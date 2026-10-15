@@ -1,0 +1,419 @@
+//! Record page, laid out like the Screenshot page:
+//!
+//! | source tiles: Select area · Full screen · Window |
+//! | source details (fixed height)                     |
+//! | Output | Audio / Animation   (same height)        |
+//! | Start                                             |
+
+use super::{header, tile};
+use crate::app::{App, RecState};
+use crate::overlay::Purpose;
+use crate::{i18n, theme};
+use eframe::egui::{self, RichText};
+use egui_phosphor::regular as icon;
+use mediaa_core::geometry::Rect;
+use mediaa_core::library::human_duration;
+use mediaa_core::settings::{AnimSettings, GifDither, MicChoice, RecordProfile, ANIM_HEIGHTS, OUTPUT_HEIGHTS};
+use mediaa_core::Settings;
+use mediaa_core::{AnimFormat, OutputKind};
+use mediaa_platform::screen::MonitorInfo;
+use rust_i18n::t;
+use std::collections::BTreeSet;
+use std::time::Duration;
+
+/// Height of the source details panel (constant, so switching sources does not move the page).
+const SOURCE_PANEL_H: f32 = 150.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TargetKind {
+    #[default]
+    Screen,
+    Region,
+    Windows,
+}
+
+#[derive(Default)]
+pub struct RecordUi {
+    pub target: TargetKind,
+    /// Displays to record (ids); empty = the primary one.
+    pub monitors: BTreeSet<u32>,
+    pub region: Option<(MonitorInfo, Rect)>,
+    pub windows: BTreeSet<u32>,
+}
+
+pub fn monitor_label(m: &MonitorInfo) -> String {
+    if m.primary {
+        format!("{} · {}", m.label(), t!("shot.primary"))
+    } else {
+        m.label()
+    }
+}
+
+/// Live status while counting down / recording / saving. Returns `true` if it drew something.
+pub fn live_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
+    let p = theme::palette(ui);
+    match &app.recorder {
+        RecState::Idle => false,
+        RecState::Recording { session, .. } => {
+            let paused = session.is_paused();
+            let elapsed = human_duration(session.elapsed().as_secs_f64());
+            let audio = if session.has_audio() { t!("record.with_audio") } else { t!("record.no_audio") };
+            let detail = match session.output() {
+                OutputKind::Audio(f) => f.label().to_string(),
+                _ => format!("{} · {} · {audio}", session.source_names().join(", "), t!("record.frames", n = session.frames_captured())),
+            };
+            theme::card(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon::RECORD).size(24.0).color(if paused { p.warning } else { p.danger }));
+                    ui.label(RichText::new(elapsed).size(28.0).strong());
+                    ui.label(RichText::new(if paused { t!("record.paused") } else { t!("record.recording") }).color(p.text_weak));
+                });
+                theme::hint(ui, detail);
+                ui.horizontal(|ui| {
+                    let (ic, label) = if paused { (icon::PLAY, t!("record.resume")) } else { (icon::PAUSE, t!("record.pause")) };
+                    if ui.add(theme::secondary(ic, &label)).clicked() {
+                        app.toggle_pause();
+                    }
+                    if ui.add(theme::primary(ui, icon::STOP, &t!("record.stop_save"))).clicked() {
+                        app.stop_recording(ctx, true);
+                    }
+                    if ui.add(theme::danger(ui, icon::TRASH, &t!("record.cancel"))).clicked() {
+                        app.stop_recording(ctx, false);
+                    }
+                });
+            });
+            ctx.request_repaint_after(Duration::from_millis(250));
+            true
+        }
+        RecState::Saving { progress, cancel, .. } => {
+            let (progress, cancel) = (*progress, cancel.clone());
+            theme::card(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new(t!("record.saving_long")).strong());
+                ui.add(egui::ProgressBar::new(progress).show_percentage().animate(true));
+                if ui.add(theme::secondary(icon::X, &t!("record.abort_saving"))).clicked() {
+                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+            true
+        }
+    }
+}
+
+pub fn ui(app: &mut App, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    header(ui, &t!("record.title"), "");
+    if live_status(app, ui, &ctx) {
+        return;
+    }
+
+    // --- Source tiles
+    let w = super::tile_width(ui, 3);
+    let target = app.rec.target;
+    ui.horizontal_wrapped(|ui| {
+        if tile(ui, icon::SELECTION, &t!("shot.area"), "", w, target == TargetKind::Region).clicked() {
+            app.rec.target = TargetKind::Region;
+            app.start_region_screenshot(&ctx, Purpose::RecordRegion);
+        }
+        if tile(ui, icon::MONITOR, &t!("shot.full"), "", w, target == TargetKind::Screen).clicked() {
+            app.rec.target = TargetKind::Screen;
+            app.refresh_monitors();
+        }
+        if tile(ui, icon::APP_WINDOW, &t!("shot.window"), "", w, target == TargetKind::Windows).clicked() {
+            app.rec.target = TargetKind::Windows;
+            app.refresh_windows();
+        }
+    });
+    ui.add_space(4.0);
+
+    // --- Source details (fixed height)
+    theme::card(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.set_height(SOURCE_PANEL_H);
+        source_details(app, ui);
+    });
+    ui.add_space(4.0);
+
+    // --- Output | Audio / Animation (settings used by this page's start button and area)
+    let sources_h = source_height(app);
+    let mut refresh_mics = false;
+    if profile_editor(ui, &mut app.settings, RecordProfile::App, &app.mic_devices, sources_h, &mut refresh_mics) {
+        app.settings_changed();
+    }
+    if refresh_mics {
+        app.refresh_mics();
+    }
+}
+
+/// Output and Audio / Animation settings of one recording profile in a single card (also used
+/// on the Settings page for the hotkey profile). Returns `true` if something changed.
+/// `refresh_mics` is set when the microphone list was just opened (the caller re-reads devices).
+pub fn profile_editor(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    profile: RecordProfile,
+    mics: &[String],
+    sources_h: Option<u32>,
+    refresh_mics: &mut bool,
+) -> bool {
+    let changed = std::cell::Cell::new(false);
+    let refresh = std::cell::Cell::new(false);
+    let mark = |c: bool| changed.set(changed.get() | c);
+    let salt = profile == RecordProfile::Hotkey;
+    let (r, anim) = settings.profile_mut(profile);
+    let kind = r.output;
+    let (output, height, fps, quality, hide, cursor) =
+        (&mut r.output, &mut r.output_height, &mut r.fps, &mut r.video_quality, &mut r.hide_to_tray, &mut r.record_cursor);
+    let (record_audio, microphone, system_audio, every_file) =
+        (&mut r.record_audio, &mut r.microphone, &mut r.system_audio, &mut r.audio_in_every_file);
+    theme::split_card(
+        ui,
+        |ui| {
+            theme::section(ui, icon::FILM_STRIP, &t!("record.output"));
+            theme::row(ui, &t!("record.format"), |ui| {
+                let opts: Vec<(OutputKind, String)> = OutputKind::ALL.iter().map(|k| (*k, k.label().to_string())).collect();
+                mark(theme::segmented(ui, output, &opts));
+            });
+            theme::row(ui, &t!("record.resolution"), |ui| {
+                mark(resolution_picker(ui, height, &OUTPUT_HEIGHTS, sources_h, egui::Id::new(("rec-resolution", salt))));
+            });
+            theme::row(ui, &t!("record.fps"), |ui| {
+                mark(ui.add(egui::Slider::new(fps, 5..=60).suffix(" fps")).changed());
+            });
+            if let OutputKind::Video(_) = kind {
+                theme::row(ui, &t!("record.quality"), |ui| {
+                    mark(ui.add(egui::Slider::new(quality, 1..=100).suffix("%")).changed());
+                });
+            }
+            theme::row(ui, "", |ui| {
+                mark(ui.checkbox(cursor, t!("record.cursor")).changed());
+            });
+            theme::row(ui, "", |ui| {
+                mark(ui.checkbox(hide, t!("record.hide_to_tray")).changed());
+            });
+        },
+        |ui| match kind {
+            OutputKind::Audio(_) => {}
+            OutputKind::Video(_) => {
+                theme::section(ui, icon::MICROPHONE, &t!("record.audio"));
+                theme::row(ui, "", |ui| {
+                    mark(ui.checkbox(record_audio, t!("record.record_audio")).changed());
+                });
+                // Sources only matter when sound is recorded at all.
+                ui.add_enabled_ui(*record_audio, |ui| {
+                theme::row(ui, &t!("record.microphone"), |ui| {
+                    let (c, opened) = mic_combo(ui, microphone, mics, egui::Id::new(("rec-mic", salt)));
+                    mark(c);
+                    refresh.set(opened);
+                });
+                theme::row(ui, "", |ui| {
+                    let supported = mediaa_platform::audio::system_audio_supported();
+                    ui.add_enabled_ui(supported, |ui| {
+                        mark(ui.checkbox(system_audio, t!("record.system_audio")).changed());
+                    });
+                    if !supported {
+                        theme::hint(ui, t!("record.system_audio_linux"));
+                    }
+                });
+                theme::row(ui, "", |ui| {
+                    mark(ui.checkbox(every_file, t!("record.audio_every_file")).on_hover_text(t!("record.audio_every_file_hint")).changed());
+                });
+                });
+            }
+            OutputKind::Anim(fmt) => {
+                theme::section(ui, icon::GIF, &t!("record.animation"));
+                mark(anim_options(ui, anim, Some(fmt), sources_h));
+            }
+        },
+    );
+    *refresh_mics = refresh.get();
+    changed.get()
+}
+
+/// Source height used to offer only downscaling presets (`None` = unknown / varies).
+fn source_height(app: &App) -> Option<u32> {
+    match app.rec.target {
+        TargetKind::Screen => app.monitors.iter().filter(|m| app.rec.monitors.contains(&m.id)).map(|m| m.height).min().or_else(|| app.monitors.first().map(|m| m.height)),
+        TargetKind::Region => app.rec.region.as_ref().map(|(_, r)| r.h.max(0) as u32),
+        TargetKind::Windows => None,
+    }
+}
+
+/// Output size by height: "Original", the `presets` below the source height, or a custom
+/// height typed in (aspect ratio always kept, never upscaled). `value`: 0 = original.
+pub fn resolution_picker(ui: &mut egui::Ui, value: &mut u32, presets: &[u32], source_h: Option<u32>, id: egui::Id) -> bool {
+    let label = |h: u32| match h {
+        0 => t!("record.res_original").to_string(),
+        2160 => "2160p (4K)".into(),
+        1440 => "1440p (QHD)".into(),
+        1080 => "1080p (FHD)".into(),
+        720 => "720p (HD)".into(),
+        h => format!("{h}p"),
+    };
+    // "Custom" stays selected while its number is typed (it may pass through preset values).
+    let custom_id = id.with("custom");
+    let mut custom = ui.data(|d| d.get_temp::<bool>(custom_id)).unwrap_or(*value != 0 && !presets.contains(value));
+    let mut changed = false;
+    let selected = if custom { t!("record.res_custom").to_string() } else { label(*value) };
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(!custom && *value == 0, label(0)).clicked() {
+                (*value, custom, changed) = (0, false, true);
+            }
+            for &h in presets {
+                if source_h.is_none_or(|s| h < s) && ui.selectable_label(!custom && *value == h, label(h)).clicked() {
+                    (*value, custom, changed) = (h, false, true);
+                }
+            }
+            if ui.selectable_label(custom, t!("record.res_custom")).clicked() && !custom {
+                custom = true;
+                if *value == 0 {
+                    *value = source_h.map_or(480, |s| (s / 2).max(16));
+                }
+                changed = true;
+            }
+        })
+        .response
+        .on_hover_text(t!("record.resolution_hint"));
+    if custom {
+        changed |= ui.add(egui::DragValue::new(value).range(16..=4320).suffix(" px")).changed();
+    }
+    ui.data_mut(|d| d.insert_temp(custom_id, custom));
+    changed
+}
+
+fn source_details(app: &mut App, ui: &mut egui::Ui) {
+    match app.rec.target {
+        TargetKind::Screen => {
+            // Header with the refresh button on the right, like the Windows list.
+            ui.horizontal(|ui| {
+                theme::section(ui, icon::MONITOR, &t!("record.displays_title"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh")).clicked() {
+                        app.refresh_monitors();
+                    }
+                });
+            });
+            let primary = app.monitors.first().map(|m| m.id);
+            for m in &app.monitors {
+                let ticked = app.rec.monitors.contains(&m.id) || (app.rec.monitors.is_empty() && Some(m.id) == primary);
+                let mut on = ticked;
+                if ui.checkbox(&mut on, monitor_label(m)).changed() {
+                    if app.rec.monitors.is_empty() {
+                        app.rec.monitors.extend(primary);
+                    }
+                    if on {
+                        app.rec.monitors.insert(m.id);
+                    } else {
+                        app.rec.monitors.remove(&m.id);
+                    }
+                }
+            }
+        }
+        TargetKind::Region => {
+            theme::section(ui, icon::SELECTION, &t!("record.area"));
+            match &app.rec.region {
+                Some((m, r)) => ui.label(t!("record.area_value", w = r.w, h = r.h, x = r.x, y = r.y, display = m.name)),
+                None => ui.label(RichText::new(t!("record.area_none")).color(theme::palette(ui).text_weak)),
+            };
+        }
+        TargetKind::Windows => {
+            ui.horizontal(|ui| {
+                theme::section(ui, icon::APP_WINDOW, &t!("record.windows_title"));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh")).clicked() {
+                        app.refresh_windows();
+                    }
+                });
+            });
+            egui::ScrollArea::vertical().id_salt("rec-windows").auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for w in &app.windows {
+                    let mut on = app.rec.windows.contains(&w.id);
+                    if ui.checkbox(&mut on, format!("{}  ({}×{})", w.label(), w.width, w.height)).changed() {
+                        if on {
+                            app.rec.windows.insert(w.id);
+                        } else {
+                            app.rec.windows.remove(&w.id);
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// GIF / WebP options shared by the Record and Convert pages. `fmt = None` shows both.
+/// `source_h`: height of what is converted / recorded, to offer only smaller sizes.
+pub fn anim_options(ui: &mut egui::Ui, a: &mut AnimSettings, fmt: Option<AnimFormat>, source_h: Option<u32>) -> bool {
+    let mut changed = false;
+    theme::row(ui, &t!("anim.fps"), |ui| {
+        changed |= ui.add(egui::Slider::new(&mut a.fps, 1..=50).suffix(" fps")).changed();
+    });
+    theme::row(ui, &t!("record.resolution"), |ui| {
+        changed |= resolution_picker(ui, &mut a.max_height, &ANIM_HEIGHTS, source_h, egui::Id::new(("anim-resolution", fmt.is_some())));
+    });
+    if fmt != Some(AnimFormat::Webp) {
+        theme::row(ui, &t!("anim.colors"), |ui| {
+            changed |= ui.add(egui::Slider::new(&mut a.gif_colors, 4..=256)).changed();
+        });
+        theme::row(ui, &t!("anim.dither"), |ui| {
+            egui::ComboBox::from_id_salt(("dither", fmt.is_some())).selected_text(i18n::dither(a.gif_dither)).show_ui(ui, |ui| {
+                for d in GifDither::ALL {
+                    changed |= ui.selectable_value(&mut a.gif_dither, d, i18n::dither(d)).changed();
+                }
+            });
+        });
+    }
+    if fmt != Some(AnimFormat::Gif) {
+        theme::row(ui, &t!("anim.webp_quality"), |ui| {
+            changed |= ui.add(egui::Slider::new(&mut a.webp_quality, 0..=100)).changed();
+        });
+    }
+    changed
+}
+
+/// "Start recording" bar, pinned to the bottom of the window by the page shell.
+pub fn start_bar(app: &mut App, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    let target = app.record_target_from_ui();
+    ui.vertical_centered(|ui| {
+        let btn = theme::primary(ui, icon::RECORD, &t!("record.start")).min_size(egui::vec2(220.0, 36.0));
+        let mut resp = ui.add_enabled(target.is_ok(), btn);
+        let hk = &app.settings.hotkeys;
+        if hk.enabled && !hk.start_video.is_empty() {
+            resp = resp.on_hover_text(t!("record.hotkey_hint", key = hk.start_video));
+        }
+        if resp.clicked() {
+            app.start_recording_from_ui(&ctx);
+        }
+        if let Err(why) = &target {
+            if !why.is_empty() {
+                theme::hint(ui, why.as_str());
+            }
+        }
+    });
+}
+
+/// Microphone choice: automatic, none or a device (a disconnected one is marked). Returns
+/// (changed, list just opened — the caller re-reads the devices).
+pub fn mic_combo(ui: &mut egui::Ui, microphone: &mut MicChoice, mics: &[String], id: egui::Id) -> (bool, bool) {
+    let label = |m: &MicChoice| match m {
+        MicChoice::Auto => t!("record.mic_auto").to_string(),
+        MicChoice::Off => t!("common.none").to_string(),
+        MicChoice::Device(d) if mics.contains(d) => d.clone(),
+        MicChoice::Device(d) => t!("record.mic_missing", device = d).to_string(),
+    };
+    let mut changed = false;
+    let combo = egui::ComboBox::from_id_salt(id).selected_text(label(microphone)).show_ui(ui, |ui| {
+        let mut options = vec![MicChoice::Auto, MicChoice::Off];
+        options.extend(mics.iter().map(|d| MicChoice::Device(d.clone())));
+        for o in options {
+            let text = label(&o);
+            changed |= ui.selectable_value(microphone, o, text).changed();
+        }
+    });
+    (changed, combo.response.clicked())
+}

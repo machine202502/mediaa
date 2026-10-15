@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/media", "crates/platform", "crates/agent", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+mediaa-core = { path = "crates/core" }
+mediaa-platform = { path = "crates/platform" }
+mediaa-media = { path = "crates/media" }
+mediaa-agent = { path = "crates/agent" }
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg", "bmp", "tiff"] }
+hound = "3.5"
+crossbeam-channel = "0.5"
+log = { version = "0.4", features = ["std"] }
+directories = "6"
+tempfile = "3"
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# Single self-contained executable: FFmpeg is linked statically, so trim what we can.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Dependencies do the per-pixel work (screen capture, image conversion); keep them fast in
+# debug builds too, otherwise recording a large display drops to a few frames per second.
+[profile.dev.package."*"]
+opt-level = 3
+# Frame conversion loops in the platform crate run per pixel as well.
+[profile.dev.package.mediaa-platform]
+opt-level = 3
+# The preview decoder scales frames per pixel too (generic `image` code is built in this crate).
+[profile.dev.package.mediaa-media]
+opt-level = 3

@@ -1,0 +1,14 @@
+# Static FFmpeg built by vcpkg from `vcpkg.json` (see README / build scripts).
+# FFMPEG_DIR may be overridden from the environment (force = false), e.g. by build-linux.sh.
+[env]
+FFMPEG_DIR = { value = "vcpkg_installed/x64-windows-static-release", relative = true, force = false }
+# llama.cpp (agent runtime) is built by CMake: the static C runtime like everything else, and the
+# Visual Studio generator so a plain `cargo build` finds the compiler.
+LLAMA_STATIC_CRT = "1"
+CMAKE_GENERATOR = { value = "Visual Studio 18 2026", force = false }
+CMAKE_TOOLCHAIN_FILE = { value = "cmake/static-crt.cmake", relative = true, force = false }
+
+# One self-contained .exe: static C runtime as well (no VCRUNTIME140.dll needed).
+# Matches the vcpkg `x64-windows-static-release` triplet (/MT).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -1,0 +1,4 @@
+target/
+vcpkg_installed/
+vcpkg_installed_*/
+dist/

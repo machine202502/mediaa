@@ -1,0 +1,37 @@
+[package]
+name = "mediaa-platform"
+description = "OS integrations for MediaA: screen/window capture, audio input, clipboard, file ops"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mediaa-core.workspace = true
+anyhow.workspace = true
+log.workspace = true
+image.workspace = true
+crossbeam-channel.workspace = true
+xcap = "0.9"
+cpal = "0.18"
+clipboard-rs = "0.3"
+trash = "5"
+opener = { version = "0.9", features = ["reveal"] }
+raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2.0.1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi"] }
+
+[target."cfg(not(windows))".dependencies]
+device_query = "4.0.1"
+
+[dev-dependencies]
+mediaa-media.workspace = true
+tempfile.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_HiDpi"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+xcb = { version = "1.7", features = ["shm", "xfixes"] }
+libc = "0.2"

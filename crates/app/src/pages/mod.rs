@@ -1,0 +1,324 @@
+//! Window layout: top header (sections, recording status, theme, settings), a slim row of
+//! sub-pages under it for the sections that have them (Capture, Agent), and the active page.
+
+pub mod about;
+pub mod agent;
+pub mod audio;
+pub mod capture;
+pub mod convert;
+pub mod library;
+pub mod record;
+pub mod settings;
+
+use crate::app::{App, Page, RecState};
+use crate::{i18n, theme};
+use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke};
+use egui_phosphor::regular as icon;
+use mediaa_core::library::human_duration;
+use mediaa_core::settings::ThemePreference;
+use rust_i18n::t;
+
+/// Narrowest catalogs side bar (the widest: 60 % of the window).
+const SIDEBAR_MIN: f32 = 180.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Section {
+    Library,
+    Capture,
+    Convert,
+    Agent,
+}
+
+impl Page {
+    /// Header section of the page (`None` for Settings / About).
+    pub fn section(self) -> Option<Section> {
+        match self {
+            Page::Library => Some(Section::Library),
+            Page::Screenshot | Page::Record | Page::RecordAudio => Some(Section::Capture),
+            Page::Convert => Some(Section::Convert),
+            Page::Catalogs | Page::Queue | Page::Budget | Page::Providers | Page::Models => Some(Section::Agent),
+            Page::Settings | Page::About => None,
+        }
+    }
+}
+
+/// Sub-pages of a section (empty: the section is one page).
+fn sub_pages(section: Section) -> Vec<(Page, &'static str, String)> {
+    match section {
+        Section::Capture => vec![
+            (Page::Screenshot, icon::CAMERA, t!("nav.screenshot").into()),
+            (Page::Record, icon::VIDEO_CAMERA, t!("nav.record").into()),
+            (Page::RecordAudio, icon::MICROPHONE, t!("nav.record_audio").into()),
+        ],
+        Section::Agent => vec![
+            (Page::Catalogs, icon::TREE_STRUCTURE, t!("nav.catalogs").into()),
+            (Page::Queue, icon::QUEUE, t!("nav.queue").into()),
+            (Page::Budget, icon::GAUGE, t!("nav.budget").into()),
+            (Page::Providers, icon::PLUGS_CONNECTED, t!("nav.providers").into()),
+            (Page::Models, icon::CUBE, t!("nav.models").into()),
+        ],
+        Section::Library | Section::Convert => Vec::new(),
+    }
+}
+
+pub fn shell(app: &mut App, ui: &mut egui::Ui) {
+    let p = theme::palette(ui);
+    let ctx = ui.ctx().clone();
+    egui::Panel::top("header")
+        .resizable(false)
+        .exact_size(46.0)
+        .frame(
+            egui::Frame::new()
+                .fill(p.chrome)
+                .inner_margin(Margin::symmetric(12, 6))
+                .stroke(Stroke::new(1.0, p.border)),
+        )
+        .show(ui, |ui| header_bar(app, ui, &ctx));
+
+    if let Some(section) = app.page.section() {
+        app.last_main_page = app.page;
+        match section {
+            Section::Capture => app.last_capture_page = app.page,
+            Section::Agent => app.last_agent_page = app.page,
+            Section::Library | Section::Convert => {}
+        }
+        // Sections with sub-pages: a slim row under the header.
+        let pages = sub_pages(section);
+        if !pages.is_empty() {
+            egui::Panel::top("subnav")
+                .resizable(false)
+                .exact_size(36.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(p.chrome)
+                        .inner_margin(Margin::symmetric(12, 4))
+                        .stroke(Stroke::new(1.0, p.border)),
+                )
+                .show(ui, |ui| sub_nav(app, ui, &pages));
+        }
+    }
+
+    // The record pages keep their start button at the bottom of the window, centred.
+    if matches!(app.page, Page::Record | Page::RecordAudio) && app.recorder.is_idle() {
+        egui::Panel::bottom("record-start")
+            .resizable(false)
+            .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(18, 10)))
+            .show(ui, |ui| if app.page == Page::Record { record::start_bar(app, ui) } else { audio::start_bar(app, ui) });
+    }
+
+    // Catalogs: the tree in a resizable side bar, open files in tabs filling the rest.
+    if app.page == Page::Catalogs {
+        let width_id = egui::Id::new("catalog-sidebar-width");
+        let max = (ui.available_width() * 0.6).max(SIDEBAR_MIN);
+        let width = ctx.data_mut(|d| *d.get_persisted_mut_or(width_id, 280.0f32)).clamp(SIDEBAR_MIN, max);
+        let panel = egui::Panel::left("catalog-tree")
+            .resizable(false)
+            .exact_size(width)
+            .frame(egui::Frame::new().fill(p.chrome).inner_margin(Margin::symmetric(8, 8)))
+            .show(ui, |ui| agent::catalogs::sidebar(app, ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(p.bg))
+            .show(ui, |ui| agent::catalogs::tabs(app, ui));
+        // Splitter on the side bar's edge (registered last: above both panels).
+        let edge = panel.response.rect.right();
+        let y = panel.response.rect.y_range();
+        let handle = ui.interact(egui::Rect::from_x_y_ranges(edge - 4.0..=edge + 4.0, y), egui::Id::new("catalog-splitter"), egui::Sense::drag());
+        let active = handle.hovered() || handle.dragged();
+        if active {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if handle.dragged() {
+            let w = (width + handle.drag_delta().x).clamp(SIDEBAR_MIN, max);
+            ctx.data_mut(|d| d.insert_persisted(width_id, w));
+        }
+        let (line, stroke) = if active { (2.0, p.accent) } else { (1.0, p.border) };
+        // On the window's own layer, after both panels: above them, below menus and popups.
+        ui.painter().vline(edge, y, Stroke::new(line, stroke));
+        agent::catalogs::dialogs(app, &ctx);
+        return;
+    }
+
+    egui::CentralPanel::default()
+        .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(18, 14)))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| match app.page {
+                    Page::Screenshot => capture::ui(app, ui),
+                    Page::Record => record::ui(app, ui),
+                    Page::RecordAudio => audio::ui(app, ui),
+                    Page::Library => library::ui(app, ui),
+                    Page::Convert => convert::ui(app, ui),
+                    Page::Settings => settings::ui(app, ui),
+                    Page::Providers => agent::providers::ui(app, ui),
+                    Page::Models => agent::models::ui(app, ui),
+                    Page::Queue => agent::queue::ui(app, ui),
+                    Page::Budget => agent::budget::ui(app, ui),
+                    Page::About => about::ui(app, ui),
+                    Page::Catalogs => {}
+                });
+        });
+}
+
+fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
+    let p = theme::palette(ui);
+    ui.horizontal_centered(|ui| {
+        let logo = app.logo(ctx);
+        ui.add(egui::Image::new(&logo).fit_to_exact_size(egui::vec2(24.0, 24.0)));
+        ui.label(RichText::new("MediaA").size(15.0).strong());
+        ui.add_space(14.0);
+
+        let mut section = app.page.section();
+        let before = section;
+        theme::segmented(
+            ui,
+            &mut section,
+            &[
+                (Some(Section::Library), format!("{}  {}", icon::IMAGES, t!("section.library"))),
+                (Some(Section::Capture), format!("{}  {}", icon::SCREENCAST, t!("section.capture"))),
+                (Some(Section::Convert), format!("{}  {}", icon::SHUFFLE, t!("section.convert"))),
+                (Some(Section::Agent), format!("{}  {}", icon::SPARKLE, t!("section.agent"))),
+            ],
+        );
+        if section != before {
+            app.page = match section {
+                Some(Section::Library) => Page::Library,
+                Some(Section::Capture) | None => app.last_capture_page,
+                Some(Section::Convert) => Page::Convert,
+                Some(Section::Agent) => app.last_agent_page,
+            };
+        }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            for (page, ic, tip) in [
+                (Page::Settings, icon::GEAR, t!("nav.settings")),
+                (Page::About, icon::INFO, t!("settings.about")),
+            ] {
+                let selected = app.page == page;
+                let btn = egui::Button::new(RichText::new(ic).size(15.0).color(if selected { p.accent } else { p.text }))
+                    .fill(if selected { p.accent_soft } else { Color32::TRANSPARENT })
+                    .stroke(Stroke::NONE)
+                    .min_size(egui::vec2(28.0, 28.0));
+                if ui.add(btn).on_hover_text(tip).clicked() {
+                    app.page = if selected { app.last_main_page } else { page };
+                }
+            }
+            let (ic, next) = match app.settings.theme {
+                ThemePreference::System => (icon::DESKTOP, ThemePreference::Dark),
+                ThemePreference::Dark => (icon::MOON, ThemePreference::Light),
+                ThemePreference::Light => (icon::SUN, ThemePreference::System),
+            };
+            let tip = format!("{}: {}", t!("settings.theme"), i18n::theme(app.settings.theme));
+            if theme::icon_button(ui, ic, &tip).clicked() {
+                app.settings.theme = next;
+                theme::apply_preference(ctx, next);
+                app.settings_changed();
+            }
+            recording_status(app, ui, ctx);
+        });
+    });
+}
+
+/// Sub-pages of a section as compact tabs in one row; a red dot marks the page of the
+/// recording in progress (the shell remembers the last sub-page of each section).
+fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)]) {
+    let p = theme::palette(ui);
+    ui.horizontal_centered(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for &(page, ic, ref label) in pages {
+            let selected = app.page == page;
+            let (fill, fg) = if selected { (p.accent_soft, p.accent) } else { (Color32::TRANSPARENT, p.text) };
+            let recording = page == app.recording_page() && !app.recorder.is_idle();
+            // Room for the dot after the label.
+            let text = if recording { format!("{ic}  {label}    ") } else { format!("{ic}  {label}") };
+            let btn = egui::Button::new(RichText::new(text).size(13.0).color(fg))
+                .fill(fill)
+                .stroke(Stroke::NONE)
+                .corner_radius(CornerRadius::same(6))
+                .min_size(egui::vec2(0.0, 26.0));
+            let resp = ui.add(btn);
+            if resp.clicked() {
+                app.page = page;
+            }
+            if recording {
+                let c = resp.rect.right_center() - egui::vec2(10.0, 0.0);
+                ui.painter().circle_filled(c, 3.5, p.danger);
+            }
+        }
+    });
+}
+
+/// Compact recording status + controls in the header.
+fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
+    let p = theme::palette(ui);
+    let (label, paused) = match &app.recorder {
+        RecState::Recording { session, .. } => (
+            format!(
+                "{} {}",
+                if session.is_paused() { t!("record.paused") } else { t!("record.recording") },
+                human_duration(session.elapsed().as_secs_f64())
+            ),
+            session.is_paused(),
+        ),
+        RecState::Saving { progress, .. } => (format!("{} {:.0}%", t!("record.saving"), progress * 100.0), false),
+        _ => return,
+    };
+    // Right-to-left layout: controls first, then the label.
+    if matches!(app.recorder, RecState::Recording { .. }) {
+        if theme::icon_button(ui, icon::X, &t!("record.cancel")).clicked() {
+            app.stop_recording(ctx, false);
+        }
+        if theme::icon_button(ui, icon::STOP, &t!("record.stop_save")).clicked() {
+            app.stop_recording(ctx, true);
+        }
+        let (ic, tip) = if paused { (icon::PLAY, t!("record.resume")) } else { (icon::PAUSE, t!("record.pause")) };
+        if theme::icon_button(ui, ic, &tip).clicked() {
+            app.toggle_pause();
+        }
+    }
+    ui.label(RichText::new(label).strong());
+    ui.label(RichText::new(icon::RECORD).color(if paused { p.warning } else { p.danger }));
+    ui.add_space(8.0);
+}
+
+/// Page heading with a subtitle.
+pub fn header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
+    let p = theme::palette(ui);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).size(18.0).strong());
+        if !subtitle.is_empty() {
+            ui.label(RichText::new(subtitle).size(12.0).color(p.text_weak));
+        }
+    });
+    ui.add_space(8.0);
+}
+
+/// Compact clickable action tile (icon badge + title + subtitle).
+/// Width of one of `n` tiles in a row: as many columns as fit (min. 180 pt each), the rest wrap
+/// (lay them out with `ui.horizontal_wrapped`).
+pub fn tile_width(ui: &egui::Ui, n: usize) -> f32 {
+    let gap = ui.spacing().item_spacing.x;
+    let avail = ui.available_width();
+    let cols = ((avail + gap) / (180.0 + gap)).floor().clamp(1.0, n as f32);
+    ((avail - gap * (cols - 1.0)) / cols).floor()
+}
+
+pub fn tile(ui: &mut egui::Ui, ic: &str, title: &str, subtitle: &str, width: f32, selected: bool) -> egui::Response {
+    let p = theme::palette(ui);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 62.0), egui::Sense::click());
+    let hovered = resp.hovered();
+    let fill = if selected { p.accent_soft } else if hovered { p.card_hover } else { p.card };
+    let stroke = Stroke::new(if selected { 1.5 } else { 1.0 }, if hovered || selected { p.accent } else { p.border });
+    ui.painter().rect(rect, CornerRadius::same(8), fill, stroke, egui::StrokeKind::Inside);
+    let badge = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 13.0), egui::vec2(36.0, 36.0));
+    ui.painter().rect_filled(badge, CornerRadius::same(7), p.accent_soft);
+    ui.painter().text(badge.center(), egui::Align2::CENTER_CENTER, ic, egui::FontId::proportional(18.0), p.accent);
+    let x = badge.max.x + 10.0;
+    let title_y = if subtitle.is_empty() { rect.center().y - 9.0 } else { rect.min.y + 14.0 };
+    ui.painter().text(egui::pos2(x, title_y), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(14.0), p.text);
+    ui.painter().text(egui::pos2(x, rect.min.y + 34.0), egui::Align2::LEFT_TOP, subtitle, egui::FontId::proportional(11.5), p.text_weak);
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp
+}

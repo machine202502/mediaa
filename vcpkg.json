@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg-json.schema.json",
+  "name": "mediaa",
+  "version": "0.1.0",
+  "description": "Static FFmpeg for MediaA (linked into the single executable)",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "avdevice",
+        "zlib",
+        "avfilter",
+        "swscale",
+        "swresample",
+        "gpl",
+        "x264",
+        "webp",
+        "vpx",
+        "opus",
+        "mp3lame",
+        "dav1d"
+      ]
+    }
+  ]
+}

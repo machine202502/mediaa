@@ -1,0 +1,54 @@
+[package]
+name = "mediaa"
+description = "Cross-platform screenshots, screen recording and media conversion"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mediaa"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+# Markdown of the agent's answers.
+egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }
+mediaa-core.workspace = true
+mediaa-media.workspace = true
+mediaa-platform.workspace = true
+mediaa-agent.workspace = true
+serde.workspace = true
+pollster = "0.4"
+egui_ltreeview = "0.9"
+egui_dock = "0.21"
+anyhow.workspace = true
+raw-window-handle = "0.6"
+log.workspace = true
+image.workspace = true
+crossbeam-channel.workspace = true
+chrono.workspace = true
+# wgpu renderer (DX12 / Vulkan / Metal): reliable with several native windows (area picker).
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "persistence", "x11", "wayland"] }
+egui-phosphor = "0.14"
+fontdb = "0.23"
+egui-notify = "0.23"
+global-hotkey = "0.8"
+rfd = "0.17"
+rust-i18n = "4"
+sys-locale = "0.3"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+tray-icon = { version = "0.26", default-features = false }
+
+# KSNI talks D-Bus directly: no GTK / libappindicator needed on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+
+[build-dependencies]
+ico = "0.4"
+winresource = "0.1"
+
+[dev-dependencies]
+egui_kittest = "0.36"
+tempfile.workspace = true
+toml.workspace = true
