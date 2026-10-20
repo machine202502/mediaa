@@ -1,6 +1,7 @@
 //! The agent's way out to the web: searching and reading pages, for what the recordings do not
 //! cover. Links in what the agent writes must lead to pages it was shown.
 
+use crate::prompts;
 use super::brain::ToolSpec;
 use super::tools::Outcome;
 use crate::web::{Page, WebHit};
@@ -34,13 +35,13 @@ impl<'a> Web<'a> {
         vec![
             ToolSpec {
                 name: "web_search",
-                description: "Searches the INTERNET (not the recordings): titles, addresses and snippets. When the user asks to check the web, or for what the recordings mention but do not explain (laws, definitions, facts to check). Write the query in the language of the recording and name the country when it matters.",
+                description: prompts::tool("web_search"),
                 params: json!({"type": "object", "properties": {"query": {"type": "string", "maxLength": 200}}, "required": ["query"]}),
                 example: json!({"query": "<words to search for>"}),
             },
             ToolSpec {
                 name: "web_read",
-                description: "Reads a web page found by web_search (its main text).",
+                description: prompts::tool("web_read"),
                 params: json!({"type": "object", "properties": {"url": {"type": "string", "maxLength": 500}}, "required": ["url"]}),
                 example: json!({"url": "<an address from web_search>"}),
             },
@@ -58,35 +59,23 @@ impl<'a> Web<'a> {
     }
 
     fn search(&self, query: &str) -> anyhow::Result<Outcome> {
-        anyhow::ensure!(!query.is_empty(), "web_search needs a query");
+        anyhow::ensure!(!query.is_empty(), super::tools::needs("web_search", "query"));
         let hits = (self.search)(query, HITS)?;
-        if hits.is_empty() {
-            return Ok(Outcome { text: "Nothing found on the web.".into(), seen: Some(vec![]) });
-        }
-        let mut seen = self.seen.borrow_mut();
-        let text = hits
-            .iter()
-            .map(|h| {
-                seen.insert(h.url.clone());
-                format!("- {} — {}\n  {}", h.title, h.url, h.snippet)
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok(Outcome { text: format!("{text}\nCite pages as [title](address)."), seen: Some(hits.into_iter().map(|h| h.url).collect()) })
+        self.seen.borrow_mut().extend(hits.iter().map(|h| h.url.clone()));
+        let text = prompts::render("results/web_search.j2", minijinja::context! { hits => &hits });
+        Ok(Outcome { text, seen: Some(hits.into_iter().map(|h| h.url).collect()) })
     }
 
     fn read(&self, url: &str) -> anyhow::Result<Outcome> {
-        anyhow::ensure!(!url.is_empty(), "web_read needs an address");
+        anyhow::ensure!(!url.is_empty(), super::tools::needs("web_read", "address"));
         let page = (self.read)(url, self.max_chars)?;
         let mut seen = self.seen.borrow_mut();
         seen.insert(url.to_string());
         seen.insert(page.url.clone());
         // Some sites only send a script that loads the page: nothing to read there.
-        if page.text.chars().count() < EMPTY_PAGE {
-            let text = format!("{} — {}\n\n{}\n\n(Almost no text: the site loads it with a script. Read another address.)", page.title, page.url, page.text);
-            return Ok(Outcome { text, seen: Some(vec![]) });
-        }
-        Ok(Outcome { text: format!("{} — {}\n\n{}", page.title, page.url, page.text), seen: None })
+        let empty = page.text.chars().count() < EMPTY_PAGE;
+        let text = prompts::render("results/web_page.j2", minijinja::context! { title => &page.title, url => &page.url, text => &page.text, empty });
+        Ok(Outcome { text, seen: empty.then(Vec::new) })
     }
 
     /// `text` with links to pages the agent was not shown turned into their plain text.

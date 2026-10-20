@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 #[derive(Debug, Clone)]
 pub struct ToolSpec {
     pub name: &'static str,
-    pub description: &'static str,
+    pub description: String,
     /// JSON Schema of the arguments (an object).
     pub params: Value,
     /// Example arguments (shown to the model).
@@ -278,7 +278,7 @@ mod tests {
     use super::*;
 
     fn spec(name: &'static str) -> ToolSpec {
-        ToolSpec { name, description: "", params: json!({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}), example: json!({"q": "x"}) }
+        ToolSpec { name, description: String::new(), params: json!({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}), example: json!({"q": "x"}) }
     }
 
     #[test]

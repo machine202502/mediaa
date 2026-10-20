@@ -2,3 +2,9 @@ target/
 vcpkg_installed/
 vcpkg_installed_*/
 dist/
+
+# Personal Claude Code settings
+.claude/settings.local.json
+
+# Readable dialogs of subagents (scripts/subagent-log.mjs)
+subagents/

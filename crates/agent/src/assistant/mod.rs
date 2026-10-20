@@ -23,6 +23,7 @@ pub use provider::ProviderBrain;
 pub use tools::{Recording, Tools};
 
 use crate::llm::{Message, Role};
+use crate::prompts;
 use crate::tools::parse_time;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -79,7 +80,7 @@ pub enum Event {
 }
 
 /// An earlier question and its answer in the chat.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Turn {
     pub question: String,
     pub answer: String,
@@ -97,10 +98,8 @@ pub struct Answer {
 pub trait Toolbox {
     fn specs(&self) -> Vec<ToolSpec>;
     fn run(&self, tool: &str, args: &Value) -> anyhow::Result<tools::Outcome>;
-    /// What the questions are about, for the system prompt.
-    fn subject(&self) -> &'static str;
-    /// How moments are cited.
-    fn citation_form(&self) -> &'static str;
+    /// What the questions are about, for the prompts: `recording` or `folder`.
+    fn kind(&self) -> &'static str;
     /// What the agent knows up front (the card).
     fn card(&self) -> String;
     /// Citations in `text` that point at nothing said.
@@ -120,12 +119,8 @@ impl Toolbox for Tools<'_> {
         Tools::run(self, tool, args)
     }
 
-    fn subject(&self) -> &'static str {
-        "one recording (the transcript of a conversation)"
-    }
-
-    fn citation_form(&self) -> &'static str {
-        "[m:ss]"
+    fn kind(&self) -> &'static str {
+        "recording"
     }
 
     fn card(&self) -> String {
@@ -141,34 +136,11 @@ impl Toolbox for Tools<'_> {
     }
 }
 
-/// The system prompt: how to work, what is known up front and the tools.
-pub fn system_prompt(toolbox: &dyn Toolbox, specs: &[ToolSpec]) -> String {
-    let mut p = format!(
-        "You answer questions about {} using tools.\n\
-         Each turn write one JSON object: its action is a tool to call, or \"answer\" once you can answer.\n\
-         Rules:\n\
-         - Always look into the recordings first. Rely on them, not on your own knowledge; if they do not contain the answer, say so.\n\
-         - Cite the moments you rely on as {}, with times taken from tool results.\n\
-         - Answer in the language of the question, in Markdown (new lines for lists, never HTML), to the point.\n\
-         - Never call a tool twice with the same arguments; if a search finds nothing, rephrase or read the outline.\n\
-         - Use the calculator and time tools instead of computing in your head.\n\
-         - If the question is ambiguous (who or which part is meant), answer with one short clarifying question instead of guessing.\n\n",
-        toolbox.subject(),
-        toolbox.citation_form(),
-    );
-    if toolbox.web().is_some() {
-        p.push_str(
-            "- When the user asks to check the internet, or about something the recordings mention but do not explain (a law, a form, a term), \
-             call web_search, then web_read for details. The search tool only searches the recordings: never present them as web results. \
-             Keep apart what the recordings say and what the web says; cite pages as [title](address), only addresses from tool results.\n\n",
-        );
-    }
-    p.push_str(&toolbox.card());
-    p.push_str("\nTools:\n");
-    for t in specs {
-        p.push_str(&format!("- {}: {} Example args: {}\n", t.name, t.description, t.example));
-    }
-    p
+/// The system prompt: how to work, what is known up front, the tools and the chat's memory.
+pub fn system_prompt(toolbox: &dyn Toolbox, specs: &[ToolSpec], memory: &Memory) -> String {
+    let tools: Vec<Value> = specs.iter().map(|t| json!({"name": t.name, "description": t.description, "example": t.example.to_string()})).collect();
+    let ctx = minijinja::context! { kind => toolbox.kind(), web => toolbox.web().is_some(), card => toolbox.card(), tools, facts => &memory.facts, summary => &memory.summary };
+    prompts::render("agent/system.j2", ctx)
 }
 
 /// Times cited as `[m:ss]`, `[mm:ss]` or `[h:mm:ss]` (also the start of `[m:ss–m:ss]`).
@@ -224,6 +196,7 @@ pub fn fingerprint(tool: &str, args: &Value) -> String {
     format!("{tool}:{}", norm(args))
 }
 
+/// How a tool result (`prompts/results/step.j2`) starts.
 const RESULT: &str = "Result of step ";
 
 /// Shortens the oldest tool results while the prompt is over its share of `context` tokens
@@ -239,7 +212,8 @@ pub fn compact(messages: &mut [Message], context: u32) {
         }
         let m = &mut messages[i];
         if m.content.chars().count() > STUB_CHARS {
-            m.content = format!("{}\n… (shortened to save room; call the tool again to see it all)", m.content.chars().take(STUB_CHARS).collect::<String>());
+            let head: String = m.content.chars().take(STUB_CHARS).collect();
+            m.content = prompts::render("results/shortened.j2", minijinja::context! { head });
         }
     }
 }
@@ -292,12 +266,8 @@ pub fn ask(
         let helper: &dyn Brain = sub.as_ref().map_or(brain, |s| s as &dyn Brain);
         let delegate = |task: &str, text: &str| {
             let messages = [
-                Message::new(
-                    Role::System,
-                    "You do one bounded task on a stretch of a recorded conversation for the main assistant. \
-                     Answer compactly, in the language of the conversation, citing times [m:ss] from the lines.",
-                ),
-                Message::new(Role::User, format!("Task: {task}\n\nThe stretch:\n{text}")),
+                Message::new(Role::System, prompts::render("delegate_system.j2", ())),
+                Message::new(Role::User, prompts::render("delegate_task.j2", minijinja::context! { task, text })),
             ];
             helper.complete(&messages, cancel)
         };
@@ -394,19 +364,19 @@ pub fn chat_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "remember",
-            description: "Keeps a fact for the rest of this chat: names, what the user prefers, conclusions to build on.",
+            description: prompts::tool("remember"),
             params: json!({"type": "object", "properties": {"fact": {"type": "string"}}, "required": ["fact"]}),
             example: json!({"fact": "<the fact>"}),
         },
         ToolSpec {
             name: "plan",
-            description: "For a request that needs several steps: first a short checklist, then the same list again with items done as you go. Simple questions skip it.",
+            description: prompts::tool("plan"),
             params: json!({"type": "object", "properties": {"items": {"type": "array", "maxItems": 8, "items": {"type": "object", "properties": {"text": {"type": "string"}, "done": {"type": "boolean"}}, "required": ["text", "done"]}}}, "required": ["items"]}),
             example: json!({"items": [{"text": "<step>", "done": false}]}),
         },
         ToolSpec {
             name: "say",
-            description: "Sends ONE section of a long answer to the user now (a few paragraphs). For long reports: section by section, each built from what you read, then answer briefly.",
+            description: prompts::tool("say"),
             // Bounded: the grammar closes a section before the step runs out of tokens.
             params: json!({"type": "object", "properties": {"text": {"type": "string", "maxLength": SECTION_CHARS}}, "required": ["text"]}),
             example: json!({"text": "<a finished section, Markdown, with [m:ss] citations>"}),
@@ -419,37 +389,32 @@ fn chat_tool(tool: &str, args: &Value, toolbox: &dyn Toolbox, memory: &mut Memor
     let plain = |text: String| Ok(tools::Outcome { text, seen: None });
     let arg = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().trim().to_string();
     Some(match tool {
-        "remember" => match memory.remember(&arg("fact")) {
-            true => plain("Remembered for this chat.".into()),
-            false => plain("Already remembered (or empty).".into()),
-        },
+        "remember" => plain(prompts::render("results/remember.j2", minijinja::context! { new => memory.remember(&arg("fact")) })),
         "plan" => {
-            let items = args["items"].as_array().cloned().unwrap_or_default();
-            let lines: Vec<String> = items
-                .iter()
-                .map(|i| format!("[{}] {}", if i["done"].as_bool() == Some(true) { "x" } else { " " }, i["text"].as_str().unwrap_or_default()))
+            let items: Vec<Value> = args["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|i| json!({"text": i["text"].as_str().unwrap_or_default(), "done": i["done"].as_bool() == Some(true)}))
                 .collect();
-            if lines.is_empty() {
-                return Some(Err(anyhow::anyhow!("a plan needs items")));
+            if items.is_empty() {
+                return Some(Err(anyhow::anyhow!(prompts::render("results/plan_empty.j2", ()))));
             }
-            plain(format!("Plan:\n{}", lines.join("\n")))
+            plain(prompts::render("results/plan.j2", minijinja::context! { items }))
         }
         "say" => {
             let text = arg("text");
             if text.is_empty() {
-                return Some(Err(anyhow::anyhow!("say needs a text")));
+                return Some(Err(anyhow::anyhow!(prompts::render("results/say_empty.j2", ()))));
             }
             let text = tidy(&without(&text, &toolbox.bad_citations(&text)));
             let text = toolbox.web().map_or(text.clone(), |w| w.known_links(&text));
             // A section rests on the recording (or pages read): it cites what it is based on.
             if citations(&text).is_empty() && folder::folder_citations(&text).is_empty() && !text.contains("](http") {
-                return Some(Err(anyhow::anyhow!(
-                    "a section must cite the moments it is based on, as {}: read (or delegate) that part of the recording first",
-                    toolbox.citation_form()
-                )));
+                return Some(Err(anyhow::anyhow!(prompts::render("results/say_uncited.j2", minijinja::context! { kind => toolbox.kind() }))));
             }
             on_event(&Event::Say(text));
-            plain("Sent to the user. Continue with the next section; once all are sent, answer in ONE short line (the sections are already with the user).".into())
+            plain(prompts::render("results/say_sent.j2", ()))
         }
         _ => return toolbox.web().and_then(|w| w.run(tool, args)),
     })
@@ -472,7 +437,7 @@ pub fn answer(
     if tools.web().is_some() {
         specs.extend(internet::Web::specs());
     }
-    let mut messages = vec![Message::new(Role::System, system_prompt(tools, &specs) + &memory.prompt())];
+    let mut messages = vec![Message::new(Role::System, system_prompt(tools, &specs, memory))];
     for t in &history[memory.summarized.min(history.len())..] {
         messages.push(Message::new(Role::User, t.question.clone()));
         messages.push(Message::new(Role::Assistant, t.answer.clone()));
@@ -487,7 +452,7 @@ pub fn answer(
         let must_answer = steps.len() >= MAX_STEPS || stall >= STALL_STEPS;
         if must_answer && !told_to_answer {
             told_to_answer = true;
-            messages.push(Message::new(Role::User, "Answer now with what you have found; say what is missing or uncertain."));
+            messages.push(Message::new(Role::User, prompts::render("nudges/answer_now.j2", ())));
         }
         compact(&mut messages, brain.context());
         // Small models jump to conclusions: the first step always looks into the recording.
@@ -505,7 +470,7 @@ pub fn answer(
                 if drafted {
                     on_event(&Event::DraftDiscarded);
                 }
-                messages.push(Message::new(Role::User, "Your last step was too long and got cut off. Keep each step short: send long text section by section."));
+                messages.push(Message::new(Role::User, prompts::render("nudges/cut_off.j2", ())));
                 continue;
             }
             Err(e) => return Err(e),
@@ -519,7 +484,7 @@ pub fn answer(
                 let fp = fingerprint(&tool, &args);
                 let no = steps.len() + 1;
                 let (status, text) = match done.get(&fp) {
-                    Some(prev) => (StepStatus::Repeated, format!("Already done at step {prev} with the same arguments; its result is above. Do something else or answer.")),
+                    Some(prev) => (StepStatus::Repeated, prompts::render("results/repeated.j2", minijinja::context! { step => prev })),
                     None => match chat_tool(&tool, &args, tools, memory, on_event).unwrap_or_else(|| tools.run(&tool, &args)) {
                         Ok(out) => {
                             let new = out.seen.as_ref().is_none_or(|s| tools::adds(&mut known, s));
@@ -528,7 +493,7 @@ pub fn answer(
                             } else if out.seen.as_ref().is_some_and(Vec::is_empty) {
                                 (StepStatus::Nothing, out.text)
                             } else {
-                                (StepStatus::Nothing, "Nothing new: everything this returned was already shown above.".to_string())
+                                (StepStatus::Nothing, prompts::render("results/nothing_new.j2", ()))
                             }
                         }
                         Err(e) => (StepStatus::Failed, format!("Error: {e:#}")),
@@ -541,7 +506,7 @@ pub fn answer(
                     StepStatus::Repeated => stall + 2,
                     _ => stall + 1,
                 };
-                messages.push(Message::new(Role::User, format!("{RESULT}{no} ({tool}):\n{text}")));
+                messages.push(Message::new(Role::User, prompts::render("results/step.j2", minijinja::context! { step => no, tool => &tool, text => &text })));
                 let record = StepRecord { title: if title.is_empty() { tool.clone() } else { title }, tool, args, result: text, status };
                 on_event(&Event::Step(record.clone()));
                 steps.push(record);
@@ -551,11 +516,9 @@ pub fn answer(
                 if !bad.is_empty() && !checked_citations && n + 1 < MAX_STEPS + 4 {
                     checked_citations = true;
                     on_event(&Event::DraftDiscarded);
-                    let list = bad.iter().map(|b| format!("[{b}]")).collect::<Vec<_>>().join(", ");
-                    messages.push(Message::new(
-                        Role::User,
-                        format!("These citations point at nothing said: {list}. Fix the answer: cite only times from the tool results, as {}.", tools.citation_form()),
-                    ));
+                    let bad: Vec<String> = bad.iter().map(|b| format!("[{b}]")).collect();
+                    let nudge = prompts::render("nudges/bad_citations.j2", minijinja::context! { bad, kind => tools.kind() });
+                    messages.push(Message::new(Role::User, nudge));
                     continue;
                 }
                 let mut text = tidy(&without(&text, &bad));

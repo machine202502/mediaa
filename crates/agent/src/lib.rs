@@ -9,6 +9,7 @@ pub mod index;
 pub mod llm;
 pub mod local;
 pub mod outline;
+pub mod prompts;
 pub mod providers;
 pub mod runtime;
 pub mod scheduler;

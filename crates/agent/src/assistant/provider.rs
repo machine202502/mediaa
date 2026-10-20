@@ -30,7 +30,7 @@ pub fn request(model: &str, messages: &[Message], tools: &[ToolSpec], may_answer
             .map(|t| {
                 // The step title rides along as an argument.
                 let mut params = t.params.clone();
-                params["properties"]["title"] = json!({"type": "string", "description": "3-8 words saying what this step does, in the user's language"});
+                params["properties"]["title"] = json!({"type": "string", "description": crate::prompts::tool("step_title")});
                 let mut required = params["required"].as_array().cloned().unwrap_or_default();
                 required.push(json!("title"));
                 params["required"] = Value::Array(required);
@@ -103,7 +103,7 @@ pub fn read_response(body: &Value) -> anyhow::Result<Step> {
     if let Some(call) = msg["tool_calls"].as_array().and_then(|c| c.first()) {
         let tool = call["function"]["name"].as_str().unwrap_or_default().to_string();
         let raw = call["function"]["arguments"].as_str().unwrap_or("{}");
-        let mut args: Value = serde_json::from_str(raw).map_err(|e| anyhow::anyhow!("the arguments of {tool} are not JSON ({e}): {raw}"))?;
+        let mut args: Value = serde_json::from_str(raw).map_err(|e| anyhow::anyhow!(crate::prompts::render("errors/arguments_not_json.j2", minijinja::context! { tool => &tool, error => e.to_string(), raw })))?;
         let title = args.as_object_mut().and_then(|o| o.remove("title")).and_then(|t| t.as_str().map(str::to_string)).unwrap_or_default();
         return Ok(Step::Tool { thought: content, title, tool, args });
     }
@@ -133,7 +133,7 @@ impl Brain for ProviderBrain {
                 // A malformed call: once more, telling the model what was wrong.
                 Err(e) if !retried && e.to_string().contains("not JSON") => {
                     retried = true;
-                    messages.push(Message::new(crate::llm::Role::User, format!("Your last tool call was malformed: {e}. Call the tool again with valid JSON arguments.")));
+                    messages.push(Message::new(crate::llm::Role::User, crate::prompts::render("nudges/malformed_call.j2", minijinja::context! { error => e.to_string() })));
                 }
                 Err(e) => return Err(e),
             }
@@ -163,7 +163,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     fn spec() -> ToolSpec {
-        ToolSpec { name: "search", description: "find", params: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}), example: json!({}) }
+        ToolSpec { name: "search", description: "find".into(), params: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}), example: json!({}) }
     }
 
     #[test]

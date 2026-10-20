@@ -13,7 +13,7 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_PAGE: u64 = 4 << 20;
 
 /// A search result.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct WebHit {
     pub title: String,
     pub url: String,

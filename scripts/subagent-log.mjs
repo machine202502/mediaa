@@ -1,0 +1,521 @@
+#!/usr/bin/env node
+// Mirrors the dialogs of subagents into readable Markdown files in `subagents/` (one per run),
+// so the user can watch what each subagent does while it works:
+// * Claude Code's own subagents (Sonnet, Haiku…): ~/.claude/projects/<project>/<session>/subagents/agent-*.jsonl
+//   with agent-*.meta.json (task description, model);
+// * runs of scripts/subagent.sh (DeepSeek…): target/subagents/<run>/stream.jsonl with task.md, model,
+//   name (optional), result.json.
+//
+//   node scripts/subagent-log.mjs once            render every transcript once
+//   node scripts/subagent-log.mjs watch           keep rendering what changes (every 3 s); one at a time
+//   node scripts/subagent-log.mjs watch --detach  start that watcher in the background and return
+//   node scripts/subagent-log.mjs follow RUN_DIR  render one scripts/subagent.sh run until it ends
+//
+// Finished runs (a result line: готово, ошибка, лимит ходов) whose transcript has not changed for
+// `archiveAfterHours` hours move to subagents/archive/ — the log and its artifacts keep their layout,
+// so the links inside the log stay valid. The limit comes from subagents/config.json (created with
+// {"archiveAfterHours": 6} when missing; the env SUBAGENT_ARCHIVE_HOURS overrides it) and is read on
+// every pass. A resumed run (its transcript changes) comes back to subagents/. registry.md never moves.
+// `watch` keeps one watcher: its pid is in subagents/.watch.pid; `watch --detach` starts it in the
+// background and returns at once (SessionStart hook).
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn } from "node:child_process";
+
+const repo = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
+const outDir = path.join(repo, "subagents");
+const archiveDir = path.join(outDir, "archive");
+const indexFile = path.join(outDir, ".index.json");
+const pidFile = path.join(outDir, ".watch.pid");
+const configFile = path.join(outDir, "config.json");
+/// Longest text kept of one thought, tool input or tool result.
+const CUT = 2000;
+/// A transcript untouched this long (and not finished explicitly) counts as stopped.
+const IDLE_MS = 10 * 60 * 1000;
+
+// ~/.claude/projects/<the project path with every non-alphanumeric character as '-'>
+const projectKey = repo.replace(/[^A-Za-z0-9]/g, "-");
+const claudeProject = path.join(os.homedir(), ".claude", "projects", projectKey);
+
+function readJsonl(file) {
+    const out = [];
+    let text = "";
+    try {
+        text = fs.readFileSync(file, "utf8");
+    } catch {
+        return out;
+    }
+    for (const line of text.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+            out.push(JSON.parse(line));
+        } catch {
+            // A line still being written.
+        }
+    }
+    return out;
+}
+
+const readText = (file) => {
+    try {
+        return fs.readFileSync(file, "utf8").trim();
+    } catch {
+        return "";
+    }
+};
+
+/// A path with forward slashes, relative to `base` (for links inside a log).
+const relTo = (base, abs) => path.relative(base, abs).replace(/\\/g, "/");
+const cut = (s) => (s.length > CUT ? `${s.slice(0, CUT)}\n… (ещё ${s.length - CUT} символов)` : s);
+const time = (iso) => (iso ? new Date(iso).toLocaleTimeString("ru-RU", { hour12: false }) : "");
+const stamp = (d) => {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}`;
+};
+const slug = (s) =>
+    s
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 50)
+        .replace(/-+$/, "") || "task";
+const shortModel = (m) => (m || "model").split("/").pop().replace(/[^A-Za-z0-9.-]+/g, "-");
+const fence = (s) => {
+    const n = Math.max(3, ...[...String(s).matchAll(/`+/g)].map((m) => m[0].length + 1));
+    return "`".repeat(n);
+};
+const block = (s, lang = "") => {
+    const f = fence(s);
+    return `${f}${lang}\n${s}\n${f}`;
+};
+
+function resultText(content) {
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) return content.map((c) => (c.type === "text" ? c.text : `[${c.type}]`)).join("\n");
+    return JSON.stringify(content);
+}
+
+/// The dialog as Markdown lines: thoughts, texts, tool calls with their results.
+function renderEvents(events) {
+    const lines = [];
+    let first = true;
+    for (const e of events) {
+        const content = e.message?.content;
+        if (e.type === "user") {
+            if (typeof content === "string") {
+                // The task (first) or a later message to the subagent (a resume, a nudge).
+                if (!first) lines.push(`### ${time(e.timestamp)} · сообщение подагенту`, "", content, "");
+                first = false;
+                continue;
+            }
+            for (const c of content || []) {
+                if (c.type === "tool_result") {
+                    lines.push(`<details><summary>результат${c.is_error ? " (ошибка)" : ""}</summary>`, "", block(cut(resultText(c.content))), "", "</details>", "");
+                } else if (c.type === "text" && first) {
+                    first = false;
+                } else if (c.type === "text") {
+                    lines.push(`### ${time(e.timestamp)} · сообщение подагенту`, "", c.text, "");
+                }
+            }
+            first = false;
+        } else if (e.type === "assistant") {
+            for (const c of content || []) {
+                if (c.type === "thinking" && c.thinking) lines.push(`### ${time(e.timestamp)} · думает`, "", cut(c.thinking).replace(/^/gm, "> "), "");
+                if (c.type === "text" && c.text.trim()) lines.push(`### ${time(e.timestamp)} · пишет`, "", c.text, "");
+                if (c.type === "tool_use") lines.push(`### ${time(e.timestamp)} · вызывает \`${c.name}\``, "", block(cut(JSON.stringify(c.input, null, 2)), "json"), "");
+            }
+        }
+    }
+    return lines;
+}
+
+/// The task: the first user message of the transcript.
+function firstTask(events) {
+    for (const e of events) {
+        if (e.type !== "user") continue;
+        const c = e.message?.content;
+        if (typeof c === "string") return c;
+        const t = (c || []).find((x) => x.type === "text");
+        if (t) return t.text;
+    }
+    return "";
+}
+
+/// Every transcript: { key, file (the JSONL), title, model, task, started, status, summary }.
+function sources() {
+    const out = [];
+    // Claude Code's subagents, every session of this project.
+    if (fs.existsSync(claudeProject)) {
+        for (const session of fs.readdirSync(claudeProject)) {
+            const dir = path.join(claudeProject, session, "subagents");
+            if (!fs.existsSync(dir)) continue;
+            for (const f of fs.readdirSync(dir)) {
+                if (!f.endsWith(".jsonl")) continue;
+                const file = path.join(dir, f);
+                let meta = {};
+                try {
+                    meta = JSON.parse(fs.readFileSync(file.replace(/\.jsonl$/, ".meta.json"), "utf8"));
+                } catch {}
+                out.push({ key: file, file, kind: "claude", title: meta.description, model: meta.model || "inherit" });
+            }
+        }
+    }
+    // Runs of scripts/subagent.sh.
+    const runs = path.join(repo, "target", "subagents");
+    if (fs.existsSync(runs)) {
+        for (const r of fs.readdirSync(runs)) out.push(runSource(path.join(runs, r)));
+    }
+    return out.filter((s) => s && fs.existsSync(s.file));
+}
+
+function runSource(dir) {
+    const task = readText(path.join(dir, "task.md"));
+    return {
+        key: dir,
+        dir,
+        file: path.join(dir, "stream.jsonl"),
+        kind: "script",
+        title: readText(path.join(dir, "name")) || task.split("\n").find((l) => l.trim()) || path.basename(dir),
+        model: readText(path.join(dir, "model")),
+    };
+}
+
+/// How to continue a run that stopped at its turn limit.
+function continueLines(src) {
+    if (src.kind === "script") {
+        const dir = relTo(repo, src.dir);
+        return ["Продолжить в той же сессии:", "", `\`scripts/subagent.sh resume ${dir} MESSAGE_FILE --max-turns N\``];
+    }
+    return ["Подагент Claude Code остановился на лимите ходов: запустите его снова или продолжите работу над задачей сами."];
+}
+
+/// Running / done / error and the closing summary of a transcript.
+function state(src, events, mtime) {
+    const result = [...events].reverse().find((e) => e.type === "result");
+    if (result) {
+        const ok = result.subtype === "success" && !result.is_error;
+        const maxTurns = result.subtype === "error_max_turns";
+        const sec = Math.round((result.duration_ms || 0) / 1000);
+        const status = ok ? "готово" : maxTurns ? "остановлен на лимите ходов" : `ошибка (${result.subtype})`;
+        const turns = `Ходов: ${result.num_turns ?? "?"}, время: ${Math.floor(sec / 60)} мин ${sec % 60} с.`;
+        return { status, finished: true, summary: [turns, "", ...(maxTurns ? [...continueLines(src), ""] : []), result.result || ""] };
+    }
+    if (src.kind === "script") {
+        const alive = Date.now() - mtime < IDLE_MS;
+        return { status: alive ? "работает" : "остановлен (журнал давно не менялся)", finished: false, summary: [] };
+    }
+    // Claude Code's subagent: finished when its last message is text without a pending tool call
+    // and the transcript is quiet.
+    const last = [...events].reverse().find((e) => e.type === "assistant");
+    const calls = (last?.message?.content || []).some((c) => c.type === "tool_use" && c.name !== "SubagentHandback");
+    const quiet = Date.now() - mtime > 15000;
+    if (last && !calls && quiet) {
+        const text = (last.message.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+        const handback = (last.message.content || []).find((c) => c.name === "SubagentHandback");
+        return { status: "готово", finished: true, summary: [handback ? JSON.stringify(handback.input, null, 2) : text] };
+    }
+    return { status: Date.now() - mtime < IDLE_MS ? "работает" : "остановлен (журнал давно не менялся)", finished: false, summary: [] };
+}
+
+/// How long a finished run waits before it moves to subagents/archive/ (config.json, env wins).
+function archiveHours() {
+    const def = { archiveAfterHours: 6 };
+    let config = null;
+    try {
+        config = JSON.parse(fs.readFileSync(configFile, "utf8"));
+    } catch {}
+    if (typeof config?.archiveAfterHours !== "number") {
+        try {
+            fs.mkdirSync(outDir, { recursive: true });
+            fs.writeFileSync(configFile, `${JSON.stringify(def, null, 2)}\n`);
+        } catch {}
+        config = def;
+    }
+    const env = Number(process.env.SUBAGENT_ARCHIVE_HOURS);
+    return process.env.SUBAGENT_ARCHIVE_HOURS && Number.isFinite(env) && env >= 0 ? env : config.archiveAfterHours;
+}
+
+/// Rename a file or folder, creating the parent; true when nothing is left at `from`.
+function move(from, to) {
+    if (from === to || !fs.existsSync(from)) return true;
+    try {
+        fs.mkdirSync(path.dirname(to), { recursive: true });
+        fs.rmSync(to, { recursive: true, force: true });
+        fs.renameSync(from, to);
+        return true;
+    } catch {
+        return false; // in use: the next pass tries again
+    }
+}
+
+const underArchive = (rel) => rel.replace(/^subagents\//, "subagents/archive/");
+const fromArchive = (rel) => rel.replace(/^subagents\/archive\//, "subagents/");
+
+/// A finished run untouched for long: its log and artifacts move under subagents/archive/.
+function archiveRun(src, index, mtime) {
+    const name = index[src.key];
+    if (!move(path.join(outDir, name), path.join(archiveDir, name))) return;
+    const artifacts = index[`${src.key}#artifacts`];
+    if (artifacts) {
+        const to = underArchive(artifacts);
+        if (move(path.join(repo, artifacts), path.join(repo, to))) index[`${src.key}#artifacts`] = to;
+    }
+    index[`${src.key}#archived`] = true;
+    index[`${src.key}#archivedAt`] = mtime;
+}
+
+/// The transcript changed after archiving (a resume): the log and artifacts come back.
+function unarchiveRun(src, index) {
+    const name = index[src.key];
+    if (!move(path.join(archiveDir, name), path.join(outDir, name))) return;
+    const artifacts = index[`${src.key}#artifacts`];
+    if (artifacts?.startsWith("subagents/archive/")) {
+        const to = fromArchive(artifacts);
+        if (move(path.join(repo, artifacts), path.join(repo, to))) index[`${src.key}#artifacts`] = to;
+    }
+    delete index[`${src.key}#archived`];
+    delete index[`${src.key}#archivedAt`];
+}
+
+const checked = new Map(); // key → mtime the run was judged for archiving
+
+/// Archive what is finished and old.
+function archivePass(all, index, hours) {
+    const cutoff = Date.now() - hours * 3600e3;
+    for (const src of all) {
+        let mtime = 0;
+        try {
+            mtime = fs.statSync(src.file).mtimeMs;
+        } catch {}
+        if (!index[src.key] || index[`${src.key}#archived`] || !mtime || mtime >= cutoff) continue;
+        if (checked.get(src.key) === mtime) continue; // judged this version of the transcript already
+        checked.set(src.key, mtime);
+        if (state(src, readJsonl(src.file), mtime).finished) archiveRun(src, index, mtime);
+    }
+}
+
+/// Bring back the archived runs that became active again (transcript changed: a resume).
+function unarchivePass(all, index) {
+    for (const src of all) {
+        if (!index[`${src.key}#archived`]) continue;
+        let mtime = 0;
+        try {
+            mtime = fs.statSync(src.file).mtimeMs;
+        } catch {}
+        if (mtime && mtime !== index[`${src.key}#archivedAt`]) unarchiveRun(src, index);
+    }
+}
+
+/// The pid of a living watcher from subagents/.watch.pid, or 0.
+function runningWatcher() {
+    const pid = Number(readText(pidFile));
+    if (!Number.isInteger(pid) || pid <= 0) return 0;
+    try {
+        process.kill(pid, 0);
+        return pid;
+    } catch {
+        return 0;
+    }
+}
+
+/// Where the run lives, for watching and recovery: pids, the session to resume.
+function processLines(src, events) {
+    const session = events.find((e) => e.session_id || e.sessionId);
+    const sid = session?.session_id || session?.sessionId || "";
+    if (src.kind === "script") {
+        const r = (f) => readText(path.join(src.dir, f));
+        const pids = [`claude ${r("pid") || "?"}${r("winpid") ? ` (Windows ${r("winpid")})` : ""}`, `скрипт ${r("script_pid") || "?"}`, `зеркало ${r("log_pid") || "?"}`];
+        // Cost per claude call (cost-run, cost-resume-…), written by scripts/subagent.sh at the end.
+        let costs = [];
+        try {
+            costs = fs.readdirSync(src.dir).filter((f) => f.startsWith("cost-")).map((f) => Number(r(f))).filter(Number.isFinite);
+        } catch {}
+        return [
+            ...(costs.length ? [`* **Стоимость:** $${costs.reduce((a, b) => a + b, 0).toFixed(4)}`] : []),
+            `* **Процессы:** ${pids.join(", ")}`,
+            `* **Сессия:** \`${sid || r("session_id") || "?"}\` · продолжить: \`scripts/subagent.sh resume ${path.relative(repo, src.dir).replace(/\\/g, "/")} MESSAGE_FILE\`, ход: \`scripts/subagent.sh status …\``,
+        ];
+    }
+    // A subagent of Claude Code runs inside the lead's Claude Code process.
+    const agent = path.basename(src.file, ".jsonl").replace(/^agent-/, "");
+    const sessionDir = path.basename(path.dirname(path.dirname(src.file)));
+    const host = sessionDir === process.env.CLAUDE_CODE_SESSION_ID && process.env.CLAUDE_PID ? `, процесс Claude Code ${process.env.CLAUDE_PID}` : "";
+    return [`* **Процессы:** внутри сессии головы \`${sessionDir}\`${host}; агент \`${agent}\``];
+}
+
+/// A row in subagents/registry.md (the same table scripts/subagent.sh writes to).
+function register(src, events, title, model, started) {
+    const reg = path.join(outDir, "registry.md");
+    if (!fs.existsSync(reg)) {
+        fs.mkdirSync(outDir, { recursive: true });
+        fs.writeFileSync(
+            reg,
+            "# Запуски подагентов\n\nПишется при старте каждого запуска. Проверить, кто жив: `scripts/subagent.sh list`.\n\n" +
+                "| Начало | Задача | Модель | Процессы | Сессия | Папка запуска |\n|---|---|---|---|---|---|\n",
+        );
+    }
+    const p = (n) => String(n).padStart(2, "0");
+    const when = `${started.getFullYear()}-${p(started.getMonth() + 1)}-${p(started.getDate())} ${p(started.getHours())}:${p(started.getMinutes())}:${p(started.getSeconds())}`;
+    const procs = processLines(src, events)[0].replace(/^\* \*\*Процессы:\*\* /, "").replace(/\|/g, "/");
+    const session = path.basename(path.dirname(path.dirname(src.file)));
+    fs.appendFileSync(reg, `| ${when} | ${title.replace(/\|/g, "/")} | ${model} | ${procs} | \`${session}\` | \`${src.file}\` |\n`);
+}
+
+/// The artifacts the subagent left, linked from the log (paths relative to the log's folder).
+function artifactLines(logDir, artifacts) {
+    if (!artifacts) return [];
+    const abs = path.join(repo, artifacts);
+    let files = [];
+    try {
+        files = fs.readdirSync(abs, { recursive: true }).filter((f) => fs.statSync(path.join(abs, f)).isFile());
+    } catch {
+        return ["## Артефакты", "", "_пока нет_", ""];
+    }
+    const rel = relTo(logDir, abs);
+    const lines = files.map((f) => {
+        const link = `${rel}/${String(f).replace(/\\/g, "/")}`;
+        return /\.(png|jpe?g|gif|webp)$/i.test(f) ? `* ![${f}](${link})` : `* [${f}](${link})`;
+    });
+    return ["## Артефакты", "", ...(lines.length ? lines : ["_пока нет_"]), ""];
+}
+
+function loadIndex() {
+    try {
+        return JSON.parse(fs.readFileSync(indexFile, "utf8"));
+    } catch {
+        return {};
+    }
+}
+
+const rendered = new Map(); // key → mtime rendered
+
+function render(src, index) {
+    let mtime;
+    try {
+        mtime = fs.statSync(src.file).mtimeMs;
+    } catch {
+        return false;
+    }
+    const events = readJsonl(src.file);
+    if (!events.length) return false;
+    const task = src.kind === "script" ? readText(path.join(src.dir, "task.md")) : firstTask(events);
+    const title = src.title || task.split("\n").find((l) => l.trim()) || "задача";
+    const startIso = events.find((e) => e.timestamp)?.timestamp;
+    const started = startIso ? new Date(startIso) : new Date(mtime);
+    const model = src.model || events.find((e) => e.type === "system" && e.model)?.model || "";
+    if (!index[src.key]) {
+        // A run of scripts/subagent.sh is already named that way: its log takes the same name.
+        const named = src.kind === "script" && /^\d{4}-\d\d-\d\d_\d\d-\d\d_/.test(path.basename(src.dir));
+        index[src.key] = named ? `${path.basename(src.dir)}.md` : `${stamp(started)}_${shortModel(model)}_${slug(title)}.md`;
+        // scripts/subagent.sh registers its runs itself; Claude Code's subagents are registered here.
+        if (src.kind === "claude") register(src, events, title, model, started);
+    }
+    const { status, summary, finished } = state(src, events, mtime);
+    const archived = Boolean(index[`${src.key}#archived`]);
+    const logDir = archived ? archiveDir : outDir;
+    let artifacts = index[`${src.key}#artifacts`] || (task.match(/subagents[\\/]artifacts[\\/][^\s`'")\\/]+/) || [])[0]?.replace(/\\/g, "/").replace(/[.,;:]+$/, "");
+    // A Claude Code subagent's artifacts folder was named in its task before its log existed: once
+    // it is done, the folder takes the log's name, so the two match.
+    const wanted = `subagents/artifacts/${index[src.key].replace(/\.md$/, "")}`;
+    if (!archived && src.kind === "claude" && artifacts && artifacts !== wanted && finished && fs.existsSync(path.join(repo, artifacts)) && !fs.existsSync(path.join(repo, wanted))) {
+        fs.renameSync(path.join(repo, artifacts), path.join(repo, wanted));
+        artifacts = wanted;
+    }
+    if (artifacts) index[`${src.key}#artifacts`] = artifacts;
+    const md = [
+        `# ${title}`,
+        "",
+        `* **Модель:** ${model || "?"}`,
+        `* **Статус:** ${status}`,
+        `* **Начало:** ${started.toLocaleString("ru-RU")} · **обновлено:** ${new Date(mtime).toLocaleString("ru-RU")}`,
+        ...processLines(src, events),
+        `* **Журнал:** \`${src.file}\``,
+        ...(artifacts ? [`* **Артефакты:** [${artifacts}](${relTo(logDir, path.join(repo, artifacts))})`] : []),
+        "",
+        "## Задание",
+        "",
+        block(task),
+        "",
+        "## Ход работы",
+        "",
+        ...renderEvents(events),
+        ...(summary.length ? ["## Итог", "", ...summary, ""] : []),
+        ...artifactLines(logDir, artifacts),
+    ].join("\n");
+    fs.mkdirSync(logDir, { recursive: true });
+    fs.writeFileSync(path.join(logDir, index[src.key]), md);
+    rendered.set(src.key, mtime);
+    return finished;
+}
+
+function pass(force) {
+    const index = loadIndex();
+    const all = sources();
+    unarchivePass(all, index);
+    for (const src of all) {
+        let mtime = 0;
+        try {
+            mtime = fs.statSync(src.file).mtimeMs;
+        } catch {}
+        // Claude Code's subagents settle a little after their last line: re-render while recent.
+        const recent = Date.now() - mtime < 60000;
+        if (force || rendered.get(src.key) !== mtime || recent) render(src, index);
+    }
+    fs.mkdirSync(outDir, { recursive: true });
+    archivePass(all, index, archiveHours());
+    fs.writeFileSync(indexFile, JSON.stringify(index, null, 2));
+}
+
+/// One watcher only: take subagents/.watch.pid and keep rendering until stopped.
+function startWatch() {
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.writeFileSync(pidFile, String(process.pid));
+    const mine = () => Number(readText(pidFile)) === process.pid;
+    const drop = () => {
+        try {
+            if (mine()) fs.rmSync(pidFile, { force: true });
+        } catch {}
+    };
+    process.on("exit", drop);
+    process.on("SIGINT", () => process.exit(0));
+    process.on("SIGTERM", () => process.exit(0));
+    pass(true);
+    setInterval(() => pass(false), 3000);
+}
+
+const [cmd, arg] = process.argv.slice(2);
+if (cmd === "id") {
+    // The shared name of a run (log, artifacts, run folder): `id MODEL TITLE`, now.
+    const [model, title] = process.argv.slice(3);
+    console.log(`${stamp(new Date())}_${shortModel(model)}_${slug(title || "")}`);
+} else if (cmd === "once") {
+    pass(true);
+} else if (cmd === "watch" && arg === "--detach") {
+    // Started from a hook: hand the work to the background and return without a sound.
+    try {
+        const script = path.resolve(process.argv[1]);
+        const child = spawn(process.execPath, [script, "watch"], { detached: true, stdio: "ignore", windowsHide: true });
+        child.on("error", () => {});
+        child.unref();
+    } catch {}
+} else if (cmd === "watch") {
+    if (!runningWatcher()) startWatch();
+} else if (cmd === "follow" && arg) {
+    const src = runSource(path.resolve(arg));
+    const tick = () => {
+        const index = loadIndex();
+        // Following a run means it is active again: an archived one comes back.
+        if (index[`${src.key}#archived`]) unarchiveRun(src, index);
+        const done = fs.existsSync(src.file) && render(src, index);
+        fs.writeFileSync(indexFile, JSON.stringify(index, null, 2));
+        return done;
+    };
+    const timer = setInterval(() => {
+        if (tick()) clearInterval(timer);
+    }, 3000);
+} else {
+    console.error("usage: node scripts/subagent-log.mjs once | watch [--detach] | follow RUN_DIR | id MODEL TITLE");
+    process.exit(2);
+}

@@ -1,0 +1,3 @@
+{% for c in chapters %}
+{{ "\n" if not loop.first else "" }}[{{ c.start }}–{{ c.end }}] {{ c.title }} — {{ c.summary }}
+{%- endfor %}

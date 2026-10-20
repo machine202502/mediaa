@@ -7,6 +7,7 @@
 use super::brain::Brain;
 use super::Turn;
 use crate::llm::{Message, Role};
+use crate::prompts;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicBool;
 
@@ -39,21 +40,6 @@ impl Memory {
         }
         true
     }
-
-    /// The part of the system prompt it makes.
-    pub fn prompt(&self) -> String {
-        let mut p = String::new();
-        if !self.facts.is_empty() {
-            p.push_str("\nRemembered in this chat:\n");
-            for f in &self.facts {
-                p.push_str(&format!("- {f}\n"));
-            }
-        }
-        if !self.summary.is_empty() {
-            p.push_str(&format!("\nThe earlier conversation, summarised:\n{}\n", self.summary));
-        }
-        p
-    }
 }
 
 fn chars(turns: &[Turn]) -> usize {
@@ -79,23 +65,8 @@ pub fn fold(brain: &dyn Brain, history: &[Turn], memory: &mut Memory, cancel: &A
         return Ok(false);
     }
     let from = memory.summarized.min(history.len());
-    let mut text = String::new();
-    if !memory.summary.is_empty() {
-        text.push_str(&format!("Summary so far:\n{}\n\n", memory.summary));
-    }
-    text.push_str("Exchanges to add to it:\n");
-    for t in &history[from..from + n] {
-        text.push_str(&format!("User: {}\nAssistant: {}\n\n", t.question, t.answer));
-    }
-    let messages = [
-        Message::new(
-            Role::System,
-            "You keep a running summary of a conversation about a recording. Update the summary with the new exchanges. \
-             Keep: what the user wants and prefers, decisions and conclusions, facts with their times [m:ss], open questions. \
-             Drop small talk. At most 200 words, in the language of the conversation. Write only the summary.",
-        ),
-        Message::new(Role::User, text),
-    ];
+    let task = prompts::render("memory_fold_task.j2", minijinja::context! { summary => &memory.summary, exchanges => &history[from..from + n] });
+    let messages = [Message::new(Role::System, prompts::render("memory_fold_system.j2", ())), Message::new(Role::User, task)];
     memory.summary = brain.complete(&messages, cancel)?;
     memory.summarized = from + n;
     Ok(true)
@@ -120,9 +91,6 @@ mod tests {
         }
         assert_eq!(m.facts.len(), MAX_FACTS);
         assert!(!m.facts.contains(&"Дану зовут Дарья".to_string()), "the oldest went");
-        assert!(m.prompt().contains("Remembered in this chat:\n- факт 5\n"));
-        m.summary = "Говорили о бюджете.".into();
-        assert!(m.prompt().contains("summarised:\nГоворили о бюджете."));
     }
 
     #[test]

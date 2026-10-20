@@ -3,6 +3,7 @@
 //! named by its number. Moments are cited as `[#N m:ss]` — the recording's number and the time —
 //! and checked against that recording.
 
+use crate::prompts;
 use super::brain::ToolSpec;
 use super::tools::{self, Outcome, Recording, Tools};
 use super::Toolbox;
@@ -74,16 +75,16 @@ impl FolderTools<'_> {
         let raw = match &args["recording"] {
             Value::Number(n) => n.to_string(),
             Value::String(s) => s.trim().trim_start_matches('#').to_string(),
-            _ => anyhow::bail!("say which recording (its number from the list)"),
+            _ => return Err(tools::error("which_recording", ())),
         };
         let i = match raw.parse::<usize>() {
             Ok(n) if (1..=self.items.len()).contains(&n) => n - 1,
-            Ok(n) => anyhow::bail!("there is no recording #{n} (there are {})", self.items.len()),
+            Ok(n) => return Err(tools::error("no_recording_number", minijinja::context! { number => n, count => self.items.len() })),
             Err(_) => self
                 .items
                 .iter()
                 .position(|it| it.recording.title.to_lowercase().contains(&raw.to_lowercase()))
-                .ok_or_else(|| anyhow::anyhow!("no recording is called «{raw}»"))?,
+                .ok_or_else(|| tools::error("no_recording_title", minijinja::context! { title => &raw }))?,
         };
         Ok((i, &self.items[i]))
     }
@@ -97,17 +98,17 @@ impl FolderTools<'_> {
 
 impl Toolbox for FolderTools<'_> {
     fn specs(&self) -> Vec<ToolSpec> {
-        let recording = json!({"type": "integer", "description": "the recording's number from the list"});
+        let recording = json!({"type": "integer", "description": prompts::tool("folder/recording_param")});
         let mut specs = vec![
             ToolSpec {
                 name: "recordings",
-                description: "The recordings of the folder: number, title, length, speakers, chapters.",
+                description: prompts::tool("folder/recordings"),
                 params: json!({"type": "object", "properties": {}}),
                 example: json!({}),
             },
             ToolSpec {
                 name: "search",
-                description: "Finds the places that talk about something in ALL the recordings (by meaning and by words).",
+                description: prompts::tool("folder/search"),
                 params: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
                 example: json!({"query": "<what to find>"}),
             },
@@ -129,38 +130,36 @@ impl Toolbox for FolderTools<'_> {
     fn run(&self, tool: &str, args: &Value) -> anyhow::Result<Outcome> {
         match tool {
             "recordings" => {
-                let text = self
+                let items: Vec<_> = self
                     .items
                     .iter()
                     .enumerate()
                     .map(|(i, it)| {
                         let r = &it.recording;
-                        let chapters = r.chapters.iter().map(|c| c.digest.title.as_str()).collect::<Vec<_>>().join("; ");
-                        let state = if r.replies.is_empty() { " — not transcribed yet" } else { "" };
-                        format!("#{} «{}», {}{state}{}", i + 1, r.title, format_time(r.duration), if chapters.is_empty() { String::new() } else { format!(". Chapters: {chapters}") })
+                        let chapters: Vec<&str> = r.chapters.iter().map(|c| c.digest.title.as_str()).collect();
+                        minijinja::context! { number => i + 1, title => &r.title, length => format_time(r.duration), transcribed => !r.replies.is_empty(), chapters }
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Ok(Outcome { text, seen: None })
+                    .collect();
+                Ok(Outcome { text: prompts::render("results/folder/recordings.j2", minijinja::context! { items }), seen: None })
             }
             "search" => {
                 let query = args["query"].as_str().unwrap_or_default().trim();
-                anyhow::ensure!(!query.is_empty(), "search needs a query");
+                anyhow::ensure!(!query.is_empty(), tools::needs("search", "query"));
                 let hits = (self.search)(query, 8)?;
                 if hits.is_empty() {
-                    return Ok(Outcome { text: format!("Nothing found for «{query}» in the folder."), seen: Some(vec![]) });
+                    return Ok(Outcome { text: prompts::render("results/folder/nothing.j2", minijinja::context! { query }), seen: Some(vec![]) });
                 }
-                let text = hits
+                let shown: Vec<_> = hits
                     .iter()
                     .map(|(i, h)| {
                         let r = &self.items[*i].recording;
-                        let who = h.chunk.speakers.iter().map(|&s| r.speaker(s)).collect::<Vec<_>>().join(", ");
-                        format!("[#{} {}–{}] «{}» ({who}) {}", i + 1, format_time(h.chunk.start), format_time(h.chunk.end), r.title, h.chunk.text)
+                        let who: Vec<String> = h.chunk.speakers.iter().map(|&s| r.speaker(s)).collect();
+                        minijinja::context! { number => i + 1, start => format_time(h.chunk.start), end => format_time(h.chunk.end), title => &r.title, who, text => &h.chunk.text }
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
+                    .collect();
+                let text = prompts::render("results/folder/search.j2", minijinja::context! { hits => shown });
                 let seen = hits.iter().map(|(i, h)| format!("{}:at@{}", i + 1, h.chunk.start as i64)).collect();
-                Ok(Outcome { text: tools_bounded(text, self.max_chars), seen: Some(seen) })
+                Ok(Outcome { text: tools::bounded(text, self.max_chars, "plain"), seen: Some(seen) })
             }
             "mentions" if args["recording"].is_null() => {
                 // Every recording: their counts together.
@@ -168,47 +167,39 @@ impl Toolbox for FolderTools<'_> {
                 let mut seen = Vec::new();
                 for i in 0..self.items.len() {
                     let out = self.one(i, "mentions", args)?;
-                    if !out.text.contains("never said") {
-                        parts.push(format!("#{}: {}", i + 1, out.text));
+                    // Never said there: nothing shown (not the result's wording, which lives in a template).
+                    if out.seen.as_ref().is_some_and(|s| !s.is_empty()) {
+                        parts.push(minijinja::context! { number => i + 1, text => out.text });
                         seen.extend(out.seen.unwrap_or_default());
                     }
                 }
-                let text = if parts.is_empty() { "Never said in any recording.".to_string() } else { parts.join("\n\n") };
-                Ok(Outcome { text: tools_bounded(text, self.max_chars), seen: Some(seen) })
+                let text = if parts.is_empty() { prompts::render("results/folder/never_said.j2", ()) } else { prompts::render("results/folder/mentions.j2", minijinja::context! { parts }) };
+                Ok(Outcome { text: tools::bounded(text, self.max_chars, "plain"), seen: Some(seen) })
             }
             "outline" | "read" | "mentions" | "speakers" => {
                 let (i, _) = self.item(args)?;
                 self.one(i, tool, args)
             }
             "calculator" | "time" => self.one(0, tool, args),
-            other => anyhow::bail!("there is no tool «{other}»"),
+            other => Err(tools::error("no_tool", minijinja::context! { tool => other })),
         }
     }
 
-    fn subject(&self) -> &'static str {
-        "the recordings of a folder (transcripts of conversations), numbered #1, #2…"
-    }
-
-    fn citation_form(&self) -> &'static str {
-        "[#2 12:30] (the recording's number, then the time)"
+    fn kind(&self) -> &'static str {
+        "folder"
     }
 
     fn card(&self) -> String {
-        // The map of the folder up front: what each recording is about, by its chapters.
-        let mut card = format!("The folder has {} recordings:\n", self.items.len());
-        for (i, it) in self.items.iter().enumerate() {
-            let r = &it.recording;
-            let about = if r.replies.is_empty() {
-                " — not transcribed yet".to_string()
-            } else if r.chapters.is_empty() {
-                String::new()
-            } else {
-                let titles: Vec<&str> = r.chapters.iter().take(CARD_CHAPTERS).map(|c| c.digest.title.as_str()).collect();
-                format!(". About: {}", titles.join("; "))
-            };
-            card.push_str(&format!("#{} «{}», {}{about}\n", i + 1, r.title, format_time(r.duration)));
-        }
-        tools_bounded(card, self.max_chars / 3)
+        let items: Vec<Value> = self
+            .items
+            .iter()
+            .map(|it| {
+                let r = &it.recording;
+                let chapters: Vec<&str> = r.chapters.iter().take(CARD_CHAPTERS).map(|c| c.digest.title.as_str()).collect();
+                json!({"title": r.title, "length": format_time(r.duration), "transcribed": !r.replies.is_empty(), "chapters": chapters})
+            })
+            .collect();
+        tools::bounded(prompts::render("agent/card_folder.j2", minijinja::context! { items }), self.max_chars / 3, "plain")
     }
 
     fn web(&self) -> Option<&super::internet::Web<'_>> {
@@ -237,14 +228,6 @@ impl Toolbox for FolderTools<'_> {
         // A time without its recording cannot be followed.
         bad.extend(super::citations(text).into_iter().filter(|(s, _)| !s.starts_with('#')).map(|(s, _)| s));
         bad
-    }
-}
-
-fn tools_bounded(text: String, max: usize) -> String {
-    if text.chars().count() > max {
-        format!("{}\n… (cut)", text.chars().take(max).collect::<String>())
-    } else {
-        text
     }
 }
 

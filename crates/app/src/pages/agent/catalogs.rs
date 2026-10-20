@@ -619,10 +619,40 @@ enum TabCmd {
     ResumeTask(mediaa_core::queue::TaskId),
 }
 
+/// The width of every tab in the dock: short titles are padded, long ones are cut.
+const TAB_WIDTH: f32 = 180.0;
+
+/// The room a title gets inside [`TAB_WIDTH`]: the tab minus the tab button's 2×8 px text spacing
+/// and the 24 px close button.
+const TAB_TITLE_WIDTH: f32 = TAB_WIDTH - 16.0 - 24.0;
+
+/// The full title of a tab: the catalog node's name (or the file name), with the folder chat icon.
+fn tab_title(cat: &Catalogs, tab: &Tab) -> String {
+    let name = cat.node(tab.node).map_or_else(|| tab.path.file_name().unwrap_or_default().to_string_lossy().into_owned(), |n| n.name.clone());
+    match tab.body {
+        Body::Chat(_) => format!("{}  {name}", icon::CHATS_CIRCLE),
+        _ => name,
+    }
+}
+
+/// One row of [`tab_title`], cut to [`TAB_TITLE_WIDTH`] by egui itself (its glyph widths) with `…`.
+fn tab_title_job(full: &str) -> egui::text::LayoutJob {
+    // The placeholder colour is replaced by egui_dock's active/inactive tab colour.
+    let format = egui::TextFormat { font_id: egui::FontId::proportional(13.0), color: Color32::PLACEHOLDER, ..Default::default() };
+    let mut job = egui::text::LayoutJob::single_section(full.to_owned(), format);
+    job.wrap.max_width = TAB_TITLE_WIDTH;
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('…');
+    job
+}
+
 struct Tabs<'a> {
     cat: &'a Catalogs,
     services: Option<super::Services>,
     cmds: Vec<TabCmd>,
+    /// For laying the title out ourselves: egui_dock discards a `LayoutJob`'s own wrapping.
+    ctx: egui::Context,
 }
 
 impl TabViewer for Tabs<'_> {
@@ -633,15 +663,16 @@ impl TabViewer for Tabs<'_> {
     }
 
     fn title(&mut self, tab: &mut Tab) -> egui::WidgetText {
-        let name = self.cat.node(tab.node).map_or_else(|| tab.path.file_name().unwrap_or_default().to_string_lossy().into_owned(), |n| n.name.clone());
-        match tab.body {
-            Body::Chat(_) => format!("{}  {name}", icon::CHATS_CIRCLE).into(),
-            _ => name.into(),
-        }
+        let job = tab_title_job(&tab_title(self.cat, tab));
+        egui::WidgetText::Galley(self.ctx.fonts_mut(|f| f.layout_job(job)))
+    }
+
+    fn on_tab_button(&mut self, tab: &mut Tab, response: &egui::Response) {
+        response.clone().on_hover_text(tab_title(self.cat, tab));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Tab) {
-        let title = self.title(tab).text().to_string();
+        let title = tab_title(self.cat, tab);
         match &mut tab.body {
             Body::Studio(studio) => match studio.ui(ui, &title, self.services.as_ref()) {
                 Some(StudioAction::OpenAt(p, t)) => self.cmds.push(TabCmd::OpenAt(p, t)),
@@ -723,8 +754,10 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
         ui.centered_and_justified(|ui| theme::hint(ui, t!("agent.open_hint")));
         return;
     }
-    let mut viewer = Tabs { cat, services, cmds: Vec::new() };
-    let style = egui_dock::Style::from_egui(ui.style());
+    let mut viewer = Tabs { cat, services, cmds: Vec::new(), ctx: ui.ctx().clone() };
+    let mut style = egui_dock::Style::from_egui(ui.style());
+    // No maximum width in egui_dock: the title is cut to the tab's width instead (see `tab_title_job`).
+    style.tab.minimum_width = Some(TAB_WIDTH);
     *dock = std::mem::replace(dock, DockState::new(Vec::new())).with_translations(translations());
     DockArea::new(dock)
         .style(style)
@@ -825,5 +858,18 @@ mod tests {
     fn hit_text_is_cut_at_a_word() {
         assert_eq!(shortened("коротко", 20), "коротко");
         assert_eq!(shortened("первое второе третье", 15), "первое второе…");
+    }
+
+    #[test]
+    fn tab_title_job_is_one_row_cut_with_an_ellipsis() {
+        let full = "очень длинное имя записи, которое не поместится в вкладку";
+        let job = tab_title_job(full);
+        assert_eq!(job.text, full, "the full title stays in the job");
+        assert_eq!(job.wrap.max_width, TAB_TITLE_WIDTH);
+        assert_eq!(job.wrap.max_rows, 1);
+        assert!(job.wrap.break_anywhere);
+        assert_eq!(job.wrap.overflow_character, Some('…'));
+        assert_eq!(job.sections.len(), 1);
+        assert_eq!(job.sections[0].format.color, Color32::PLACEHOLDER, "egui_dock colours the tab");
     }
 }

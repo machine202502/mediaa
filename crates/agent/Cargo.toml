@@ -27,6 +27,8 @@ scraper = "0.27"
 dom_smoothie = "0.18"
 url = "2"
 regex = "1"
+minijinja = "2"
+minijinja-embed = "2"
 
 # Windows: models run on any GPU with a Vulkan driver (NVIDIA, AMD, Intel), else on the CPU.
 [target.'cfg(windows)'.dependencies]
@@ -35,3 +37,7 @@ llama-cpp-2 = { version = "0.1.159", features = ["vulkan"] }
 [dev-dependencies]
 tempfile.workspace = true
 tiny_http = "0.12"
+insta = "1"
+
+[build-dependencies]
+minijinja-embed = "2"

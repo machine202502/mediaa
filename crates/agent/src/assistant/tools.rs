@@ -2,6 +2,7 @@
 //! speakers (talk time computed, never guessed), and exact arithmetic and time math. Results are
 //! text for the model, bounded by its context; each says what it adds, for the novelty check.
 
+use crate::prompts;
 use super::brain::ToolSpec;
 use crate::tools::{between, calculate, format_time, parse_time};
 use mediaa_core::outline::Chapter;
@@ -36,34 +37,21 @@ impl Recording {
 
     /// The card at the top of the context.
     pub fn card(&self) -> String {
-        let minutes = self.duration / 60.0;
-        let size = if minutes < 10.0 {
-            "short"
-        } else if minutes < 60.0 {
-            "medium"
-        } else {
-            "long"
-        };
-        let speakers: Vec<u32> = {
-            let mut s: Vec<u32> = self.replies.iter().filter_map(|r| r.speaker).collect();
-            s.sort_unstable();
-            s.dedup();
-            s
-        };
-        let mut card = format!("Recording: «{}», {} long ({size}).\n", self.title, format_time(self.duration));
-        if self.diarized && !speakers.is_empty() {
-            card.push_str(&format!("Speakers: {}.\n", speakers.iter().map(|&s| self.speaker(s)).collect::<Vec<_>>().join(", ")));
-        } else {
-            card.push_str("Speakers were not told apart.\n");
-        }
-        card.push_str(&match self.chapters.len() {
-            0 => "No outline yet: use search and read.\n".to_string(),
-            n => format!("Outline: {n} chapters (tool outline).\n"),
-        });
-        if let Some(p) = self.position {
-            card.push_str(&format!("The user is at [{}] in playback.\n", format_time(p)));
-        }
-        card
+        let mut ids: Vec<u32> = self.replies.iter().filter_map(|r| r.speaker).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let speakers: Vec<String> = if self.diarized { ids.iter().map(|&s| self.speaker(s)).collect() } else { Vec::new() };
+        prompts::render(
+            "agent/card_recording.j2",
+            minijinja::context! {
+                title => &self.title,
+                length => format_time(self.duration),
+                minutes => self.duration / 60.0,
+                speakers,
+                chapters => self.chapters.len(),
+                position => self.position.map(format_time),
+            },
+        )
     }
 }
 
@@ -73,43 +61,43 @@ pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "outline",
-            description: "Chapters of the recording with times, titles and summaries: the map of the recording.",
+            description: prompts::tool("outline"),
             params: none.clone(),
             example: json!({}),
         },
         ToolSpec {
             name: "search",
-            description: "Finds the places in the recording that talk about something (by meaning and by words; the recording only, not the internet). Returns fragments with times.",
+            description: prompts::tool("search"),
             params: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
             example: json!({"query": "сроки сдачи отчёта"}),
         },
         ToolSpec {
             name: "read",
-            description: "The exact replies between two times (m:ss or h:mm:ss).",
+            description: prompts::tool("read"),
             params: json!({"type": "object", "properties": {"from": {"type": "string"}, "to": {"type": "string"}}, "required": ["from", "to"]}),
             example: json!({"from": "12:00", "to": "15:30"}),
         },
         ToolSpec {
             name: "mentions",
-            description: "Every time a word or phrase is said (any word form): how many times, exact times of the first and the last, each with its context. For «when first», «how often», «every time».",
+            description: prompts::tool("mentions"),
             params: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
             example: json!({"query": "самозанятость"}),
         },
         ToolSpec {
             name: "speakers",
-            description: "Who speaks: names, talk time, number of replies, when they first speak.",
+            description: prompts::tool("speakers"),
             params: none,
             example: json!({}),
         },
         ToolSpec {
             name: "calculator",
-            description: "Exact arithmetic: + - * / % ^, parentheses, sqrt, round, min, max.",
+            description: prompts::tool("calculator"),
             params: json!({"type": "object", "properties": {"expression": {"type": "string"}}, "required": ["expression"]}),
             example: json!({"expression": "(45 - 12) / 3"}),
         },
         ToolSpec {
             name: "time",
-            description: "The duration between two times of the recording.",
+            description: prompts::tool("time"),
             params: json!({"type": "object", "properties": {"from": {"type": "string"}, "to": {"type": "string"}}, "required": ["from", "to"]}),
             example: json!({"from": "5:59", "to": "1:02:30"}),
         },
@@ -130,20 +118,27 @@ impl Outcome {
     }
 }
 
-/// Text cut to `max` characters with a note.
-fn bounded(mut text: String, max: usize, note: &str) -> String {
+/// Text cut to `max` characters with a note (the template `results/cut/<note>.j2`).
+pub(super) fn bounded(mut text: String, max: usize, note: &str) -> String {
     if text.chars().count() > max {
         text = text.chars().take(max).collect();
-        text.push_str(&format!("\n… {note}"));
+        text.push_str(&format!("\n… {}", prompts::render(&format!("results/cut/{note}.j2"), ())));
     }
     text
 }
 
+/// A tool's error text for the model: the template `errors/<name>.j2`.
+pub(super) fn error(name: &str, ctx: impl serde::Serialize) -> anyhow::Error {
+    anyhow::anyhow!(prompts::render(&format!("errors/{name}.j2"), ctx))
+}
+
+/// The error of a tool called without a required argument (`errors/needs_<what>.j2`).
+pub(super) fn needs(tool: &str, what: &str) -> anyhow::Error {
+    error(&format!("needs_{what}"), minijinja::context! { tool })
+}
+
 fn line(rec: &Recording, r: &Reply) -> String {
-    match r.speaker {
-        Some(s) => format!("[{}] {}: {}", format_time(r.start), rec.speaker(s), r.text()),
-        None => format!("[{}] {}", format_time(r.start), r.text()),
-    }
+    prompts::render("results/recording/line.j2", minijinja::context! { time => format_time(r.start), speaker => r.speaker.map(|s| rec.speaker(s)), text => r.text() })
 }
 
 /// The focused scan of a recording: instruction → what matches, with coverage.
@@ -196,7 +191,7 @@ impl Tools<'_> {
         if self.scan.is_some() {
             s.push(ToolSpec {
                 name: "scan",
-                description: "Reads the WHOLE recording part by part and lists everything matching the instruction, with times. The instruction is what the user asks for, in their own words — not an example. Slow: only for exhaustive questions («all decisions», «every piece of advice», «each time X comes up»). Says which parts it could not read.",
+                description: prompts::tool("scan"),
                 params: json!({"type": "object", "properties": {"instruction": {"type": "string"}}, "required": ["instruction"]}),
                 example: json!({"instruction": "<what the user wants listed, in their words>"}),
             });
@@ -204,7 +199,7 @@ impl Tools<'_> {
         if self.rename.is_some() && self.recording.diarized {
             s.push(ToolSpec {
                 name: "rename_speakers",
-                description: "Gives speakers names, kept with the recording. Only when the user asks for it or confirms; names come from the recording (people introduce themselves or address each other — search for that first).",
+                description: prompts::tool("rename_speakers"),
                 params: json!({"type": "object", "properties": {"names": {"type": "array", "maxItems": 12, "items": {"type": "object", "properties": {"speaker": {"type": "string"}, "name": {"type": "string"}}, "required": ["speaker", "name"]}}}, "required": ["names"]}),
                 example: json!({"names": [{"speaker": "<a speaker as the tools show it>", "name": "<the name>"}]}),
             });
@@ -212,7 +207,7 @@ impl Tools<'_> {
         if self.delegate.is_some() {
             s.push(ToolSpec {
                 name: "delegate",
-                description: "Gives a bounded task on one stretch of the recording to a helper that reads it whole (e.g. «summarise», «list the arguments»): saves your context on long stretches. Returns its compact result with times.",
+                description: prompts::tool("delegate"),
                 params: json!({"type": "object", "properties": {"task": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"}}, "required": ["task", "from", "to"]}),
                 example: json!({"task": "<what to do with this stretch>", "from": "40:00", "to": "55:00"}),
             });
@@ -226,47 +221,47 @@ impl Tools<'_> {
         match tool {
             "outline" => {
                 if rec.chapters.is_empty() {
-                    return Ok(Outcome::plain("No outline yet (it is being built). Use search and read."));
+                    return Ok(Outcome::plain(prompts::render("results/recording/no_outline.j2", ())));
                 }
-                let text = rec
+                let chapters: Vec<_> = rec
                     .chapters
                     .iter()
-                    .map(|c| format!("[{}–{}] {} — {}", format_time(c.start), format_time(c.end), c.digest.title, c.digest.summary))
-                    .collect::<Vec<_>>()
-                    .join("\n");
+                    .map(|c| minijinja::context! { start => format_time(c.start), end => format_time(c.end), title => &c.digest.title, summary => &c.digest.summary })
+                    .collect();
+                let text = prompts::render("results/recording/outline.j2", minijinja::context! { chapters });
                 let seen = rec.chapters.iter().map(|c| format!("chapter@{}", c.start as i64)).collect();
-                Ok(Outcome { text: bounded(text, self.max_chars, "(more chapters: read by time)"), seen: Some(seen) })
+                Ok(Outcome { text: bounded(text, self.max_chars, "chapters"), seen: Some(seen) })
             }
             "search" => {
                 let query = arg("query");
-                anyhow::ensure!(!query.is_empty(), "search needs a query");
+                anyhow::ensure!(!query.is_empty(), needs("search", "query"));
                 let hits = (self.search)(&query, 6)?;
                 if hits.is_empty() {
-                    return Ok(Outcome { text: format!("Nothing found for «{query}». Try other words or read the outline."), seen: Some(vec![]) });
+                    return Ok(Outcome { text: prompts::render("results/recording/nothing.j2", minijinja::context! { query }), seen: Some(vec![]) });
                 }
-                let text = hits
+                let shown: Vec<_> = hits
                     .iter()
                     .map(|h| {
-                        let who = h.chunk.speakers.iter().map(|&s| rec.speaker(s)).collect::<Vec<_>>().join(", ");
-                        format!("[{}–{}] ({who}) {}", format_time(h.chunk.start), format_time(h.chunk.end), h.chunk.text)
+                        let who: Vec<String> = h.chunk.speakers.iter().map(|&s| rec.speaker(s)).collect();
+                        minijinja::context! { start => format_time(h.chunk.start), end => format_time(h.chunk.end), who, text => &h.chunk.text }
                     })
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
+                    .collect();
+                let text = prompts::render("results/recording/search.j2", minijinja::context! { hits => shown });
                 let seen = hits.iter().map(|h| format!("at@{}", h.chunk.start as i64)).collect();
-                Ok(Outcome { text: bounded(text, self.max_chars, "(cut; read a range for the rest)"), seen: Some(seen) })
+                Ok(Outcome { text: bounded(text, self.max_chars, "search"), seen: Some(seen) })
             }
             "read" => {
                 let (from, to) = (arg("from"), arg("to"));
-                let a = parse_time(&from).ok_or_else(|| anyhow::anyhow!("\"{from}\" is not a time (use m:ss)"))?;
-                let b = parse_time(&to).ok_or_else(|| anyhow::anyhow!("\"{to}\" is not a time (use m:ss)"))?;
+                let a = parse_time(&from).ok_or_else(|| error("not_a_time", minijinja::context! { value => &from }))?;
+                let b = parse_time(&to).ok_or_else(|| error("not_a_time", minijinja::context! { value => &to }))?;
                 let (a, b) = (a.min(b), a.max(b));
-                anyhow::ensure!(a <= rec.duration, "the recording is only {} long", format_time(rec.duration));
+                anyhow::ensure!(a <= rec.duration, error("recording_length", minijinja::context! { length => format_time(rec.duration) }));
                 let mut text = String::new();
                 let mut seen = Vec::new();
                 for r in rec.replies.iter().filter(|r| r.end >= a && r.start <= b) {
                     let l = line(rec, r);
                     if text.chars().count() + l.chars().count() > self.max_chars {
-                        text.push_str(&format!("… (stopped here; read on from [{}])", format_time(r.start)));
+                        text.push_str(&prompts::render("results/recording/stopped.j2", minijinja::context! { time => format_time(r.start) }));
                         break;
                     }
                     text.push_str(&l);
@@ -274,44 +269,44 @@ impl Tools<'_> {
                     seen.push(format!("at@{}", r.start as i64));
                 }
                 if seen.is_empty() {
-                    return Ok(Outcome { text: format!("Nobody speaks between [{}] and [{}].", format_time(a), format_time(b)), seen: Some(vec![]) });
+                    return Ok(Outcome { text: prompts::render("results/recording/silence.j2", minijinja::context! { start => format_time(a), end => format_time(b) }), seen: Some(vec![]) });
                 }
                 Ok(Outcome { text, seen: Some(seen) })
             }
             "mentions" => self.mentions(&arg("query")),
             "rename_speakers" => {
-                let rename = self.rename.ok_or_else(|| anyhow::anyhow!("speakers cannot be named here"))?;
+                let rename = self.rename.ok_or_else(|| error("cannot_rename", ()))?;
                 let mut done = Vec::new();
                 for item in args["names"].as_array().cloned().unwrap_or_default() {
                     let (label, name) = (item["speaker"].as_str().unwrap_or_default(), item["name"].as_str().unwrap_or_default().trim());
-                    let s = speaker_of(rec, label).ok_or_else(|| anyhow::anyhow!("there is no speaker «{label}»"))?;
-                    anyhow::ensure!(!name.is_empty(), "an empty name for «{label}»");
+                    let s = speaker_of(rec, label).ok_or_else(|| error("no_speaker", minijinja::context! { label }))?;
+                    anyhow::ensure!(!name.is_empty(), error("empty_name", minijinja::context! { label }));
                     rename(s, name)?;
-                    done.push(format!("{} → {name}", rec.speaker(s)));
+                    done.push(minijinja::context! { speaker => rec.speaker(s), name });
                 }
-                anyhow::ensure!(!done.is_empty(), "rename_speakers needs names");
-                Ok(Outcome { text: format!("Named: {}.", done.join(", ")), seen: None })
+                anyhow::ensure!(!done.is_empty(), needs("rename_speakers", "names"));
+                Ok(Outcome { text: prompts::render("results/recording/named.j2", minijinja::context! { done }), seen: None })
             }
             "delegate" => {
-                let delegate = self.delegate.ok_or_else(|| anyhow::anyhow!("there is no helper"))?;
+                let delegate = self.delegate.ok_or_else(|| error("no_helper", ()))?;
                 let task = arg("task");
-                anyhow::ensure!(!task.is_empty(), "delegate needs a task");
+                anyhow::ensure!(!task.is_empty(), needs("delegate", "task"));
                 // The helper reads the stretch whole (bounded by its own context, not yours).
                 let stretch = Tools { max_chars: self.max_chars * 4, ..Tools::new(rec, self.search, self.max_chars) }.run("read", args)?;
                 let result = delegate(&task, &stretch.text)?;
-                Ok(Outcome { text: bounded(result, self.max_chars, "(cut)"), seen: None })
+                Ok(Outcome { text: bounded(result, self.max_chars, "plain"), seen: None })
             }
             "scan" => {
                 let instruction = arg("instruction");
-                anyhow::ensure!(!instruction.is_empty(), "scan needs an instruction");
-                let scan = self.scan.ok_or_else(|| anyhow::anyhow!("the scan is not available"))?;
+                anyhow::ensure!(!instruction.is_empty(), needs("scan", "instruction"));
+                let scan = self.scan.ok_or_else(|| error("no_scan", ()))?;
                 let found = scan(&instruction)?;
                 let seen = found.facts.iter().map(|f| format!("fact@{}:{}", f.time as i64, f.text)).collect();
-                Ok(Outcome { text: bounded(found.text(&instruction), self.max_chars, "(cut; ask a narrower instruction)"), seen: Some(seen) })
+                Ok(Outcome { text: bounded(found.text(&instruction), self.max_chars, "scan"), seen: Some(seen) })
             }
             "speakers" => {
                 if !rec.diarized {
-                    return Ok(Outcome::plain("Speakers were not told apart in this recording."));
+                    return Ok(Outcome::plain(prompts::render("results/recording/no_speakers.j2", ())));
                 }
                 let mut stats: BTreeMap<u32, (f64, usize, f64)> = BTreeMap::new();
                 for r in &rec.replies {
@@ -321,19 +316,18 @@ impl Tools<'_> {
                         e.1 += 1;
                     }
                 }
-                let text = stats
+                let speakers: Vec<_> = stats
                     .iter()
-                    .map(|(&s, &(talk, n, first))| format!("{}: talks {} in {n} replies, first at [{}]", rec.speaker(s), format_time(talk), format_time(first)))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                Ok(Outcome::plain(text))
+                    .map(|(&s, &(talk, replies, first))| minijinja::context! { name => rec.speaker(s), talk => format_time(talk), replies, first => format_time(first) })
+                    .collect();
+                Ok(Outcome::plain(prompts::render("results/recording/speakers.j2", minijinja::context! { speakers })))
             }
             "calculator" => Ok(Outcome::plain(calculate(&arg("expression"))?)),
             "time" => {
                 let (secs, clock) = between(&arg("from"), &arg("to"))?;
-                Ok(Outcome::plain(format!("{clock} ({secs} seconds)")))
+                Ok(Outcome::plain(prompts::render("results/recording/time.j2", minijinja::context! { clock, seconds => secs.to_string() })))
             }
-            other => anyhow::bail!("there is no tool «{other}»"),
+            other => Err(error("no_tool", minijinja::context! { tool => other })),
         }
     }
 }
@@ -352,9 +346,9 @@ impl Tools<'_> {
     /// Every place the words of `query` are said in a row (by stems).
     fn mentions(&self, query: &str) -> anyhow::Result<Outcome> {
         let q = stems(query);
-        anyhow::ensure!(!q.is_empty(), "mentions needs a word");
+        anyhow::ensure!(!q.is_empty(), needs("mentions", "word"));
         let rec = self.recording;
-        let mut found: Vec<String> = Vec::new();
+        let mut found = Vec::new();
         let mut times: Vec<f64> = Vec::new();
         for r in &rec.replies {
             let words: Vec<String> = r.words.iter().map(|w| stems(&w.text).into_iter().next().unwrap_or_default()).collect();
@@ -366,22 +360,20 @@ impl Tools<'_> {
                         let from = i.saturating_sub(MENTION_CONTEXT);
                         let to = (i + q.len() + MENTION_CONTEXT).min(r.words.len());
                         let context = r.words[from..to].iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
-                        let who = r.speaker.map(|s| format!(" {}:", rec.speaker(s))).unwrap_or_default();
-                        found.push(format!("[{}]{who} …{context}…", format_time(t)));
+                        found.push(minijinja::context! { time => format_time(t), speaker => r.speaker.map(|s| rec.speaker(s)), context });
                     }
                 }
             }
         }
         let (Some(first), Some(last)) = (times.first(), times.last()) else {
-            return Ok(Outcome { text: format!("«{query}» is never said (no word form of it). Try a synonym or search."), seen: Some(vec![]) });
+            return Ok(Outcome { text: prompts::render("results/recording/never_said.j2", minijinja::context! { query }), seen: Some(vec![]) });
         };
-        let mut text = format!("«{query}»: {} mentions, first at [{}], last at [{}].\n", times.len(), format_time(*first), format_time(*last));
-        text.push_str(&found.join("\n"));
-        if times.len() > found.len() {
-            text.push_str(&format!("\n… and {} more", times.len() - found.len()));
-        }
+        let text = prompts::render(
+            "results/recording/mentions.j2",
+            minijinja::context! { query, count => times.len(), first => format_time(*first), last => format_time(*last), more => times.len() - found.len(), found },
+        );
         let seen = times.iter().map(|t| format!("mention@{}", *t as i64)).collect();
-        Ok(Outcome { text: bounded(text, self.max_chars, "(cut)"), seen: Some(seen) })
+        Ok(Outcome { text: bounded(text, self.max_chars, "plain"), seen: Some(seen) })
     }
 }
 

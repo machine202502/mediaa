@@ -1,0 +1,17 @@
+Part {{ number }} of {{ parts }} of the recording ({{ start }} – {{ end }}).
+{# Small models drift into English unless told. #}
+Write everything in {{ language }}.
+{% if previous %}
+The previous part was about: {{ previous }}
+{% endif %}
+
+Transcript of this part:
+{{ text }}
+
+Write a JSON object:
+title — 3 to 8 words naming what this part is about;
+summary — 1 to 3 sentences;
+decisions — what was decided (empty when nothing);
+actions — who will do what, with names when known (empty when nothing);
+questions — questions left open (empty when none);
+topics — 1 to 5 short topics.

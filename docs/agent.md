@@ -1,5 +1,8 @@
 # MediaA Agent — architecture and plan
 
+Related: open tasks and ideas — [todos.md](todos.md); finished and rejected — [done.md](done.md);
+working context (build, tests, workflow) — [dev-context.md](dev-context.md).
+
 The Agent section analyses audio and video in catalogs: transcription, speaker naming, search
 and a chat with one agent that answers questions about a recording. From the earlier
 media-analysis project only the UX is taken (studio layout, transport, panes); the agent, its

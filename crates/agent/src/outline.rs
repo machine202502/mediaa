@@ -3,6 +3,7 @@
 //! chapter by chapter.
 
 use crate::llm::{Generate, LocalModel, Message, Role};
+use crate::prompts;
 use crate::runtime::{Runtime, Use};
 use crate::worker::{Checkpoints, TaskHandler};
 use mediaa_core::agent::{AgentSettings, ModelRole, ModelSource, WorkKind};
@@ -32,34 +33,15 @@ pub fn enqueue(ai_dir: &Path, path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-const SYSTEM: &str = "You write the outline of a recorded conversation, part by part. \
-Write in the language of the conversation. Use only what is said in this part; never invent.";
-
 /// The request for window `i` of `n`.
 pub fn prompt(window: &Window, i: usize, n: usize, previous: Option<&str>) -> String {
-    let mut p = format!("Part {} of {n} of the recording ({} – {}).\n", i + 1, human_duration(window.start), human_duration(window.end));
-    // Small models drift into English unless told.
-    p.push_str(&format!("Write everything in {}.\n", outline::language(&window.text)));
-    if let Some(prev) = previous {
-        p.push_str(&format!("The previous part was about: {prev}\n"));
-    }
-    p.push_str("\nTranscript of this part:\n");
-    p.push_str(&window.text);
-    p.push_str(
-        "\n\nWrite a JSON object:\n\
-         title — 3 to 8 words naming what this part is about;\n\
-         summary — 1 to 3 sentences;\n\
-         decisions — what was decided (empty when nothing);\n\
-         actions — who will do what, with names when known (empty when nothing);\n\
-         questions — questions left open (empty when none);\n\
-         topics — 1 to 5 short topics.",
-    );
-    p
+    let (start, end, language) = (human_duration(window.start), human_duration(window.end), outline::language(&window.text));
+    prompts::render("outline/part.j2", minijinja::context! { number => i + 1, parts => n, start, end, language, previous, text => &window.text })
 }
 
 /// Asks `model` for the digest of a window.
 pub fn digest(model: &LocalModel, window: &Window, i: usize, n: usize, previous: Option<&str>, cancel: &std::sync::atomic::AtomicBool) -> anyhow::Result<Digest> {
-    let messages = [Message::new(Role::System, SYSTEM), Message::new(Role::User, prompt(window, i, n, previous))];
+    let messages = [Message::new(Role::System, prompts::render("outline/system.j2", ())), Message::new(Role::User, prompt(window, i, n, previous))];
     let opts = Generate { max_tokens: 800, temperature: 0.0, json_schema: Some(DIGEST_SCHEMA.into()), no_repeats: true };
     let text = model.chat(&messages, &opts, cancel, &mut |_| true)?;
     let mut d: Digest = serde_json::from_str(text.trim()).map_err(|e| anyhow::anyhow!("the model's digest is not valid: {e}"))?;

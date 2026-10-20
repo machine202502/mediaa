@@ -1,3 +1,6 @@
 *.sh text eol=lf
 Dockerfile text eol=lf
 *.ps1 text eol=crlf
+# Prompt templates and their snapshots: exact text, the same on every checkout.
+*.j2 text eol=lf
+*.snap text eol=lf

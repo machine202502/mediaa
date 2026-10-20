@@ -1,0 +1,8 @@
+---
+source: crates/agent/src/prompts.rs
+expression: "render(\"delegate_task.j2\", context!\n{\n    task => \"Кратко перескажи\", text =>\n    \"[0:10] (Анна) Отчёт в пятницу.\"\n})"
+---
+Task: Кратко перескажи
+
+The stretch:
+[0:10] (Анна) Отчёт в пятницу.

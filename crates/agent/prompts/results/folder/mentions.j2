@@ -1,0 +1,3 @@
+{% for p in parts %}
+{{ "\n\n" if not loop.first else "" }}#{{ p.number }}: {{ p.text }}
+{%- endfor %}

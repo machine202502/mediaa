@@ -38,6 +38,8 @@ pub struct WindowInfo {
     pub id: u32,
     pub title: String,
     pub app: String,
+    /// The process that owns the window.
+    pub pid: u32,
     pub width: u32,
     pub height: u32,
 }
@@ -127,6 +129,7 @@ pub fn windows() -> anyhow::Result<Vec<WindowInfo>> {
             id: w.id()?,
             title,
             app: w.app_name().unwrap_or_default(),
+            pid: w.pid().unwrap_or(0),
             width,
             height,
         });

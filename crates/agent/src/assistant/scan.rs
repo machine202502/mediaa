@@ -9,6 +9,7 @@ use super::brain::Brain;
 use super::provider::ProviderBrain;
 use super::tools::Recording;
 use crate::llm::{Generate, LocalModel, Message, Role};
+use crate::prompts;
 use crate::tools::{format_time, parse_time};
 use mediaa_core::outline::{self, Window};
 use mediaa_core::retrieval::stems;
@@ -61,27 +62,10 @@ pub struct Scan {
 impl Scan {
     /// The result for the model.
     pub fn text(&self, instruction: &str) -> String {
-        let mut t = if self.failed.is_empty() {
-            format!("Scanned the whole recording ({} parts) for «{instruction}»: {} findings.\n", self.parts, self.facts.len())
-        } else {
-            format!(
-                "Scanned {} of {} parts for «{instruction}»: {} findings. NOT checked: {}.\n",
-                self.parts - self.failed.len(),
-                self.parts,
-                self.facts.len(),
-                self.failed.iter().map(|(a, b, why)| format!("[{}–{}] ({why})", format_time(*a), format_time(*b))).collect::<Vec<_>>().join(", ")
-            )
-        };
-        if !self.facts.is_empty() {
-            t.push_str("Findings — the material for your answer: list the ones that answer the question, with their times.\n");
-        }
-        for f in &self.facts {
-            t.push_str(&format!("[{}] {}\n", format_time(f.time), f.text));
-        }
-        if self.facts.is_empty() {
-            t.push_str("Nothing in the recording matches.\n");
-        }
-        t
+        let failed: Vec<_> = self.failed.iter().map(|(a, b, why)| minijinja::context! { start => format_time(*a), end => format_time(*b), why }).collect();
+        let facts: Vec<_> = self.facts.iter().map(|f| minijinja::context! { time => format_time(f.time), text => &f.text }).collect();
+        let done = self.parts - self.failed.len();
+        prompts::render("results/scan.j2", minijinja::context! { instruction, parts => self.parts, done, count => self.facts.len(), failed, facts })
     }
 }
 
@@ -89,10 +73,6 @@ impl Scan {
 pub trait Extract {
     fn extract(&self, instruction: &str, part: &Window, i: usize, n: usize, cancel: &AtomicBool) -> anyhow::Result<Vec<(String, String)>>;
 }
-
-const SYSTEM: &str = "You read one part of a recorded conversation and pick out only what the instruction asks for. \
-Write each finding as one short sentence in your own words (not a quote), in the language of the conversation, \
-with the time of the line it comes from. Most parts have few findings or none: an empty list is a fine answer.";
 
 /// Where a finding was said: the word of the part's reply sharing the most words with it
 /// (models misread times; the text tells), else the model's time inside the part, else the
@@ -121,13 +101,13 @@ pub fn place(finding: &str, said_at: Option<f64>, part: &Window, replies: &[Repl
 }
 
 fn request(instruction: &str, part: &Window, i: usize, n: usize) -> String {
-    format!(
-        "Instruction: {instruction}\n\nPart {} of {n} ({} – {}):\n{}\n\nReturn a JSON object {{\"facts\": [{{\"time\": \"m:ss\", \"text\": \"...\"}}]}}.",
-        i + 1,
-        format_time(part.start),
-        format_time(part.end),
-        part.text
-    )
+    let (start, end) = (format_time(part.start), format_time(part.end));
+    prompts::render("scan/part.j2", minijinja::context! { instruction, number => i + 1, parts => n, start, end, text => &part.text })
+}
+
+/// The scan's system prompt; `json_only` for models without a grammar.
+fn system(json_only: bool) -> String {
+    prompts::render("scan/system.j2", minijinja::context! { json_only })
 }
 
 /// Facts out of a model's JSON answer.
@@ -154,7 +134,7 @@ pub struct LocalExtract<'a>(pub &'a LocalModel);
 
 impl Extract for LocalExtract<'_> {
     fn extract(&self, instruction: &str, part: &Window, i: usize, n: usize, cancel: &AtomicBool) -> anyhow::Result<Vec<(String, String)>> {
-        let messages = [Message::new(Role::System, SYSTEM), Message::new(Role::User, request(instruction, part, i, n))];
+        let messages = [Message::new(Role::System, system(false)), Message::new(Role::User, request(instruction, part, i, n))];
         let opts = Generate { max_tokens: 900, temperature: 0.0, json_schema: Some(facts_schema()), no_repeats: true };
         read_facts(&self.0.chat(&messages, &opts, cancel, &mut |_| true)?)
     }
@@ -165,7 +145,7 @@ pub struct ProviderExtract<'a>(pub &'a ProviderBrain);
 
 impl Extract for ProviderExtract<'_> {
     fn extract(&self, instruction: &str, part: &Window, i: usize, n: usize, cancel: &AtomicBool) -> anyhow::Result<Vec<(String, String)>> {
-        let messages = [Message::new(Role::System, format!("{SYSTEM} Answer with the JSON object only.")), Message::new(Role::User, request(instruction, part, i, n))];
+        let messages = [Message::new(Role::System, system(true)), Message::new(Role::User, request(instruction, part, i, n))];
         read_facts(&self.0.complete(&messages, cancel)?)
     }
 }

@@ -1,0 +1,15 @@
+{# What the agent knows up front about one recording. #}
+Recording: «{{ title }}», {{ length }} long ({% if minutes < 10 %}short{% elif minutes < 60 %}medium{% else %}long{% endif %}).
+{% if speakers %}
+Speakers: {{ speakers | join(", ") }}.
+{% else %}
+Speakers were not told apart.
+{% endif %}
+{% if chapters %}
+Outline: {{ chapters }} chapters (tool outline).
+{% else %}
+No outline yet: use search and read.
+{% endif %}
+{% if position %}
+The user is at [{{ position }}] in playback.
+{% endif %}

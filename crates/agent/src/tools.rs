@@ -8,13 +8,13 @@ const MATH_FUNCTIONS: [&str; 9] = ["sqrt", "cbrt", "abs", "pow", "ln", "log10", 
 /// `round`, `sqrt`…). Integers stay exact; the result is formatted without float noise.
 pub fn calculate(expression: &str) -> anyhow::Result<String> {
     let expr = expression.trim();
-    anyhow::ensure!(!expr.is_empty(), "empty expression");
+    anyhow::ensure!(!expr.is_empty(), crate::prompts::render("errors/empty_expression.j2", ()));
     // Models write `sqrt(2)` as often as evalexpr's `math::sqrt(2)`: accept both.
     let mut code = expr.replace("math::", "");
     for f in MATH_FUNCTIONS {
         code = code.replace(&format!("{f}("), &format!("math::{f}("));
     }
-    let value = evalexpr::eval(&code).map_err(|e| anyhow::anyhow!("cannot evaluate \"{expr}\": {e}"))?;
+    let value = evalexpr::eval(&code).map_err(|e| anyhow::anyhow!(crate::prompts::render("errors/cannot_evaluate.j2", minijinja::context! { expr, error => e.to_string() })))?;
     Ok(match value {
         evalexpr::Value::Int(i) => i.to_string(),
         evalexpr::Value::Float(f) if f.is_finite() => {
@@ -63,8 +63,8 @@ pub fn format_time(seconds: f64) -> String {
 
 /// The time between two times (either order): seconds and as a clock time.
 pub fn between(from: &str, to: &str) -> anyhow::Result<(f64, String)> {
-    let a = parse_time(from).ok_or_else(|| anyhow::anyhow!("\"{from}\" is not a time (use 5:59, 1:02:30 or seconds)"))?;
-    let b = parse_time(to).ok_or_else(|| anyhow::anyhow!("\"{to}\" is not a time (use 5:59, 1:02:30 or seconds)"))?;
+    let a = parse_time(from).ok_or_else(|| anyhow::anyhow!(crate::prompts::render("errors/not_a_clock_time.j2", minijinja::context! { time => from })))?;
+    let b = parse_time(to).ok_or_else(|| anyhow::anyhow!(crate::prompts::render("errors/not_a_clock_time.j2", minijinja::context! { time => to })))?;
     let d = (b - a).abs();
     Ok((d, format_time(d)))
 }
