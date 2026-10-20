@@ -16,9 +16,9 @@ egui_commonmark = { version = "0.25", default-features = false, features = ["pul
 mediaa-core.workspace = true
 mediaa-media.workspace = true
 mediaa-platform.workspace = true
+mediaa-engine.workspace = true
 mediaa-agent.workspace = true
 serde.workspace = true
-pollster = "0.4"
 egui_ltreeview = "0.9"
 egui_dock = "0.21"
 anyhow.workspace = true

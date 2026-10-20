@@ -254,7 +254,7 @@ mod tests {
     }
 
     /// Downloads GigaAM v3 (~225 MB) and the VAD into `MEDIAA_TEST_AI` (or a temporary folder)
-    /// and transcribes the model's sample. Network: `cargo test -p mediaa-agent -- --ignored`.
+    /// and transcribes the model's sample. Network: `cargo test -p mediaa-engine -- --ignored`.
     #[test]
     #[ignore]
     fn transcribes_a_russian_sample() {

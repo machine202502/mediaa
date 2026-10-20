@@ -3,10 +3,10 @@
 //! the reranker, then varied. Each model step is optional: without an embedding model the
 //! search is by keywords, without a reranker the fused order stays.
 
-use crate::embed::{Embedder, Reranker};
 use crate::index::EMBED_CTX;
-use crate::runtime::{Runtime, Use};
+use crate::slots::Slots;
 use mediaa_core::agent::{AgentSettings, ModelRole, WorkKind};
+use mediaa_engine::{EmbedKind, EmbeddingsRequest, Engine, RerankRequest};
 use mediaa_core::retrieval::Hit;
 use mediaa_core::transcript::Transcript;
 use std::path::{Path, PathBuf};
@@ -60,16 +60,28 @@ pub fn diverse(hits: Vec<FileHit>, limit: usize) -> Vec<FileHit> {
 
 /// Hits for `query` in the transcripts of `files` in `ai_dir`, best first, at most `limit`.
 /// `interactive`: a user waits (agent slots, ahead of background work).
-pub fn search_files(runtime: &Runtime, settings: &AgentSettings, ai_dir: &Path, files: &[Source], query: &str, limit: usize, interactive: bool) -> anyhow::Result<(Vec<FileHit>, Trace)> {
+#[allow(clippy::too_many_arguments)]
+pub fn search_files(engine: &dyn Engine, slots: &Slots, settings: &AgentSettings, ai_dir: &Path, files: &[Source], query: &str, limit: usize, interactive: bool) -> anyhow::Result<(Vec<FileHit>, Trace)> {
     let cancel = AtomicBool::new(false);
     let kind = if interactive { WorkKind::Agent } else { WorkKind::Indexing };
-    let how = |role| Use { kind, device: settings.devices.get(role), n_ctx: EMBED_CTX, interactive };
+    let device = |role| settings.devices.get(role);
+    let hf_token = crate::assistant::hf_token(settings);
     let mut trace = Trace { files: files.len(), ..Trace::default() };
     let embedding = settings.models.embedding.as_ref().and_then(|source| {
-        runtime
-            .with_model(source, how(ModelRole::Embedding), &cancel, |e: &Embedder, _| e.query(query))
-            .map_err(|e| log::info!("search without meaning: {e:#}"))
-            .ok()
+        let run = || {
+            let model = crate::models::local_spec(source)?;
+            let _lease = slots.request(kind, interactive).wait(&cancel)?;
+            let found = engine.embeddings(&EmbeddingsRequest {
+                model,
+                input: vec![query.to_string()],
+                kind: EmbedKind::Query,
+                n_ctx: Some(EMBED_CTX),
+                device: Some(device(ModelRole::Embedding)),
+                hf_token: hf_token.clone(),
+            })?;
+            found.into_iter().next().filter(|v| !v.is_empty()).ok_or_else(|| anyhow::anyhow!("the engine returned no embedding"))
+        };
+        run().map_err(|e| log::info!("search without meaning: {e:#}")).ok()
     });
     trace.by_meaning = embedding.is_some();
 
@@ -91,10 +103,26 @@ pub fn search_files(runtime: &Runtime, settings: &AgentSettings, ai_dir: &Path, 
     hits.sort_by(|a, b| b.hit.score.total_cmp(&a.hit.score));
     hits.truncate(CANDIDATES.max(limit));
     if let (Some(source), false) = (&settings.models.reranker, hits.is_empty()) {
-        let scores = runtime.with_model(source, how(ModelRole::Reranker), &cancel, |r: &Reranker, _| {
-            hits.iter().map(|h| r.score(query, &h.hit.chunk.text)).collect::<anyhow::Result<Vec<f32>>>()
-        });
-        match scores {
+        let rerank = || -> anyhow::Result<Vec<f32>> {
+            let model = crate::models::local_spec(source)?;
+            let _lease = slots.request(kind, interactive).wait(&cancel)?;
+            let results = engine.rerank(&RerankRequest {
+                model,
+                query: query.to_string(),
+                documents: hits.iter().map(|h| h.hit.chunk.text.clone()).collect(),
+                n_ctx: Some(EMBED_CTX),
+                device: Some(device(ModelRole::Reranker)),
+                hf_token: hf_token.clone(),
+            })?;
+            let mut scores = vec![0.0; hits.len()];
+            for result in results {
+                if let Some(score) = scores.get_mut(result.index) {
+                    *score = result.relevance_score;
+                }
+            }
+            Ok(scores)
+        };
+        match rerank() {
             Ok(scores) => {
                 for (h, s) in hits.iter_mut().zip(&scores) {
                     h.hit.score = *s;
@@ -109,9 +137,10 @@ pub fn search_files(runtime: &Runtime, settings: &AgentSettings, ai_dir: &Path, 
 }
 
 /// Hits for `query` in one transcript (see [`search_files`]).
-pub fn search(runtime: &Runtime, settings: &AgentSettings, ai_dir: &Path, id: &str, query: &str, limit: usize, interactive: bool) -> anyhow::Result<(Vec<Hit>, Trace)> {
+#[allow(clippy::too_many_arguments)]
+pub fn search(engine: &dyn Engine, slots: &Slots, settings: &AgentSettings, ai_dir: &Path, id: &str, query: &str, limit: usize, interactive: bool) -> anyhow::Result<(Vec<Hit>, Trace)> {
     let file = Source { id: id.to_string(), path: PathBuf::new() };
-    let (hits, trace) = search_files(runtime, settings, ai_dir, &[file], query, limit, interactive)?;
+    let (hits, trace) = search_files(engine, slots, settings, ai_dir, &[file], query, limit, interactive)?;
     Ok((hits.into_iter().map(|h| h.hit).collect(), trace))
 }
 
@@ -148,8 +177,11 @@ mod tests {
         Transcript::open(ai, "c").unwrap();
         let files: Vec<Source> = ["a", "b", "c", "missing"].iter().map(|id| Source { id: id.to_string(), path: PathBuf::from(format!("/m/{id}.mp4")) }).collect();
         let settings = AgentSettings { models: ModelChoices { embedding: None, reranker: None, ..ModelChoices::default() }, ..AgentSettings::default() };
-        let runtime = Runtime::new(ai, Budget::default());
-        let (hits, trace) = search_files(&runtime, &settings, ai, &files, "отчёт", 5, true).unwrap();
+        // No models are chosen, so the engine is never asked anything.
+        let engine = mediaa_engine::testing::FakeEngine::new();
+        let slots = Slots::new(Budget::default());
+        let (hits, trace) = search_files(&engine, &slots, &settings, ai, &files, "отчёт", 5, true).unwrap();
+        assert!(engine.chats().is_empty() && engine.embeddings_count() == 0, "the engine is not asked anything");
         assert_eq!(trace, Trace { by_meaning: false, reranked: false, files: 4, not_indexed: 2 });
         let paths: Vec<_> = hits.iter().map(|h| h.path.to_string_lossy().into_owned()).collect();
         assert_eq!(paths.len(), 2, "{paths:?}");

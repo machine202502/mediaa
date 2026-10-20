@@ -161,7 +161,7 @@ fn search_ui(ui: &mut egui::Ui, search: &mut Search, cat: &Catalogs, selected: O
         let _ = std::thread::Builder::new().name("catalog-search".into()).spawn(move || {
             let sources: Vec<Source> = files.iter().filter_map(|(_, p)| transcript::file_id(p).ok().map(|id| Source { id, path: p.clone() })).collect();
             let settings = s.settings.read().expect("settings lock").clone();
-            let found = search::search_files(&s.runtime, &settings, &s.ai_dir, &sources, &query, CATALOG_HITS, true)
+            let found = search::search_files(s.engine.as_ref(), &s.slots, &settings, &s.ai_dir, &sources, &query, CATALOG_HITS, true)
                 .map(|(hits, trace)| {
                     let hits = hits.into_iter().filter_map(|h| files.iter().find(|(_, p)| *p == h.path).map(|(id, _)| (*id, h))).collect();
                     (hits, trace)

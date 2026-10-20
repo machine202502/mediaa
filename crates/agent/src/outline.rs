@@ -2,11 +2,12 @@
 //! the agent's model window by window as constrained JSON. Queued after indexing; resumable
 //! chapter by chapter.
 
-use crate::llm::{Generate, LocalModel, Message, Role};
+use crate::assistant::{Message, Role};
 use crate::prompts;
-use crate::runtime::{Runtime, Use};
+use mediaa_engine::{ChatMessage, ChatRequest, Device, Engine, Priority};
+use crate::slots::Slots;
 use crate::worker::{Checkpoints, TaskHandler};
-use mediaa_core::agent::{AgentSettings, ModelRole, ModelSource, WorkKind};
+use mediaa_core::agent::{AgentSettings, ModelRole, WorkKind};
 use mediaa_core::library::human_duration;
 use mediaa_core::outline::{self, Chapter, Digest, Window, DIGEST_SCHEMA};
 use mediaa_core::queue::{Queue, Task};
@@ -14,6 +15,7 @@ use mediaa_core::transcript::{self, Transcript};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 pub const KIND: &str = "outline";
@@ -39,11 +41,23 @@ pub fn prompt(window: &Window, i: usize, n: usize, previous: Option<&str>) -> St
     prompts::render("outline/part.j2", minijinja::context! { number => i + 1, parts => n, start, end, language, previous, text => &window.text })
 }
 
-/// Asks `model` for the digest of a window.
-pub fn digest(model: &LocalModel, window: &Window, i: usize, n: usize, previous: Option<&str>, cancel: &std::sync::atomic::AtomicBool) -> anyhow::Result<Digest> {
+/// Asks the engine's `model` for the digest of a window.
+#[allow(clippy::too_many_arguments)]
+pub fn digest(engine: &dyn Engine, model: &str, device: Device, hf_token: Option<&str>, window: &Window, i: usize, n: usize, previous: Option<&str>, cancel: &AtomicBool) -> anyhow::Result<Digest> {
     let messages = [Message::new(Role::System, prompts::render("outline/system.j2", ())), Message::new(Role::User, prompt(window, i, n, previous))];
-    let opts = Generate { max_tokens: 800, temperature: 0.0, json_schema: Some(DIGEST_SCHEMA.into()), no_repeats: true };
-    let text = model.chat(&messages, &opts, cancel, &mut |_| true)?;
+    let request = ChatRequest {
+        model: model.to_string(),
+        messages: messages.iter().map(|m| ChatMessage::new(m.role.into(), m.content.clone())).collect(),
+        max_tokens: 800,
+        temperature: 0.0,
+        json_schema: Some(serde_json::from_str(DIGEST_SCHEMA)?),
+        no_repeats: true,
+        n_ctx: Some(OUTLINE_CTX),
+        device: Some(device),
+        priority: Some(Priority::Background),
+        hf_token: hf_token.map(str::to_string),
+    };
+    let text = engine.chat(&request, cancel, &mut |_| true)?.content;
     let mut d: Digest = serde_json::from_str(text.trim()).map_err(|e| anyhow::anyhow!("the model's digest is not valid: {e}"))?;
     d.title = d.title.trim().trim_end_matches('.').to_string();
     Ok(d)
@@ -51,13 +65,14 @@ pub fn digest(model: &LocalModel, window: &Window, i: usize, n: usize, previous:
 
 pub struct Outline {
     ai_dir: PathBuf,
-    runtime: Runtime,
+    engine: Arc<dyn Engine>,
+    slots: Slots,
     settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>,
 }
 
 impl Outline {
-    pub fn new(ai_dir: &Path, runtime: Runtime, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Outline {
-        Outline { ai_dir: ai_dir.to_path_buf(), runtime, settings }
+    pub fn new(ai_dir: &Path, engine: Arc<dyn Engine>, slots: Slots, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Outline {
+        Outline { ai_dir: ai_dir.to_path_buf(), engine, slots, settings }
     }
 }
 
@@ -76,33 +91,27 @@ impl TaskHandler for Outline {
             t.clear_chapters()?;
         }
         let settings = (self.settings)();
-        let source = match settings.models.agent.clone() {
-            Some(s @ (ModelSource::HuggingFace { .. } | ModelSource::Local { .. })) => s,
-            // Provider models write outlines once the agent talks to providers (P4).
-            _ => return Ok(json!({ "chapters": 0, "skipped": "the agent model is not local" })),
-        };
-        if let ModelSource::HuggingFace { repo } = &source {
-            crate::hub::download(&self.ai_dir, repo, settings.hugging_face(), |_, _| {})?;
-        }
+        // Provider models write outlines once the agent talks to providers (P4).
+        let model = settings.models.agent.as_ref().and_then(|source| crate::models::local_spec(source).ok());
+        let Some(model) = model else { return Ok(json!({ "chapters": 0, "skipped": "the agent model is not local" })) };
         let names = t.speaker_names()?;
         let dialog = t.dialog()?;
         let language = outline::language(&dialog.iter().take(20).map(|r| r.text()).collect::<Vec<_>>().join(" "));
         let windows = outline::windows(&dialog, outline::WINDOW_WORDS, &names, |s| outline::unnamed_speaker(language, s));
         let n = windows.len();
-        let how = Use { kind: WorkKind::Indexing, device: settings.devices.get(ModelRole::Agent), n_ctx: OUTLINE_CTX, interactive: false };
+        let device = settings.devices.get(ModelRole::Agent);
+        let hf_token = crate::assistant::hf_token(&settings);
         let cancel = cp.stopping();
-        self.runtime.with_model(&source, how, cancel, |model: &LocalModel, _lease| {
-            let mut previous = t.chapters()?.last().map(|c| c.digest.title.clone());
-            for (i, w) in windows.iter().enumerate().skip(next) {
-                let started = std::time::Instant::now();
-                let d = digest(model, w, i, n, previous.as_deref(), cancel)?;
-                log::info!("outline of {}: chapter {}/{n} in {:.1} s", input.path.display(), i + 1, started.elapsed().as_secs_f32());
-                previous = Some(d.title.clone());
-                t.put_chapter(i, &Chapter { start: w.start, end: w.end, digest: d })?;
-                cp.save(&json!(i + 1), &Value::Null, (i + 1) as f32 / n.max(1) as f32)?;
-            }
-            Ok(())
-        })?;
+        let _lease = self.slots.request(WorkKind::Indexing, false).wait(cancel)?;
+        let mut previous = t.chapters()?.last().map(|c| c.digest.title.clone());
+        for (i, w) in windows.iter().enumerate().skip(next) {
+            let started = std::time::Instant::now();
+            let d = digest(self.engine.as_ref(), &model, device, hf_token.as_deref(), w, i, n, previous.as_deref(), cancel)?;
+            log::info!("outline of {}: chapter {}/{n} in {:.1} s", input.path.display(), i + 1, started.elapsed().as_secs_f32());
+            previous = Some(d.title.clone());
+            t.put_chapter(i, &Chapter { start: w.start, end: w.end, digest: d })?;
+            cp.save(&json!(i + 1), &Value::Null, (i + 1) as f32 / n.max(1) as f32)?;
+        }
         Ok(json!({ "chapters": n }))
     }
 }
@@ -111,17 +120,17 @@ impl TaskHandler for Outline {
 mod tests {
     use super::*;
 
-    /// The default agent model (~2.5 GB, from `MEDIAA_TEST_AI` or downloaded) digests a short
-    /// meeting: a title, the decision and the action items with names.
+    /// Models are required (`MEDIAA_TEST_MODELS`, the app's folder by default); the default agent
+    /// model is downloaded on first use (~2.5 GB). It digests a short meeting: a title, the
+    /// decision and the action items with names.
     #[test]
     #[ignore]
     fn digests_a_meeting() {
-        let tmp = tempfile::tempdir().unwrap();
-        let ai = std::env::var_os("MEDIAA_TEST_AI").map_or(tmp.path().to_path_buf(), PathBuf::from);
-        let source = ModelRole::Agent.default_source().unwrap();
-        let ModelSource::HuggingFace { repo } = &source else { panic!() };
-        crate::hub::download(&ai, repo, None, |_, _| {}).unwrap();
-        let model = LocalModel::load(&crate::runtime::gguf_path(&ai, &source).unwrap(), true, OUTLINE_CTX).unwrap();
+        let engine = crate::live::engine();
+        let model = match ModelRole::Agent.default_source().unwrap() {
+            mediaa_core::agent::ModelSource::HuggingFace { repo } => repo,
+            other => panic!("{other:?}"),
+        };
         let text = "[00:00] Дана: Давайте по отчёту для заказчика. Олег, где мы?\n\
                     [00:05] Олег: Цифры за квартал собраны, не хватает графиков по продажам.\n\
                     [00:12] Дана: Графики сделает Ира до четверга. Отчёт отправляем в пятницу утром, решено.\n\
@@ -129,7 +138,7 @@ mod tests {
                     [00:26] Дана: Пока не знаю, обсудим в понедельник.\n\
                     [00:30] Олег: Я ещё проверю цифры по региону Север, там были вопросы.";
         let w = Window { start: 0.0, end: 35.0, text: text.into() };
-        let d = digest(&model, &w, 0, 1, None, &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        let d = digest(engine.as_ref(), &model, Device::Auto, None, &w, 0, 1, None, &AtomicBool::new(false)).unwrap();
         eprintln!("{d:#?}");
         assert!(!d.title.is_empty() && d.title.split_whitespace().count() <= 12, "{}", d.title);
         assert!(!d.summary.is_empty());

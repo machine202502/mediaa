@@ -17,15 +17,16 @@ pub mod provider;
 pub mod scan;
 pub mod tools;
 
-pub use brain::{Brain, LocalBrain, Step, ToolSpec};
+pub use brain::{Brain, EngineBrain, Message, Role, Step, ToolSpec};
 pub use memory::Memory;
 pub use provider::ProviderBrain;
 pub use tools::{Recording, Tools};
 
-use crate::llm::{Message, Role};
 use crate::prompts;
+use crate::slots::Slots;
 use crate::tools::parse_time;
 use serde::{Deserialize, Serialize};
+use mediaa_engine::Engine;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
@@ -231,10 +232,11 @@ fn step_json(step: &Step) -> String {
 const STEP_TOKENS: u32 = 2048;
 
 /// Answers `question` about the transcript `file_id` of `ai_dir` with the agent's model of
-/// `settings` (local through the runtime, or a provider's), searching with the runtime's models.
+/// `settings` (local through the engine, or a provider's), searching with the engine's models.
 #[allow(clippy::too_many_arguments)]
 pub fn ask(
-    runtime: &crate::runtime::Runtime,
+    engine: &dyn Engine,
+    slots: &Slots,
     settings: &mediaa_core::agent::AgentSettings,
     ai_dir: &std::path::Path,
     file_id: &str,
@@ -246,7 +248,7 @@ pub fn ask(
     on_event: &mut dyn FnMut(&Event),
 ) -> anyhow::Result<Answer> {
     use mediaa_core::agent::ModelSource;
-    let find = |q: &str, n: usize| crate::search::search(runtime, settings, ai_dir, file_id, q, n, true).map(|(h, _)| h);
+    let find = |q: &str, n: usize| crate::search::search(engine, slots, settings, ai_dir, file_id, q, n, true).map(|(h, _)| h);
     // Events come from the loop and from a running scan (its progress), never at once.
     let events = std::cell::RefCell::new(on_event);
     let transcript = mediaa_core::transcript::Transcript::open(ai_dir, file_id).ok();
@@ -257,11 +259,11 @@ pub fn ask(
     // The sub-agent: a provider's model when one is chosen; otherwise the agent's own model
     // (loading a second local model next to it would compete for the same memory).
     let sub = match &settings.models.subagent {
-        Some(ModelSource::Provider { provider, model }) => Some(provider_brain(runtime, settings, provider, model)?),
+        Some(ModelSource::Provider { provider, model }) => Some(provider_brain(slots, settings, provider, model)?),
         _ => None,
     };
     let mut events_out = |e: &Event| (events.borrow_mut())(e);
-    let (web_search, web_read) = web_calls(runtime, settings, cancel);
+    let (web_search, web_read) = web_calls(slots, settings, cancel);
     let run = |brain: &dyn Brain, extract: &dyn scan::Extract| {
         let helper: &dyn Brain = sub.as_ref().map_or(brain, |s| s as &dyn Brain);
         let delegate = |task: &str, text: &str| {
@@ -277,17 +279,17 @@ pub fn ask(
         let tools = Tools { scan: Some(&scanner), rename: Some(&rename), delegate: Some(&delegate), web: web.as_ref(), ..Tools::new(recording, &find, max_chars) };
         answer(brain, &tools, history, memory, question, cancel, &mut events_out)
     };
-    with_brain(runtime, settings, ai_dir, cancel, run)
+    with_brain(engine, slots, settings, run)
 }
 
-/// Web search and page reading with `settings`, one call at a time (the scheduler's web slot).
+/// Web search and page reading with `settings`, one call at a time (the web search slot).
 fn web_calls<'a>(
-    runtime: &'a crate::runtime::Runtime,
+    slots: &'a Slots,
     settings: &'a mediaa_core::agent::AgentSettings,
     cancel: &'a AtomicBool,
 ) -> (Box<internet::WebSearch<'a>>, Box<internet::WebRead<'a>>) {
     use mediaa_core::agent::WorkKind;
-    let lease = move || runtime.scheduler().request(WorkKind::WebSearch, None, true).wait(cancel);
+    let lease = move || slots.request(WorkKind::WebSearch, true).wait(cancel);
     (
         Box::new(move |q: &str, n: usize| {
             let _lease = lease()?;
@@ -301,40 +303,48 @@ fn web_calls<'a>(
 }
 
 /// A provider's model as a brain.
-fn provider_brain(runtime: &crate::runtime::Runtime, settings: &mediaa_core::agent::AgentSettings, id: &str, model: &str) -> anyhow::Result<ProviderBrain> {
+fn provider_brain(slots: &Slots, settings: &mediaa_core::agent::AgentSettings, id: &str, model: &str) -> anyhow::Result<ProviderBrain> {
     let p = settings.provider(id).ok_or_else(|| anyhow::anyhow!("the provider of a model was removed"))?.clone();
-    Ok(ProviderBrain { provider: p, model: model.to_string(), scheduler: runtime.scheduler().clone(), max_tokens: STEP_TOKENS })
+    Ok(ProviderBrain { provider: p, model: model.to_string(), slots: slots.clone(), max_tokens: STEP_TOKENS })
 }
 
-/// Runs `f` with the agent's model of `settings` (a provider's, or a local one loaded through the
-/// runtime) and how it reads parts of a recording for the scan.
+/// Runs `f` with the agent's model of `settings` (a provider's, or an engine model) and how it
+/// reads parts of a recording for the scan.
 fn with_brain<R>(
-    runtime: &crate::runtime::Runtime,
+    engine: &dyn Engine,
+    slots: &Slots,
     settings: &mediaa_core::agent::AgentSettings,
-    ai_dir: &std::path::Path,
-    cancel: &AtomicBool,
     f: impl FnOnce(&dyn Brain, &dyn scan::Extract) -> anyhow::Result<R>,
 ) -> anyhow::Result<R> {
-    use mediaa_core::agent::{ModelRole, ModelSource, WorkKind};
+    use mediaa_core::agent::{ModelRole, ModelSource};
+    use mediaa_engine::Priority;
     match settings.models.agent.as_ref().ok_or_else(|| anyhow::anyhow!("no agent model chosen (Agent → Models)"))? {
         ModelSource::Provider { provider, model } => {
-            let brain = provider_brain(runtime, settings, provider, model)?;
+            let brain = provider_brain(slots, settings, provider, model)?;
             f(&brain, &scan::ProviderExtract(&brain))
         }
         local => {
-            if let ModelSource::HuggingFace { repo } = local {
-                crate::hub::download(ai_dir, repo, settings.hugging_face(), |_, _| {})?;
-            }
-            let how = crate::runtime::Use { kind: WorkKind::Agent, device: settings.devices.get(ModelRole::Agent), n_ctx: settings.agent_context.clamp(2048, 262_144), interactive: true };
-            runtime.with_model(local, how, cancel, |model: &crate::llm::LocalModel, _| f(&LocalBrain { model, max_tokens: STEP_TOKENS }, &scan::LocalExtract(model)))
+            let model = crate::models::local_spec(local)?;
+            let n_ctx = settings.agent_context.clamp(2048, 262_144);
+            let device = settings.devices.get(ModelRole::Agent);
+            let hf_token = hf_token(settings);
+            let brain = EngineBrain { engine, model: model.clone(), n_ctx, device, priority: Priority::Interactive, max_tokens: STEP_TOKENS, hf_token: hf_token.clone() };
+            let extract = scan::EngineExtract { engine, model, n_ctx, device, priority: Priority::Background, hf_token };
+            f(&brain, &extract)
         }
     }
+}
+
+/// The token model downloads use, when the settings have a Hugging Face provider with one.
+pub fn hf_token(settings: &mediaa_core::agent::AgentSettings) -> Option<String> {
+    settings.hugging_face().map(|provider| provider.api_key.trim().to_string()).filter(|token| !token.is_empty())
 }
 
 /// Answers `question` about the recordings of a folder (`items`), like [`ask`].
 #[allow(clippy::too_many_arguments)]
 pub fn ask_folder(
-    runtime: &crate::runtime::Runtime,
+    engine: &dyn Engine,
+    slots: &Slots,
     settings: &mediaa_core::agent::AgentSettings,
     ai_dir: &std::path::Path,
     items: &[folder::Item],
@@ -346,12 +356,12 @@ pub fn ask_folder(
 ) -> anyhow::Result<Answer> {
     let sources: Vec<crate::search::Source> = items.iter().map(|it| crate::search::Source { id: it.file_id.clone(), path: it.path.clone() }).collect();
     let across = |q: &str, n: usize| {
-        let (hits, _) = crate::search::search_files(runtime, settings, ai_dir, &sources, q, n, true)?;
+        let (hits, _) = crate::search::search_files(engine, slots, settings, ai_dir, &sources, q, n, true)?;
         Ok(hits.into_iter().filter_map(|h| items.iter().position(|it| it.path == h.path).map(|i| (i, h.hit))).collect())
     };
-    let one = |i: usize, q: &str, n: usize| crate::search::search(runtime, settings, ai_dir, &items[i].file_id, q, n, true).map(|(h, _)| h);
-    let (web_search, web_read) = web_calls(runtime, settings, cancel);
-    with_brain(runtime, settings, ai_dir, cancel, |brain, _| {
+    let one = |i: usize, q: &str, n: usize| crate::search::search(engine, slots, settings, ai_dir, &items[i].file_id, q, n, true).map(|(h, _)| h);
+    let (web_search, web_read) = web_calls(slots, settings, cancel);
+    with_brain(engine, slots, settings, |brain, _| {
         let max_chars = (brain.context() as usize) * 3 / 4;
         let web = settings.web.enabled.then(|| internet::Web::new(&*web_search, &*web_read, max_chars / 3));
         let tools = folder::FolderTools { items, search: &across, search_one: &one, max_chars, web: web.as_ref() };
@@ -782,12 +792,12 @@ mod tests {
         assert!(a.forced);
     }
 
-    /// The default agent model answers about the transcribed sample of `MEDIAA_TEST_AI` (run the
+    /// Models are required: the folder is `MEDIAA_TEST_MODELS` (the app's by default). The default
+    /// agent model answers about the transcribed sample of `MEDIAA_TEST_AI` (run the
     /// `transcribes_through_the_queue` test first): it searches, finds the oak, cites the time.
     #[test]
     #[ignore]
     fn a_real_model_answers_from_the_recording() {
-        use crate::runtime::Runtime;
         use mediaa_core::agent::{AgentSettings, Budget};
         use mediaa_core::transcript::{self, Transcript};
         let ai = std::path::PathBuf::from(std::env::var_os("MEDIAA_TEST_AI").expect("MEDIAA_TEST_AI"));
@@ -797,23 +807,24 @@ mod tests {
         assert!(!replies.is_empty(), "transcribe the sample first");
         let rec = Recording { title: "Пушкин".into(), duration: 11.3, diarized: true, names: t.speaker_names().unwrap(), replies, chapters: t.chapters().unwrap(), position: None };
         let settings = AgentSettings::default();
-        let runtime = Runtime::new(&ai, Budget::default());
+        let engine = crate::live::engine();
+        let slots = Slots::new(Budget::default());
         let question = "Какое дерево упоминается в записи и в какой момент?";
-        let a = ask(&runtime, &settings, &ai, &id, &rec, &[], &mut Memory::default(), question, &AtomicBool::new(false), &mut |e| eprintln!("{e:?}")).unwrap();
+        let a = ask(engine.as_ref(), &slots, &settings, &ai, &id, &rec, &[], &mut Memory::default(), question, &AtomicBool::new(false), &mut |e| eprintln!("{e:?}")).unwrap();
         eprintln!("{}", a.text);
         assert!(a.text.to_lowercase().contains("дуб"), "{}", a.text);
         assert!(!citations(&a.text).is_empty(), "cites the moment: {}", a.text);
         assert!(bad_citations(&a.text, &rec).is_empty());
     }
 
-    /// A bench over a real recording: `MEDIAA_BENCH_LIB` (a library with the file transcribed and
-    /// indexed), `MEDIAA_BENCH_FILE`, questions in `MEDIAA_BENCH_QUESTIONS` (separated by `|`),
-    /// a Tavily key in `MEDIAA_BENCH_TAVILY` and a proxy in `MEDIAA_BENCH_PROXY` for the web.
-    /// Prints every answer with its steps and time; fails on wrong citations.
+    /// A bench over a real recording, with models in `MEDIAA_TEST_MODELS`: `MEDIAA_BENCH_LIB`
+    /// (a library with the file transcribed and indexed), `MEDIAA_BENCH_FILE`, questions in
+    /// `MEDIAA_BENCH_QUESTIONS` (separated by `|`), a Tavily key in `MEDIAA_BENCH_TAVILY` and a
+    /// proxy in `MEDIAA_BENCH_PROXY` for the web. Prints every answer with its steps and time;
+    /// fails on wrong citations.
     #[test]
     #[ignore]
     fn bench_on_a_recording() {
-        use crate::runtime::Runtime;
         use mediaa_core::agent::{AgentSettings, Budget};
         use mediaa_core::transcript::{self, Transcript};
         let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
@@ -829,13 +840,14 @@ mod tests {
         if let Ok(proxy) = std::env::var("MEDIAA_BENCH_PROXY") {
             settings.web.proxy = proxy;
         }
-        let runtime = Runtime::new(&ai, Budget::default());
+        let engine = crate::live::engine();
+        let slots = Slots::new(Budget::default());
         if std::env::var_os("MEDIAA_BENCH_OUTLINE").is_some() {
             let started = std::time::Instant::now();
             let q = mediaa_core::queue::Queue::open(&ai).unwrap();
             crate::outline::enqueue(&ai, &file).unwrap();
             let s = settings.clone();
-            let handlers: Vec<Box<dyn crate::worker::TaskHandler>> = vec![Box::new(crate::outline::Outline::new(&ai, runtime.clone(), std::sync::Arc::new(move || s.clone())))];
+            let handlers: Vec<Box<dyn crate::worker::TaskHandler>> = vec![Box::new(crate::outline::Outline::new(&ai, engine.clone(), slots.clone(), std::sync::Arc::new(move || s.clone())))];
             assert!(crate::worker::run_next(&q, &handlers, &AtomicBool::new(false)).unwrap());
             eprintln!("outline rebuilt in {:.0} s", started.elapsed().as_secs_f32());
         }
@@ -891,9 +903,9 @@ mod tests {
             };
             let cancel = AtomicBool::new(false);
             let a = if items.is_empty() {
-                ask(&runtime, &settings, &ai, &id, &rec, &history, &mut memory, q.trim(), &cancel, &mut print).unwrap()
+                ask(engine.as_ref(), &slots, &settings, &ai, &id, &rec, &history, &mut memory, q.trim(), &cancel, &mut print).unwrap()
             } else {
-                ask_folder(&runtime, &settings, &ai, &items, &history, &mut memory, q.trim(), &cancel, &mut print).unwrap()
+                ask_folder(engine.as_ref(), &slots, &settings, &ai, &items, &history, &mut memory, q.trim(), &cancel, &mut print).unwrap()
             };
             eprintln!("Q: {q}\nA ({:.0} s, {} steps{}): {}\n", started.elapsed().as_secs_f32(), a.steps.len(), if a.forced { ", forced" } else { "" }, a.text);
             if items.is_empty() {

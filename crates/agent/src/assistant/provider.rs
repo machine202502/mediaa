@@ -3,11 +3,9 @@
 //! retry; a reply that is a step written as text (models imitate the history) is accepted too.
 //! Each request takes a «provider calls» slot of the budget.
 
-use super::brain::{parse_step, Brain, Step, ToolSpec};
-use crate::llm::Message;
+use super::brain::{parse_step, AnswerStream, Brain, Message, Role, Step, ToolSpec};
 use crate::providers::chat_completion_stream;
-use super::brain::AnswerStream;
-use crate::scheduler::Scheduler;
+use crate::slots::Slots;
 use mediaa_core::agent::{Provider, WorkKind};
 use serde_json::{json, Value};
 use std::sync::atomic::AtomicBool;
@@ -15,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 pub struct ProviderBrain {
     pub provider: Provider,
     pub model: String,
-    pub scheduler: Scheduler,
+    pub slots: Slots,
     /// Longest step (tokens).
     pub max_tokens: u32,
 }
@@ -122,7 +120,7 @@ impl Brain for ProviderBrain {
         let mut messages = messages.to_vec();
         let mut retried = false;
         loop {
-            let lease = self.scheduler.request(WorkKind::ProviderCalls, None, true).wait(cancel)?;
+            let lease = self.slots.request(WorkKind::ProviderCalls, true).wait(cancel)?;
             let mut collected = Collected::default();
             let streamed = chat_completion_stream(&self.provider, &request(&self.model, &messages, tools, may_answer, self.max_tokens), &mut |delta| {
                 collected.add(delta, on_answer);
@@ -133,7 +131,7 @@ impl Brain for ProviderBrain {
                 // A malformed call: once more, telling the model what was wrong.
                 Err(e) if !retried && e.to_string().contains("not JSON") => {
                     retried = true;
-                    messages.push(Message::new(crate::llm::Role::User, crate::prompts::render("nudges/malformed_call.j2", minijinja::context! { error => e.to_string() })));
+                    messages.push(Message::new(Role::User, crate::prompts::render("nudges/malformed_call.j2", minijinja::context! { error => e.to_string() })));
                 }
                 Err(e) => return Err(e),
             }
@@ -141,7 +139,7 @@ impl Brain for ProviderBrain {
     }
 
     fn complete(&self, messages: &[Message], cancel: &AtomicBool) -> anyhow::Result<String> {
-        let lease = self.scheduler.request(WorkKind::ProviderCalls, None, true).wait(cancel)?;
+        let lease = self.slots.request(WorkKind::ProviderCalls, true).wait(cancel)?;
         let mut text = String::new();
         chat_completion_stream(&self.provider, &request(&self.model, messages, &[], true, self.max_tokens), &mut |delta| {
             text.push_str(delta["content"].as_str().unwrap_or_default());
@@ -158,7 +156,6 @@ impl Brain for ProviderBrain {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::Role;
     use mediaa_core::agent::{Budget, ProviderKind};
     use std::sync::{Arc, Mutex};
 
@@ -217,7 +214,7 @@ mod tests {
     fn brain(url: String) -> ProviderBrain {
         let mut p = Provider::new(ProviderKind::OpenAiCompatible, "Local");
         p.base_url = url;
-        ProviderBrain { provider: p, model: "m".into(), scheduler: Scheduler::new(Budget::default(), std::time::Duration::from_secs(20), |_, _| {}), max_tokens: 100 }
+        ProviderBrain { provider: p, model: "m".into(), slots: Slots::new(Budget::default()), max_tokens: 100 }
     }
 
     fn call(name: &str, args: &str) -> Value {

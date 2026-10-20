@@ -79,9 +79,9 @@ impl Provider {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum ModelSource {
-    /// Downloaded from Hugging Face into `.ai/models` before first use.
+    /// Downloaded from Hugging Face by the inference engine on first use.
     HuggingFace { repo: String },
-    /// A model file or folder on disk.
+    /// A model file or folder on disk (the engine reads it where it is).
     Local { path: PathBuf },
     /// Served by one of the providers (by its id).
     Provider { provider: String, model: String },
@@ -387,7 +387,14 @@ impl Default for WebSettings {
 
 impl Default for AgentSettings {
     fn default() -> Self {
-        Self { providers: Vec::new(), models: ModelChoices::default(), devices: ModelDevices::default(), budget: Budget::default(), agent_context: 8192, web: WebSettings::default() }
+        Self {
+            providers: Vec::new(),
+            models: ModelChoices::default(),
+            devices: ModelDevices::default(),
+            budget: Budget::default(),
+            agent_context: 8192,
+            web: WebSettings::default(),
+        }
     }
 }
 

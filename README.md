@@ -1,8 +1,9 @@
 # MediaA
 
 Cross-platform screen capture tool written in Rust: Lightshot-style screenshots, OBS-style
-recordings, audio recording and conversion between popular formats — shipped as **one executable** (FFmpeg is linked in
-statically).
+recordings, audio recording and conversion between popular formats. The release is **one program**,
+`mediaa` (one executable, FFmpeg linked in statically); the Agent's local models run inside it (see
+[Models](#models)).
 
 The window has four sections:
 
@@ -11,7 +12,20 @@ The window has four sections:
 | **Library** | Every screenshot, recording and conversion (images, videos, animations, audio) |
 | **Capture** | Screenshots, video recording (screen / area / windows), audio recording |
 | **Convert** | Video, animation, image and audio conversions |
-| **Agent** | Virtual catalogs of files (links or owned copies in `.ai/files`, opened in tabs), LLM providers (OpenAI-compatible, OpenRouter) and models per role (Hugging Face downloads into `.ai/models`, local files, provider models) with a model check; optional web search for the agent (DuckDuckGo, SearXNG, Brave, Tavily) |
+| **Agent** | Virtual catalogs of files (links or owned copies in `.ai/files`, opened in tabs), LLM providers (OpenAI-compatible, OpenRouter) and models per role — local models run in the app itself (Hugging Face downloads into its models folder, or a local file), provider models are called directly — with a model check; optional web search for the agent (DuckDuckGo, SearXNG, Brave, Tavily) |
+
+## Models
+
+The language, embedding, rerank and speech models run **inside the app's process**: llama.cpp with
+Vulkan for language models (a CPU fallback), sherpa-onnx for speech. There is no separate engine
+program to start and no address or token to set: Agent → Models shows the engine's state («Движок
+работает» — the engine runs), the models folder and the graphics cards it sees.
+
+Models are downloaded from Hugging Face into the app's data folder — Windows
+`%LOCALAPPDATA%\MediaA\MediaA\data\models`, the same `dev.MediaA.MediaA/data/models` on Linux and
+macOS — or opened from a local file or folder. GPUs are used through the Vulkan driver; without one
+the models run on the CPU. The memory budget (Agent → Budget) limits what the loaded models may
+take. The engine's design is in [workflow/engine.md](workflow/engine.md).
 
 ## Features
 
@@ -42,6 +56,8 @@ crates/
   core/      settings, selection geometry, annotations (tiny-skia), pacing, naming, library, WAV  (no FFmpeg)
   media/     FFmpeg pipeline via ez-ffmpeg: recording sessions, muxing, conversions, thumbnails
   platform/  OS integration: xcap (screenshots; macOS/Wayland recording), windows-capture (Windows recording), xcb + MIT-SHM (X11 recording), cpal (audio), clipboard, open/trash
+  agent/     the Agent's work: queue tasks (transcribe, index, outline), retrieval, providers, web search, the agent loop
+  engine/    the model engine inside the app: llama.cpp (language models, embeddings, reranker), sherpa-onnx (speech), model downloads, memory budget, the `Engine` the app calls (workflow/engine.md)
   app/       egui UI (eframe + wgpu), tray, hotkeys, area picker, i18n (locales/*.toml) -> `mediaa`
 scripts/     build / run / test helpers for every platform (see below)
 vcpkg.json   static FFmpeg 8.1 (avcodec, avformat, avfilter, swscale, swresample, x264, libvpx, libwebp, opus, mp3lame, dav1d)
@@ -58,7 +74,7 @@ pipeline as a library), [xcap](https://crates.io/crates/xcap), [windows-capture]
 |---|---|---|---|
 | Rust | stable, `x86_64-pc-windows-msvc` | stable | stable |
 | C/C++ toolchain | Visual Studio 2022+ "Desktop development with C++" **and** "C++ Clang Compiler for Windows" (libclang for bindgen) | `build-essential`, `clang`, `libclang-dev` | Xcode command line tools |
-| Vulkan SDK | `winget install --id KhronosGroup.VulkanSDK -e` (llama.cpp GPU backend; users only need a GPU driver) | — (CPU) | — (CPU) |
+| Vulkan SDK | `winget install --id KhronosGroup.VulkanSDK -e` — to **build** the app (llama.cpp GPU backend). Running it needs only a GPU driver with Vulkan; without one the models run on the CPU | — (CPU) | — (CPU) |
 | FFmpeg build | vcpkg (cloned automatically if missing) | vcpkg + `nasm pkg-config cmake ninja-build autoconf automake libtool` | vcpkg + `brew install nasm pkg-config cmake ninja autoconf automake libtool` |
 | System libs | — | see `scripts/linux/Dockerfile` (pipewire, xcb, alsa, dbus, xkbcommon, wayland, GL dev packages) | — |
 | Optional | Docker Desktop (Linux builds), WSL2 (running Linux builds) | Docker | Docker |
@@ -98,9 +114,9 @@ On macOS grant *Screen Recording* (and *Microphone*) permissions in System Setti
 
 | Platform | Command | Result |
 |---|---|---|
-| Windows | `.\scripts\windows\build.ps1` | `dist\windows\mediaa.exe` — single file, FFmpeg + C runtime static (only system DLLs) |
+| Windows | `.\scripts\windows\build.ps1` | `dist\windows\mediaa.exe` — a single file, FFmpeg + C runtime static (only system DLLs; the Vulkan loader is delay-loaded) |
 | Linux (native) | `scripts/linux/build.sh` | `dist/linux/mediaa` — FFmpeg static; system GUI/audio libs dynamic |
-| Linux (Docker) | `scripts/linux/build-docker.sh` | same, built in an Ubuntu 24.04 container |
+| Linux (Docker) | `scripts/linux/build-docker.sh` | the same program, built in an Ubuntu 24.04 container |
 | macOS | `scripts/macos/build.sh` | `dist/macos/MediaA.app` |
 
 Manual equivalent (Windows): `vcpkg install --triplet x64-windows-static-release
@@ -194,6 +210,7 @@ changed in Settings.
 | Screenshots, recordings, conversions | `Documents/MediaA` (changeable in Settings) |
 | Library cache | `.cache/` in that folder: `library.db` (SQLite: file index with titles, sizes, dates, dimensions, durations, and thumbnail slots; every change is written by row) and thumbnail atlases `thumbs-N.jpg`; everything is rebuilt when missing |
 | Settings | Windows `%APPDATA%\MediaA\MediaA\config\settings.toml`, Linux `~/.config/mediaa`, macOS `~/Library/Application Support/dev.MediaA.MediaA` |
+| Downloaded models | the app's data dir: Windows `%LOCALAPPDATA%\MediaA\MediaA\data\models`, Linux `~/.local/share/mediaa/models`, macOS `~/Library/Application Support/dev.MediaA.MediaA/models` |
 | Logs, scratch files | the platform's local data dir (`…\MediaA\data\logs`) |
 
 ## Platform notes

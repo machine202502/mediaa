@@ -359,11 +359,11 @@ impl Chat {
                 let answered = match &target {
                     Target::File(path, timing) => {
                         let recording = recording_of(&ai, &store, path, *timing)?;
-                        assistant::ask(&s.runtime, &settings, &ai, &store, &recording, &history, &mut memory, &question, &c, &mut on_event)
+                        assistant::ask(s.engine.as_ref(), &s.slots, &settings, &ai, &store, &recording, &history, &mut memory, &question, &c, &mut on_event)
                     }
                     Target::Folder(files) => {
                         let items = items_of(&ai, files);
-                        assistant::ask_folder(&s.runtime, &settings, &ai, &items, &history, &mut memory, &question, &c, &mut on_event)
+                        assistant::ask_folder(s.engine.as_ref(), &s.slots, &settings, &ai, &items, &history, &mut memory, &question, &c, &mut on_event)
                     }
                 };
                 // What the chat learned is kept even when the answer failed.

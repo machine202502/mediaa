@@ -4,17 +4,20 @@ pub mod budget;
 pub mod catalogs;
 pub mod chat;
 pub mod dialog;
+pub mod engine_state;
 pub mod models;
 pub mod providers;
 pub mod queue;
 pub mod studio;
 
-use mediaa_agent::runtime::Runtime;
+use eframe::egui;
 use mediaa_agent::index::Index;
 use mediaa_agent::outline::Outline;
+use mediaa_agent::slots::Slots;
 use mediaa_agent::transcribe::Transcribe;
 use mediaa_agent::worker::{self, TaskHandler};
-use mediaa_core::agent::{AgentSettings, Budget};
+use mediaa_core::agent::AgentSettings;
+use mediaa_engine::Engine;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -24,7 +27,7 @@ use std::sync::{Arc, RwLock};
 struct Worker {
     dir: PathBuf,
     stop: Arc<AtomicBool>,
-    /// The settings its tasks see (Hugging Face token and proxy for downloads).
+    /// The settings its tasks see.
     settings: Arc<RwLock<AgentSettings>>,
 }
 
@@ -34,37 +37,54 @@ impl Drop for Worker {
     }
 }
 
-#[derive(Default)]
 pub struct AgentUi {
     pub catalogs: catalogs::CatalogsUi,
     pub providers: providers::ProvidersUi,
     pub models: models::ModelsUi,
     pub queue: queue::QueueUi,
-    pub budget: budget::BudgetUi,
-    /// The model runtime of the library's `.ai` folder and the budget it runs under.
-    runtime: Option<(PathBuf, Budget, Runtime)>,
+    /// The engine's state, shared by every page (and the section header).
+    pub engine_state: engine_state::EngineState,
+    /// The models' engine, shared with the agent's services.
+    engine: Arc<dyn Engine>,
+    /// The memory budget the engine was last told (settings may change it).
+    engine_budget: mediaa_engine::Budget,
+    /// Limits of the app's own model work (the engine has its own queue of loaded models).
+    slots: Slots,
     worker: Option<Worker>,
 }
 
 impl AgentUi {
-    /// The model runtime of `ai_dir` (one per library), kept on the current budget.
-    pub fn runtime(&mut self, ai_dir: &Path, budget: &Budget) -> &Runtime {
-        let same = self.runtime.as_ref().is_some_and(|(dir, _, _)| dir == ai_dir);
-        if !same {
-            self.runtime = Some((ai_dir.to_path_buf(), budget.clone(), Runtime::new(ai_dir, budget.clone())));
+    pub fn new(engine: Arc<dyn Engine>, budget: &mediaa_core::agent::Budget) -> AgentUi {
+        AgentUi {
+            catalogs: Default::default(),
+            providers: Default::default(),
+            models: Default::default(),
+            queue: Default::default(),
+            engine_state: Default::default(),
+            engine,
+            engine_budget: budget.clone().into(),
+            slots: Slots::new(budget.clone()),
+            worker: None,
         }
-        let (_, current, runtime) = self.runtime.as_mut().expect("just set");
-        if current != budget {
-            runtime.set_budget(budget.clone());
-            *current = budget.clone();
-        }
-        runtime
     }
 
-    /// Keeps the runtime and the queue worker on the library's `.ai` folder and the current
-    /// settings (called every frame; cheap when nothing changed).
-    pub fn tick(&mut self, ai_dir: &Path, agent: &AgentSettings) {
-        let scheduler = self.runtime(ai_dir, &agent.budget).scheduler().clone();
+    /// The models' engine of the app (one for the whole process).
+    pub fn engine(&self) -> &Arc<dyn Engine> {
+        &self.engine
+    }
+
+    /// Keeps the engine's budget, the slots of model work and the queue worker on the library's
+    /// `.ai` folder and the current settings (called every frame; cheap when nothing changed).
+    /// Also asks the engine for its state in the background (one poller for every page).
+    pub fn tick(&mut self, ai_dir: &Path, agent: &AgentSettings, ctx: &egui::Context) {
+        self.engine_state.tick(&self.engine, ctx);
+        self.slots.set_budget(agent.budget.clone());
+        let budget: mediaa_engine::Budget = agent.budget.clone().into();
+        if budget != self.engine_budget {
+            // The engine keeps its models under the same memory budget.
+            self.engine.set_budget(budget);
+            self.engine_budget = budget;
+        }
         if let Some(w) = &self.worker {
             if w.dir == ai_dir {
                 let stale = *w.settings.read().expect("settings lock") != *agent;
@@ -74,16 +94,17 @@ impl AgentUi {
                 return;
             }
         }
-        // A new library (or the first frame): a worker of its own.
+        // A new library: a worker of its own.
         self.worker = None;
         let settings = Arc::new(RwLock::new(agent.clone()));
         let s = settings.clone();
         let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || s.read().expect("settings lock").clone());
-        let runtime = self.runtime(ai_dir, &agent.budget).clone();
+        let slots = self.slots.clone();
+        let engine = self.engine.clone();
         let handlers: Vec<Box<dyn TaskHandler>> = vec![
-            Box::new(Transcribe::new(ai_dir, scheduler, current.clone())),
-            Box::new(Index::new(ai_dir, runtime.clone(), current.clone())),
-            Box::new(Outline::new(ai_dir, runtime, current)),
+            Box::new(Transcribe::new(ai_dir, engine.clone(), slots.clone(), current.clone())),
+            Box::new(Index::new(ai_dir, engine.clone(), slots.clone(), current.clone())),
+            Box::new(Outline::new(ai_dir, engine, slots, current)),
         ];
         let stop = Arc::new(AtomicBool::new(false));
         match worker::spawn(ai_dir.to_path_buf(), handlers, stop.clone()) {
@@ -93,19 +114,20 @@ impl AgentUi {
     }
 }
 
-/// What studios need for searching: the runtime (query embeddings) and the current settings.
+/// What studios need for searching and asking: the engine, the slots of model work and the
+/// current settings.
 #[derive(Clone)]
 pub struct Services {
     pub ai_dir: PathBuf,
-    pub runtime: Runtime,
+    pub engine: Arc<dyn Engine>,
+    pub slots: Slots,
     pub settings: Arc<RwLock<AgentSettings>>,
 }
 
 impl AgentUi {
     /// The services of the current library (after [`AgentUi::tick`]).
     pub fn services(&self) -> Option<Services> {
-        let (dir, _, runtime) = self.runtime.as_ref()?;
-        let worker = self.worker.as_ref().filter(|w| &w.dir == dir)?;
-        Some(Services { ai_dir: dir.clone(), runtime: runtime.clone(), settings: worker.settings.clone() })
+        let worker = self.worker.as_ref()?;
+        Some(Services { ai_dir: worker.dir.clone(), engine: self.engine.clone(), slots: self.slots.clone(), settings: worker.settings.clone() })
     }
 }

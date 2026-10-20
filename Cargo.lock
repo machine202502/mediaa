@@ -3855,9 +3855,9 @@ dependencies = [
  "log",
  "mediaa-agent",
  "mediaa-core",
+ "mediaa-engine",
  "mediaa-media",
  "mediaa-platform",
- "pollster 0.4.0",
  "raw-window-handle",
  "rfd",
  "rust-i18n",
@@ -3878,23 +3878,18 @@ dependencies = [
  "crossbeam-channel",
  "dom_smoothie",
  "evalexpr",
- "hf-hub",
  "insta",
- "libloading",
- "llama-cpp-2",
  "log",
  "mediaa-core",
+ "mediaa-engine",
  "mediaa-media",
- "memmap2",
  "minijinja",
  "minijinja-embed",
  "regex",
  "reqwest",
- "safetensors",
  "scraper",
  "serde",
  "serde_json",
- "sherpa-onnx",
  "tempfile",
  "tiny_http",
  "url",
@@ -3927,6 +3922,25 @@ dependencies = [
  "thiserror 2.0.21",
  "tiny-skia",
  "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "mediaa-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hf-hub",
+ "libloading",
+ "llama-cpp-2",
+ "log",
+ "mediaa-core",
+ "memmap2",
+ "reqwest",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "sherpa-onnx",
+ "tempfile",
 ]
 
 [[package]]

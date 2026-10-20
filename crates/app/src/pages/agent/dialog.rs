@@ -73,7 +73,7 @@ struct Search {
 /// Search in the transcript of `id` (a user waits).
 fn search(services: &Services, id: &str, query: &str) -> anyhow::Result<Vec<Hit>> {
     let settings = services.settings.read().expect("settings lock").clone();
-    Ok(mediaa_agent::search::search(&services.runtime, &settings, &services.ai_dir, id, query, SEARCH_HITS, true)?.0)
+    Ok(mediaa_agent::search::search(services.engine.as_ref(), &services.slots, &settings, &services.ai_dir, id, query, SEARCH_HITS, true)?.0)
 }
 
 pub struct Dialog {

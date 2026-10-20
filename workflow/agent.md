@@ -23,6 +23,9 @@ models as well as large local or remote ones (see 7).
 
 ## 2. Runtimes
 
+All model inference runs in **`mediaa-engine`**, a separate program the app talks to over HTTP
+([engine.md](engine.md)); the app itself contains no model engine.
+
 * **LLMs** (agent, sub-agent, titles): llama.cpp through `llama-cpp-2`, GGUF models. GPU via the
   **Vulkan** backend (NVIDIA and AMD, one build, no CUDA/ROCm installs), CPU fallback.
   Constrained JSON output (GBNF from a JSON schema) for tool calls — small models never emit
@@ -31,11 +34,15 @@ models as well as large local or remote ones (see 7).
   inside, CPU): Silero VAD, GigaAM (NeMo CTC / transducer in the sherpa-onnx layout),
   pyannote segmentation + speaker embeddings. Text embeddings (P3) go the same way.
 * Model files: Hugging Face downloads pick *one* runnable file set (a GGUF quantisation such as
-  `Q4_K_M`, or the ONNX files) — defaults move to GGUF / ONNX repositories.
+  `Q4_K_M`, or the ONNX files) — defaults move to GGUF / ONNX repositories. The engine stores
+  them in its own models folder.
 
-## 3. Budget and the model scheduler (`mediaa_agent::scheduler`)
+## 3. Budget and the model scheduler (`mediaa_engine::scheduler`)
 
-Resources: a **GPU memory pool** (the user's cap, e.g. 8 GB), a **RAM pool** for CPU models,
+Memory and model loading are handled in `mediaa-engine` ([engine.md](engine.md)); the app keeps
+the **slots per kind of work** (`mediaa_agent::slots`) and its task queue.
+
+Resources of the engine: a **GPU memory pool** (the user's cap, e.g. 8 GB), a **RAM pool** for CPU models,
 and **slots per kind of work** (e.g. web search ≤ 2 at once, transcription ≤ 1).
 
 * A job asks for a *lease* on a model: `{model, size estimate, device preference}`.
@@ -240,7 +247,7 @@ Studied for ideas only; nothing is copied.
 | Phase | Content |
 |---|---|
 | P0 ✅ | Budget settings + page, device preference per model, GPU detection, scheduler core (leases, round robin, slots) with tests, `calculator` and `time` tools. |
-| P1 ✅ | llama.cpp with Vulkan (any GPU with a driver; the loader is delay-loaded, so the app starts without it) and the CPU (static CRT), model loading through the scheduler (`runtime.rs`), GGUF defaults, real model check (load + one token), «provider calls» budget, API keys in the OS keychain (`core::secrets`), VRAM on the Budget page, model memory on the Queue page. ONNX Runtime moved to P2 with its first model. |
+| P1 ✅ | llama.cpp with Vulkan (any GPU with a driver; the loader is delay-loaded, so the engine starts without it) and the CPU (static CRT), model loading through the scheduler (`runtime.rs`), GGUF defaults, real model check (load + one token), «provider calls» budget, API keys in the OS keychain (`core::secrets`), VRAM on the Budget page, model memory on the Queue page. ONNX Runtime moved to P2 with its first model. |
 | P2 (mostly done) | ✅ sherpa-onnx (static, ONNX Runtime inside): Silero VAD, GigaAM v3 with punctuation, pyannote segmentation + WeSpeaker embeddings; `transcribe` queue task resumable phrase by phrase (`agent::transcribe`), transcript per file by content id (`core::transcript`, `.ai/media/<id>.db`); «Transcribe» and the Dialog pane in the studio (replies by speaker, word highlight while playing, click to seek, speaker names); the queue worker runs from app start. Left: voiceprints across recordings, names proposed by the agent model (P4), custom vocabulary. |
 | P3 ✅ | ✅ chunks along speaker turns (~200 words, overlap for long turns), FTS5 over Snowball stems (ru / en), embeddings through llama.cpp (EmbeddingGemma 300M GGUF, GPU), hybrid search (RRF + diversity) — `core::retrieval`; `index` queue task after every transcription; search in the studio's Dialog pane; reranker role (BGE reranker v2 M3 GGUF through llama.cpp) re-orders 24 candidates (`agent::search`); outline: chapter digests (title, summary, decisions, action items, open questions, topics) by the agent model as constrained JSON, window by window (`core::outline`, `agent::outline` task after indexing), shown as chapter headings in the Dialog pane.; search over a catalog folder (`agent::search::search_files`: one query embedding, candidates per file reranked together) from the catalogs side bar. Focused scan and coverage move to P4 as agent tools. |
 | P4 ✅ | ✅ agent loop (`agent::assistant`): grammar-constrained JSON steps with an explicit `action` (local) or native tool calls with one corrective retry (providers, «provider calls» slots); the first step always looks into the recording; tools outline / search / read / mentions (exact counts and times by code) / speakers / calculator / time; fingerprints, novelty, stall guard, step limit; citations checked against the transcript; old results shortened to fit the context; chats per recording (`core::chat`), the studio's Chat pane (Markdown, citations seek, steps in the details); outlines written in the recording's language; answers stream as they are written (the `answer` field out of the step JSON for local models, SSE for providers) with a loop guard (DRY sampler + cutting a repeated paragraph); the focused scan tool (`assistant::scan`: every ~900-word part read against an instruction by the agent's model, findings with checked times, coverage — unread parts named —, complete scans cached per instruction, progress in the chat).; model profiles (the local agent context in settings, each provider's context); chat memory (`remember`) and history folded into a summary when it outgrows 30 % of the context (`assistant::memory`); `plan` checklist; `say` sections of long answers (bounded by the grammar, cited or refused, then a one-line close); `rename_speakers`; `delegate` (a stretch read whole by the sub-agent: a provider's model or the agent's own); a clarifying question instead of a guess; a chat over a catalog folder (`assistant::folder`: the folder card with each recording's chapters, one search across all, per-recording tools, citations `[#N m:ss]` that open the recording). |

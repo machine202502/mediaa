@@ -58,11 +58,11 @@ type Loaded = Arc<Mutex<HashMap<String, Arc<dyn Any + Send + Sync>>>>;
 
 /// The GGUF file of a local model source: a file, or the GGUF inside a folder (a downloaded
 /// Hugging Face model or a folder the user picked).
-pub fn gguf_path(ai_dir: &Path, source: &ModelSource) -> anyhow::Result<PathBuf> {
+pub fn gguf_path(models_root: &Path, source: &ModelSource) -> anyhow::Result<PathBuf> {
     let place = match source {
         ModelSource::HuggingFace { repo } => {
-            anyhow::ensure!(hub::is_downloaded(ai_dir, repo), "{repo} is not downloaded yet (Models → Check models)");
-            hub::model_dir(ai_dir, repo)
+            anyhow::ensure!(hub::is_downloaded(models_root, repo), "{repo} is not downloaded yet (Models → Check models)");
+            hub::model_dir(models_root, repo)
         }
         ModelSource::Local { path } => path.clone(),
         ModelSource::Provider { .. } => anyhow::bail!("a provider model is not a local file"),
@@ -96,20 +96,22 @@ pub struct Use {
 
 #[derive(Clone)]
 pub struct Runtime {
-    ai_dir: PathBuf,
+    models_root: PathBuf,
     scheduler: Scheduler,
     loaded: Loaded,
 }
 
 impl Runtime {
-    pub fn new(ai_dir: &Path, budget: Budget) -> Runtime {
+    /// A runtime over a models folder (models are directly in `models_root`, as the engine
+    /// stores them).
+    pub fn new(models_root: &Path, budget: Budget) -> Runtime {
         let loaded: Loaded = Arc::default();
         let l = loaded.clone();
         let scheduler = Scheduler::new(budget, QUANTUM, move |key, _| {
             l.lock().expect("models lock").remove(key);
             log::info!("model unloaded: {key}");
         });
-        Runtime { ai_dir: ai_dir.to_path_buf(), scheduler, loaded }
+        Runtime { models_root: models_root.to_path_buf(), scheduler, loaded }
     }
 
     pub fn scheduler(&self) -> &Scheduler {
@@ -130,7 +132,7 @@ impl Runtime {
         f: impl FnOnce(&E, &Lease) -> anyhow::Result<R>,
     ) -> anyhow::Result<R> {
         let Use { kind, device, n_ctx, interactive } = how;
-        let path = gguf_path(&self.ai_dir, source)?;
+        let path = gguf_path(&self.models_root, source)?;
         let key = format!("{}#{n_ctx}", path.display());
         let need = ModelNeed { key: key.clone(), bytes: estimate_bytes(&path, n_ctx)?, device };
         let lease = self.scheduler.request(kind, Some(need), interactive).wait(cancel)?;
@@ -188,10 +190,19 @@ mod tests {
         let hf = ModelSource::HuggingFace { repo: "a/b".into() };
         assert!(gguf_path(dir.path(), &hf).unwrap_err().to_string().contains("not downloaded"));
         assert!(gguf_path(dir.path(), &ModelSource::Provider { provider: "p".into(), model: "m".into() }).is_err());
+        // A model file directly in the models folder, and a downloaded repository.
+        let direct = dir.path().join("direct.gguf");
+        std::fs::write(&direct, b"x").unwrap();
+        assert_eq!(gguf_path(dir.path(), &local(&direct)).unwrap(), direct);
+        let repo = dir.path().join("a--b");
+        std::fs::create_dir(&repo).unwrap();
+        std::fs::write(repo.join("m-Q4_K_M.gguf"), b"x").unwrap();
+        std::fs::write(repo.join(".mediaa-complete"), b"a/b").unwrap();
+        assert_eq!(gguf_path(dir.path(), &hf).unwrap(), repo.join("m-Q4_K_M.gguf"));
     }
 
     /// Loads the 19 MB story model once for two jobs and unloads it after them.
-    /// Network: `cargo test -p mediaa-agent -- --ignored`.
+    /// Network: `cargo test -p mediaa-engine -- --ignored`.
     #[test]
     #[ignore]
     fn loads_shares_and_unloads() {
@@ -211,7 +222,7 @@ mod tests {
             .with_model(&source, how, &cancel, |m: &LocalModel, lease| {
                 assert!(lease.fresh(), "first use loads it");
                 assert_eq!(rt.loaded().len(), 1);
-                m.complete("Once upon a time", &opts, &cancel, &mut |_| true)
+                m.complete("Once upon a time", &opts, &cancel, &mut |_| true).map(|g| g.text)
             })
             .unwrap();
         assert!(!text.is_empty());

@@ -1,4 +1,9 @@
 //! Embeds the app icon into the Windows executable (Explorer, taskbar, Alt+Tab).
+//!
+//! Windows: llama.cpp's Vulkan backend is linked against the Vulkan loader that GPU drivers
+//! install. Loading the loader only when llama.cpp first uses it keeps MediaA starting on
+//! machines without one — it then runs models on the CPU; `mediaa_engine::llm` checks for the
+//! loader first.
 
 #[path = "src/icon.rs"]
 #[allow(dead_code)]
@@ -9,8 +14,6 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    // The Vulkan loader comes with GPU drivers; loading it only when models run keeps the app
-    // starting on machines without one (`mediaa_agent::llm` checks for it first).
     println!("cargo:rustc-link-arg-bins=/DELAYLOAD:vulkan-1.dll");
     println!("cargo:rustc-link-arg-bins=delayimp.lib");
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));

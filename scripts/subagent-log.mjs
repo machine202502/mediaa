@@ -11,6 +11,8 @@
 //   node scripts/subagent-log.mjs watch --detach  start that watcher in the background and return
 //   node scripts/subagent-log.mjs follow RUN_DIR  render one scripts/subagent.sh run until it ends
 //
+// A run of scripts/subagent.sh is finished by its result line; a Claude Code subagent only by its
+// SubagentHandback tool call (a quiet transcript alone may just be a long build).
 // Finished runs (a result line: готово, ошибка, лимит ходов) whose transcript has not changed for
 // `archiveAfterHours` hours move to subagents/archive/ — the log and its artifacts keep their layout,
 // so the links inside the log stay valid. The limit comes from subagents/config.json (created with
@@ -182,6 +184,33 @@ function runSource(dir) {
     };
 }
 
+/// A path a task wrote (relative, absolute Windows, backslashes) as repo-relative; "" when it is
+/// not a path inside the repo or holds a placeholder (`<name>` and the like).
+function repoRel(raw) {
+    const v = String(raw || "").trim().replace(/\\/g, "/").replace(/[.,;:]+$/, "");
+    if (!v || /[<>]/.test(v)) return "";
+    const rel = relTo(repo, path.resolve(repo, v));
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel) || /^[A-Za-z]:/.test(rel)) return "";
+    return rel;
+}
+
+/// The run's artifacts folder, repo-relative, from the authoritative place for its kind:
+/// scripts/subagent.sh writes it to RUN_DIR/artifacts (one line, repo-relative); a Claude Code
+/// subagent names it in the task («Artifacts folder…: <path>»), else the first
+/// `subagents/artifacts/<name>` mention counts.
+function artifactFolder(src, task) {
+    const folder = (p) => {
+        const rel = repoRel(p);
+        return /^subagents\/artifacts\/./.test(rel) ? rel : "";
+    };
+    if (src.kind === "script") return folder(readText(path.join(src.dir, "artifacts")));
+    const line = String(task).match(/artifacts\s+folder[^\n:]*:[ \t]*([^\s`'")\]]+)/i);
+    const named = line ? folder(line[1]) : "";
+    if (named) return named;
+    const mention = String(task).match(/subagents[\\/]artifacts[\\/][^\s`'")\\/]+/);
+    return mention ? folder(mention[0]) : "";
+}
+
 /// How to continue a run that stopped at its turn limit.
 function continueLines(src) {
     if (src.kind === "script") {
@@ -206,15 +235,12 @@ function state(src, events, mtime) {
         const alive = Date.now() - mtime < IDLE_MS;
         return { status: alive ? "работает" : "остановлен (журнал давно не менялся)", finished: false, summary: [] };
     }
-    // Claude Code's subagent: finished when its last message is text without a pending tool call
-    // and the transcript is quiet.
-    const last = [...events].reverse().find((e) => e.type === "assistant");
-    const calls = (last?.message?.content || []).some((c) => c.type === "tool_use" && c.name !== "SubagentHandback");
-    const quiet = Date.now() - mtime > 15000;
-    if (last && !calls && quiet) {
-        const text = (last.message.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
-        const handback = (last.message.content || []).find((c) => c.name === "SubagentHandback");
-        return { status: "готово", finished: true, summary: [handback ? JSON.stringify(handback.input, null, 2) : text] };
+    // Claude Code's subagent: finished only by its SubagentHandback tool call (the final report).
+    // A last text without tool calls means nothing — a long build looks exactly like that.
+    for (const e of [...events].reverse()) {
+        if (e.type !== "assistant") continue;
+        const handback = (e.message?.content || []).find((c) => c.type === "tool_use" && c.name === "SubagentHandback");
+        if (handback) return { status: "готово", finished: true, summary: [JSON.stringify(handback.input, null, 2)] };
     }
     return { status: Date.now() - mtime < IDLE_MS ? "работает" : "остановлен (журнал давно не менялся)", finished: false, summary: [] };
 }
@@ -250,8 +276,54 @@ function move(from, to) {
     }
 }
 
+/// Move the files of `from` into `to` (skipping names already there) and remove the source folder
+/// once it is empty; true when everything that could move did.
+function mergeDir(from, to) {
+    if (!fs.existsSync(from)) return true;
+    try {
+        fs.mkdirSync(to, { recursive: true });
+        for (const e of fs.readdirSync(from, { withFileTypes: true })) {
+            const dst = path.join(to, e.name);
+            if (fs.existsSync(dst)) continue;
+            fs.renameSync(path.join(from, e.name), dst);
+        }
+        if (!fs.readdirSync(from).length) fs.rmdirSync(from);
+        return true;
+    } catch {
+        return false; // in use: the next pass tries again
+    }
+}
+
 const underArchive = (rel) => rel.replace(/^subagents\//, "subagents/archive/");
 const fromArchive = (rel) => rel.replace(/^subagents\/archive\//, "subagents/");
+
+/// The run's artifacts folder (repo-relative, "" when there is none), keeping the index in step:
+/// the authoritative folder wins when it exists, else the stored mapping if that one still exists;
+/// mappings to a folder that is gone or a placeholder are dropped. Files are never moved here,
+/// except that a finished Claude Code subagent's folder takes the log's name and a leftover
+/// task-named folder is merged into it (the subagent may keep writing after the first rename).
+function resolveArtifacts(src, index, task, archived, finished) {
+    const key = `${src.key}#artifacts`;
+    const named = artifactFolder(src, task);
+    const wanted = `subagents/artifacts/${index[src.key].replace(/\.md$/, "")}`;
+    const abs = (rel) => (rel ? path.join(repo, rel) : "");
+    const exists = (rel) => Boolean(rel) && !/[<>]/.test(rel) && fs.existsSync(abs(rel));
+    let merged = true;
+    if (!archived && src.kind === "claude" && finished && named && named !== wanted && exists(named)) {
+        merged = exists(wanted) ? mergeDir(abs(named), abs(wanted)) : move(abs(named), abs(wanted));
+    }
+    const order = archived
+        ? [underArchive(named), index[key]]
+        : src.kind === "claude" && finished
+          ? merged
+              ? [wanted, named, index[key]]
+              : [named, wanted, index[key]]
+          : [named, wanted, index[key]];
+    const artifacts = order.find(exists) || "";
+    if (artifacts) index[key] = artifacts;
+    else delete index[key];
+    return artifacts;
+}
 
 /// A finished run untouched for long: its log and artifacts move under subagents/archive/.
 function archiveRun(src, index, mtime) {
@@ -415,15 +487,7 @@ function render(src, index) {
     const { status, summary, finished } = state(src, events, mtime);
     const archived = Boolean(index[`${src.key}#archived`]);
     const logDir = archived ? archiveDir : outDir;
-    let artifacts = index[`${src.key}#artifacts`] || (task.match(/subagents[\\/]artifacts[\\/][^\s`'")\\/]+/) || [])[0]?.replace(/\\/g, "/").replace(/[.,;:]+$/, "");
-    // A Claude Code subagent's artifacts folder was named in its task before its log existed: once
-    // it is done, the folder takes the log's name, so the two match.
-    const wanted = `subagents/artifacts/${index[src.key].replace(/\.md$/, "")}`;
-    if (!archived && src.kind === "claude" && artifacts && artifacts !== wanted && finished && fs.existsSync(path.join(repo, artifacts)) && !fs.existsSync(path.join(repo, wanted))) {
-        fs.renameSync(path.join(repo, artifacts), path.join(repo, wanted));
-        artifacts = wanted;
-    }
-    if (artifacts) index[`${src.key}#artifacts`] = artifacts;
+    const artifacts = resolveArtifacts(src, index, task, archived, finished);
     const md = [
         `# ${title}`,
         "",

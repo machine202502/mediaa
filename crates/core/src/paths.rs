@@ -33,6 +33,11 @@ pub fn work_dir() -> PathBuf {
     data_dir().join("work")
 }
 
+/// Where the engine downloads models (and runs the ones from there).
+pub fn models_dir() -> PathBuf {
+    data_dir().join("models")
+}
+
 fn home() -> PathBuf {
     UserDirs::new()
         .map(|u| u.home_dir().to_path_buf())
@@ -87,6 +92,7 @@ mod tests {
     fn default_dirs_end_with_app_name() {
         assert!(default_media_dir().ends_with(APP_NAME));
         assert!(work_dir().starts_with(data_dir()));
+        assert_eq!(models_dir(), data_dir().join("models"));
         assert_eq!(settings_file().file_name().unwrap(), "settings.toml");
     }
 

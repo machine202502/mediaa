@@ -168,6 +168,10 @@ impl App {
             .as_mut()
             .map(|h| h.apply(&settings.hotkeys))
             .unwrap_or_default();
+        // One engine for the whole process: the agent's services and the pages share it.
+        let agent_budget = settings.agent.budget.clone();
+        let engine: std::sync::Arc<dyn mediaa_engine::Engine> =
+            std::sync::Arc::new(mediaa_engine::LocalEngine::new(mediaa_core::paths::models_dir(), agent_budget.clone().into()));
 
         let mut app = Self {
             settings,
@@ -194,7 +198,7 @@ impl App {
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
             conv: Default::default(),
-            agent: Default::default(),
+            agent: pages::agent::AgentUi::new(engine, &agent_budget),
             capabilities: mediaa_media::capabilities(),
             quit_after_save: false,
             native_window: cc.window_handle().ok().and_then(|h| NativeWindow::from_raw(h.as_raw())),
@@ -873,7 +877,7 @@ impl eframe::App for App {
         self.poll_recorder(ctx);
         self.update_tray();
         let ai = mediaa_core::catalogs::ai_dir(&crate::pages::library::library_dir(&self.settings));
-        self.agent.tick(&ai, &self.settings.agent);
+        self.agent.tick(&ai, &self.settings.agent, ctx);
 
         if ctx.input(|i| i.viewport().close_requested()) && !self.quit_after_save {
             let busy = !self.recorder.is_idle();

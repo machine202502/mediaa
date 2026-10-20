@@ -3,9 +3,50 @@
 //! (small models never emit a broken call); providers use native tool calls
 //! (`super::provider`).
 
-use crate::llm::{Generate, LocalModel, Message};
+use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Device, Engine, Priority};
 use serde_json::{json, Map, Value};
 use std::sync::atomic::AtomicBool;
+
+/// Who wrote a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Role {
+    System,
+    User,
+    Assistant,
+}
+
+impl Role {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        }
+    }
+}
+
+impl From<Role> for ChatRole {
+    fn from(role: Role) -> ChatRole {
+        match role {
+            Role::System => ChatRole::System,
+            Role::User => ChatRole::User,
+            Role::Assistant => ChatRole::Assistant,
+        }
+    }
+}
+
+/// A message of a chat with the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Message {
+    pub role: Role,
+    pub content: String,
+}
+
+impl Message {
+    pub fn new(role: Role, content: impl Into<String>) -> Message {
+        Message { role, content: content.into() }
+    }
+}
 
 /// A tool the model may call.
 #[derive(Debug, Clone)]
@@ -224,20 +265,43 @@ pub fn finished(text: &str) -> String {
     }
 }
 
-/// A local llama.cpp model as the brain.
-pub struct LocalBrain<'a> {
-    pub model: &'a LocalModel,
+/// A model of the engine as the brain: the same step grammar, streamed as it is written.
+pub struct EngineBrain<'a> {
+    pub engine: &'a dyn Engine,
+    /// The engine's model spec (`owner/repo` or an absolute path).
+    pub model: String,
+    pub n_ctx: u32,
+    pub device: Device,
+    pub priority: Priority,
     /// Longest step (tokens).
     pub max_tokens: u32,
+    /// The Hugging Face token for downloading the model when it is not on disk yet.
+    pub hf_token: Option<String>,
 }
 
-impl Brain for LocalBrain<'_> {
+impl EngineBrain<'_> {
+    fn request(&self, messages: &[Message], max_tokens: u32) -> ChatRequest {
+        ChatRequest {
+            model: self.model.clone(),
+            messages: messages.iter().map(|m| ChatMessage::new(m.role.into(), m.content.clone())).collect(),
+            max_tokens,
+            temperature: 0.0,
+            n_ctx: Some(self.n_ctx),
+            device: Some(self.device),
+            priority: Some(self.priority),
+            hf_token: self.hf_token.clone(),
+            ..ChatRequest::default()
+        }
+    }
+}
+
+impl Brain for EngineBrain<'_> {
     fn step(&self, messages: &[Message], tools: &[ToolSpec], may_answer: bool, cancel: &AtomicBool, on_answer: &mut dyn FnMut(&str)) -> anyhow::Result<Step> {
-        let opts = Generate { max_tokens: self.max_tokens, temperature: 0.0, json_schema: Some(step_schema(tools, may_answer).to_string()), no_repeats: true };
+        let request = ChatRequest { json_schema: Some(step_schema(tools, may_answer)), no_repeats: true, ..self.request(messages, self.max_tokens) };
         let mut stream = AnswerStream::default();
         let mut answer = String::new();
         let mut looped = None;
-        let text = self.model.chat(messages, &opts, cancel, &mut |piece| {
+        let generated = self.engine.chat(&request, cancel, &mut |piece| {
             let new = stream.push(piece);
             if new.is_empty() {
                 return true;
@@ -250,7 +314,7 @@ impl Brain for LocalBrain<'_> {
             on_answer(&new);
             true
         })?;
-        match (parse_step(&text), looped) {
+        match (parse_step(&generated.content), looped) {
             (Ok(step), None) => Ok(step),
             // Stopped in a loop, or cut off at the token limit: the answer written so far.
             (_, cut) if !answer.trim().is_empty() => {
@@ -264,12 +328,13 @@ impl Brain for LocalBrain<'_> {
     }
 
     fn complete(&self, messages: &[Message], cancel: &AtomicBool) -> anyhow::Result<String> {
-        let opts = Generate { max_tokens: self.max_tokens, ..Generate::default() };
-        Ok(self.model.chat(messages, &opts, cancel, &mut |_| true)?.trim().to_string())
+        anyhow::ensure!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "cancelled");
+        let request = self.request(messages, self.max_tokens);
+        Ok(self.engine.chat(&request, cancel, &mut |_| true)?.content.trim().to_string())
     }
 
     fn context(&self) -> u32 {
-        self.model.n_ctx()
+        self.n_ctx
     }
 }
 
@@ -293,8 +358,6 @@ mod tests {
         // Before anything was looked up: calls only.
         assert_eq!(step_schema(&[spec("search"), spec("read")], false)["oneOf"].as_array().unwrap().len(), 2);
         assert_eq!(step_schema(&[spec("search")], false)["properties"]["action"]["const"], "search");
-        // llama.cpp turns it into a grammar.
-        assert!(llama_cpp_2::json_schema_to_grammar(&s.to_string()).is_ok());
     }
 
     /// Feeds `raw` in pieces of `n` characters; returns what was streamed.

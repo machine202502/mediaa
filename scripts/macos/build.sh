@@ -54,6 +54,6 @@ case "${1:-build}" in
 </dict>
 </plist>
 PLIST
-    echo "done: dist/macos/MediaA.app"
+    echo "done: dist/macos/MediaA.app ($(du -sh "$APP" | cut -f1))"
     ;;
 esac

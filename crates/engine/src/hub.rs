@@ -1,6 +1,6 @@
-//! Hugging Face models, downloaded with `hf-hub` into `<media>/.ai/models/<owner>--<name>`.
-//! Only one weights format of a repository is fetched (repositories often carry the same
-//! weights as safetensors, PyTorch, ONNX, OpenVINO…).
+//! Hugging Face models, downloaded with `hf-hub` into the engine's models folder:
+//! `<models>/<owner>--<name>`. Only one weights format of a repository is fetched
+//! (repositories often carry the same weights as safetensors, PyTorch, ONNX, OpenVINO…).
 
 use hf_hub::progress::{DownloadEvent, Progress, ProgressEvent, ProgressHandler};
 use mediaa_core::agent::Provider;
@@ -22,13 +22,19 @@ pub fn split_spec(spec: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Folder of a Hugging Face model inside the `.ai` folder (`repo` as in [`split_spec`]).
-pub fn model_dir(ai_dir: &Path, repo: &str) -> PathBuf {
-    ai_dir.join("models").join(repo.trim().replace('/', "--"))
+/// Folder of a Hugging Face model in a models folder (`repo` as in [`split_spec`]).
+pub fn model_dir(models_root: &Path, repo: &str) -> PathBuf {
+    models_root.join(repo.trim().replace('/', "--"))
 }
 
-pub fn is_downloaded(ai_dir: &Path, repo: &str) -> bool {
-    model_dir(ai_dir, repo).join(COMPLETE).is_file()
+pub fn is_downloaded(models_root: &Path, repo: &str) -> bool {
+    model_dir(models_root, repo).join(COMPLETE).is_file()
+}
+
+/// The spec of a complete model folder (what its completion marker says), `None` when the
+/// folder is not a complete download.
+pub fn downloaded_repo(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join(COMPLETE)).ok().map(|spec| spec.trim().to_string()).filter(|spec| !spec.is_empty())
 }
 
 /// Quantisations of GGUF repositories in order of preference: a good size / quality balance
@@ -101,21 +107,30 @@ impl ProgressHandler for Bytes {
     }
 }
 
-/// Downloads `repo` (`owner/name`) unless already complete; `on_progress(done, total)` in bytes.
-/// `hf`: the Hugging Face provider whose token (gated / private models) and proxy are used;
-/// without one, `HF_TOKEN` from the environment if set, directly.
+/// Downloads `repo` (`owner/name`) into `<models_root>/<owner>--<name>` unless already
+/// complete; `on_progress(done, total)` in bytes. `hf`: the Hugging Face provider whose token
+/// (gated / private models) and proxy are used; without one, `HF_TOKEN` from the environment
+/// if set, directly.
 pub fn download(
-    ai_dir: &Path,
+    models_root: &Path,
     repo: &str,
     hf: Option<&Provider>,
     on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
 ) -> anyhow::Result<PathBuf> {
-    let dir = model_dir(ai_dir, repo);
+    download_into(model_dir(models_root, repo), repo, hf, on_progress)
+}
+
+fn download_into(
+    dir: PathBuf,
+    repo: &str,
+    hf: Option<&Provider>,
+    on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
+) -> anyhow::Result<PathBuf> {
     // One download at a time: two of the same model (a check and a task) would write the same
     // files; the second finds the model complete.
     static DOWNLOADS: Mutex<()> = Mutex::new(());
     let _one = DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
-    if is_downloaded(ai_dir, repo) {
+    if dir.join(COMPLETE).is_file() {
         return Ok(dir);
     }
     let (repo_id, file) = split_spec(repo);
@@ -128,7 +143,7 @@ pub fn download(
     let proxy = hf.and_then(Provider::proxy);
     let http = reqwest::Client::builder().user_agent(concat!("mediaa/", env!("CARGO_PKG_VERSION")));
     let http = match proxy {
-        Some(url) => http.proxy(crate::providers::proxy(url)?),
+        Some(url) => http.proxy(reqwest::Proxy::all(url).map_err(|e| anyhow::anyhow!("proxy \"{url}\": {e}"))?),
         None => http.no_proxy(),
     };
     builder = builder.client(http.build()?);
@@ -188,7 +203,7 @@ mod tests {
         assert_eq!(select_files(&split).allow, Some(vec!["big-Q4_K_M-*".into()]));
     }
 
-    /// Network: `cargo test -p mediaa-agent -- --ignored`.
+    /// Network: `cargo test -p mediaa-engine -- --ignored`.
     #[test]
     #[ignore]
     fn downloads_a_tiny_model() {
@@ -208,13 +223,15 @@ mod tests {
         assert_eq!(split_spec(" owner/name "), ("owner/name", None));
         assert_eq!(split_spec("csukuangfj/vad/silero_vad.onnx"), ("csukuangfj/vad", Some("silero_vad.onnx")));
         assert_eq!(split_spec("a/b/dir/m.onnx/"), ("a/b", Some("dir/m.onnx")));
-        assert_eq!(model_dir(Path::new("/ai"), "a/b/m.onnx"), Path::new("/ai/models/a--b--m.onnx"), "a folder of its own");
+        assert_eq!(model_dir(Path::new("/ai"), "a/b/m.onnx"), Path::new("/ai/a--b--m.onnx"), "a folder of its own");
     }
 
     #[test]
     fn model_folders() {
-        let ai = Path::new("/m/.ai");
-        assert_eq!(model_dir(ai, " Qwen/Qwen3-0.6B "), Path::new("/m/.ai/models/Qwen--Qwen3-0.6B"));
+        let root = Path::new("/m/models");
+        assert_eq!(model_dir(root, " Qwen/Qwen3-0.6B "), Path::new("/m/models/Qwen--Qwen3-0.6B"));
+        assert_eq!(model_dir(root, "a/b/file.gguf"), Path::new("/m/models/a--b--file.gguf"));
         assert!(!is_downloaded(Path::new("/nope"), "a/b"));
+        assert_eq!(downloaded_repo(Path::new("/nope")), None);
     }
 }

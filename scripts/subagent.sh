@@ -3,7 +3,7 @@
 # DeepSeek's own Anthropic-compatible API. The lead (the model the user talks to) calls it and reviews the result.
 # A run lives in target/subagents/<time>-<rand>/ so that long runs can be watched and continued:
 #
-#   scripts/subagent.sh run    [--provider openrouter|deepseek] [--model ID] [--max-turns N] [--name TITLE] TASK_FILE
+#   scripts/subagent.sh run    [--provider deepseek|openrouter] [--model ID] [--max-turns N] [--name TITLE] TASK_FILE
 #   scripts/subagent.sh resume RUN_DIR MESSAGE_FILE [--max-turns N]
 #   scripts/subagent.sh status RUN_DIR
 #   scripts/subagent.sh list             # every run: running / finished / gone (crashed)
@@ -48,7 +48,7 @@ setup_provider() { # provider, model override; sets base, key, model
         deepseek)
             base="https://api.deepseek.com/anthropic"
             key="$(key_of DEEPSEEK_API_KEY "$HOME/.secrets/deepseek.key")"
-            # DeepSeek's own name of V4.1 Flash (check the current one in DeepSeek's docs).
+            # DeepSeek's own name of V4.1 Flash (GET https://api.deepseek.com/models lists them).
             model="${2:-deepseek-flash}"
             ;;
         *) echo "unknown provider: $1 (openrouter or deepseek)" >&2; exit 2 ;;
@@ -270,7 +270,10 @@ token_cost() { # run dir
         const [dir] = process.argv.slice(1);
         let models, result;
         try { models = JSON.parse(fs.readFileSync(0, "utf8")).data; result = JSON.parse(fs.readFileSync(dir + "/result.json", "utf8")); } catch { process.exit(0); }
-        const name = fs.readFileSync(dir + "/model", "utf8").trim();
+        // Model names of the DeepSeek API, priced as the same model in the OpenRouter list.
+        const priced = { "deepseek-flash": "deepseek/deepseek-v4.1-flash", "deepseek-v4-pro": "deepseek/deepseek-v4-pro" };
+        const own = fs.readFileSync(dir + "/model", "utf8").trim();
+        const name = priced[own] || own;
         const m = models.find((x) => x.id === name || x.canonical_slug === name);
         const u = result.usage || {};
         if (!m) process.exit(0);
@@ -334,7 +337,7 @@ end_accounting() { # run dir, label
 
 cmd_run() {
     local -a rest=()
-    local prov=openrouter override="" name="" task="" rc=0
+    local prov=deepseek override="" name="" task="" rc=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --provider) [[ $# -ge 2 ]] || usage_error; prov="$2"; shift 2 ;;

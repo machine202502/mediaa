@@ -4,9 +4,8 @@
 //! summary (decisions, facts with times, open questions, the user's preferences); the latest
 //! exchanges always stay word for word.
 
-use super::brain::Brain;
+use super::brain::{Brain, Message, Role};
 use super::Turn;
-use crate::llm::{Message, Role};
 use crate::prompts;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::AtomicBool;

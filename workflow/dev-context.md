@@ -4,6 +4,7 @@
 работаем и на что уже наступали.
 
 Связанные документы:
+* [process.md](process.md) — что сейчас в работе: задача, шаг, исполнитель, ссылка на лог.
 * [todos.md](todos.md) — задачи и идеи, которые можно взять в работу.
 * [done.md](done.md) — что уже сделано и от каких идей отказались.
 * [agent.md](agent.md) — архитектура агента и таблица фаз.
@@ -14,10 +15,12 @@
 ## 1. Проект в двух словах
 
 * **MediaA** — настольное приложение на Rust: egui 0.36 + wgpu, Windows в первую очередь.
-  Собирается в **один статический exe**. Разделы: Библиотека, Захват, Конвертация, Агент.
+  Выпуск — **одна программа** `mediaa` (UI, захват, конвертация; один статический exe с FFmpeg);
+  движок моделей (`mediaa_engine`) — библиотека внутри неё, приложение зовёт его напрямую
+  (контракт — [engine.md](engine.md)). Разделы приложения: Библиотека, Захват, Конвертация, Агент.
 * Раздел **Агент**:
   * каталоги аудио и видео, у каждого файла вкладка-«студия» с панелями Диалог · Видео · Чат;
-  * распознавание речи и диаризация (sherpa-onnx);
+  * распознавание речи и диаризация — в движке (sherpa-onnx), приложение передаёт ему PCM в памяти;
   * гибридный поиск по записи (FTS5 + эмбеддинги + реранкер);
   * главы со сводками (outline);
   * чат с агентом-инструментальщиком по одной записи или по папке;
@@ -46,10 +49,11 @@
 
 | Крейт | Что внутри |
 |---|---|
-| `crates/core` | настройки (`settings.rs`, `agent.rs`: `AgentSettings`, `WebSettings`, роли моделей и их умолчания `default_source`), `secrets.rs` (keychain), `transcript.rs` (БД записи `.ai/media/<id>.db`, SCHEMA 4), `queue.rs`, `retrieval.rs`, `outline.rs`, `chat.rs`, `catalogs.rs`, `paths.rs` |
-| `crates/agent` | `scheduler.rs` (бюджет, слоты, аренда моделей), `runtime.rs`, `llm.rs`/`local.rs` (llama.cpp), `embed.rs`, `speech.rs` (sherpa-onnx), `transcribe.rs`, `index.rs`, `outline.rs`, `search.rs`, `hub.rs` (загрузки с HF), `check.rs` (проверка моделей), `providers.rs` (OpenAI-совместимые, SSE), `web.rs` (поиск и чтение страниц), `prompts.rs` (шаблоны), `assistant/` (агент) |
+| `crates/core` | настройки (`settings.rs`, `agent.rs`: `AgentSettings`, `WebSettings`, роли моделей и их умолчания `default_source`), `secrets.rs` (keychain), `transcript.rs` (БД записи `.ai/media/<id>.db`, SCHEMA 4), `queue.rs`, `retrieval.rs`, `outline.rs`, `chat.rs`, `catalogs.rs`, `paths.rs` (`models_dir()` — папка моделей движка) |
+| `crates/agent` | `slots.rs` (слоты по видам работ: сколько задач каждого вида одновременно), `models.rs` (спека модели для движка), `transcribe.rs`, `index.rs`, `outline.rs`, `search.rs`, `check.rs` (проверка моделей), `providers.rs` (OpenAI-совместимые, SSE), `web.rs` (поиск и чтение страниц), `prompts.rs` (шаблоны), `live.rs` (движок для `#[ignore]`-тестов), `assistant/` (агент). Модели не запускает и не скачивает — всё это в движке |
+| `crates/engine` | движок моделей — библиотека `mediaa_engine` (workflow/engine.md): трейт `Engine` и `LocalEngine` (`engine/`), `llm.rs`/`local.rs` (llama.cpp), `embed.rs`, `speech.rs` (sherpa-onnx), `runtime.rs` (модели под бюджет), `scheduler.rs` (пулы памяти), `hub.rs` (загрузки с HF), `testing.rs` (фейковый движок для тестов, feature `testing`) |
 | `crates/agent/src/assistant` | `mod.rs` (цикл `answer`, `ask`, `ask_folder`, промпт, проверка цитат, бенч), `brain.rs` (шаг агента как JSON по грамматике), `provider.rs`, `tools.rs` (инструменты по записи), `folder.rs` (чат по папке), `scan.rs`, `memory.rs`, `internet.rs` (web_search / web_read, фильтр ссылок) |
-| `crates/app` | UI: `pages/agent/{catalogs,studio,chat,dialog,queue,budget,providers,models}.rs`, `theme.rs`, `app.rs` |
+| `crates/app` | UI: `pages/agent/{catalogs,studio,chat,dialog,queue,budget,providers,models,engine_state}.rs` (`engine_state` — один опрос движка на весь раздел, чип в шапке, общая подсказка «движок не запустился»), `theme.rs`, `app.rs` (создаёт один `LocalEngine` при старте и раздаёт его как `Arc<dyn Engine>`) |
 | `crates/media`, `crates/platform` | FFmpeg (статический, vcpkg), захват экрана; `platform/examples/snap.rs` — скриншот своего окна |
 
 Архитектура и фазы описаны в [agent.md](agent.md), раздел 9 «Phases».
@@ -66,8 +70,11 @@ cargo test --release --workspace
 cargo clippy --release --workspace --all-targets
 ```
 
-* llama.cpp (`llama-cpp-2` 0.1.159) собирается с Vulkan; `vulkan-1.dll` подгружается
-  отложенно. Файл `Directory.Build.targets` (`BuildInParallel=false`) лечит гонку MSBuild
+* llama.cpp (`llama-cpp-2` 0.1.159) собирается с Vulkan в крейте движка (`crates/engine`),
+  `vulkan-1.dll` подгружается отложенно через `crates/app/build.rs` (это флаг линковки бинаря
+  `mediaa`); приложение запускается и без него, тогда модели идут на процессоре
+  (`mediaa_engine::llm` сначала проверяет загрузчик).
+  Файл `Directory.Build.targets` (`BuildInParallel=false`) лечит гонку MSBuild
   в `vulkan-shaders-gen`, удалять его нельзя.
 * FFmpeg — статический, через vcpkg (`x64-windows-static-release`), `+crt-static`.
 * В Git Bash нет Python (только заглушка Windows Store). Многострочные правки Rust делать
@@ -76,11 +83,16 @@ cargo clippy --release --workspace --all-targets
 ### Запуск для проверки UI
 
 ```bash
+# движок внутри приложения: отдельный процесс не нужен. Модели — в папке данных приложения
+# (paths::models_dir(): Windows %LOCALAPPDATA%\MediaA\MediaA\data\models); тестам её задаёт
+# MEDIAA_TEST_MODELS. Пустая папка — нормально: страница «Модели» скачает выбранные.
 S=<scratchpad>; MEDIAA_DEV_LIBRARY="$S/lib" ./target/release/mediaa.exe --page=queue & echo $! > /tmp/mediaa.pid
 cargo run --release -q -p mediaa-platform --example snap -- "$S/out.png" MediaA
 kill $(cat /tmp/mediaa.pid)
 ```
 
+* `scripts/ui-snap.sh` собирает и запускает приложение на тестовой библиотеке: движок уже
+  внутри него, чип в шапке показывает «Движок работает».
 * `--page=` принимает library, record, providers, queue, budget, models, catalogs и другие
   страницы (см. `page_from_args` в `app.rs`).
 * `MEDIAA_DEV_OPEN` открывает файл, а если передать имя папки — чат этой папки.
@@ -98,9 +110,12 @@ kill $(cat /tmp/mediaa.pid)
 * Видео для тестов агента (27 мин, много текста):
   `C:\shared-data\reps\hh-hack\source-1\videos\Как подтвердить опыт без трудовой ⧸ Хабр против работяг [1280x720].mp4`
 * Тестовая библиотека может лежать в scratchpad сессии:
-  `<scratchpad>/lib`. В ней каталог «Записи» с Лукоморье.wav и этим видео (ссылкой),
-  распознанными, проиндексированными и с главами. Если её нет, создать новую библиотеку,
-  добавить видео, нажать «Распознать» и дождаться цепочки transcribe → index → outline.
+  `<scratchpad>/lib` (по умолчанию `scripts/ui-snap.sh` берёт `target/ui-library`). В ней каталог
+  «Записи» с Лукоморье.wav и этим видео (ссылкой), распознанными, проиндексированными и с главами.
+  Если её нет, создать новую библиотеку, добавить видео, нажать «Распознать» и дождаться цепочки
+  transcribe → index → outline. Для этой цепочки нужны модели распознавания и эмбеддингов в
+  папке моделей движка (`paths::models_dir()`), а не в `.ai/models` библиотеки; движок уже
+  работает внутри приложения.
 
 ### Бенч агента на реальной модели (игнорируемый тест)
 
@@ -110,6 +125,11 @@ MEDIAA_BENCH_QUESTIONS='вопрос 1|вопрос 2' \
 MEDIAA_BENCH_TAVILY=<ключ, только через env> MEDIAA_BENCH_PROXY='socks5h://127.0.0.1:10901' \
 cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --nocapture
 ```
+
+* Все живые (игнорируемые) тесты агента — бенч, `transcribe`, `outline`, `assistant` — сами
+  создают `LocalEngine` на папке моделей `MEDIAA_TEST_MODELS` (по умолчанию
+  `paths::models_dir()` — папка приложения) под бюджетом по умолчанию (`crates/agent/src/live.rs`).
+  Отдельный процесс движка не нужен; недостающие модели тест скачает сам.
 
 * Флаги: `MEDIAA_BENCH_OUTLINE=1` пересобирает главы, `MEDIAA_BENCH_FOLDER=1` задаёт вопросы
   по всей библиотеке.
@@ -134,14 +154,20 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
     и проверяет результат (дифф, тесты). За ней же — решения, которые требуют контекста
     разговора, и вопросы к пользователю.
   * **Подагенты** — реализуют. Какой модели дать задачу, решает голова.
+  * **Голова следит за архитектурой и делегирует.** Нашла ошибку или решение можно лучше —
+    возвращает задачу исполнителю (`scripts/subagent.sh resume` в его сессии) или новому подагенту,
+    а не правит сама. Сама правит только в крайнем случае (критичный код) или когда пользователь
+    просил всё провалидировать. Её ресурс — архитектура, структура файлов и то, как решения
+    подагентов сочетаются с другими задачами.
 * **Цель — экономия денег пользователя.** Простое, что дешевле сделать самому, чем писать
   задание и проверять, голова делает сама. Остальное — самому дешёвому подагенту, который
   справится хорошо.
 * **Модели подагентов, которые можно вызывать:**
   * Haiku — механика по образцу (штатный подагент Claude Code, тратит лимиты Claude).
   * Sonnet — задачи средней сложности с ясной постановкой (штатный, тратит лимиты Claude).
-  * DeepSeek (`deepseek/deepseek-v4.1-flash-1017`) — через скрипт, см. ниже. Дешевле Haiku,
-    пишет код хорошо; лимиты Claude не тратит (платится через OpenRouter). Можно запускать
+  * DeepSeek V4.1 Flash (`deepseek-flash` в API DeepSeek) — через скрипт, см. ниже. Дешевле
+    Haiku, пишет код хорошо; лимиты Claude не тратит (платится с баланса DeepSeek; ключ —
+    `~/.secrets/deepseek.key` или `DEEPSEEK_API_KEY`). Можно запускать
     несколько параллельно, если они не трогают одни файлы.
 * Задание подагенту самодостаточное: пути, правила CLAUDE.md, точные ожидаемые тексты,
   команды тестов, «не коммитить, не менять git-индекс, не запускать приложение и не убивать
@@ -149,12 +175,17 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
 * Подагентов, трогающих одни файлы, запускать по очереди. Git worktree начинается с HEAD,
   поэтому незакоммиченную работу он не видит.
 * Тесты гонять один раз в конце работы (сборка долгая), а не после каждой правки.
+* **Уведомление пользователя.** Когда вся задача готова или голова ждёт решения пользователя —
+  push-уведомление (`PushNotification`) с началом «ГОТОВО:» или «НУЖНЫ ВЫ:». Обычные баннеры
+  приложения приходят при каждом конце ответа (и пока голова ждёт подагентов), поэтому значат
+  только «что-то изменилось». В приложении включены баннеры со звуком и мигание кнопки на
+  панели задач (`draw_attention_on_notifications`).
 * Коммитить только по явному разрешению пользователя, каждый раз отдельно (глобальное правило
   в `~/.claude/CLAUDE.md`).
 
 ### Подагенты на DeepSeek
 
-* Запуск: `scripts/subagent.sh [--provider openrouter|deepseek] [--model ID] [--max-turns N] TASK_FILE`.
+* Запуск: `scripts/subagent.sh [--provider deepseek|openrouter] [--model ID] [--max-turns N] TASK_FILE`.
   Задание — в файле (команда должна начинаться с `scripts/subagent.sh`: на это стоит правило
   разрешения в `.claude/settings.local.json`). Ответ — JSON Claude Code, итог в поле `result`.
 * Подагент — безголовый Claude Code с моделью DeepSeek: те же правила проекта (CLAUDE.md),
@@ -162,8 +193,10 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
   (`mcp__integrated-browser-mcp`) и отладчик (`mcp__debugmcp`). Запрещено: `git commit/add/reset/
   push/stash/checkout/restore/rm`, скриншот экрана (`desktop-mcp`), Chrome пользователя.
   Всё прочее отклоняется (спросить некого).
-* `total_cost_usd` в ответе посчитан по ценам Anthropic — неверно; реальная цена в панели
-  OpenRouter (порядка десятых долей цента за короткую задачу).
+* `total_cost_usd` в ответе посчитан по ценам Anthropic — неверно; настоящая — в `cost-*`
+  (см. «Стоимость» ниже; порядка десятых долей цента за короткую задачу). Провайдер по
+  умолчанию — прямой API DeepSeek; `--provider openrouter` — запасной (ключ
+  `~/.secrets/openrouter.key`, сейчас удалён).
 * Скрипт снимает переменные `CLAUDE*`/`ANTHROPIC*`, унаследованные от приложения Claude:
   иначе дочерний `claude` ждёт ключ от хозяина и шлёт запросы без ключа (401).
 * Браузер VS Code работает в полном режиме (`argv.json`: `enable-proposed-api` для
@@ -227,6 +260,9 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
   * веб-страница — своя вкладка браузера VS Code; `browser_screenshot` в файл не сохраняет;
   * сохранить снимок с экрана — `desktop-mcp` `capture_screenshot` с `region` и `savePath`,
     никогда не весь экран.
+* Модели DeepSeek не могут надёжно написать тег `<think>` (для них это начало собственных
+  рассуждений): задачи, где в коде или тексте есть `<think>`, — Sonnet/Haiku, либо предупредить в
+  задании не трогать такие строки.
 * Отказ в команде или инструменте — не обходить, а написать в отчёте (DeepSeek на тесте пытался
   обойти запрет и запустил приложение через `cargo run` на настоящей библиотеке пользователя).
 
@@ -237,7 +273,8 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
   `changes-<run|resume-…>.patch` в папке запуска и в артефактах: добавленные, изменённые,
   удалённые файлы с диффом. Правки параллельного запуска тоже попадут — это помечено в файле.
 * **Стоимость.** Токены из итога запуска × цены модели из публичного списка OpenRouter
-  (`token_cost`); счётчик расходов по ключу OpenRouter обновляется с задержкой и служит только
+  (`token_cost`; модели API DeepSeek сопоставлены с той же моделью в списке OpenRouter);
+  счётчик расходов по ключу (OpenRouter — с задержкой, баланс DeepSeek — до центов) служит только
   запасным способом. Пишется в `cost-<…>`, видна в итоге запуска, в шапке лога и в `list`.
 * **Архив.** Завершённый запуск, журнал которого не менялся дольше срока, зеркало переносит
   в `subagents/archive/` (лог) и `subagents/archive/artifacts/` (артефакты), ничего не удаляя.

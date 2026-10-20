@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/media", "crates/platform", "crates/agent", "crates/app"]
+members = ["crates/core", "crates/media", "crates/platform", "crates/engine", "crates/agent", "crates/app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ rust-version = "1.85"
 mediaa-core = { path = "crates/core" }
 mediaa-platform = { path = "crates/platform" }
 mediaa-media = { path = "crates/media" }
+mediaa-engine = { path = "crates/engine" }
 mediaa-agent = { path = "crates/agent" }
 anyhow = "1"
 thiserror = "2"

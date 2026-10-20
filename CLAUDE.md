@@ -9,16 +9,18 @@ through, designs the solution, writes self-contained briefs and reviews the resu
 tests). **Subagents** implement; the lead decides which subagent model gets which task. The
 goal is to save the user's money: the lead does simple things itself when that is cheaper than
 a brief and a review, and otherwise picks the cheapest subagent that will do the task well.
-Subagent models and how to run them: [docs/dev-context.md](docs/dev-context.md), «Как работаем».
+Subagent models and how to run them: [workflow/dev-context.md](workflow/dev-context.md), «Как работаем».
 
 ## Documents (they reference each other)
 
-- [docs/todos.md](docs/todos.md): every task and idea we may do; the user picks what to take.
-- [docs/done.md](docs/done.md): finished tasks and rejected ideas; do not redo them. A task
+- [workflow/todos.md](workflow/todos.md): every task and idea we may do; the user picks what to take.
+- [workflow/done.md](workflow/done.md): finished tasks and rejected ideas; do not redo them. A task
   that is finished or rejected is removed from todos.md and recorded here.
-- [docs/dev-context.md](docs/dev-context.md): reference for working on the project (build,
+- [workflow/dev-context.md](workflow/dev-context.md): reference for working on the project (build,
   tests, code map, test data, workflow, pitfalls).
-- [docs/agent.md](docs/agent.md): the agent's architecture and phases.
+- [workflow/process.md](workflow/process.md): what is in progress now — the task, its step, which subagent runs it
+  and a link to its log. The lead updates it whenever a subagent starts or finishes.
+- [workflow/agent.md](workflow/agent.md): the agent's architecture and phases.
 
 ## Rules
 

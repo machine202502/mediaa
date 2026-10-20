@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Release build of MediaA for Windows -> dist\windows\mediaa.exe (single file, FFmpeg + CRT static).
+  Release build of MediaA for Windows -> dist\windows\mediaa.exe
+  (a single file; the app links FFmpeg and the C runtime statically).
 #>
 . "$PSScriptRoot\env.ps1"
 cargo build --release -p mediaa

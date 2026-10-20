@@ -2,11 +2,10 @@
 //! (`mediaa_core::retrieval`), then an embedding per chunk with the Embedding role's model.
 //! Queued after every transcription (and queues the outline); resumable chunk by chunk.
 
-use crate::embed::Embedder;
-use crate::hub;
-use crate::runtime::{Runtime, Use};
+use crate::slots::Slots;
+use mediaa_engine::{EmbedKind, EmbeddingsRequest, Engine};
 use crate::worker::{Checkpoints, TaskHandler};
-use mediaa_core::agent::{AgentSettings, ModelRole, ModelSource, WorkKind};
+use mediaa_core::agent::{AgentSettings, ModelRole, WorkKind};
 use mediaa_core::queue::{Queue, Task};
 use mediaa_core::retrieval;
 use mediaa_core::transcript::{self, Transcript};
@@ -34,13 +33,14 @@ pub fn enqueue(ai_dir: &Path, path: &Path) -> anyhow::Result<()> {
 
 pub struct Index {
     ai_dir: PathBuf,
-    runtime: Runtime,
+    engine: Arc<dyn Engine>,
+    slots: Slots,
     settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>,
 }
 
 impl Index {
-    pub fn new(ai_dir: &Path, runtime: Runtime, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Index {
-        Index { ai_dir: ai_dir.to_path_buf(), runtime, settings }
+    pub fn new(ai_dir: &Path, engine: Arc<dyn Engine>, slots: Slots, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Index {
+        Index { ai_dir: ai_dir.to_path_buf(), engine, slots, settings }
     }
 }
 
@@ -62,26 +62,33 @@ impl TaskHandler for Index {
         }
         let chunks = t.chunks()?;
         let settings = (self.settings)();
-        // Keywords only when the embedding model is a provider's (not supported yet) or unset.
-        let source = match settings.models.embedding.clone() {
-            Some(s @ (ModelSource::HuggingFace { .. } | ModelSource::Local { .. })) => s,
-            _ => return Ok(json!({ "chunks": chunks.len(), "embedded": 0 })),
+        // Keywords only when the embedding model is a provider's (the engine cannot run it) or unset.
+        let model = match settings.models.embedding.as_ref() {
+            Some(source) => match crate::models::local_spec(source) {
+                Ok(model) => model,
+                Err(_) => return Ok(json!({ "chunks": chunks.len(), "embedded": 0 })),
+            },
+            None => return Ok(json!({ "chunks": chunks.len(), "embedded": 0 })),
         };
-        if let ModelSource::HuggingFace { repo } = &source {
-            hub::download(&self.ai_dir, repo, settings.hugging_face(), |_, _| {})?;
-        }
         let todo: Vec<(i64, String)> = chunks.iter().filter(|(_, _, done)| !done).map(|(id, c, _)| (*id, c.text.clone())).collect();
         let total = chunks.len().max(1) as f32;
         let before = chunks.len() - todo.len();
-        let how = Use { kind: WorkKind::Indexing, device: settings.devices.get(ModelRole::Embedding), n_ctx: EMBED_CTX, interactive: false };
-        let cancel = cp.stopping();
-        self.runtime.with_model(&source, how, cancel, |e: &Embedder, _lease| {
-            for (n, (chunk, text)) in todo.iter().enumerate() {
-                t.set_embedding(*chunk, &e.passage(text)?)?;
-                cp.save(&json!("embedding"), &Value::Null, (before + n + 1) as f32 / total)?;
-            }
-            Ok(())
-        })?;
+        let device = settings.devices.get(ModelRole::Embedding);
+        let hf_token = crate::assistant::hf_token(&settings);
+        let _lease = self.slots.request(WorkKind::Indexing, false).wait(cp.stopping())?;
+        for (n, (chunk, text)) in todo.iter().enumerate() {
+            let request = EmbeddingsRequest {
+                model: model.clone(),
+                input: vec![text.clone()],
+                kind: EmbedKind::Passage,
+                n_ctx: Some(EMBED_CTX),
+                device: Some(device),
+                hf_token: hf_token.clone(),
+            };
+            let vector = self.engine.embeddings(&request)?.into_iter().next().filter(|v| !v.is_empty());
+            t.set_embedding(*chunk, &vector.ok_or_else(|| anyhow::anyhow!("the engine returned no embedding"))?)?;
+            cp.save(&json!("embedding"), &Value::Null, (before + n + 1) as f32 / total)?;
+        }
         Ok(json!({ "chunks": chunks.len(), "embedded": chunks.len() }))
     }
 }
