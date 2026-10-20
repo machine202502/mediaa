@@ -23,6 +23,7 @@ image = { version = "0.25", default-features = false, features = ["png", "webp",
 hound = "3.5"
 crossbeam-channel = "0.5"
 log = { version = "0.4", features = ["std"] }
+env_logger = "0.11"
 directories = "6"
 tempfile = "3"
 rusqlite = { version = "0.40", features = ["bundled"] }

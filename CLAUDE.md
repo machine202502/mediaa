@@ -21,6 +21,7 @@ Subagent models and how to run them: [workflow/dev-context.md](workflow/dev-cont
 - [workflow/process.md](workflow/process.md): what is in progress now — the task, its step, which subagent runs it
   and a link to its log. The lead updates it whenever a subagent starts or finishes.
 - [workflow/agent.md](workflow/agent.md): the agent's architecture and phases.
+- [workflow/engine.md](workflow/engine.md), [workflow/topics.md](workflow/topics.md): designs (contracts) of larger tasks.
 
 ## Rules
 
@@ -33,6 +34,13 @@ Subagent models and how to run them: [workflow/dev-context.md](workflow/dev-cont
 - Prefer mature third-party crates over hand-written code.
 - Keep everything covered by tests; run `cargo test --workspace` and
   `cargo clippy --workspace --all-targets` before finishing.
+- **The lead always writes the prompts.** The wording of every text sent to a model (every
+  `crates/agent/prompts/**/*.j2`: system prompts, task prompts, tool descriptions, corrective
+  messages, merge/summary questions) is written or rewritten by the lead, never by a subagent —
+  the quality of the small models depends on it directly. A subagent may only wire a template
+  (the data it receives, the grammar, the tests) with placeholder text; its brief says so, and
+  the lead writes the final wording and updates the exact tests and snapshots before the task is
+  done.
 - **Prompts live in template files, never in Rust code.** Every text sent to a model (system
   prompts, task prompts, tool descriptions, corrective messages) is a MiniJinja template in
   `crates/agent/prompts/*.j2`, registered in `crates/agent/src/prompts.rs` and rendered with

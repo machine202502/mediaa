@@ -162,10 +162,8 @@ mod tests {
 
     #[test]
     fn interpolation_works() {
-        rust_i18n::set_locale("en");
-        assert_eq!(t!("lib.count", n = 3), "3 files");
-        rust_i18n::set_locale("ru");
-        assert_eq!(t!("lib.count", n = 3), "файлов: 3");
-        rust_i18n::set_locale("en");
+        // An explicit locale: the global one is shared by the tests running in parallel.
+        assert_eq!(t!("lib.count", n = 3, locale = "en"), "3 files");
+        assert_eq!(t!("lib.count", n = 3, locale = "ru"), "файлов: 3");
     }
 }

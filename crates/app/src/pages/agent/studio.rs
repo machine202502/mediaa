@@ -5,6 +5,7 @@
 
 use super::chat::Chat;
 use super::dialog::Dialog;
+use super::topics;
 use super::Services;
 use crate::player::Player;
 use crate::theme;
@@ -216,6 +217,8 @@ impl Studio {
 
     /// Play · time · position (fills the rest) · volume · speed · mute · hide video · video only.
     fn transport(&mut self, ui: &mut egui::Ui, rect: Rect, layout: &mut Layout, p: theme::Palette) {
+        // The topics of the recording cut the seek bar into segments (loaded by the dialog).
+        let chapters = self.dialog.chapters();
         ui.painter().hline(rect.x_range(), rect.min.y, Stroke::new(1.0, p.border));
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 8.0))), |ui| {
             ui.horizontal_centered(|ui| {
@@ -268,9 +271,9 @@ impl Studio {
                             player.set_volume(v);
                         }
                     }
-                    // Position: whatever width is left.
+                    // Position: whatever width is left, in the recording's topics.
                     let frac = if duration > 0.0 { (pos / duration) as f32 } else { 0.0 };
-                    let (resp, v) = slider(ui, ui.available_width(), frac, "studio-position", p);
+                    let (resp, v) = topics::seek_bar(ui, ui.available_width(), frac, duration, chapters, "studio-position", p);
                     if let Some(f) = v {
                         let t = f64::from(f) * duration;
                         if resp.dragged() {

@@ -6,6 +6,7 @@
 use super::studio::{panel, StudioAction};
 use super::Services;
 use crate::player::Player;
+use crate::tab_strip::{self, Tab, TabAction};
 use crate::theme;
 use crossbeam_channel::Receiver;
 use eframe::egui::{self, FontId, Rect, RichText};
@@ -218,12 +219,22 @@ enum Scope {
 pub struct Chat {
     scope: Scope,
     ai_dir: PathBuf,
+    /// Every chat of the recording (or folder), newest first.
     chats: Vec<ChatInfo>,
+    /// The chats shown as tabs, in tab order.
+    open: Vec<ChatId>,
+    /// The chats without a tab, newest first.
+    archived: Vec<ChatInfo>,
+    /// The chat on screen; `None` is the new-chat tab (no chat stored until the first question).
     current: Option<ChatId>,
+    /// The first read has chosen a tab (before that `current` is merely unset).
+    loaded: bool,
     messages: Vec<ChatMessage>,
     input: String,
     running: Option<Running>,
     error: Option<String>,
+    /// An archived chat waiting for the delete confirmation.
+    confirm_delete: Option<ChatInfo>,
     read: Option<Instant>,
     cache: CommonMarkCache,
     dev_asked: bool,
@@ -245,11 +256,15 @@ impl Chat {
             scope,
             ai_dir: ai_dir.to_path_buf(),
             chats: Vec::new(),
+            open: Vec::new(),
+            archived: Vec::new(),
             current: None,
+            loaded: false,
             messages: Vec::new(),
             input: String::new(),
             running: None,
             error: None,
+            confirm_delete: None,
             read: None,
             cache: CommonMarkCache::default(),
             dev_asked: false,
@@ -286,8 +301,22 @@ impl Chat {
         self.read = Some(Instant::now());
         let Some(t) = self.transcript() else { return };
         self.chats = t.chats().unwrap_or_default();
-        if self.current.is_none_or(|c| !self.chats.iter().any(|x| x.id == c)) {
-            self.current = self.chats.first().map(|c| c.id);
+        self.open = t.open_chats().unwrap_or_default();
+        // A chat deleted elsewhere leaves no tab.
+        let before = self.open.len();
+        self.open.retain(|c| self.chats.iter().any(|x| x.id == *c));
+        if self.open.len() != before {
+            if let Err(e) = t.set_open_chats(&self.open) {
+                log::warn!("chat tabs: {e:#}");
+            }
+        }
+        self.archived = t.archived_chats().unwrap_or_default();
+        if !self.loaded {
+            self.loaded = true;
+            self.current = self.open.first().copied();
+        } else if self.current.is_some_and(|c| !self.open.contains(&c)) {
+            // The open tab was closed while another studio of the same file was writing.
+            self.current = self.open.first().copied();
         }
         self.messages = self.current.and_then(|c| t.messages(c).ok()).unwrap_or_default();
     }
@@ -314,6 +343,12 @@ impl Chat {
                 None => t.create_chat(&chat_title(&question))?,
             };
             t.add_message(chat, Author::User, &question, &serde_json::Value::Null)?;
+            // The first question gives the new chat its tab.
+            let mut open = t.open_chats()?;
+            if !open.contains(&chat) {
+                open.push(chat);
+                t.set_open_chats(&open)?;
+            }
             Ok(chat)
         })();
         let chat = match stored {
@@ -462,6 +497,7 @@ impl Chat {
             let input = Rect::from_min_max(egui::pos2(ui.max_rect().min.x, ui.max_rect().max.y - input_h + 6.0), ui.max_rect().max);
             ui.scope_builder(egui::UiBuilder::new().max_rect(input), |ui| self.input_ui(ui, player.as_deref(), services));
         });
+        self.delete_dialog(ui.ctx());
         // A citation: this recording's player, or (in a folder) the recording it names.
         match (seek.as_deref().and_then(|s| self.jump(s)), player) {
             (Some(Jump::Here(t)), Some(p)) => {
@@ -485,46 +521,165 @@ impl Chat {
         }
     }
 
-    /// Chat choice, a new chat, removing the current one.
+    /// Tabs of the open chats, «+» (a new chat) and «История» (the archive, right of «+»).
     fn chats_bar(&mut self, ui: &mut egui::Ui) {
-        // Right to left: the buttons, then the chat list in what is left (never wider).
+        let tabs = tab_list(&self.chats, &self.open, self.current, &t!("studio.new_chat"));
+        let archived = self.archived.clone();
+        let salt = self.salt();
+        let mut select = None;
+        let mut close = None;
+        let mut restore = None;
+        let mut confirm = None;
+
+        // Right to left: «История», «+», then the tabs in the room left.
         let row = egui::Layout::right_to_left(egui::Align::Center);
-        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), theme::ICON_BUTTON), row, |ui| {
-            let current = self.current.and_then(|c| self.chats.iter().find(|x| x.id == c)).map_or_else(|| t!("studio.new_chat").to_string(), |c| c.title.clone());
-            let mut pick = None;
-            if let Some(c) = self.current {
-                if theme::icon_button(ui, icon::TRASH, &t!("studio.delete_chat")).clicked() {
-                    if let Some(t) = self.transcript() {
-                        if let Err(e) = t.delete_chat(c) {
-                            self.error = Some(format!("{e:#}"));
-                        }
-                    }
-                    pick = Some(None);
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), 34.0), row, |ui| {
+            let history = theme::icon_button(ui, icon::CLOCK_COUNTER_CLOCKWISE, &t!("studio.history"));
+            egui::Popup::menu(&history).show(|ui| {
+                ui.set_min_width(320.0);
+                ui.set_max_width(380.0);
+                if archived.is_empty() {
+                    theme::hint(ui, t!("studio.history_empty"));
+                    return;
                 }
-            }
-            if theme::icon_button(ui, icon::PLUS, &t!("studio.new_chat")).clicked() {
-                pick = Some(None);
-            }
-            // The width given to a combo box leaves out its arrow and padding.
-            egui::ComboBox::from_id_salt(("chat-pick", self.salt())).selected_text(current).truncate().width((ui.available_width() - 32.0).max(60.0)).show_ui(ui, |ui| {
-                for c in &self.chats {
-                    if ui.selectable_label(Some(c.id) == self.current, &c.title).clicked() {
-                        pick = Some(Some(c.id));
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    for (n, c) in archived.iter().enumerate() {
+                        if n > 0 {
+                            ui.separator();
+                        }
+                        ui.horizontal(|ui| {
+                            // The title and date take the room the buttons leave.
+                            let buttons = 200.0;
+                            ui.allocate_ui_with_layout(
+                                egui::vec2((ui.available_width() - buttons).max(80.0), 36.0),
+                                egui::Layout::top_down(egui::Align::LEFT),
+                                |ui| {
+                                    ui.add(egui::Label::new(RichText::new(&c.title).size(13.0)).truncate()).on_hover_text(&c.title);
+                                    theme::hint(ui, chat_date(c.created_ms));
+                                },
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(theme::secondary(icon::TRASH, &t!("studio.delete_chat"))).clicked() {
+                                    confirm = Some(c.clone());
+                                    ui.close();
+                                }
+                                if ui.add(theme::secondary(icon::ARROW_SQUARE_OUT, &t!("studio.open_chat"))).clicked() {
+                                    restore = Some(c.id);
+                                    ui.close();
+                                }
+                            });
+                        });
                     }
+                });
+            });
+            if theme::icon_button(ui, icon::PLUS, &t!("studio.new_chat")).clicked() {
+                // Nothing is stored until the first question.
+                select = Some(None);
+            }
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                match tab_strip::tab_strip(ui, ("chat-tabs", &salt), &tabs, &t!("studio.close_chat")) {
+                    Some(TabAction::Selected(chat)) => select = Some(chat),
+                    Some(TabAction::Closed(chat)) => close = chat,
+                    None => {}
                 }
             });
-            if let (Some(choice), None) = (pick, &self.running) {
-                self.current = choice;
-                self.messages.clear();
-                if choice.is_some() {
-                    self.refresh(true);
-                } else {
-                    // A new chat starts with the next question.
-                    self.read = Some(Instant::now());
+        });
+        // A running answer keeps the pane on its chat: switching and closing wait, as before.
+        if self.running.is_none() {
+            if let Some(choice) = select {
+                self.select(choice);
+            }
+            if let Some(chat) = close {
+                self.close_tab(chat);
+            }
+            if let Some(chat) = restore {
+                self.restore_chat(chat);
+            }
+        }
+        if let Some(info) = confirm {
+            self.confirm_delete = Some(info);
+        }
+        ui.add_space(4.0);
+    }
+
+    /// Shows the chosen tab (`None`: the new-chat state).
+    fn select(&mut self, choice: Option<ChatId>) {
+        if self.current == choice {
+            return;
+        }
+        self.current = choice;
+        self.messages.clear();
+        if choice.is_some() {
+            self.refresh(true);
+        } else {
+            // A new chat starts with the next question.
+            self.read = Some(Instant::now());
+        }
+    }
+
+    /// Closes a tab: the chat is archived, never deleted. Closing the current tab shows its
+    /// neighbour, or the new-chat state when none is left.
+    fn close_tab(&mut self, chat: ChatId) {
+        let Some(t) = self.transcript() else { return };
+        let Some(at) = self.open.iter().position(|&c| c == chat) else { return };
+        let open = without_chat(&self.open, chat);
+        if let Err(e) = t.set_open_chats(&open) {
+            self.error = Some(format!("{e:#}"));
+            return;
+        }
+        self.open = open;
+        if self.current == Some(chat) {
+            self.current = neighbour_after_close(&self.open, at);
+            self.messages.clear();
+        }
+        self.refresh(true);
+    }
+
+    /// Gives an archived chat its tab back and makes it current.
+    fn restore_chat(&mut self, chat: ChatId) {
+        let Some(t) = self.transcript() else { return };
+        let open = with_restored(&self.open, chat);
+        if let Err(e) = t.set_open_chats(&open) {
+            self.error = Some(format!("{e:#}"));
+            return;
+        }
+        self.open = open;
+        self.current = Some(chat);
+        self.messages.clear();
+        self.refresh(true);
+    }
+
+    /// The permanent-delete confirmation of an archived chat.
+    fn delete_dialog(&mut self, ctx: &egui::Context) {
+        let Some(info) = self.confirm_delete.clone() else { return };
+        let mut decision = None;
+        let modal = egui::Modal::new(egui::Id::new(("chat-delete", self.salt()))).show(ctx, |ui| {
+            ui.set_width(340.0);
+            ui.label(RichText::new(format!("{}  {}", icon::TRASH, t!("studio.delete_chat"))).size(15.0).strong());
+            ui.label(t!("studio.delete_chat_confirm", title = info.title));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.add(theme::danger(ui, icon::TRASH, &t!("studio.delete_chat"))).clicked() {
+                    decision = Some(true);
+                }
+                if ui.add(theme::secondary(icon::X, &t!("common.cancel"))).clicked() {
+                    decision = Some(false);
+                }
+            });
+        });
+        if modal.should_close() && decision.is_none() {
+            decision = Some(false);
+        }
+        if let Some(ok) = decision {
+            self.confirm_delete = None;
+            if ok {
+                match self.transcript().map(|t| t.delete_chat(info.id)) {
+                    Some(Ok(())) => self.refresh(true),
+                    Some(Err(e)) => self.error = Some(format!("{e:#}")),
+                    None => {}
                 }
             }
-        });
-        ui.add_space(4.0);
+        }
     }
 
     fn input_ui(&mut self, ui: &mut egui::Ui, player: Option<&Player>, services: Option<&Services>) {
@@ -553,6 +708,45 @@ impl Chat {
             });
         });
     }
+}
+
+/// The tabs to draw: the open chats in their tab order, and «Новый чат» while no chat is
+/// current (a new chat is stored only with its first question).
+fn tab_list(chats: &[ChatInfo], open: &[ChatId], current: Option<ChatId>, new_title: &str) -> Vec<Tab<Option<ChatId>>> {
+    let mut tabs: Vec<Tab<Option<ChatId>>> = open
+        .iter()
+        .filter_map(|&id| chats.iter().find(|c| c.id == id))
+        .map(|c| Tab::new(Some(c.id), c.title.clone(), current == Some(c.id)))
+        .collect();
+    if current.is_none() {
+        tabs.push(Tab::new(None, new_title, true).fixed());
+    }
+    tabs
+}
+
+/// The tabs without `chat` (closing archives it; the others keep their order).
+fn without_chat(open: &[ChatId], chat: ChatId) -> Vec<ChatId> {
+    open.iter().copied().filter(|&c| c != chat).collect()
+}
+
+/// The chat shown after the tab at `at` (its index before closing) is gone: the right
+/// neighbour that took its place, else the left one, else the new-chat state.
+fn neighbour_after_close(open: &[ChatId], at: usize) -> Option<ChatId> {
+    open.get(at).or_else(|| at.checked_sub(1).and_then(|i| open.get(i))).copied()
+}
+
+/// The tabs with `chat` restored: appended unless it is open already.
+fn with_restored(open: &[ChatId], chat: ChatId) -> Vec<ChatId> {
+    let mut out = open.to_vec();
+    if !out.contains(&chat) {
+        out.push(chat);
+    }
+    out
+}
+
+/// A chat's date for the history list.
+fn chat_date(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local).format("%d.%m.%Y").to_string()).unwrap_or_default()
 }
 
 /// A message; returns the time of a clicked citation.
@@ -669,6 +863,38 @@ mod tests {
         // Sections and the final message make one answer.
         let h = history(&[m(Author::User, "a"), m(Author::Agent, "часть 1"), m(Author::Agent, "часть 2"), m(Author::User, "c"), m(Author::Agent, "d")]);
         assert_eq!(h.iter().map(|t| t.answer.as_str()).collect::<Vec<_>>(), ["часть 1\n\nчасть 2", "d"]);
+    }
+
+    #[test]
+    fn tabs_close_to_a_neighbour_restore_and_start_a_new_chat() {
+        let info = |id: ChatId, title: &str| ChatInfo { id, title: title.into(), created_ms: 1, messages: 0 };
+        let chats = [info(5, "Пять"), info(7, "Семь"), info(9, "Девять")];
+        let open = [5, 7, 9];
+        // Closing the current tab shows its right neighbour; the last one shows its left.
+        assert_eq!(neighbour_after_close(&without_chat(&open, 7), 1), Some(9));
+        assert_eq!(neighbour_after_close(&without_chat(&open, 9), 2), Some(7));
+        assert_eq!(neighbour_after_close(&without_chat(&open, 5), 0), Some(7));
+        // The only tab closed: the new-chat state.
+        assert_eq!(neighbour_after_close(&without_chat(&[5], 5), 0), None);
+        let tabs = tab_list(&chats, &[], None, "Новый чат");
+        assert_eq!(tabs.len(), 1, "only «Новый чат»");
+        assert_eq!(tabs[0].id, None);
+        assert!(tabs[0].active && !tabs[0].closable, "there is no stored chat to close");
+
+        // «+»: the chat tabs stay, the new-chat tab is added last and is current.
+        let tabs = tab_list(&chats, &open, None, "Новый чат");
+        assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), [Some(5), Some(7), Some(9), None]);
+        assert!(tabs.last().is_some_and(|t| t.active) && tabs[..3].iter().all(|t| !t.active));
+
+        // Restoring appends the chat and makes it current.
+        let mut open = without_chat(&open, 7);
+        assert_eq!(open, [5, 9]);
+        open = with_restored(&open, 7);
+        assert_eq!(open, [5, 9, 7], "a closed tab does not keep its place");
+        assert_eq!(with_restored(&open, 7), open, "already open");
+        let tabs = tab_list(&chats, &open, Some(7), "Новый чат");
+        assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), [Some(5), Some(9), Some(7)]);
+        assert!(tabs[2].active && tabs[..2].iter().all(|t| !t.active));
     }
 
     #[test]

@@ -26,6 +26,8 @@ use std::time::Duration;
 pub struct RecordedChat {
     pub model: String,
     pub messages: usize,
+    /// The contents of the messages, in order (system first when there is one).
+    pub texts: Vec<String>,
     pub max_tokens: u32,
     pub temperature: f32,
     pub no_repeats: bool,
@@ -73,6 +75,7 @@ pub struct FakeEngine {
 struct Inner {
     chats: Mutex<Vec<RecordedChat>>,
     deltas: Mutex<Option<Vec<String>>>,
+    answers: Mutex<Vec<String>>,
     usage: Mutex<Option<Option<Usage>>>,
     kinds: Mutex<Vec<EmbedKind>>,
     vectors: Mutex<Option<Vec<Vec<f32>>>>,
@@ -98,6 +101,12 @@ impl FakeEngine {
     /// The pieces a chat answer is streamed in (default: «Привет», «, », «мир»).
     pub fn chat_deltas(&self, deltas: &[&str]) {
         *self.inner.deltas.lock().unwrap() = Some(deltas.iter().map(|d| (*d).to_string()).collect());
+    }
+
+    /// Whole answers for successive chat calls (the first call gets the first answer, and so on);
+    /// once they run out the deltas (or the default answer) are used again.
+    pub fn chat_answers(&self, answers: &[&str]) {
+        *self.inner.answers.lock().unwrap() = answers.iter().map(|a| (*a).to_string()).collect();
     }
 
     /// The usage a chat answer reports (`None`: no usage at all).
@@ -221,6 +230,7 @@ impl Engine for FakeEngine {
         self.inner.chats.lock().unwrap().push(RecordedChat {
             model: request.model.trim().to_string(),
             messages: request.messages.len(),
+            texts: request.messages.iter().map(|m| m.content.clone()).collect(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             no_repeats: request.no_repeats,
@@ -254,7 +264,11 @@ impl Engine for FakeEngine {
                 std::thread::sleep(Duration::from_millis(2));
             }
         }
-        let deltas = self.inner.deltas.lock().unwrap().clone().unwrap_or_else(|| vec!["Привет".into(), ", ".into(), "мир".into()]);
+        let next = {
+            let mut answers = self.inner.answers.lock().unwrap();
+            if answers.is_empty() { None } else { Some(answers.remove(0)) }
+        };
+        let deltas = next.map(|answer| vec![answer]).unwrap_or_else(|| self.inner.deltas.lock().unwrap().clone().unwrap_or_else(|| vec!["Привет".into(), ", ".into(), "мир".into()]));
         let mut content = String::new();
         for delta in &deltas {
             if !on_text(delta) {

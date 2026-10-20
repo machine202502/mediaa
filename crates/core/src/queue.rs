@@ -155,6 +155,17 @@ impl Queue {
         }
     }
 
+    /// Queues a task that starts from `cursor`: a stage of a resumable task (the bench re-runs
+    /// only the merge of the outline).
+    pub fn enqueue_at(&self, kind: &str, title: &str, input: &Value, cursor: &Value, priority: i64) -> anyhow::Result<TaskId> {
+        let now = now_ms();
+        self.db.execute(
+            "INSERT INTO tasks (kind, title, input, cursor, priority, status, created_ms, updated_ms) VALUES (?1, ?2, ?3, ?4, ?5, 'queued', ?6, ?6)",
+            params![kind, title, input.to_string(), cursor.to_string(), priority, now],
+        )?;
+        Ok(self.db.last_insert_rowid())
+    }
+
     pub fn get(&self, id: TaskId) -> anyhow::Result<Option<Task>> {
         Ok(self.db.query_row(&format!("SELECT {COLUMNS} FROM tasks WHERE id = ?1"), [id], task).optional()?)
     }
@@ -316,6 +327,15 @@ mod tests {
         assert_eq!(q.get(other).unwrap().unwrap().status, TaskStatus::Queued);
         assert_eq!(q.get(low).unwrap().unwrap().input, json!({"file": "a.mp3"}));
         assert_eq!(q.list().unwrap().iter().map(|t| t.id).collect::<Vec<_>>(), [low, high, other], "running first");
+    }
+
+    #[test]
+    fn a_task_can_start_from_a_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = Queue::open(dir.path()).unwrap();
+        let id = q.enqueue_at("outline", "t", &json!({"path": "/a"}), &json!({"stage": "merge", "topic": 0}), 0).unwrap();
+        let t = q.claim(&["outline"]).unwrap().unwrap();
+        assert_eq!((t.id, t.cursor), (id, json!({"stage": "merge", "topic": 0})));
     }
 
     #[test]

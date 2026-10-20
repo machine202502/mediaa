@@ -170,6 +170,18 @@ impl Transcript {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Chunks in order with their embeddings (`None` until embedded).
+    pub fn chunks_with_embeddings(&self) -> anyhow::Result<Vec<(Chunk, Option<Vec<f32>>)>> {
+        let mut q = self.db.prepare("SELECT start, end_, speakers, text, embedding FROM chunks ORDER BY id")?;
+        let rows = q.query_map([], |r| {
+            let speakers: String = r.get(2)?;
+            let embedding: Option<Vec<u8>> = r.get(4)?;
+            let chunk = Chunk { start: r.get(0)?, end: r.get(1)?, speakers: serde_json::from_str(&speakers).unwrap_or_default(), text: r.get(3)? };
+            Ok((chunk, embedding.map(|b| floats(&b))))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     pub fn set_embedding(&self, id: i64, v: &[f32]) -> anyhow::Result<()> {
         self.db.execute("UPDATE chunks SET embedding = ?1 WHERE id = ?2", params![blob(v), id])?;
         Ok(())
@@ -280,6 +292,7 @@ mod tests {
         let stored = t.chunks().unwrap();
         assert_eq!(stored.len(), 3);
         assert!(stored.iter().all(|(_, _, embedded)| !embedded));
+        assert!(t.chunks_with_embeddings().unwrap().iter().all(|(_, e)| e.is_none()));
         // Keywords find word forms.
         let found = t.keyword_search("отчетов", 10).unwrap();
         assert_eq!(found.len(), 2);
@@ -290,6 +303,7 @@ mod tests {
             t.set_embedding(*id, &v).unwrap();
         }
         assert_eq!(t.vector_search(&[0.0, 1.0], 1).unwrap(), vec![stored[1].0]);
+        assert_eq!(t.chunks_with_embeddings().unwrap().iter().map(|(_, e)| e.clone().unwrap()).collect::<Vec<_>>(), [vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 0.0]]);
         // Hybrid: a keyword miss is still found by meaning.
         let hits = t.search("загородный дом", Some(&[0.0, 1.0]), 3).unwrap();
         assert_eq!(hits[0].chunk.text, cs[1].text);

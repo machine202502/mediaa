@@ -78,14 +78,54 @@ mod tests {
     #[test]
     fn outline() {
         insta::assert_snapshot!("outline_system", render("outline/system.j2", ()));
-        let tail = "\n\nWrite a JSON object:\ntitle — 3 to 8 words naming what this part is about;\nsummary — 1 to 3 sentences;\ndecisions — what was decided (empty when nothing);\nactions — who will do what, with names when known (empty when nothing);\nquestions — questions left open (empty when none);\ntopics — 1 to 5 short topics.";
-        let part = |previous: Option<&str>| render("outline/part.j2", context! { number => 2, parts => 3, start => "20 мин", end => "40 мин", language => "Russian", previous, text => "[20:00] (Анна) Сроки." });
-        // Exactly what the code wrote before the move to templates.
-        assert_eq!(part(None), format!("Part 2 of 3 of the recording (20 мин – 40 мин).\nWrite everything in Russian.\n\nTranscript of this part:\n[20:00] (Анна) Сроки.{tail}"));
+        let tail = "\n\nWrite a JSON object:\ntitle — 3 to 8 words naming the subject, specific to this conversation (not \"Discussion\" or \"Questions\");\nsummary — 1 to 3 sentences: what is discussed and what came of it;\ndecisions — what was decided (empty when nothing was decided);\nactions — who will do what, with names when they are said (empty when nothing);\nquestions — questions left open (empty when none);\ntopics — 1 to 5 short keywords;\nquotes — 0 to 3 key lines, copied word for word from the transcript above, each with the time of its line (empty when nothing stands out).";
+        let part = |previous: Option<&str>, number, parts| {
+            render("outline/part.j2", context! { number, parts, start => "20 мин", end => "40 мин", language => "Russian", previous, text => "[20:00] Анна: Сроки." })
+        };
+        let lines = "one line per reply, \"[time] speaker: text\":\n[20:00] Анна: Сроки.";
         assert_eq!(
-            part(Some("бюджет")),
-            format!("Part 2 of 3 of the recording (20 мин – 40 мин).\nWrite everything in Russian.\nThe previous part was about: бюджет\n\nTranscript of this part:\n[20:00] (Анна) Сроки.{tail}")
+            part(None, 2, 3),
+            format!("Part 2 of 3 of one topic of the recording (20 мин – 40 мин).\nWrite everything in Russian.\n\nTranscript (this part), {lines}{tail}")
         );
+        assert_eq!(
+            part(Some("бюджет"), 2, 3),
+            format!("Part 2 of 3 of one topic of the recording (20 мин – 40 мин).\nWrite everything in Russian.\nThe previous part of this topic was about: бюджет\nDescribe what this part adds; do not repeat the previous part.\n\nTranscript (this part), {lines}{tail}")
+        );
+        // The first part of a topic sees the previous topic.
+        assert_eq!(
+            part(Some("бюджет"), 1, 3),
+            format!("Part 1 of 3 of one topic of the recording (20 мин – 40 мин).\nWrite everything in Russian.\nThe previous topic of the recording was: бюджет\nName this topic by what is new in it; do not reuse that title.\n\nTranscript (this part), {lines}{tail}")
+        );
+        // A topic that fits one window has no part number and is read as a whole.
+        assert_eq!(
+            part(None, 1, 1),
+            format!("One topic of the recording (20 мин – 40 мин).\nWrite everything in Russian.\n\nTranscript (the whole topic), {lines}{tail}")
+        );
+
+        let parts = [
+            context! { number => 1, title => "Отчёт", summary => "Сроки.", decisions => ["Сдать в пятницу"], actions => Vec::<String>::new(), questions => Vec::<String>::new(), topics => ["сроки", "отчёт"] },
+            context! { number => 2, title => "Бюджет", summary => "Цифры.", decisions => Vec::<String>::new(), actions => ["Олег проверит"], questions => ["Когда созвон?"], topics => Vec::<String>::new() },
+        ];
+        insta::assert_snapshot!("outline_reduce_system", render("outline/reduce_system.j2", ()));
+        let reduce = render("outline/reduce.j2", context! { language => "Russian", previous => Option::<String>::None, parts });
+        insta::assert_snapshot!("outline_reduce", reduce);
+        assert!(reduce.contains("[1] Отчёт — Сроки.\nDecisions: Сдать в пятницу\n") && reduce.contains("[2] Бюджет — Цифры.\nActions: Олег проверит\n"), "{reduce}");
+        assert!(!reduce.contains("Part 2"), "empty lists leave no line");
+        assert!(!reduce.contains("previous topic"), "the first topic has none: {reduce}");
+        // After a merge the previous topic is named, so the new title does not repeat it.
+        let after = render("outline/reduce.j2", context! { language => "Russian", previous => "Смета", parts });
+        assert!(after.contains("The previous topic of the recording was: Смета\nName this topic by what is new in it; do not reuse that title.\n"), "{after}");
+
+        insta::assert_snapshot!("outline_pair_system", render("outline/pair_system.j2", ()));
+        let first = context! { start => "0:00", end => "10:00", title => "Отчёт", summary => "Сроки.", decisions => ["Сдать в пятницу"], actions => Vec::<String>::new(), questions => Vec::<String>::new(), topics => ["сроки", "отчёт"] };
+        let second = context! { start => "10:00", end => "20:00", title => "Бюджет", summary => "Цифры.", decisions => Vec::<String>::new(), actions => ["Олег проверит"], questions => ["Когда созвон?"], topics => Vec::<String>::new() };
+        let pair = render("outline/pair.j2", context! { first, second });
+        insta::assert_snapshot!("outline_pair", pair);
+        assert!(pair.starts_with(
+            "Two neighbouring chapters of the recording.\n\nChapter A (0:00 – 10:00):\nTitle: Отчёт\nSummary: Сроки.\nDecisions: Сдать в пятницу\nTopics: сроки; отчёт\n\n\
+             Chapter B (10:00 – 20:00):\nTitle: Бюджет\nSummary: Цифры.\nActions: Олег проверит\nQuestions: Когда созвон?\n\nIs chapter B the same subject as chapter A, continued?"
+        ), "{pair}");
+        assert!(pair.ends_with("Write a JSON object:\nsame — true or false, as above."), "{pair}");
     }
 
     fn tools() -> Vec<minijinja::Value> {

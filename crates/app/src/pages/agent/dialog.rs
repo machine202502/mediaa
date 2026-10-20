@@ -4,6 +4,7 @@
 //! runs: its progress and the text so far.
 
 use super::studio::{panel, StudioAction};
+use super::topics;
 use crate::player::Player;
 use crate::theme;
 use eframe::egui::{self, text::LayoutJob, Color32, FontId, Rect, RichText, Sense, TextFormat};
@@ -92,6 +93,8 @@ pub struct Dialog {
     naming: Option<(u32, String)>,
     /// The reply being played (to keep it in view).
     playing: Option<usize>,
+    /// The reply to bring into view (a click on a topic).
+    scroll_to: Option<usize>,
     /// Chunks indexed for search.
     indexed: usize,
     search: Search,
@@ -113,6 +116,7 @@ impl Dialog {
             read: None,
             naming: None,
             playing: None,
+            scroll_to: None,
             indexed: 0,
             search: Search::default(),
         }
@@ -154,6 +158,11 @@ impl Dialog {
         }
     }
 
+    /// The topics of the recording (read with the transcript).
+    pub fn chapters(&self) -> &[Chapter] {
+        &self.chapters
+    }
+
     fn speaker_name(&self, speaker: u32) -> String {
         self.names.get(&speaker).cloned().unwrap_or_else(|| t!("studio.speaker", n = speaker + 1).into())
     }
@@ -184,6 +193,17 @@ impl Dialog {
                     action = action.take().or(self.empty(ui, p));
                 }
                 return;
+            }
+            // The topics stay at the top of the pane while the replies scroll below.
+            if !self.chapters.is_empty() {
+                // A topic or one of its parts was clicked: seek there and show its first reply.
+                if let Some(start) = topics::block(ui, &self.chapters, player.position(), player, body.height() * 0.4, p) {
+                    player.seek(start);
+                    self.scroll_to = self.replies.iter().position(|r| r.end > start + 0.001).or(Some(0));
+                    // The reply to scroll to is in the dialog, not in the search results.
+                    self.search.hits = None;
+                }
+                ui.add_space(6.0);
             }
             if self.search_ui(ui, player, services, p) {
                 return;
@@ -337,16 +357,9 @@ impl Dialog {
         self.playing = playing;
         let mut seek = None;
         let mut name_click = None;
+        let scroll_to = self.scroll_to.take();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            let mut chapter = 0;
             for (i, reply) in self.replies.iter().enumerate() {
-                // Chapters begin before their first reply.
-                while let Some(c) = self.chapters.get(chapter).filter(|c| c.start <= reply.start + 0.01) {
-                    if let Some(t) = chapter_ui(ui, chapter, c, p) {
-                        seek = Some(t);
-                    }
-                    chapter += 1;
-                }
                 let current = playing == Some(i);
                 let top = ui.horizontal(|ui| {
                     if let Some(s) = reply.speaker {
@@ -361,7 +374,7 @@ impl Dialog {
                         seek = Some(reply.start);
                     }
                 });
-                if current && follow {
+                if (current && follow) || scroll_to == Some(i) {
                     top.response.scroll_to_me(Some(egui::Align::Center));
                 }
                 if let Some(t) = reply_text(ui, reply, if current { Some(now) } else { None }, p) {
@@ -414,42 +427,6 @@ impl Dialog {
             self.naming = None;
         }
     }
-}
-
-/// A chapter heading: its title and time (a click seeks there) and its digest folded under it.
-fn chapter_ui(ui: &mut egui::Ui, idx: usize, c: &Chapter, p: theme::Palette) -> Option<f64> {
-    let mut seek = None;
-    ui.add_space(if idx == 0 { 0.0 } else { 6.0 });
-    theme::card(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.horizontal(|ui| {
-            let time = ui.add(egui::Button::new(RichText::new(human_duration(c.start)).font(FontId::monospace(11.5)).color(p.accent)).frame(false));
-            if time.on_hover_text(t!("studio.go_there")).clicked() {
-                seek = Some(c.start);
-            }
-            ui.add(egui::Label::new(RichText::new(&c.digest.title).strong().size(14.5)).wrap());
-        });
-        let d = &c.digest;
-        egui::CollapsingHeader::new(RichText::new(t!("studio.digest")).size(12.0).color(p.text_weak)).id_salt(("chapter", idx)).default_open(false).show(ui, |ui| {
-            ui.add(egui::Label::new(RichText::new(&d.summary).size(13.0)).wrap());
-            for (label, items) in [(t!("studio.decisions"), &d.decisions), (t!("studio.actions"), &d.actions), (t!("studio.questions"), &d.questions)] {
-                if items.is_empty() {
-                    continue;
-                }
-                ui.add_space(4.0);
-                ui.label(RichText::new(label).size(12.0).strong().color(p.text_weak));
-                for item in items {
-                    ui.add(egui::Label::new(RichText::new(format!("•  {item}")).size(13.0)).wrap());
-                }
-            }
-            if !d.topics.is_empty() {
-                ui.add_space(4.0);
-                theme::hint(ui, d.topics.join(" · "));
-            }
-        });
-    });
-    ui.add_space(6.0);
-    seek
 }
 
 /// The words of a reply as one wrapped text, the one at `now` highlighted; returns the time of

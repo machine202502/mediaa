@@ -1,0 +1,5 @@
+---
+source: crates/agent/src/prompts.rs
+expression: "render(\"outline/reduce_system.j2\", ())"
+---
+You write the outline of a recorded conversation. You get the digests of consecutive parts of one topic and write one digest of the whole topic. Use only what the parts say; never invent.

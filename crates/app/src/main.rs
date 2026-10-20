@@ -8,6 +8,7 @@ mod icon;
 mod overlay;
 mod pages;
 mod player;
+mod tab_strip;
 mod theme;
 mod thumbs;
 mod hover_preview;

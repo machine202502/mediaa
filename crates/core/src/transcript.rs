@@ -198,6 +198,11 @@ impl Transcript {
         Ok(())
     }
 
+    pub fn remove_meta(&self, key: &str) -> anyhow::Result<()> {
+        self.db.execute("DELETE FROM meta WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
     /// Replaces everything recognised from `from` seconds on with `phrases` (a resumed
     /// transcription repeats the part after its last checkpoint), in one transaction.
     pub fn put_phrases(&mut self, from: f64, phrases: &[Phrase]) -> anyhow::Result<()> {
@@ -335,6 +340,8 @@ mod tests {
         assert_eq!(t.phrases().unwrap(), phrases);
         t.set_meta("model", "giga").unwrap();
         assert_eq!(t.meta("model").unwrap().as_deref(), Some("giga"));
+        t.remove_meta("model").unwrap();
+        assert!(t.meta("model").unwrap().is_none());
 
         let turns = [Turn { start: 0.0, end: 1.6, speaker: 0 }, Turn { start: 1.8, end: 10.0, speaker: 1 }];
         t.set_replies(&replies(&phrases, &turns)).unwrap();

@@ -7,6 +7,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type ChatId = i64;
 
+/// The `meta` key with the chats shown as tabs: a JSON array of ids, in tab order.
+const OPEN_CHATS: &str = "chat-tabs";
+
 fn now_ms() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
@@ -19,6 +22,8 @@ fn memory_key(chat: ChatId) -> String {
 pub struct ChatInfo {
     pub id: ChatId,
     pub title: String,
+    /// When it was started, Unix milliseconds.
+    pub created_ms: i64,
     pub messages: usize,
 }
 
@@ -44,9 +49,36 @@ impl Transcript {
 
     /// Chats, the newest first.
     pub fn chats(&self) -> anyhow::Result<Vec<ChatInfo>> {
-        let mut q = self.db.prepare("SELECT c.id, c.title, (SELECT COUNT(*) FROM messages m WHERE m.chat = c.id) FROM chats c ORDER BY c.id DESC")?;
-        let rows = q.query_map([], |r| Ok(ChatInfo { id: r.get(0)?, title: r.get(1)?, messages: r.get::<_, i64>(2)? as usize }))?;
+        let mut q = self.db.prepare(
+            "SELECT c.id, c.title, c.created_ms, (SELECT COUNT(*) FROM messages m WHERE m.chat = c.id) FROM chats c ORDER BY c.id DESC",
+        )?;
+        let rows = q.query_map([], |r| {
+            Ok(ChatInfo { id: r.get(0)?, title: r.get(1)?, created_ms: r.get(2)?, messages: r.get::<_, i64>(3)? as usize })
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The chats shown as tabs, in tab order. Without the stored list every chat is open,
+    /// newest first (as they were before tabs).
+    pub fn open_chats(&self) -> anyhow::Result<Vec<ChatId>> {
+        if let Some(json) = self.meta(OPEN_CHATS)? {
+            match serde_json::from_str::<Vec<ChatId>>(&json) {
+                Ok(ids) => return Ok(ids),
+                Err(e) => log::warn!("chat-tabs: {e}; treating every chat as open"),
+            }
+        }
+        Ok(self.chats()?.into_iter().map(|c| c.id).collect())
+    }
+
+    /// Stores the tabs and their order.
+    pub fn set_open_chats(&self, chats: &[ChatId]) -> anyhow::Result<()> {
+        self.set_meta(OPEN_CHATS, &serde_json::to_string(chats)?)
+    }
+
+    /// Chats that have no tab (closed/archived), the newest first.
+    pub fn archived_chats(&self) -> anyhow::Result<Vec<ChatInfo>> {
+        let open = self.open_chats()?;
+        Ok(self.chats()?.into_iter().filter(|c| !open.contains(&c.id)).collect())
     }
 
     pub fn chat_title(&self, chat: ChatId) -> anyhow::Result<Option<String>> {
@@ -58,10 +90,15 @@ impl Transcript {
         Ok(())
     }
 
-    /// Removes a chat with its messages and memory.
+    /// Removes a chat with its messages, memory and tab.
     pub fn delete_chat(&self, chat: ChatId) -> anyhow::Result<()> {
         self.db.execute("DELETE FROM chats WHERE id = ?1", [chat])?;
         self.db.execute("DELETE FROM meta WHERE key = ?1", [memory_key(chat)])?;
+        let open = self.open_chats()?;
+        if open.contains(&chat) {
+            let left: Vec<ChatId> = open.into_iter().filter(|&c| c != chat).collect();
+            self.set_open_chats(&left)?;
+        }
         Ok(())
     }
 
@@ -116,6 +153,7 @@ mod tests {
         t.add_message(a, Author::Agent, "В пятницу [0:10].", &json!([{"tool": "search"}])).unwrap();
         let chats = t.chats().unwrap();
         assert_eq!(chats.iter().map(|c| (c.title.as_str(), c.messages)).collect::<Vec<_>>(), [("Бюджет", 0), ("Сроки", 2)], "newest first");
+        assert!(chats.iter().all(|c| c.created_ms > 0));
         let m = t.messages(a).unwrap();
         assert_eq!((m[0].author, m[1].author), (Author::User, Author::Agent));
         assert_eq!(m[1].details[0]["tool"], "search");
@@ -129,5 +167,40 @@ mod tests {
         assert_eq!(t.chat_memory(a).unwrap(), None, "and its memory");
         assert_eq!(t.chats().unwrap().len(), 1);
         assert_eq!(t.chat_title(a).unwrap(), None);
+    }
+
+    #[test]
+    fn tabs_keep_chats_open_or_archived() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = Transcript::open(dir.path(), "f").unwrap();
+        let a = t.create_chat("А").unwrap();
+        let b = t.create_chat("Б").unwrap();
+        let c = t.create_chat("В").unwrap();
+        // Without the key every chat is open, newest first, and none is archived.
+        assert_eq!(t.open_chats().unwrap(), [c, b, a]);
+        assert!(t.archived_chats().unwrap().is_empty());
+
+        // Tab order is kept; chats left out are archived, newest first.
+        t.set_open_chats(&[b, a]).unwrap();
+        assert_eq!(t.open_chats().unwrap(), [b, a]);
+        assert_eq!(t.archived_chats().unwrap().iter().map(|x| x.id).collect::<Vec<_>>(), [c]);
+
+        // A restored chat becomes a tab again.
+        t.set_open_chats(&[b, a, c]).unwrap();
+        assert!(t.archived_chats().unwrap().is_empty());
+
+        // Deleting an open chat drops its tab and its memory; the others keep their order.
+        t.set_chat_memory(a, r#"{"facts":["x"]}"#).unwrap();
+        t.delete_chat(a).unwrap();
+        assert_eq!(t.open_chats().unwrap(), [b, c]);
+        assert_eq!(t.chat_memory(a).unwrap(), None);
+        assert!(t.chats().unwrap().iter().all(|x| x.id != a));
+
+        // Deleting an archived chat leaves the open tabs as they are.
+        t.set_open_chats(&[b]).unwrap();
+        t.delete_chat(c).unwrap();
+        assert_eq!(t.open_chats().unwrap(), [b]);
+        assert!(t.archived_chats().unwrap().is_empty());
+        assert_eq!(t.chats().unwrap().iter().map(|x| x.id).collect::<Vec<_>>(), [b]);
     }
 }

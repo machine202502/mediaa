@@ -819,14 +819,18 @@ mod tests {
 
     /// A bench over a real recording, with models in `MEDIAA_TEST_MODELS`: `MEDIAA_BENCH_LIB`
     /// (a library with the file transcribed and indexed), `MEDIAA_BENCH_FILE`, questions in
-    /// `MEDIAA_BENCH_QUESTIONS` (separated by `|`), a Tavily key in `MEDIAA_BENCH_TAVILY` and a
-    /// proxy in `MEDIAA_BENCH_PROXY` for the web. Prints every answer with its steps and time;
-    /// fails on wrong citations.
+    /// `MEDIAA_BENCH_QUESTIONS` (separated by `|`; none are asked when it is unset), a Tavily
+    /// key in `MEDIAA_BENCH_TAVILY` and a proxy in `MEDIAA_BENCH_PROXY` for the web.
+    /// `MEDIAA_BENCH_OUTLINE` rebuilds the outline first; `MEDIAA_BENCH_MERGE` runs only its
+    /// merge stage over the chapters the digest stage left in `outline-topics`. `RUST_LOG=info`
+    /// shows the merge decisions. Prints every answer with its steps and time; fails on wrong
+    /// citations.
     #[test]
     #[ignore]
     fn bench_on_a_recording() {
         use mediaa_core::agent::{AgentSettings, Budget};
         use mediaa_core::transcript::{self, Transcript};
+        let _ = env_logger::Builder::from_env(env_logger::Env::default()).try_init();
         let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
         let ai = mediaa_core::catalogs::ai_dir(std::path::Path::new(&var("MEDIAA_BENCH_LIB")));
         let file = std::path::PathBuf::from(var("MEDIAA_BENCH_FILE"));
@@ -850,6 +854,27 @@ mod tests {
             let handlers: Vec<Box<dyn crate::worker::TaskHandler>> = vec![Box::new(crate::outline::Outline::new(&ai, engine.clone(), slots.clone(), std::sync::Arc::new(move || s.clone())))];
             assert!(crate::worker::run_next(&q, &handlers, &AtomicBool::new(false)).unwrap());
             eprintln!("outline rebuilt in {:.0} s", started.elapsed().as_secs_f32());
+        } else if std::env::var_os("MEDIAA_BENCH_MERGE").is_some() {
+            // Only the merge: the chapters of the digest stage are restored from meta, so the
+            // costly digests are not asked again.
+            let t = Transcript::open(&ai, &id).unwrap();
+            let key = crate::outline::TOPICS_KEY;
+            let json = t.meta(key).unwrap().unwrap_or_else(|| panic!("no {key} in the transcript: run with MEDIAA_BENCH_OUTLINE first"));
+            let topics: Vec<mediaa_core::outline::Chapter> = serde_json::from_str(&json).unwrap();
+            crate::outline::write_chapters(&t, &topics).unwrap();
+            for key in [crate::outline::MERGE_KEY, crate::outline::MERGED_KEY, crate::outline::FINAL_KEY] {
+                t.remove_meta(key).unwrap();
+            }
+            drop(t);
+            let started = std::time::Instant::now();
+            let q = mediaa_core::queue::Queue::open(&ai).unwrap();
+            let input = serde_json::to_value(crate::outline::Input { path: file.clone() }).unwrap();
+            let title = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            q.enqueue_at(crate::outline::KIND, &title, &input, &json!({ "stage": "merge", "topic": 0 }), 0).unwrap();
+            let s = settings.clone();
+            let handlers: Vec<Box<dyn crate::worker::TaskHandler>> = vec![Box::new(crate::outline::Outline::new(&ai, engine.clone(), slots.clone(), std::sync::Arc::new(move || s.clone())))];
+            assert!(crate::worker::run_next(&q, &handlers, &AtomicBool::new(false)).unwrap());
+            eprintln!("merge rebuilt in {:.0} s", started.elapsed().as_secs_f32());
         }
         let t = Transcript::open(&ai, &id).unwrap();
         for c in t.chapters().unwrap() {
@@ -894,7 +919,10 @@ mod tests {
         };
         let mut history: Vec<Turn> = Vec::new();
         let mut memory = Memory::default();
-        for q in var("MEDIAA_BENCH_QUESTIONS").split('|') {
+        let questions: Vec<String> = std::env::var("MEDIAA_BENCH_QUESTIONS")
+            .map(|s| s.split('|').map(|q| q.trim().to_string()).filter(|q| !q.is_empty()).collect())
+            .unwrap_or_default();
+        for q in questions {
             let started = std::time::Instant::now();
             let mut print = |e: &Event| match e {
                 Event::Step(s) => eprintln!("    · {:?} {} {} → {}", s.status, s.tool, s.args, s.result.chars().take(if s.tool == "scan" { 3000 } else { 160 }).collect::<String>().replace('\n', " / ")),

@@ -9,6 +9,7 @@ pub mod models;
 pub mod providers;
 pub mod queue;
 pub mod studio;
+pub mod topics;
 
 use eframe::egui;
 use mediaa_agent::index::Index;
