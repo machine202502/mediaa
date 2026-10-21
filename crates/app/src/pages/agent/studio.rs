@@ -26,6 +26,24 @@ const MIN_PANE: f32 = 150.0;
 /// Below this width the panes stack (video, dialog, chat).
 const NARROW: f32 = 980.0;
 const SASH: f32 = 8.0;
+/// Gap between the boxes of neighbouring controls in the transport row. Every box keeps
+/// [`ROW_PAD`] of inert space around its visible body (a glyph, a slider track, a text), so
+/// the visible gap between any two neighbours is `ROW_GAP + 2 * ROW_PAD` — one spacing for
+/// the whole row.
+const ROW_GAP: f32 = 8.0;
+/// Inert space on each side of a control's visible body; equals the seek bar's track inset.
+const ROW_PAD: f32 = topics::TRACK_INSET;
+/// Height of the transport row (the icon buttons; the sliders are 24 px, centred in it).
+const ROW_H: f32 = theme::ICON_BUTTON;
+/// Visible width of the row's icons.
+const ROW_ICON: f32 = 14.0;
+/// Visible track widths of the volume and speed sliders.
+const VOLUME_TRACK: f32 = 96.0;
+const SPEED_TRACK: f32 = 84.0;
+/// Largest radius of a slider's knob. The knob's centre keeps this distance from the track's
+/// ends, so the thumb never sticks out of its box into a gap — the slider's visible body is
+/// always its track, for every value and while hovered.
+const KNOB: f32 = topics::KNOB;
 
 /// Layout choices shared by all studios (kept across restarts).
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -100,7 +118,7 @@ impl Studio {
 
         let full = ui.available_rect_before_wrap();
         let top = Rect::from_min_size(full.min, egui::vec2(full.width(), 44.0));
-        let bar = Rect::from_min_max(egui::pos2(full.min.x, full.max.y - 52.0), full.max);
+        let bar = Rect::from_min_max(egui::pos2(full.min.x, full.max.y - 60.0), full.max);
         let stage = Rect::from_min_max(egui::pos2(full.min.x + 6.0, top.max.y), egui::pos2(full.max.x - 6.0, bar.min.y - 2.0));
 
         // Title bar: tools · title · (room for more tools).
@@ -215,13 +233,15 @@ impl Studio {
         }
     }
 
-    /// Play · time · position (fills the rest) · volume · speed · mute · hide video · video only.
+    /// Play · time · seek · mute · volume · gauge · speed · «1×» · hide video · video only;
+    /// the current topic runs under the seek bar. All controls of the row are one gap apart.
     fn transport(&mut self, ui: &mut egui::Ui, rect: Rect, layout: &mut Layout, p: theme::Palette) {
         // The topics of the recording cut the seek bar into segments (loaded by the dialog).
         let chapters = self.dialog.chapters();
         ui.painter().hline(rect.x_range(), rect.min.y, Stroke::new(1.0, p.border));
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 8.0))), |ui| {
-            ui.horizontal_centered(|ui| {
+            let width = ui.available_width();
+            let row = ui.allocate_ui_with_layout(egui::vec2(width, ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
                 let player = &mut self.player;
                 let (ic, tip) = if player.is_paused() { (icon::PLAY, t!("viewer.play")) } else { (icon::PAUSE, t!("viewer.pause")) };
                 if theme::icon_button(ui, ic, &tip).clicked() {
@@ -231,64 +251,160 @@ impl Studio {
                 let shown = if duration > 0.0 && pos >= duration - 0.05 { duration } else { pos.floor() };
                 ui.label(RichText::new(format!("{} / {}", human_duration(shown), human_duration(duration))).font(FontId::monospace(12.0)));
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.video {
-                        let (ic, tip) = if layout.cinema { (icon::CORNERS_IN, t!("studio.cinema_off")) } else { (icon::CORNERS_OUT, t!("studio.cinema")) };
-                        if toggle_button(ui, ic, &tip, layout.cinema, p).clicked() {
-                            layout.cinema = !layout.cinema;
-                            if layout.cinema {
-                                layout.show_video = true;
-                            }
-                        }
-                        let (ic, tip) = if layout.show_video { (icon::VIDEO_CAMERA, t!("studio.hide_video")) } else { (icon::VIDEO_CAMERA_SLASH, t!("studio.show_video")) };
-                        if toggle_button(ui, ic, &tip, !layout.show_video, p).clicked() {
-                            layout.show_video = !layout.show_video;
-                            if !layout.show_video {
-                                layout.cinema = false;
-                            }
-                        }
-                    }
-                    let player = &mut self.player;
-                    if player.has_sound() {
-                        let muted = player.volume() == 0.0;
-                        let (ic, tip) = if muted { (icon::SPEAKER_SLASH, t!("studio.unmute")) } else { (icon::SPEAKER_HIGH, t!("viewer.mute")) };
-                        if toggle_button(ui, ic, &tip, muted, p).clicked() {
-                            player.set_volume(if muted { 1.0 } else { 0.0 });
+                // The row is laid out from the right: every control gets a box of its visible
+                // body plus `ROW_PAD` on both sides, the boxes are `ROW_GAP` apart, and the seek
+                // bar takes what is left. Every body has a fixed width (the speed label is
+                // monospaced and two-decimal, so all its variants are equally wide), so no value
+                // of any control can move the row.
+                let label = speed_label(player.speed());
+                let boxes = row_boxes(ui.available_rect_before_wrap(), self.video, player.has_sound(), speed_label_width(ui));
+
+                if let Some(b) = boxes.cinema {
+                    let (ic, tip) = if layout.cinema { (icon::CORNERS_IN, t!("studio.cinema_off")) } else { (icon::CORNERS_OUT, t!("studio.cinema")) };
+                    if at(ui, b, ROW_H, |ui| toggle_button(ui, ic, &tip, layout.cinema, p)).clicked() {
+                        layout.cinema = !layout.cinema;
+                        if layout.cinema {
+                            layout.show_video = true;
                         }
                     }
-                    // Speed: a stepped slider with its value.
-                    let idx = SPEEDS.iter().position(|&s| s == player.speed()).unwrap_or(1);
-                    ui.label(RichText::new(format!("{}×", SPEEDS[idx])).font(FontId::monospace(12.0)));
-                    let (resp, v) = slider(ui, 84.0, idx as f32 / (SPEEDS.len() - 1) as f32, "studio-speed", p);
-                    resp.on_hover_text(t!("studio.speed"));
+                }
+                if let Some(b) = boxes.camera {
+                    let (ic, tip) = if layout.show_video { (icon::VIDEO_CAMERA, t!("studio.hide_video")) } else { (icon::VIDEO_CAMERA_SLASH, t!("studio.show_video")) };
+                    if at(ui, b, ROW_H, |ui| toggle_button(ui, ic, &tip, !layout.show_video, p)).clicked() {
+                        layout.show_video = !layout.show_video;
+                        if !layout.show_video {
+                            layout.cinema = false;
+                        }
+                    }
+                }
+                ui.painter().text(boxes.label.center(), egui::Align2::CENTER_CENTER, label, FontId::monospace(12.0), p.text);
+                let idx = SPEEDS.iter().position(|&s| s == player.speed()).unwrap_or(1);
+                let (resp, v) = at(ui, boxes.speed, 24.0, |ui| slider(ui, SPEED_TRACK, idx as f32 / (SPEEDS.len() - 1) as f32, "studio-speed", p));
+                resp.on_hover_text(t!("studio.speed"));
+                if let Some(v) = v {
+                    player.set_speed(SPEEDS[(v * (SPEEDS.len() - 1) as f32).round() as usize]);
+                }
+                ui.painter().text(boxes.gauge.center(), egui::Align2::CENTER_CENTER, icon::GAUGE, FontId::proportional(14.0), p.text_weak);
+                ui.interact(boxes.gauge, ui.id().with("studio-speed-gauge"), Sense::hover()).on_hover_text(t!("studio.speed"));
+                if let Some(b) = boxes.volume {
+                    let (resp, v) = at(ui, b, 24.0, |ui| slider(ui, VOLUME_TRACK, player.volume(), "studio-volume", p));
+                    resp.on_hover_text(t!("studio.volume"));
                     if let Some(v) = v {
-                        player.set_speed(SPEEDS[(v * (SPEEDS.len() - 1) as f32).round() as usize]);
+                        player.set_volume(v);
                     }
-                    if player.has_sound() {
-                        let (resp, v) = slider(ui, 96.0, player.volume(), "studio-volume", p);
-                        resp.on_hover_text(t!("studio.volume"));
-                        if let Some(v) = v {
-                            player.set_volume(v);
-                        }
+                }
+                if let Some(b) = boxes.speaker {
+                    let muted = player.volume() == 0.0;
+                    let (ic, tip) = if muted { (icon::SPEAKER_SLASH, t!("studio.unmute")) } else { (icon::SPEAKER_HIGH, t!("viewer.mute")) };
+                    if at(ui, b, ROW_H, |ui| toggle_button(ui, ic, &tip, muted, p)).clicked() {
+                        player.set_volume(if muted { 1.0 } else { 0.0 });
                     }
-                    // Position: whatever width is left, in the recording's topics.
-                    let frac = if duration > 0.0 { (pos / duration) as f32 } else { 0.0 };
-                    let (resp, v) = topics::seek_bar(ui, ui.available_width(), frac, duration, chapters, "studio-position", p);
-                    if let Some(f) = v {
-                        let t = f64::from(f) * duration;
-                        if resp.dragged() {
-                            player.scrub(t);
-                        } else {
-                            player.seek(t);
-                        }
+                }
+                // Position: whatever width is left, in the recording's topics.
+                let frac = if duration > 0.0 { (pos / duration) as f32 } else { 0.0 };
+                let seek = boxes.seek;
+                let (resp, v) = at(ui, seek, 24.0, |ui| topics::seek_bar(ui, seek.width(), frac, duration, chapters, "studio-position", p));
+                if let Some(f) = v {
+                    let t = f64::from(f) * duration;
+                    if resp.dragged() {
+                        player.scrub(t);
+                    } else {
+                        player.seek(t);
                     }
-                    if resp.drag_stopped() {
-                        player.end_scrub();
-                    }
-                });
+                }
+                if resp.drag_stopped() {
+                    player.end_scrub();
+                }
+                resp.rect
             });
+            // The current topic under the bar, left-aligned with it; a blank line without topics.
+            if !chapters.is_empty() {
+                let seek = row.inner;
+                let top = row.response.rect.bottom() + 2.0;
+                let left = seek.left() + topics::TRACK_INSET;
+                let line = Rect::from_min_max(egui::pos2(left, top), egui::pos2(seek.right(), top + 16.0));
+                let text = topics::current_label(chapters, self.player.position());
+                // A child UI at the bar's left edge keeps the line left-aligned with it (and the
+                // label truncates at the bar's right edge).
+                ui.scope_builder(egui::UiBuilder::new().max_rect(line), |ui| {
+                    ui.add(egui::Label::new(RichText::new(text).size(11.0).color(p.text_weak)).truncate());
+                });
+            }
         });
     }
+}
+
+/// Lays the transport controls out from the right: every `take` returns the next control's
+/// box, [`ROW_GAP`] left of the previous one, and [`Self::seek`] gives the seek bar what is
+/// left. Pure geometry, so the single gap is testable.
+struct Row {
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
+impl Row {
+    fn new(area: Rect) -> Self {
+        Self { right: area.right(), top: area.top(), bottom: area.bottom() }
+    }
+
+    fn take(&mut self, body: f32) -> Rect {
+        let rect = Rect::from_min_max(egui::pos2(self.right - body - 2.0 * ROW_PAD, self.top), egui::pos2(self.right, self.bottom));
+        self.right = rect.left() - ROW_GAP;
+        rect
+    }
+
+    fn seek(&self, area: Rect) -> Rect {
+        Rect::from_min_max(area.min, egui::pos2(self.right, area.bottom()))
+    }
+}
+
+/// The transport row's boxes: `None` for the controls of a file with no video or no sound —
+/// they take no room at all, and the seek bar stretches instead.
+struct Boxes {
+    cinema: Option<Rect>,
+    camera: Option<Rect>,
+    label: Rect,
+    speed: Rect,
+    gauge: Rect,
+    volume: Option<Rect>,
+    speaker: Option<Rect>,
+    seek: Rect,
+}
+
+/// Lays the row out from the right (the same order as [`Row`]); `label_width` is the visible
+/// width of the speed label.
+fn row_boxes(area: Rect, video: bool, sound: bool, label_width: f32) -> Boxes {
+    let mut boxes = Row::new(area);
+    let cinema = video.then(|| boxes.take(ROW_ICON));
+    let camera = video.then(|| boxes.take(ROW_ICON));
+    let label = boxes.take(label_width);
+    let speed = boxes.take(SPEED_TRACK);
+    let gauge = boxes.take(ROW_ICON);
+    let volume = sound.then(|| boxes.take(VOLUME_TRACK));
+    let speaker = sound.then(|| boxes.take(ROW_ICON));
+    let seek = boxes.seek(area);
+    Boxes { cinema, camera, label, speed, gauge, volume, speaker, seek }
+}
+
+/// Runs `add` in a child UI occupying `rect`, shrunk to `height` and centred, so the 24 px
+/// sliders and the 26 px icon buttons share one centre line.
+fn at<R>(ui: &mut egui::Ui, rect: Rect, height: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let inner = Rect::from_center_size(rect.center(), egui::vec2(rect.width(), height));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)), add).inner
+}
+
+/// The «1.00×» text of a speed: two decimals in the monospace font, so every speed has the same
+/// glyph count and therefore the same width — the label needs no reserved spare, the row never
+/// moves when the speed changes, and its single gap stays equal to the others.
+fn speed_label(speed: f64) -> String {
+    format!("{speed:.2}×")
+}
+
+/// The visible width of the speed label — the same for every speed (see [`speed_label`]).
+fn speed_label_width(ui: &egui::Ui) -> f32 {
+    let font = FontId::monospace(12.0);
+    SPEEDS.iter().map(|&s| ui.fonts_mut(|f| f.layout_no_wrap(speed_label(s), font.clone(), Color32::PLACEHOLDER)).size().x).fold(0.0, f32::max)
 }
 
 pub enum StudioAction {
@@ -322,22 +438,33 @@ fn toggle_button(ui: &mut egui::Ui, ic: &str, tip: &str, on: bool, p: theme::Pal
     resp
 }
 
-/// Thin track with an accent fill and a round knob; the new value while clicked or dragged.
-fn slider(ui: &mut egui::Ui, width: f32, frac: f32, id: &str, p: theme::Palette) -> (egui::Response, Option<f32>) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width.max(40.0), 24.0), Sense::hover());
+/// Thin track with an accent fill and a round knob; `track_width` is the visible track, which is
+/// also the slider's visible body: the knob's centre stops one radius short of each end, so a
+/// full or an empty slider never reaches into the row's gaps. The new value while clicked or
+/// dragged.
+fn slider(ui: &mut egui::Ui, track_width: f32, frac: f32, id: &str, p: theme::Palette) -> (egui::Response, Option<f32>) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(track_width + 2.0 * ROW_PAD, 24.0), Sense::hover());
     let resp = ui.interact(rect, ui.id().with(id), Sense::click_and_drag());
-    let track = Rect::from_center_size(rect.center(), egui::vec2(rect.width() - 14.0, 4.0));
-    let x = track.left() + track.width() * frac.clamp(0.0, 1.0);
+    let (track, centre) = slider_parts(rect, frac);
+    let x = centre.x;
     let painter = ui.painter();
     painter.rect_filled(track, CornerRadius::same(2), p.border);
     painter.rect_filled(Rect::from_min_max(track.min, egui::pos2(x, track.max.y)), CornerRadius::same(2), p.accent);
-    let knob = if resp.hovered() || resp.dragged() { 7.0 } else { 6.0 };
-    painter.circle(egui::pos2(x, track.center().y), knob, Color32::WHITE, Stroke::new(1.5, p.accent));
+    let knob = if resp.hovered() || resp.dragged() { KNOB } else { KNOB - 1.0 };
+    painter.circle(centre, knob, Color32::WHITE, Stroke::new(1.5, p.accent));
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    let value = resp.interact_pointer_pos().filter(|_| resp.clicked() || resp.dragged()).map(|pt| ((pt.x - track.left()) / track.width()).clamp(0.0, 1.0));
+    let value = resp.interact_pointer_pos().filter(|_| resp.clicked() || resp.dragged()).map(|pt| ((pt.x - track.left() - KNOB) / (track.width() - 2.0 * KNOB)).clamp(0.0, 1.0));
     (resp, value)
+}
+
+/// The track of a slider in its box and the knob's centre for `frac`. Pure, so the transport
+/// row's test can check that the knob never leaves the track (and so never reaches a gap).
+fn slider_parts(rect: Rect, frac: f32) -> (Rect, egui::Pos2) {
+    let track = Rect::from_center_size(rect.center(), egui::vec2(rect.width() - 2.0 * ROW_PAD, 4.0));
+    let x = track.left() + KNOB + (track.width() - 2.0 * KNOB) * frac.clamp(0.0, 1.0);
+    (track, egui::pos2(x, track.center().y))
 }
 
 #[cfg(test)]
@@ -349,5 +476,88 @@ mod tests {
         assert!(SPEEDS.contains(&1.0) && SPEEDS.windows(2).all(|w| w[0] < w[1]));
         let l = Layout::default();
         assert!(l.show_video && !l.cinema && l.sizes == PANES);
+    }
+
+    /// The visible part of a control inside its box: an icon's glyph, a label's text or a
+    /// slider's track, centred in the box.
+    fn body(box_: Rect, width: f32) -> Rect {
+        Rect::from_center_size(box_.center(), egui::vec2(width, box_.height()))
+    }
+
+    /// The gap between the visible bodies of two neighbours, as the eye sees it.
+    fn gap(left: Rect, right: Rect) -> f32 {
+        right.left() - left.right()
+    }
+
+    #[test]
+    fn the_transport_row_uses_one_gap() {
+        // Right to left: cinema, camera, the speed label, speed slider, gauge, volume, speaker.
+        let area = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(600.0, ROW_H));
+        let b = row_boxes(area, true, true, 34.0);
+        let boxes = [b.cinema.unwrap(), b.camera.unwrap(), b.label, b.speed, b.gauge, b.volume.unwrap(), b.speaker.unwrap()];
+        let bodies = [ROW_ICON, ROW_ICON, 34.0, SPEED_TRACK, ROW_ICON, VOLUME_TRACK, ROW_ICON];
+        for (box_, body) in boxes.iter().zip(bodies) {
+            assert!((box_.width() - body - 2.0 * ROW_PAD).abs() < 1e-6, "every control keeps the same padding around its body");
+            assert_eq!(box_.center().y, area.center().y, "icons and sliders share one centre line");
+        }
+        for pair in boxes.windows(2) {
+            // The boxes are taken right to left.
+            assert!((gap(pair[1], pair[0]) - ROW_GAP).abs() < 1e-6, "one gap between neighbouring boxes");
+        }
+        assert!((gap(b.seek, b.speaker.unwrap()) - ROW_GAP).abs() < 1e-6, "and the same gap before the seek bar");
+        assert_eq!(b.seek.left(), area.left());
+        // The icon button's glyph and a slider's track sit at the same distance from the box edges.
+        assert!((theme::ICON_BUTTON - ROW_ICON - 2.0 * ROW_PAD).abs() < 1e-6);
+        // Without video or sound their boxes disappear and the seek bar takes the room.
+        let b = row_boxes(area, false, false, 34.0);
+        assert!(b.cinema.is_none() && b.camera.is_none() && b.volume.is_none() && b.speaker.is_none());
+        assert_eq!(b.seek.right(), b.gauge.left() - ROW_GAP);
+    }
+
+    #[test]
+    fn every_visible_gap_is_the_same_at_both_ends_of_the_volume() {
+        let area = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(900.0, ROW_H));
+        // The label's width comes from the font; it is the same for every speed.
+        let label_w = 36.0;
+        let mut previous: Option<Vec<f32>> = None;
+        for volume in [0.0, 1.0] {
+            let b = row_boxes(area, true, true, label_w);
+            let seek = body(b.seek, b.seek.width() - 2.0 * topics::TRACK_INSET);
+            let (volume_track, _) = slider_parts(b.volume.unwrap(), volume);
+            let (speed_track, _) = slider_parts(b.speed, 1.0 / (SPEEDS.len() - 1) as f32);
+            // The knob stays inside the track at both ends, so it cannot shorten a gap.
+            for frac in [0.0, 1.0] {
+                let (t, centre) = slider_parts(b.volume.unwrap(), frac);
+                assert!(centre.x - KNOB >= t.left() - 1e-6 && centre.x + KNOB <= t.right() + 1e-6, "the thumb never leaves its track");
+            }
+            let bodies = [
+                seek,
+                body(b.speaker.unwrap(), ROW_ICON),
+                volume_track,
+                body(b.gauge, ROW_ICON),
+                speed_track,
+                body(b.label, label_w),
+                body(b.camera.unwrap(), ROW_ICON),
+                body(b.cinema.unwrap(), ROW_ICON),
+            ];
+            let gaps: Vec<f32> = bodies.windows(2).map(|pair| gap(pair[0], pair[1])).collect();
+            for g in &gaps {
+                assert!((g - (ROW_GAP + 2.0 * ROW_PAD)).abs() < 1e-6, "every visible gap is one spacing: {gaps:?}");
+            }
+            if let Some(prev) = &previous {
+                assert_eq!(prev, &gaps, "the volume value changes no gap");
+            }
+            previous = Some(gaps);
+        }
+    }
+
+    #[test]
+    fn the_speed_label_is_the_same_width_for_every_speed() {
+        assert_eq!(speed_label(1.0), "1.00×");
+        assert_eq!(speed_label(1.25), "1.25×");
+        // The same glyph count in the monospace font → the same width: the label's box is the
+        // text plus the row's padding, with no reserved spare to widen the gap before the camera.
+        let counts: Vec<usize> = SPEEDS.iter().map(|&s| speed_label(s).chars().count()).collect();
+        assert!(counts.windows(2).all(|w| w[0] == w[1]), "{counts:?}");
     }
 }

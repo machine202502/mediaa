@@ -16,6 +16,12 @@ use rust_i18n::t;
 pub const SEGMENT_GAP: f32 = 2.0;
 /// Track height of the seek bar (the hit area around it stays 24 px).
 const TRACK: f32 = 6.0;
+/// Inset of the visible track from the seek bar's hit rect on each side; the same padding is
+/// used by every slider and icon of the transport row, so all gaps in that row are equal.
+pub const TRACK_INSET: f32 = 6.0;
+/// The largest radius of a slider's knob. The knob's centre keeps this distance from the ends
+/// of the track, so the thumb never sticks out into a gap: the visible body is always the track.
+pub const KNOB: f32 = 7.0;
 /// How far the unplayed part of a segment is mixed from `accent_soft` towards `accent`: the
 /// soft colour alone is almost the panel background in both themes.
 const UNPLAYED: f32 = 0.45;
@@ -45,24 +51,23 @@ pub fn current_topic(chapters: &[Chapter], time: f64) -> Option<usize> {
 /// The x ranges of the topics on a track `width` wide starting at `left`, `duration` seconds
 /// long: every border between neighbours is inset by half of [`SEGMENT_GAP`], so the gap
 /// between two segments is exactly that (the clip keeps zero-length topics from inverting).
+/// The topics cover the whole recording, so the first segment starts at the bar's left edge and
+/// the last one runs to its right edge, even when the first topic starts later or the last one
+/// ends earlier; only the gaps between them stay unfilled.
 pub fn segments(left: f32, width: f32, duration: f64, chapters: &[Chapter]) -> Vec<Segment> {
-    if duration <= 0.0 || width <= 0.0 {
+    if duration <= 0.0 || width <= 0.0 || chapters.is_empty() {
         return Vec::new();
     }
     let x = |time: f64| left + width * (time / duration).clamp(0.0, 1.0) as f32;
-    let last = chapters.len().saturating_sub(1);
+    let last = chapters.len() - 1;
     chapters
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let mut x0 = x(c.start);
-            let mut x1 = x(c.end);
-            if i > 0 {
-                x0 += SEGMENT_GAP / 2.0;
-            }
-            if i < last {
-                x1 -= SEGMENT_GAP / 2.0;
-            }
+            let mut x0 = if i == 0 { left } else { x(c.start) + SEGMENT_GAP / 2.0 };
+            let mut x1 = if i == last { left + width } else { x(c.end) - SEGMENT_GAP / 2.0 };
+            x0 = x0.max(left);
+            x1 = x1.min(left + width);
             Segment { chapter: i, x0, x1: x1.max(x0) }
         })
         .collect()
@@ -101,21 +106,98 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
 }
 
-/// The tooltip of a topic: «title / m:ss–m:ss / the first line of the summary»; with `part`
-/// (the part under the pointer) the first line becomes «title — part title».
+/// The tooltip of a segment under the pointer: the topic's title; with `part` (the part under
+/// the pointer) «title — part title».
 pub fn tooltip(c: &Chapter, part: Option<&Part>) -> String {
     let part = part.map(|p| p.title.trim()).filter(|title| !title.is_empty());
-    let title = match part {
-        Some(title) => format!("{} — {title}", c.digest.title),
-        None => c.digest.title.clone(),
-    };
-    let mut out = format!("{title}\n{}–{}", human_duration(c.start), human_duration(c.end));
-    let first = c.digest.summary.lines().next().unwrap_or_default().trim();
-    if !first.is_empty() {
-        out.push('\n');
-        out.push_str(first);
+    match part {
+        Some(title) => format!("{} — {title}", c.digest.title.trim()),
+        None => c.digest.title.trim().to_string(),
+    }
+}
+
+/// The left x of a tooltip `width` wide centred on the pointer at `pointer_x`, kept inside
+/// `content` (the window): at the edges it slides in instead of running out of the window.
+pub fn tooltip_x(pointer_x: f32, width: f32, content: Rect) -> f32 {
+    let max_left = (content.right() - width).max(content.left());
+    (pointer_x - width / 2.0).clamp(content.left(), max_left)
+}
+
+/// The line under the seek bar: the title of the topic at `time` («title — part» inside a
+/// part), empty when the recording has no topics.
+pub fn current_label(chapters: &[Chapter], time: f64) -> String {
+    let Some(i) = current_topic(chapters, time) else { return String::new() };
+    let c = &chapters[i];
+    let title = c.digest.title.trim();
+    match part_at(c, time).map(|p| c.digest.parts[p].title.trim()).filter(|t| !t.is_empty()) {
+        Some(part) => format!("{title} — {part}"),
+        None => title.to_string(),
+    }
+}
+
+/// The delayed tooltip of a topic in the block: what is said in it — the summary, then the
+/// titles of its parts (a long topic merged from pieces); the title itself when there is
+/// nothing else.
+pub fn hover_text(c: &Chapter) -> String {
+    let mut out = c.digest.summary.trim().to_string();
+    let titles: Vec<&str> = c.digest.parts.iter().map(|p| p.title.trim()).filter(|t| !t.is_empty()).collect();
+    if !titles.is_empty() {
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(&titles.iter().map(|t| format!("•  {t}")).collect::<Vec<_>>().join("\n"));
+    }
+    if out.is_empty() {
+        out = c.digest.title.trim().to_string();
     }
     out
+}
+
+/// The app's tooltips: the popup frame without a shadow (the interface's rule: no shadows on
+/// hints, they must not look like panels).
+pub fn tooltip_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::popup(style).shadow(egui::epaint::Shadow::NONE)
+}
+
+/// Height of the topics block's header row — the same folded and unfolded, and the height of
+/// the search card (`dialog.rs`).
+pub const HEADER_H: f32 = 28.0;
+/// Left x of the header's list icon.
+pub const HEADER_ICON_X: f32 = 12.0;
+/// Left x of the header's text.
+pub const HEADER_TEXT_X: f32 = 34.0;
+/// Right inset of the count «(3/7)» (folded only).
+pub const HEADER_COUNT_X: f32 = 30.0;
+/// Center of the caret from the right edge.
+pub const HEADER_CARET_X: f32 = 14.0;
+/// Room the count needs right of the text.
+const HEADER_TEXT_RIGHT: f32 = 74.0;
+/// Side of the caret's hit box.
+const CARET_HIT: f32 = 18.0;
+
+/// The positions inside the topics block's header row. Both the folded block and the unfolded
+/// one lay their header out with this, from the same full-width row rect, so opening or
+/// closing the block never moves the icon, the text or the caret.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Header {
+    /// The list icon, left-aligned and vertically centred.
+    pub icon: egui::Pos2,
+    /// The text's rect (clipped at its right edge).
+    pub text: Rect,
+    /// The count «(3/7)», right-aligned.
+    pub count: egui::Pos2,
+    /// The caret's hit box.
+    pub caret: Rect,
+}
+
+pub fn header(rect: Rect) -> Header {
+    let y = rect.center().y;
+    Header {
+        icon: egui::pos2(rect.left() + HEADER_ICON_X, y),
+        text: Rect::from_min_max(egui::pos2(rect.left() + HEADER_TEXT_X, rect.top()), egui::pos2((rect.right() - HEADER_TEXT_RIGHT).max(rect.left() + HEADER_TEXT_X), rect.bottom())),
+        count: egui::pos2(rect.right() - HEADER_COUNT_X, y),
+        caret: Rect::from_center_size(egui::pos2(rect.right() - HEADER_CARET_X, y), egui::vec2(CARET_HIT, CARET_HIT)),
+    }
 }
 
 /// The seek bar: the playable track with a segment per topic (`2 px` gaps, the segment under
@@ -125,8 +207,10 @@ pub fn tooltip(c: &Chapter, part: Option<&Part>) -> String {
 pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapters: &[Chapter], id: &str, p: Palette) -> (egui::Response, Option<f32>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width.max(40.0), 24.0), Sense::hover());
     let resp = ui.interact(rect, ui.id().with(id), Sense::click_and_drag());
-    let track = Rect::from_center_size(rect.center(), egui::vec2(rect.width() - 14.0, TRACK));
-    let x = track.left() + track.width() * frac.clamp(0.0, 1.0);
+    let track = Rect::from_center_size(rect.center(), egui::vec2(rect.width() - 2.0 * TRACK_INSET, TRACK));
+    // The knob's centre stops one radius short of each end: at the start and at the end of the
+    // recording the thumb stays inside the track and does not reach into the speaker's gap.
+    let x = track.left() + KNOB + (track.width() - 2.0 * KNOB) * frac.clamp(0.0, 1.0);
     let segments = segments(track.left(), track.width(), duration, chapters);
     let hovered = resp.hover_pos().and_then(|pt| segments.iter().position(|s| (s.x0..=s.x1).contains(&pt.x)));
     // The part under the pointer, to name it in the tooltip.
@@ -169,13 +253,22 @@ pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapter
     if resp.hovered() || hovered.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    if let Some(i) = hovered {
-        egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with((id, "topic-tip")), egui::PopupAnchor::Pointer)
-            .show(|ui| {
-                ui.label(RichText::new(tooltip(&chapters[i], hovered_part)).size(12.0));
-            });
+    // The topic under the pointer, named above the bar and centred on the pointer (kept inside
+    // the window at its edges).
+    if let (Some(i), Some(pt)) = (hovered, resp.hover_pos()) {
+        let text = tooltip(&chapters[i], hovered_part);
+        let font = FontId::proportional(12.0);
+        let text_width = ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), p.text)).size().x;
+        let margin = ui.style().spacing.menu_margin;
+        let width = text_width + f32::from(margin.left) + f32::from(margin.right);
+        let left = tooltip_x(pt.x, width, ui.ctx().content_rect());
+        let mut tip = egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with((id, "topic-tip")), egui::PopupAnchor::Position(egui::pos2(left, track.min.y)));
+        tip.popup = tip.popup.align(egui::RectAlign::TOP_START).width(width).frame(tooltip_frame(ui.style()));
+        tip.show(|ui| {
+            ui.add(egui::Label::new(RichText::new(text).size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
+        });
     }
-    let value = resp.interact_pointer_pos().filter(|_| resp.clicked() || resp.dragged()).map(|pt| ((pt.x - track.left()) / track.width()).clamp(0.0, 1.0));
+    let value = resp.interact_pointer_pos().filter(|_| resp.clicked() || resp.dragged()).map(|pt| ((pt.x - track.left() - KNOB) / (track.width() - 2.0 * KNOB)).clamp(0.0, 1.0));
     (resp, value)
 }
 
@@ -203,57 +296,69 @@ pub fn block(ui: &mut egui::Ui, chapters: &[Chapter], position: f64, player: &mu
 
 /// The folded line: the current topic; a click unfolds the block.
 fn folded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, p: Palette, open: &mut bool) -> Option<f64> {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
-    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t!("studio.topics_expand"));
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER_H), Sense::click());
+    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    hover_tip(&resp, &chapters[current]);
     if resp.clicked() {
         *open = true;
     }
+    let head = header(rect);
     let painter = ui.painter_at(rect);
     painter.rect(rect, CornerRadius::same(8), if resp.hovered() { p.card_hover } else { p.card }, Stroke::new(1.0, p.border), StrokeKind::Inside);
-    painter.text(egui::pos2(rect.left() + 12.0, rect.center().y), Align2::LEFT_CENTER, icon::LIST_BULLETS, FontId::proportional(14.0), p.accent);
+    painter.text(head.icon, Align2::LEFT_CENTER, icon::LIST_BULLETS, FontId::proportional(14.0), p.accent);
     let c = &chapters[current];
     let text = format!("{}  {}", human_duration(c.start), c.digest.title);
-    let title = Rect::from_min_max(egui::pos2(rect.left() + 34.0, rect.top()), egui::pos2(rect.right() - 74.0, rect.bottom()));
-    painter_at(ui, title).text(egui::pos2(title.left(), rect.center().y), Align2::LEFT_CENTER, text, FontId::proportional(13.0), p.text);
-    painter.text(egui::pos2(rect.right() - 30.0, rect.center().y), Align2::RIGHT_CENTER, format!("({}/{})", current + 1, chapters.len()), FontId::monospace(11.0), p.text_weak);
-    painter.text(egui::pos2(rect.right() - 14.0, rect.center().y), Align2::CENTER_CENTER, icon::CARET_DOWN, FontId::proportional(12.0), p.text_weak);
+    let galley = elided(ui, &text, head.text.width(), FontId::proportional(13.0), p.text);
+    painter.galley(egui::pos2(head.text.left(), rect.center().y - galley.size().y / 2.0), galley, p.text);
+    painter.text(head.count, Align2::RIGHT_CENTER, format!("({}/{})", current + 1, chapters.len()), FontId::monospace(11.0), p.text_weak);
+    painter.text(head.caret.center(), Align2::CENTER_CENTER, icon::CARET_DOWN, FontId::proportional(12.0), p.text_weak);
     None
 }
 
 /// The unfolded block: a header that folds it and the list of topics in their own scroll.
 fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, player: &mut Player, max_height: f32, p: Palette, open: &mut bool) -> Option<f64> {
     let mut clicked = None;
-    egui::Frame::new()
+    // The card is filled by a frameless frame and its border is painted over the final rect:
+    // a frame stroke would inset the header by a pixel and make it jump against the folded one.
+    let card = egui::Frame::new()
         .fill(p.card)
-        .stroke(Stroke::new(1.0, p.border))
         .corner_radius(CornerRadius::same(8))
-        .inner_margin(Margin::symmetric(8, 6))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let (head, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::click());
-            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(t!("studio.topics_collapse"));
+            // The same header row as the folded block, laid out from the same full-width rect.
+            let (head, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER_H), Sense::click());
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
             if resp.clicked() {
                 *open = false;
             }
+            let h = header(head);
             let painter = painter_at(ui, head);
-            painter.text(egui::pos2(head.left() + 2.0, head.center().y), Align2::LEFT_CENTER, icon::LIST_BULLETS, FontId::proportional(14.0), p.accent);
-            painter.text(egui::pos2(head.left() + 22.0, head.center().y), Align2::LEFT_CENTER, t!("studio.topics"), FontId::proportional(12.0), p.text_weak);
-            painter.text(egui::pos2(head.right() - 8.0, head.center().y), Align2::CENTER_CENTER, icon::CARET_UP, FontId::proportional(12.0), p.text_weak);
+            painter.text(h.icon, Align2::LEFT_CENTER, icon::LIST_BULLETS, FontId::proportional(14.0), p.accent);
+            painter_at(ui, h.text).text(egui::pos2(h.text.left(), head.center().y), Align2::LEFT_CENTER, t!("studio.topics"), FontId::proportional(13.0), p.text);
+            painter.text(h.caret.center(), Align2::CENTER_CENTER, icon::CARET_UP, FontId::proportional(12.0), p.text_weak);
             ui.add_space(2.0);
-            // The list keeps its own scroll; the whole block stays under ~40 % of the pane.
-            egui::ScrollArea::vertical()
-                .max_height((max_height - 38.0).max(48.0))
-                .auto_shrink([false, true])
-                .id_salt("studio-topics-list")
+            // Only the list keeps the card's inner padding.
+            egui::Frame::new()
+                .inner_margin(Margin { left: 8, right: 8, top: 0, bottom: 6 })
                 .show(ui, |ui| {
-                    for (i, c) in chapters.iter().enumerate() {
-                        if let Some(topic) = topic_row(ui, i, c, i == current, player, p) {
-                            clicked = Some(topic);
-                        }
-                        ui.add_space(2.0);
-                    }
+                    // The list keeps its own scroll; the whole block stays under ~40 % of the pane.
+                    egui::ScrollArea::vertical()
+                        .max_height((max_height - 38.0).max(48.0))
+                        .auto_shrink([false, true])
+                        .id_salt("studio-topics-list")
+                        .show(ui, |ui| {
+                            for (i, c) in chapters.iter().enumerate() {
+                                if let Some(topic) = topic_row(ui, i, c, i == current, player, p) {
+                                    clicked = Some(topic);
+                                }
+                                ui.add_space(2.0);
+                            }
+                        });
                 });
-        });
+        })
+        .response
+        .rect;
+    ui.painter().rect(card, CornerRadius::same(8), Color32::TRANSPARENT, Stroke::new(1.0, p.border), StrokeKind::Inside);
     clicked
 }
 
@@ -269,6 +374,8 @@ fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, player: &m
         .interact(caret, ui.id().with(("topic-toggle", i)), Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(t!("studio.digest"));
+    // The row's delayed tooltip; over the caret the hit test prefers the caret's own hint.
+    hover_tip(&row, c);
     let on_caret = row.interact_pointer_pos().is_some_and(|pt| caret.contains(pt));
     let mut clicked = None;
     if row.clicked() && !on_caret {
@@ -288,7 +395,9 @@ fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, player: &m
     painter.galley(egui::pos2(rect.left() + 8.0, rect.center().y - time.size().y / 2.0), time.clone(), p.accent);
     let left = rect.left() + 8.0 + time.size().x + 10.0;
     let title = Rect::from_min_max(egui::pos2(left, rect.top()), egui::pos2(caret.left() - 2.0, rect.bottom()));
-    painter_at(ui, title).text(egui::pos2(left, rect.center().y), Align2::LEFT_CENTER, &c.digest.title, FontId::proportional(13.0), if current { p.accent } else { p.text });
+    let color = if current { p.accent } else { p.text };
+    let galley = elided(ui, &c.digest.title, title.width(), FontId::proportional(13.0), color);
+    painter.galley(egui::pos2(title.left(), rect.center().y - galley.size().y / 2.0), galley, color);
     painter.text(caret.center(), Align2::CENTER_CENTER, if digest_open { icon::CARET_DOWN } else { icon::CARET_RIGHT }, FontId::proportional(12.0), p.text_weak);
     if digest_open {
         if let Some(start) = digest_ui(ui, i, c, player, p) {
@@ -366,8 +475,20 @@ fn part_row(ui: &mut egui::Ui, part: &Part, p: Palette) -> bool {
     painter.galley(egui::pos2(rect.left() + 4.0, rect.center().y - time.size().y / 2.0), time.clone(), p.accent);
     let left = rect.left() + 4.0 + time.size().x + 8.0;
     let title = Rect::from_min_max(egui::pos2(left, rect.top()), rect.max);
-    painter_at(ui, title).text(egui::pos2(left, rect.center().y), Align2::LEFT_CENTER, part.title.trim(), FontId::proportional(12.5), p.text);
+    let galley = elided(ui, part.title.trim(), title.width(), FontId::proportional(12.5), p.text);
+    painter.galley(egui::pos2(title.left(), rect.center().y - galley.size().y / 2.0), galley, p.text);
     resp.clicked()
+}
+
+/// The delayed hover tooltip of a topic in the block: what is said in it, wrapped to about
+/// 360 px in the same shadowless frame as the one above the seek bar.
+fn hover_tip(resp: &egui::Response, c: &Chapter) {
+    let mut tip = egui::Tooltip::for_enabled(resp);
+    tip.popup = tip.popup.width(360.0).frame(tooltip_frame(resp.ctx.global_style().as_ref()));
+    tip.show(|ui| {
+        ui.set_max_width(360.0);
+        ui.add(egui::Label::new(RichText::new(hover_text(c)).size(12.0)).wrap());
+    });
 }
 
 /// A painter clipped to `rect` (long texts are cut instead of running over the neighbours).
@@ -377,6 +498,17 @@ fn painter_at(ui: &egui::Ui, rect: Rect) -> egui::Painter {
     painter
 }
 
+/// One line of `text`, cut at `width` with egui's ellipsis: a title too long for its row ends
+/// with «…» instead of being clipped mid-letter.
+fn elided(ui: &egui::Ui, text: &str, width: f32, font: FontId, color: Color32) -> std::sync::Arc<egui::Galley> {
+    egui::WidgetText::from(RichText::new(text).font(font).color(color)).into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        width.max(0.0),
+        egui::TextStyle::Body,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +516,23 @@ mod tests {
 
     fn chapter(start: f64, end: f64) -> Chapter {
         Chapter { start, end, digest: Digest { title: format!("тема {start}"), ..Digest::default() } }
+    }
+
+    #[test]
+    fn the_block_header_keeps_its_geometry_in_both_states() {
+        // Both the folded block and the unfolded one lay the header out from a full-width row
+        // of `HEADER_H` at the block's top-left; here is what that gives.
+        let rect = Rect::from_min_size(egui::pos2(100.0, 200.0), egui::vec2(400.0, HEADER_H));
+        let h = header(rect);
+        assert_eq!(h.icon, egui::pos2(112.0, 214.0), "the list icon");
+        assert_eq!(h.text.left(), 134.0, "the text starts here in both states");
+        assert_eq!((h.text.top(), h.text.right()), (200.0, 426.0), "the same clipping rect");
+        assert_eq!(h.count, egui::pos2(470.0, 214.0), "the count, folded only");
+        assert_eq!(h.caret.center(), egui::pos2(486.0, 214.0), "the caret, same place");
+        assert_eq!((h.icon.y, h.text.center().y, h.caret.center().y), (214.0, 214.0, 214.0), "one centre line");
+        // A too narrow block does not invert the text rect.
+        let h = header(Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(80.0, HEADER_H)));
+        assert!(h.text.right() >= h.text.left());
     }
 
     #[test]
@@ -412,6 +561,18 @@ mod tests {
     }
 
     #[test]
+    fn segments_cover_the_whole_bar() {
+        // The first reply starts at 5 s and the last topic ends at 95 s: no empty tail at either
+        // end, only the 2 px gap between the two topics.
+        let chapters = [chapter(5.0, 50.0), chapter(50.0, 95.0)];
+        let s = segments(10.0, 100.0, 100.0, &chapters);
+        assert_eq!((s[0].x0, s[0].x1), (10.0, 59.0), "from the bar's left edge to the border");
+        assert_eq!((s[1].x0, s[1].x1), (61.0, 110.0), "from the border to the bar's right edge");
+        let s = segments(10.0, 100.0, 100.0, &[chapter(5.0, 95.0)]);
+        assert_eq!((s[0].x0, s[0].x1), (10.0, 110.0), "one topic fills the whole bar");
+    }
+
+    #[test]
     fn segments_clip_to_the_bar_and_survive_odd_input() {
         assert!(segments(0.0, 100.0, 0.0, &[chapter(0.0, 10.0)]).is_empty(), "no duration");
         assert!(segments(0.0, 0.0, 100.0, &[chapter(0.0, 10.0)]).is_empty(), "no width");
@@ -419,22 +580,56 @@ mod tests {
         let s = segments(0.0, 100.0, 100.0, &[chapter(0.0, 200.0)]);
         assert_eq!((s[0].x0, s[0].x1), (0.0, 100.0), "an end past the recording stays on the bar");
         let s = segments(0.0, 100.0, 100.0, &[chapter(50.0, 50.0), chapter(50.0, 100.0)]);
-        assert_eq!((s[0].x0, s[0].x1), (50.0, 50.0), "a zero-length topic does not invert");
-        assert!((s[1].x0 - 51.0).abs() < 1e-6);
+        assert_eq!((s[0].x0, s[0].x1), (0.0, 49.0), "the first topic covers the start up to its border");
+        assert_eq!((s[1].x0, s[1].x1), (51.0, 100.0), "and a zero-length topic does not invert");
     }
 
     #[test]
-    fn the_tooltip_is_title_time_and_the_first_line() {
+    fn the_tooltip_is_only_the_title() {
         let c = Chapter {
             start: 40.0,
             end: 100.0,
-            digest: Digest { title: "План".into(), summary: "Решили\nвторое".into(), ..Digest::default() },
+            digest: Digest { title: " План ".into(), summary: "Решили\nвторое".into(), ..Digest::default() },
         };
-        assert_eq!(tooltip(&c, None), "План\n00:40–01:40\nРешили");
-        let c = Chapter { start: 0.0, end: 10.0, digest: Digest { title: "Пусто".into(), summary: " \n".into(), ..Digest::default() } };
-        assert_eq!(tooltip(&c, None), "Пусто\n00:00–00:10", "an empty summary is left out");
-        let c = Chapter { start: 3600.0, end: 3725.0, digest: Digest { title: "Час".into(), ..Digest::default() } };
-        assert_eq!(tooltip(&c, None), "Час\n1:00:00–1:02:05");
+        assert_eq!(tooltip(&c, None), "План", "no time, no summary");
+        let c = Chapter { start: 0.0, end: 10.0, digest: Digest { title: "Пусто".into(), summary: "Решили".into(), ..Digest::default() } };
+        assert_eq!(tooltip(&c, None), "Пусто");
+    }
+
+    #[test]
+    fn the_tooltip_is_centred_on_the_pointer_inside_the_window() {
+        let content = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1000.0, 800.0));
+        assert_eq!(tooltip_x(500.0, 100.0, content), 450.0);
+        assert_eq!(tooltip_x(10.0, 100.0, content), 0.0, "slides in at the left edge");
+        assert_eq!(tooltip_x(995.0, 100.0, content), 900.0, "and at the right one");
+        assert_eq!(tooltip_x(500.0, 1200.0, content), 0.0, "a tooltip wider than the window starts at its edge");
+    }
+
+    #[test]
+    fn the_line_under_the_bar_names_the_topic_and_its_part() {
+        let mut c = chapter(0.0, 100.0);
+        c.digest.title = "Тема".into();
+        c.digest.parts = parts();
+        assert_eq!(current_label(&[], 10.0), "");
+        assert_eq!(current_label(&[chapter(10.0, 100.0)], 0.0), "тема 10", "the first topic is current before it starts");
+        assert_eq!(current_label(&[c.clone()], 10.0), "Тема — Начало");
+        assert_eq!(current_label(&[c.clone()], 50.0), "Тема — Середина");
+        c.digest.parts[1].title = " ".into();
+        assert_eq!(current_label(&[c], 50.0), "Тема", "a part without a title is not named");
+    }
+
+    #[test]
+    fn the_hover_text_is_the_summary_and_the_part_titles() {
+        let mut c = Chapter {
+            start: 0.0,
+            end: 100.0,
+            digest: Digest { title: "Тема".into(), summary: " Решили ".into(), parts: parts(), ..Digest::default() },
+        };
+        assert_eq!(hover_text(&c), "Решили\n\n•  Начало\n•  Середина\n•  Конец");
+        c.digest.summary = "  ".into();
+        assert_eq!(hover_text(&c), "•  Начало\n•  Середина\n•  Конец");
+        c.digest.parts.clear();
+        assert_eq!(hover_text(&c), "Тема", "nothing else to say");
     }
 
     fn parts() -> Vec<Part> {
@@ -478,9 +673,9 @@ mod tests {
             end: 100.0,
             digest: Digest { title: "План".into(), summary: "Решили\nвторое".into(), parts: parts(), ..Digest::default() },
         };
-        assert_eq!(tooltip(&c, c.digest.parts.get(1)), "План — Середина\n00:40–01:40\nРешили");
+        assert_eq!(tooltip(&c, c.digest.parts.get(1)), "План — Середина");
         let blank = Part { start: 0.0, end: 1.0, title: "  ".into() };
-        assert_eq!(tooltip(&c, Some(&blank)), "План\n00:40–01:40\nРешили", "a part without a title is not named");
+        assert_eq!(tooltip(&c, Some(&blank)), "План", "a part without a title is not named");
     }
 
     #[test]

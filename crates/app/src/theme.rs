@@ -229,9 +229,15 @@ pub fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, danger: bool) -> eg
 pub const ICON_BUTTON: f32 = 26.0;
 
 pub fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
+    icon_button_sized(ui, icon, tooltip, ICON_BUTTON)
+}
+
+/// [`icon_button`] in a box of the given side — for rows whose height must not change when the
+/// button appears (a smaller box keeps the row's geometry).
+pub fn icon_button_sized(ui: &mut egui::Ui, icon: &str, tooltip: &str, side: f32) -> egui::Response {
     // Painted by hand at a fixed size: egui buttons that show their frame only on hover grow
     // by the frame stroke, which nudges the whole row sideways.
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ICON_BUTTON, ICON_BUTTON), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
     if ui.is_rect_visible(rect) {
         let p = palette(ui);
         let (fill, stroke) = if resp.is_pointer_button_down_on() {

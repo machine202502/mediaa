@@ -7,7 +7,7 @@ use super::studio::{panel, StudioAction};
 use super::topics;
 use crate::player::Player;
 use crate::theme;
-use eframe::egui::{self, text::LayoutJob, Color32, FontId, Rect, RichText, Sense, TextFormat};
+use eframe::egui::{self, text::LayoutJob, Color32, CornerRadius, FontId, Margin, Rect, RichText, Sense, Stroke, TextFormat};
 use egui_phosphor::regular as icon;
 use super::Services;
 use crossbeam_channel::Receiver;
@@ -25,6 +25,12 @@ use std::time::{Duration, Instant};
 /// How often the transcript is re-read while transcription runs / otherwise.
 const ACTIVE_REFRESH: Duration = Duration::from_secs(1);
 const IDLE_REFRESH: Duration = Duration::from_secs(5);
+
+/// The search card's clear button: its side, the gap before it and the card's right padding.
+/// The slot is reserved even while the button is hidden, so typing never moves the field.
+const SEARCH_CLEAR: f32 = 24.0;
+const SEARCH_GAP: f32 = 8.0;
+const SEARCH_PAD: f32 = 12.0;
 
 /// Speaker colours (by speaker number).
 const SPEAKER_COLORS: [Color32; 6] = [
@@ -271,17 +277,37 @@ impl Dialog {
             }
             return false;
         }
-        let mut start = false;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(icon::MAGNIFYING_GLASS).color(p.text_weak));
-            let clear = self.search.hits.is_some() || !self.search.text.is_empty();
-            let width = ui.available_width() - if clear { 34.0 } else { 0.0 };
-            let edit = ui.add(egui::TextEdit::singleline(&mut self.search.text).hint_text(t!("studio.search_hint")).desired_width(width));
-            start = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.search.text.trim().is_empty();
-            if clear && theme::icon_button(ui, icon::X, &t!("studio.search_close")).clicked() {
+        // The same card as the folded topics block — one fixed row, the same icon and text x: the
+        // card does not change height or move its contents when text appears, and the clear
+        // button's slot is reserved even while the button is hidden.
+        let (card, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), topics::HEADER_H), Sense::hover());
+        ui.painter().rect(card, CornerRadius::same(8), p.card, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+        ui.painter().text(egui::pos2(card.left() + topics::HEADER_ICON_X, card.center().y), egui::Align2::LEFT_CENTER, icon::MAGNIFYING_GLASS, FontId::proportional(14.0), p.accent);
+        let clear = self.search.hits.is_some() || !self.search.text.is_empty();
+        let clear_slot = Rect::from_center_size(egui::pos2(card.right() - SEARCH_PAD - SEARCH_CLEAR / 2.0, card.center().y), egui::vec2(SEARCH_CLEAR, SEARCH_CLEAR));
+        let field = Rect::from_min_max(egui::pos2(card.left() + topics::HEADER_TEXT_X, card.top() + 2.0), egui::pos2(clear_slot.left() - SEARCH_GAP, card.bottom() - 2.0));
+        let edit = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(field).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.search.text)
+                        .hint_text(t!("studio.search_hint"))
+                        .desired_width(field.width())
+                        .margin(Margin::ZERO)
+                        .frame(egui::Frame::NONE),
+                )
+            })
+            .inner;
+        let start = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && !self.search.text.trim().is_empty();
+        if clear {
+            let close = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(clear_slot).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+                    theme::icon_button_sized(ui, icon::X, &t!("studio.search_close"), SEARCH_CLEAR)
+                })
+                .inner;
+            if close.clicked() {
                 self.search = Search::default();
             }
-        });
+        }
         ui.add_space(4.0);
         if start {
             if let (Some(s), Some(id)) = (services.cloned(), self.file_id.clone()) {
