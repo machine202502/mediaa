@@ -20,6 +20,10 @@ Subagent models and how to run them: [workflow/dev-context.md](workflow/dev-cont
   tests, code map, test data, workflow, pitfalls).
 - [workflow/process.md](workflow/process.md): what is in progress now — the task, its step, which subagent runs it
   and a link to its log. The lead updates it whenever a subagent starts or finishes.
+- **Closing a task is part of the task, never an offer.** When a task is finished, before
+  reporting it or committing: record it in done.md under «Сделано» (rejected ideas go under
+  «Отклонено»), remove it from todos.md, mark it closed in process.md. After the commit, add its
+  hash to process.md at once.
 - [workflow/agent.md](workflow/agent.md): the agent's architecture and phases.
 - [workflow/engine.md](workflow/engine.md), [workflow/topics.md](workflow/topics.md): designs (contracts) of larger tasks.
 

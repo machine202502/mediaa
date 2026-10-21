@@ -291,7 +291,10 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
   в `subagents/archive/` (лог) и `subagents/archive/artifacts/` (артефакты), ничего не удаляя.
   Срок — `subagents/config.json` → `archiveAfterHours` (по умолчанию 6), переменная
   `SUBAGENT_ARCHIVE_HOURS` важнее. Запуск, продолженный через `resume`, возвращается из архива.
-  `registry.md` не архивируется.
+  `registry.md` не архивируется. При архивации и возврате зеркало переписывает ссылки на лог и
+  артефакты этого запуска в `workflow/*.md` и `CLAUDE.md` (`../subagents/<имя>` ↔
+  `../subagents/archive/<имя>`), а при старте `once`/`watch` разово чинит ссылки, у которых
+  существует только один из двух путей. Тесты — `node --test scripts/subagent-log.test.mjs`.
 * **Лимит ходов.** Запуск, остановленный на `--max-turns`, имеет статус «остановлен на лимите
   ходов», а в итоге лога — готовая команда `resume`.
 * **Автозапуск зеркала.** Хук `SessionStart` в `.claude/settings.local.json` выполняет

@@ -25,6 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const repo = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "..");
 const outDir = path.join(repo, "subagents");
@@ -325,17 +326,109 @@ function resolveArtifacts(src, index, task, archived, finished) {
     return artifacts;
 }
 
+/// The files whose links follow subagents/: every workflow/*.md and CLAUDE.md at the root.
+export function docFiles(root) {
+    const files = [];
+    try {
+        for (const f of fs.readdirSync(path.join(root, "workflow"))) if (f.endsWith(".md")) files.push(path.join(root, "workflow", f));
+    } catch {}
+    const claude = path.join(root, "CLAUDE.md");
+    if (fs.existsSync(claude)) files.push(claude);
+    return files;
+}
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/// A path segment ends here: no letter, digit or name character follows (so run `a` never matches `a-b`).
+const SEGMENT_END = "(?![\\p{L}\\p{N}_.-])";
+
+/// Rewrite occurrences of the repo paths `from` → `to` in the docs. Only the `subagents/…` part is
+/// replaced, so a relative prefix stays as it was (`../subagents/x` → `../subagents/archive/x`).
+/// A file is written only when its text changed (line endings are left alone). Returns its path.
+function rewriteDocPaths(root, pairs) {
+    const rules = pairs.map(([from, to]) => [
+        new RegExp(`subagents/${escapeRe(from.replace(/^subagents\//, ""))}${SEGMENT_END}`, "gu"),
+        to,
+    ]);
+    const changed = [];
+    for (const file of docFiles(root)) {
+        let text;
+        try {
+            text = fs.readFileSync(file, "utf8");
+        } catch {
+            continue;
+        }
+        let out = text;
+        for (const [re, to] of rules) out = out.replace(re, () => to);
+        if (out === text) continue;
+        fs.writeFileSync(file, out, "utf8");
+        changed.push(file);
+    }
+    return changed;
+}
+
+/// Follow a run's log and artifacts links in the docs: archived → under subagents/archive/, back
+/// when it returns from the archive. `kinds` says which of the two actually moved (a failed move
+/// must not point the docs at a path that is not there).
+export function rewriteRunLinks(root, run, archived, kinds = { log: true, artifacts: true }) {
+    const name = run.replace(/\.md$/, "");
+    const pairs = [];
+    if (kinds.log) pairs.push(archived ? [`subagents/${name}.md`, `subagents/archive/${name}.md`] : [`subagents/archive/${name}.md`, `subagents/${name}.md`]);
+    if (kinds.artifacts)
+        pairs.push(
+            archived
+                ? [`subagents/artifacts/${name}`, `subagents/archive/artifacts/${name}`]
+                : [`subagents/archive/artifacts/${name}`, `subagents/artifacts/${name}`],
+        );
+    return rewriteDocPaths(root, pairs);
+}
+
+/// A link in a doc: the relative prefix, subagents/, an optional archive/ and artifacts/, the name.
+const DOC_LINK = /((?:\.\.?\/)*)subagents\/(archive\/)?(artifacts\/)?([^\s\/)\]}`'"<>,;:]+)(?=\/|[\s)\]}`'"<>,;:]|$)/gu;
+
+/// One-time repair: a link to a log (`<run>.md`) or an artifacts folder that is missing while its
+/// archived (or live) counterpart exists moves to the existing one. Other paths and text are left.
+export function repairDocLinks(root) {
+    const changed = [];
+    for (const file of docFiles(root)) {
+        let text;
+        try {
+            text = fs.readFileSync(file, "utf8");
+        } catch {
+            continue;
+        }
+        const base = path.dirname(file);
+        const out = text.replace(DOC_LINK, (m, prefix, archived = "", kind = "", name) => {
+            if (!kind && !name.endsWith(".md")) return m; // not a log
+            if (name === "registry.md") return m; // its paths are its own
+            const rel = `subagents/${archived}${kind}${name}`;
+            const other = archived ? rel.replace("subagents/archive/", "subagents/") : rel.replace(/^subagents\//, "subagents/archive/");
+            if (fs.existsSync(path.resolve(base, prefix + rel))) return m;
+            if (!fs.existsSync(path.resolve(base, prefix + other))) return m;
+            return prefix + other;
+        });
+        if (out === text) continue;
+        fs.writeFileSync(file, out, "utf8");
+        changed.push(file);
+    }
+    return changed;
+}
+
 /// A finished run untouched for long: its log and artifacts move under subagents/archive/.
 function archiveRun(src, index, mtime) {
     const name = index[src.key];
     if (!move(path.join(outDir, name), path.join(archiveDir, name))) return;
     const artifacts = index[`${src.key}#artifacts`];
+    let movedArtifacts = false;
     if (artifacts) {
         const to = underArchive(artifacts);
-        if (move(path.join(repo, artifacts), path.join(repo, to))) index[`${src.key}#artifacts`] = to;
+        if (move(path.join(repo, artifacts), path.join(repo, to))) {
+            index[`${src.key}#artifacts`] = to;
+            movedArtifacts = true;
+        }
     }
     index[`${src.key}#archived`] = true;
     index[`${src.key}#archivedAt`] = mtime;
+    rewriteRunLinks(repo, name, true, { log: true, artifacts: movedArtifacts });
 }
 
 /// The transcript changed after archiving (a resume): the log and artifacts come back.
@@ -343,12 +436,17 @@ function unarchiveRun(src, index) {
     const name = index[src.key];
     if (!move(path.join(archiveDir, name), path.join(outDir, name))) return;
     const artifacts = index[`${src.key}#artifacts`];
+    let movedArtifacts = false;
     if (artifacts?.startsWith("subagents/archive/")) {
         const to = fromArchive(artifacts);
-        if (move(path.join(repo, artifacts), path.join(repo, to))) index[`${src.key}#artifacts`] = to;
+        if (move(path.join(repo, artifacts), path.join(repo, to))) {
+            index[`${src.key}#artifacts`] = to;
+            movedArtifacts = true;
+        }
     }
     delete index[`${src.key}#archived`];
     delete index[`${src.key}#archivedAt`];
+    rewriteRunLinks(repo, name, false, { log: true, artifacts: movedArtifacts });
 }
 
 const checked = new Map(); // key → mtime the run was judged for archiving
@@ -514,7 +612,14 @@ function render(src, index) {
     return finished;
 }
 
+let repaired = false; // the one-time repair of links in the docs has run
+
 function pass(force) {
+    // Once per process, before anything moves: point every stale link at the path that exists.
+    if (!repaired) {
+        repaired = true;
+        repairDocLinks(repo);
+    }
     const index = loadIndex();
     const all = sources();
     unarchivePass(all, index);
@@ -549,37 +654,48 @@ function startWatch() {
     setInterval(() => pass(false), 3000);
 }
 
-const [cmd, arg] = process.argv.slice(2);
-if (cmd === "id") {
-    // The shared name of a run (log, artifacts, run folder): `id MODEL TITLE`, now.
-    const [model, title] = process.argv.slice(3);
-    console.log(`${stamp(new Date())}_${shortModel(model)}_${slug(title || "")}`);
-} else if (cmd === "once") {
-    pass(true);
-} else if (cmd === "watch" && arg === "--detach") {
-    // Started from a hook: hand the work to the background and return without a sound.
+// Run the CLI only when this file is executed, so tests can import the helpers above.
+const isMain = (() => {
     try {
-        const script = path.resolve(process.argv[1]);
-        const child = spawn(process.execPath, [script, "watch"], { detached: true, stdio: "ignore", windowsHide: true });
-        child.on("error", () => {});
-        child.unref();
-    } catch {}
-} else if (cmd === "watch") {
-    if (!runningWatcher()) startWatch();
-} else if (cmd === "follow" && arg) {
-    const src = runSource(path.resolve(arg));
-    const tick = () => {
-        const index = loadIndex();
-        // Following a run means it is active again: an archived one comes back.
-        if (index[`${src.key}#archived`]) unarchiveRun(src, index);
-        const done = fs.existsSync(src.file) && render(src, index);
-        fs.writeFileSync(indexFile, JSON.stringify(index, null, 2));
-        return done;
-    };
-    const timer = setInterval(() => {
-        if (tick()) clearInterval(timer);
-    }, 3000);
-} else {
-    console.error("usage: node scripts/subagent-log.mjs once | watch [--detach] | follow RUN_DIR | id MODEL TITLE");
-    process.exit(2);
+        return fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url));
+    } catch {
+        return false;
+    }
+})();
+
+if (isMain) {
+    const [cmd, arg] = process.argv.slice(2);
+    if (cmd === "id") {
+        // The shared name of a run (log, artifacts, run folder): `id MODEL TITLE`, now.
+        const [model, title] = process.argv.slice(3);
+        console.log(`${stamp(new Date())}_${shortModel(model)}_${slug(title || "")}`);
+    } else if (cmd === "once") {
+        pass(true);
+    } else if (cmd === "watch" && arg === "--detach") {
+        // Started from a hook: hand the work to the background and return without a sound.
+        try {
+            const script = path.resolve(process.argv[1]);
+            const child = spawn(process.execPath, [script, "watch"], { detached: true, stdio: "ignore", windowsHide: true });
+            child.on("error", () => {});
+            child.unref();
+        } catch {}
+    } else if (cmd === "watch") {
+        if (!runningWatcher()) startWatch();
+    } else if (cmd === "follow" && arg) {
+        const src = runSource(path.resolve(arg));
+        const tick = () => {
+            const index = loadIndex();
+            // Following a run means it is active again: an archived one comes back.
+            if (index[`${src.key}#archived`]) unarchiveRun(src, index);
+            const done = fs.existsSync(src.file) && render(src, index);
+            fs.writeFileSync(indexFile, JSON.stringify(index, null, 2));
+            return done;
+        };
+        const timer = setInterval(() => {
+            if (tick()) clearInterval(timer);
+        }, 3000);
+    } else {
+        console.error("usage: node scripts/subagent-log.mjs once | watch [--detach] | follow RUN_DIR | id MODEL TITLE");
+        process.exit(2);
+    }
 }
