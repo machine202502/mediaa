@@ -3,16 +3,18 @@
 // so the user can watch what each subagent does while it works:
 // * Claude Code's own subagents (Sonnet, Haiku…): ~/.claude/projects/<project>/<session>/subagents/agent-*.jsonl
 //   with agent-*.meta.json (task description, model);
-// * runs of scripts/subagent.sh (DeepSeek…): target/subagents/<run>/stream.jsonl with task.md, model,
-//   name (optional), result.json.
+// * runs of scripts/subagent.sh (DeepSeek, Grok…): target/subagents/<run>/stream.jsonl with task.md, model,
+//   name (optional), result.json. Grok's stream is streaming-json (flat events or ACP session updates).
 //
 //   node scripts/subagent-log.mjs once            render every transcript once
 //   node scripts/subagent-log.mjs watch           keep rendering what changes (every 3 s); one at a time
 //   node scripts/subagent-log.mjs watch --detach  start that watcher in the background and return
-//   node scripts/subagent-log.mjs follow RUN_DIR  render one scripts/subagent.sh run until it ends
+//   node scripts/subagent-log.mjs follow RUN_DIR  render one scripts/subagent.sh run until its process exits
 //
-// A run of scripts/subagent.sh is finished by its result line; a Claude Code subagent only by its
-// SubagentHandback tool call (a quiet transcript alone may just be a long build).
+// A DeepSeek run is finished by its result line. A Grok stream writes `end` after every turn and a
+// resume appends after that, so `end` alone does not finish the run: `follow` keeps rendering while
+// the agent pid is alive. A Claude Code subagent is finished only by its SubagentHandback tool call
+// (a quiet transcript alone may just be a long build).
 // Finished runs (a result line: готово, ошибка, лимит ходов) whose transcript has not changed for
 // `archiveAfterHours` hours move to subagents/archive/ — the log and its artifacts keep their layout,
 // so the links inside the log stay valid. The limit comes from subagents/config.json (created with
@@ -100,8 +102,385 @@ function resultText(content) {
     return JSON.stringify(content);
 }
 
+function acpUpdate(e) {
+    const u = e?.params?.update || (e?.sessionUpdate ? e : null);
+    return u?.sessionUpdate ? u : null;
+}
+
+function isGrokEvents(events) {
+    return events.some((e) => {
+        const su = acpUpdate(e)?.sessionUpdate;
+        return (
+            su === "agent_message_chunk" ||
+            su === "agent_thought_chunk" ||
+            su === "tool_call" ||
+            su === "tool_call_update" ||
+            su === "turn_completed" ||
+            e.type === "thought" ||
+            e.type === "tool_call" ||
+            e.type === "tool_call_update" ||
+            (e.type === "end" && (e.sessionId || e.modelUsage))
+        );
+    });
+}
+
+function isGrok(src, events) {
+    if (src?.provider === "grok") return true;
+    if (src?.provider === "deepseek" || src?.provider === "openrouter") return false;
+    return isGrokEvents(events);
+}
+
+/// Model names that actually ran: modelUsage keys, else the recorded model id.
+function collectModels(events, usage) {
+    const names = [];
+    const add = (mu) => {
+        if (!mu || typeof mu !== "object" || Array.isArray(mu)) return;
+        for (const k of Object.keys(mu)) if (!names.includes(k)) names.push(k);
+    };
+    for (const e of events || []) {
+        add(e.modelUsage);
+        const u = acpUpdate(e);
+        add(u?.usage?.modelUsage);
+        add(u?.modelUsage);
+    }
+    add(usage?.session?.modelUsage);
+    for (const t of usage?.turns || []) add(t.modelUsage);
+    if (names.length) return names;
+    const push = (id) => {
+        if (typeof id === "string" && id && !names.includes(id)) names.push(id);
+    };
+    push(usage?.session?.primaryModelId);
+    for (const t of usage?.turns || []) push(t.primaryModelId);
+    for (const e of events || []) push(acpUpdate(e)?._meta?.modelId);
+    return names;
+}
+
+function chunkText(e) {
+    const u = acpUpdate(e);
+    if (typeof e?.data === "string") return e.data;
+    if (typeof e?.text === "string" && (e.type === "text" || e.type === "thought")) return e.text;
+    const c = u?.content;
+    if (typeof c === "string") return c;
+    if (c && typeof c.text === "string") return c.text;
+    if (Array.isArray(c)) return c.map((x) => x.text || "").join("");
+    return "";
+}
+
+function isTerminal(e) {
+    const su = acpUpdate(e)?.sessionUpdate;
+    return e.type === "end" || e.type === "result" || e.type === "error" || su === "turn_completed";
+}
+
+function isToolCall(e) {
+    return e.type === "tool_call" || acpUpdate(e)?.sessionUpdate === "tool_call";
+}
+
+function isAgentText(e) {
+    return e.type === "text" || acpUpdate(e)?.sessionUpdate === "agent_message_chunk";
+}
+
+/// The last turn's answer: text after its last tool call.
+function finalGrokText(events) {
+    let prev = -1;
+    let last = -1;
+    events.forEach((e, i) => {
+        if (isTerminal(e)) {
+            prev = last;
+            last = i;
+        }
+    });
+    const slice = events.slice(prev + 1, last === -1 ? events.length : last);
+    let lastTool = -1;
+    slice.forEach((e, i) => {
+        if (isToolCall(e)) lastTool = i;
+    });
+    return slice
+        .filter((e, i) => i > lastTool && isAgentText(e))
+        .map(chunkText)
+        .join("");
+}
+
+function stopOf(e) {
+    const u = acpUpdate(e);
+    if (e?.type === "error") return "error";
+    return String(e?.stopReason || e?.stop_reason || e?.subtype || u?.stop_reason || u?.stopReason || "");
+}
+
+function subtypeOf(stop, type) {
+    const norm = String(stop || "").toLowerCase().replace(/-/g, "_");
+    if (type === "error") return "error";
+    if (/max_turn/.test(norm) || norm === "error_max_turns") return "error_max_turns";
+    if (!norm || norm === "end_turn" || norm === "endturn" || norm === "success") return "success";
+    if (norm === "refusal") return "error";
+    return norm;
+}
+
+function turnsOf(e) {
+    const u = acpUpdate(e);
+    const n = e?.num_turns ?? e?.numTurns ?? u?.usage?.numTurns ?? e?.usage?.num_turns ?? e?.usage?.numTurns;
+    return Number.isFinite(n) ? n : null;
+}
+
+function durationOf(e) {
+    const u = acpUpdate(e);
+    const n = e?.duration_ms ?? u?.elapsed_ms ?? u?.usage?.apiDurationMs;
+    return Number.isFinite(n) ? n : 0;
+}
+
+function ticksOf(e) {
+    if (!e) return null;
+    const u = acpUpdate(e);
+    for (const c of [u?.usage?.costUsdTicks, e.usage?.costUsdTicks, e.total_cost_usd_ticks, e.costUsdTicks]) {
+        if (Number.isFinite(c)) return c;
+    }
+    return null;
+}
+
+function tokenFields(src) {
+    if (!src || typeof src !== "object") return null;
+    const input = src.inputTokens ?? src.input_tokens;
+    const output = src.outputTokens ?? src.output_tokens;
+    const reasoning = src.reasoningTokens ?? src.reasoning_tokens;
+    const total = src.totalTokens ?? src.total_tokens;
+    const calls = src.modelCalls ?? src.model_calls;
+    if (![input, output, reasoning, total, calls].some((n) => Number.isFinite(n))) return null;
+    return {
+        input_tokens: input || 0,
+        output_tokens: output || 0,
+        reasoning_tokens: reasoning || 0,
+        total_tokens: total || 0,
+        model_calls: calls || 0,
+    };
+}
+
+const FAST_WARNING = (names) =>
+    [
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        `WARNING: FAST MODEL USED: ${names.join(", ")}`,
+        "This burns the separate subscription limits.",
+        "The run is failed on purpose. Tell the user. Do not continue with this model.",
+        "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+    ].join("\n");
+
+/// Tokens, cost and the fast-model check for one Grok run. `usage` is `grok usage` JSON or null.
+export function grokRunFacts(events, usage) {
+    const models = collectModels(events, usage);
+    const fast = models.filter((m) => /fast/i.test(m));
+    const terminals = (events || []).filter(isTerminal);
+    const last = terminals[terminals.length - 1] || null;
+    const sessionTicks = usage?.session?.costUsdTicks;
+    const sessionUsd = Number.isFinite(sessionTicks) ? sessionTicks / 1e10 : null;
+    const turnTicks = ticksOf(last);
+    const turnUsd = Number.isFinite(turnTicks) ? turnTicks / 1e10 : null;
+    const sessionId =
+        usage?.sessionId ||
+        (events || []).map((e) => e.sessionId || e.session_id || e.params?.sessionId).filter(Boolean).pop() ||
+        "";
+    const tokens = tokenFields(usage?.session) || tokenFields(acpUpdate(last)?.usage) || tokenFields(last?.usage) || {};
+    return {
+        models,
+        fast,
+        sessionUsd,
+        turnUsd,
+        text: finalGrokText(events || []),
+        subtype: last ? subtypeOf(stopOf(last), last.type) : "error",
+        sessionId,
+        tokens,
+        numTurns: (last && turnsOf(last)) ?? usage?.session?.turnCount ?? terminals.length,
+        durationMs: last ? durationOf(last) : 0,
+        warning: fast.length ? FAST_WARNING(fast) : "",
+    };
+}
+
+function whenOf(e) {
+    const u = acpUpdate(e);
+    const ms = e?._meta?.agentTimestampMs || e?.params?._meta?.agentTimestampMs || u?._meta?.agentTimestampMs;
+    let iso = "";
+    if (Number.isFinite(ms)) iso = new Date(ms).toISOString();
+    else if (typeof e?.timestamp === "number") iso = new Date(e.timestamp < 1e12 ? e.timestamp * 1000 : e.timestamp).toISOString();
+    else if (typeof e?.timestamp === "string") iso = e.timestamp;
+    const t = time(iso);
+    return t && t !== "Invalid Date" ? t : "";
+}
+
+function grokToolName(e, u) {
+    const tool = u?._meta?.["x.ai/tool"];
+    return e.toolName || u?.toolName || tool?.name || u?.title || e.title || "tool";
+}
+
+function grokToolOutput(upd) {
+    if (!upd) return "";
+    if (upd.rawOutput != null) return typeof upd.rawOutput === "string" ? upd.rawOutput : JSON.stringify(upd.rawOutput, null, 2);
+    const c = upd.content;
+    if (typeof c === "string") return c;
+    if (Array.isArray(c)) return c.map((x) => (typeof x === "string" ? x : x.text || x.content || JSON.stringify(x))).join("\n");
+    return "";
+}
+
+/// Grok streaming-json (flat or ACP) as the same dialog Markdown DeepSeek runs use.
+function renderGrokEvents(events) {
+    const outputs = new Map();
+    for (const e of events) {
+        const u = acpUpdate(e);
+        const upd = u?.sessionUpdate === "tool_call_update" ? u : e.type === "tool_call_update" ? e : null;
+        if (!upd?.toolCallId) continue;
+        const prev = outputs.get(upd.toolCallId) || {};
+        outputs.set(upd.toolCallId, {
+            ...prev,
+            ...upd,
+            rawOutput: upd.rawOutput != null ? upd.rawOutput : prev.rawOutput,
+            status: upd.status || prev.status,
+        });
+    }
+    const lines = [];
+    let buf = [];
+    let kind = "";
+    let stampAt = "";
+    let firstUser = true;
+    const flush = () => {
+        const s = buf.join("");
+        const k = kind;
+        const st = stampAt;
+        buf = [];
+        kind = "";
+        stampAt = "";
+        if (!s.trim()) return;
+        const label = k === "thought" ? "думает" : "пишет";
+        const head = st ? `### ${st} · ${label}` : `### ${label}`;
+        lines.push(head, "", k === "thought" ? cut(s).replace(/^/gm, "> ") : s, "");
+    };
+    for (const e of events) {
+        const u = acpUpdate(e);
+        const su = u?.sessionUpdate;
+        if (su === "agent_thought_chunk" || e.type === "thought") {
+            if (kind !== "thought") flush();
+            if (!buf.length) stampAt = whenOf(e);
+            kind = "thought";
+            buf.push(chunkText(e));
+        } else if (su === "agent_message_chunk" || e.type === "text") {
+            if (kind !== "text") flush();
+            if (!buf.length) stampAt = whenOf(e);
+            kind = "text";
+            buf.push(chunkText(e));
+        } else if (su === "user_message_chunk") {
+            flush();
+            const t = chunkText(e);
+            if (firstUser) {
+                firstUser = false;
+                continue;
+            }
+            if (t.trim()) lines.push(whenOf(e) ? `### ${whenOf(e)} · сообщение подагенту` : "### сообщение подагенту", "", t, "");
+        } else if (su === "tool_call" || e.type === "tool_call") {
+            flush();
+            const id = (u || e).toolCallId;
+            const name = grokToolName(e, u);
+            const input = (u || e).rawInput ?? {};
+            lines.push(whenOf(e) ? `### ${whenOf(e)} · вызывает \`${name}\`` : `### вызывает \`${name}\``, "", block(cut(JSON.stringify(input, null, 2)), "json"), "");
+            const upd = outputs.get(id);
+            const out = grokToolOutput(upd);
+            if (out) {
+                const err = upd.status === "failed" || upd.status === "error";
+                lines.push(`<details><summary>результат${err ? " (ошибка)" : ""}</summary>`, "", block(cut(out)), "", "</details>", "");
+            }
+        } else if (e.type === "error") {
+            flush();
+            lines.push(whenOf(e) ? `### ${whenOf(e)} · ошибка` : "### ошибка", "", e.message || "error", "");
+        }
+    }
+    flush();
+    return lines;
+}
+
+/// Dialog after the last turn ending: a later turn, or a resume appended after `end`.
+function grokContinued(events) {
+    let last = -1;
+    for (let i = 0; i < events.length; i++) if (isTerminal(events[i])) last = i;
+    if (last < 0) return false;
+    for (let i = last + 1; i < events.length; i++) {
+        const su = acpUpdate(events[i])?.sessionUpdate;
+        const t = events[i].type;
+        if (
+            t === "thought" ||
+            t === "text" ||
+            t === "tool_call" ||
+            t === "tool_call_update" ||
+            su === "agent_thought_chunk" ||
+            su === "agent_message_chunk" ||
+            su === "tool_call" ||
+            su === "tool_call_update"
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The agent process recorded in RUN_DIR/pid. Missing or dead is false; EPERM means it is alive.
+function agentPidAlive(src) {
+    if (!src?.dir) return false;
+    const pid = Number(readText(path.join(src.dir, "pid")));
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (e) {
+        return e.code === "EPERM";
+    }
+}
+
+function grokState(src, events, mtime) {
+    // `end` / turn_completed is one turn. The process keeps writing, and a resume appends after it.
+    if (agentPidAlive(src) || !events.some(isTerminal) || grokContinued(events)) {
+        const alive = agentPidAlive(src) || Date.now() - mtime < IDLE_MS;
+        return { status: alive ? "работает" : "остановлен (журнал давно не менялся)", finished: false, summary: [] };
+    }
+    const facts = grokRunFacts(events, null);
+    const fast = facts.fast.length > 0;
+    const maxTurns = facts.subtype === "error_max_turns";
+    const ok = facts.subtype === "success" && !fast;
+    const sec = Math.round((facts.durationMs || 0) / 1000);
+    const status = fast ? "ошибка (fast model)" : ok ? "готово" : maxTurns ? "остановлен на лимите ходов" : `ошибка (${facts.subtype})`;
+    // streaming-json `end` often has no wall-clock duration; don't print a fake 0s.
+    const turns = facts.durationMs
+        ? `Ходов: ${facts.numTurns ?? "?"}, время: ${Math.floor(sec / 60)} мин ${sec % 60} с.`
+        : `Ходов: ${facts.numTurns ?? "?"}.`;
+    return {
+        status,
+        finished: true,
+        summary: [
+            ...(facts.models.length ? [`Модель: ${facts.models.join(", ")}`] : []),
+            turns,
+            "",
+            ...(fast ? [facts.warning, ""] : []),
+            ...(maxTurns ? [...continueLines(src), ""] : []),
+            facts.text || "",
+        ],
+    };
+}
+
+/// Markdown of a Grok transcript: model, dialog, result. Used by the tests.
+export function renderGrokLog(events) {
+    const src = { kind: "script", provider: "grok", model: "", dir: "", file: "stream.jsonl" };
+    const st = state(src, events, Date.now());
+    const model = collectModels(events, null).join(", ") || "?";
+    return [
+        `* **Модель:** ${model}`,
+        `* **Статус:** ${st.status}`,
+        "",
+        "## Ход работы",
+        "",
+        ...renderEvents(events, src),
+        ...(st.summary.length ? ["## Итог", "", ...st.summary, ""] : []),
+    ].join("\n");
+}
+
 /// The dialog as Markdown lines: thoughts, texts, tool calls with their results.
-function renderEvents(events) {
+function renderEvents(events, src) {
+    if (isGrok(src, events)) return renderGrokEvents(events);
+    return renderClaudeEvents(events);
+}
+
+function renderClaudeEvents(events) {
     const lines = [];
     let first = true;
     for (const e of events) {
@@ -180,6 +559,7 @@ function runSource(dir) {
         dir,
         file: path.join(dir, "stream.jsonl"),
         kind: "script",
+        provider: readText(path.join(dir, "provider")),
         title: readText(path.join(dir, "name")) || task.split("\n").find((l) => l.trim()) || path.basename(dir),
         model: readText(path.join(dir, "model")),
     };
@@ -223,6 +603,7 @@ function continueLines(src) {
 
 /// Running / done / error and the closing summary of a transcript.
 function state(src, events, mtime) {
+    if (isGrok(src, events)) return grokState(src, events, mtime);
     const result = [...events].reverse().find((e) => e.type === "result");
     if (result) {
         const ok = result.subtype === "success" && !result.is_error;
@@ -496,14 +877,16 @@ function processLines(src, events) {
     const sid = session?.session_id || session?.sessionId || "";
     if (src.kind === "script") {
         const r = (f) => readText(path.join(src.dir, f));
-        const pids = [`claude ${r("pid") || "?"}${r("winpid") ? ` (Windows ${r("winpid")})` : ""}`, `скрипт ${r("script_pid") || "?"}`, `зеркало ${r("log_pid") || "?"}`];
-        // Cost per claude call (cost-run, cost-resume-…), written by scripts/subagent.sh at the end.
+        const bin = r("provider") === "grok" ? "grok" : "claude";
+        const pids = [`${bin} ${r("pid") || "?"}${r("winpid") ? ` (Windows ${r("winpid")})` : ""}`, `скрипт ${r("script_pid") || "?"}`, `зеркало ${r("log_pid") || "?"}`];
+        // Cost per call (cost-run, cost-resume-…), written by scripts/subagent.sh at the end.
         let costs = [];
         try {
             costs = fs.readdirSync(src.dir).filter((f) => f.startsWith("cost-")).map((f) => Number(r(f))).filter(Number.isFinite);
         } catch {}
+        const costNote = r("provider") === "grok" ? " (оценка xAI; оплата по подписке)" : "";
         return [
-            ...(costs.length ? [`* **Стоимость:** $${costs.reduce((a, b) => a + b, 0).toFixed(4)}`] : []),
+            ...(costs.length ? [`* **Стоимость:** $${costs.reduce((a, b) => a + b, 0).toFixed(4)}${costNote}`] : []),
             `* **Процессы:** ${pids.join(", ")}`,
             `* **Сессия:** \`${sid || r("session_id") || "?"}\` · продолжить: \`scripts/subagent.sh resume ${path.relative(repo, src.dir).replace(/\\/g, "/")} MESSAGE_FILE\`, ход: \`scripts/subagent.sh status …\``,
         ];
@@ -561,7 +944,7 @@ function loadIndex() {
 
 const rendered = new Map(); // key → mtime rendered
 
-function render(src, index) {
+function render(src, index, env = {}) {
     let mtime;
     try {
         mtime = fs.statSync(src.file).mtimeMs;
@@ -574,7 +957,8 @@ function render(src, index) {
     const title = src.title || task.split("\n").find((l) => l.trim()) || "задача";
     const startIso = events.find((e) => e.timestamp)?.timestamp;
     const started = startIso ? new Date(startIso) : new Date(mtime);
-    const model = src.model || events.find((e) => e.type === "system" && e.model)?.model || "";
+    const streamModels = isGrok(src, events) ? collectModels(events, null) : [];
+    const model = streamModels.length ? streamModels.join(", ") : src.model || events.find((e) => e.type === "system" && e.model)?.model || "";
     if (!index[src.key]) {
         // A run of scripts/subagent.sh is already named that way: its log takes the same name.
         const named = src.kind === "script" && /^\d{4}-\d\d-\d\d_\d\d-\d\d_/.test(path.basename(src.dir));
@@ -584,7 +968,7 @@ function render(src, index) {
     }
     const { status, summary, finished } = state(src, events, mtime);
     const archived = Boolean(index[`${src.key}#archived`]);
-    const logDir = archived ? archiveDir : outDir;
+    const logDir = env.outDir || (archived ? archiveDir : outDir);
     const artifacts = resolveArtifacts(src, index, task, archived, finished);
     const md = [
         `# ${title}`,
@@ -602,7 +986,7 @@ function render(src, index) {
         "",
         "## Ход работы",
         "",
-        ...renderEvents(events),
+        ...renderEvents(events, src),
         ...(summary.length ? ["## Итог", "", ...summary, ""] : []),
         ...artifactLines(logDir, artifacts),
     ].join("\n");
@@ -654,6 +1038,91 @@ function startWatch() {
     setInterval(() => pass(false), 3000);
 }
 
+function readUsageFile(file) {
+    let text = "";
+    try {
+        text = fs.readFileSync(file, "utf8");
+    } catch {
+        return null;
+    }
+    try {
+        return JSON.parse(text);
+    } catch {
+        // A warning line may sit in front of the JSON object.
+        const i = text.indexOf("{");
+        const j = text.lastIndexOf("}");
+        if (i >= 0 && j > i) {
+            try {
+                return JSON.parse(text.slice(i, j + 1));
+            } catch {
+                return null;
+            }
+        }
+        return null;
+    }
+}
+
+/// result.json, the cost inputs and the fast-model warning for scripts/subagent.sh.
+function writeGrokFacts(dir) {
+    const events = readJsonl(path.join(dir, "stream.jsonl"));
+    const usage = readUsageFile(path.join(dir, "usage.json"));
+    const facts = grokRunFacts(events, usage);
+    const costUsd = facts.sessionUsd != null ? facts.sessionUsd.toFixed(4) : facts.turnUsd != null ? facts.turnUsd.toFixed(4) : "";
+    const result = {
+        type: "result",
+        subtype: facts.fast.length ? "error_fast_model" : facts.subtype,
+        is_error: Boolean(facts.fast.length) || facts.subtype !== "success",
+        num_turns: facts.numTurns,
+        duration_ms: facts.durationMs,
+        session_id: facts.sessionId,
+        result: facts.text,
+        model: facts.models.join(", "),
+        usage: facts.tokens,
+        cost_usd: costUsd,
+        cost_note: "xAI's estimate; the user pays by subscription",
+        fast_warning: facts.warning,
+    };
+    fs.writeFileSync(path.join(dir, "result.json"), JSON.stringify(result, null, 2) + "\n");
+    if (facts.sessionId) fs.writeFileSync(path.join(dir, "session_id"), facts.sessionId + "\n");
+    if (facts.models.length) fs.writeFileSync(path.join(dir, "model"), facts.models.join(", ") + "\n");
+    fs.writeFileSync(path.join(dir, "grok-cost-mode"), (facts.sessionUsd != null ? "session" : facts.turnUsd != null ? "turn" : "unknown") + "\n");
+    fs.writeFileSync(path.join(dir, "grok-usd-session"), facts.sessionUsd != null ? facts.sessionUsd.toFixed(4) + "\n" : "");
+    fs.writeFileSync(path.join(dir, "grok-usd-turn"), facts.turnUsd != null ? facts.turnUsd.toFixed(4) + "\n" : "");
+    const fastFile = path.join(dir, "fast-model");
+    if (facts.warning) fs.writeFileSync(fastFile, facts.warning + "\n");
+    else {
+        try {
+            fs.rmSync(fastFile, { force: true });
+        } catch {}
+    }
+}
+
+/// One pass of `follow`: re-read the run (provider, model, name, stream) and render the log.
+/// `end` in a Grok stream is one turn. While that agent pid is alive, the run is not finished,
+/// so a later turn and a resume keep showing up. A partial last line is skipped, not fatal.
+/// `env.outDir` / `env.index` / `env.isolated` keep tests off the real subagents/ folder.
+export function followTick(dir, env = {}) {
+    const src = runSource(path.resolve(dir));
+    const index = env.index || loadIndex();
+    const logRoot = env.outDir || outDir;
+    try {
+        if (!env.isolated && index[`${src.key}#archived`]) unarchiveRun(src, index);
+        let finished = false;
+        if (fs.existsSync(src.file)) finished = Boolean(render(src, index, { outDir: env.outDir }));
+        if (!env.isolated) {
+            fs.mkdirSync(path.dirname(indexFile), { recursive: true });
+            fs.writeFileSync(indexFile, JSON.stringify(index, null, 2));
+        }
+        // The pid wins over a turn's `end`: the process is about to write the next turn.
+        if (agentPidAlive(src)) finished = false;
+        const name = index[src.key] || "";
+        return { finished, log: name ? path.join(logRoot, name) : "" };
+    } catch (e) {
+        if (!env.quiet) console.error(`follow ${dir}: ${e && e.stack ? e.stack : e}`);
+        return { finished: false, log: "", error: String(e && e.message ? e.message : e) };
+    }
+}
+
 // Run the CLI only when this file is executed, so tests can import the helpers above.
 const isMain = (() => {
     try {
@@ -682,20 +1151,14 @@ if (isMain) {
     } else if (cmd === "watch") {
         if (!runningWatcher()) startWatch();
     } else if (cmd === "follow" && arg) {
-        const src = runSource(path.resolve(arg));
-        const tick = () => {
-            const index = loadIndex();
-            // Following a run means it is active again: an archived one comes back.
-            if (index[`${src.key}#archived`]) unarchiveRun(src, index);
-            const done = fs.existsSync(src.file) && render(src, index);
-            fs.writeFileSync(indexFile, JSON.stringify(index, null, 2));
-            return done;
-        };
         const timer = setInterval(() => {
-            if (tick()) clearInterval(timer);
+            if (followTick(arg).finished) clearInterval(timer);
         }, 3000);
+        if (followTick(arg).finished) clearInterval(timer);
+    } else if (cmd === "grok-facts" && arg) {
+        writeGrokFacts(path.resolve(arg));
     } else {
-        console.error("usage: node scripts/subagent-log.mjs once | watch [--detach] | follow RUN_DIR | id MODEL TITLE");
+        console.error("usage: node scripts/subagent-log.mjs once | watch [--detach] | follow RUN_DIR | id MODEL TITLE | grok-facts RUN_DIR");
         process.exit(2);
     }
 }

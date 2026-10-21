@@ -1,0 +1,9 @@
+{
+  "name": "grok-usage",
+  "private": true,
+  "description": "Reads the Grok subscription allowance from the grok TUI /usage window (scripts/subagent.sh statistics).",
+  "dependencies": {
+    "@xterm/headless": "^5.5.0",
+    "node-pty": "^1.1.0"
+  }
+}

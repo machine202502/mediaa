@@ -212,12 +212,31 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
   * недельный — то же при 70 % / 90 %;
   * между DeepSeek и Grok выбирать того, кто лучше справится с задачей; цена между ними
     пользователю неважна.
+* **Статистика расхода** пишется сама, пользователь ничего не вводит.
+  Снимки — строки JSON в `subagents/usage.jsonl` (время, метка, лимиты Claude, недельный
+  лимит Grok в %, баланс DeepSeek). Отчёт — `subagents/usage.md`: каждый запуск
+  (`target/subagents`, его архив и подагенты Claude из `subagents/registry.md`), пары
+  снимков `start …` / `end …` с разностями, итоги по исполнителям.
+  `scripts/subagent.sh` в начале и в конце запуска Grok снимает лимит Grok, запуска DeepSeek —
+  баланс; в итог запуска попадает строка `Grok limit: 12 % → 14 %` или
+  `DeepSeek balance: $9.81 → $9.79`. Скрипт передаёт `--only grok` или `--only deepseek`,
+  чтобы запуск не ждал чужой счётчик. Снимок головы без `--only` записывает лимиты Claude,
+  лимит Grok и баланс DeepSeek. Сломанный снимок — только пометка, запуск не падает.
+  Лимит Grok читается из окна `/usage` официальной программы `grok` (`-m grok-4.7`, не fast):
+  в режиме без интерфейса этой команды нет. Если окно изменилось и разбор не удался, в отчёте
+  «лимит Grok не снят», токены и оценка xAI остаются.
+  **Часть головы.** В начале и в конце каждой серии и вокруг каждого запуска Sonnet голова
+  вызывает `node scripts/usage.mjs snapshot --label "start|end …" --claude-5h N --claude-week N`
+  с числами из `get_usage` (их видит только голова). Перед закрытием серии —
+  `node scripts/usage.mjs report`, и итог серии пишется в done.md. Лимиты Claude общие для
+  головы и Sonnet: разность включает работу головы, точное разделение недоступно — это
+  помечено в отчёте.
 * **Grok** (`grok`, Grok Build CLI, подписка пользователя) — установлен и вошёл в аккаунт;
   может быть исполнителем (`grok -p` / `--prompt-file`, `--output-format json`, `--max-turns`,
   `--resume`, `--allow`/`--deny`, `--effort`). **Всегда `-m grok-4.7`, никогда fast-режим
   (`grok-4.7-build-fast`)** — он быстро съедает отдельные лимиты подписки (решение пользователя);
-  после запуска проверять в `modelUsage`, что модель не fast. Подключение к `scripts/subagent.sh`
-  — по решению пользователя.
+  после запуска проверять в `modelUsage`, что модель не fast. Исполнитель в `scripts/subagent.sh` —
+  см. «Подагенты на Grok».
 * Задание подагенту самодостаточное: пути, правила CLAUDE.md, точные ожидаемые тексты,
   команды тестов, «не коммитить, не менять git-индекс, не запускать приложение и не убивать
   процессы», «строки с `\` и `\n` править инструментом Edit, а не sed/perl».
@@ -256,6 +275,34 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
   `browser_tab_open` и передавать её `tabId`. `browser_screenshot` возвращает только картинку,
   в файл не сохраняет: для артефакта — `desktop-mcp` `capture_screenshot` с `region` и `savePath`.
 
+### Подагенты на Grok
+
+* Запуск: `scripts/subagent.sh run --provider grok [--effort none|minimal|low|medium|high|xhigh|max] [--max-turns N] [--name TITLE] TASK_FILE`.
+  Уровень рассуждений по умолчанию — `medium` (решение пользователя: high думает слишком долго); простое — `low`, по-настоящему сложное — `high` или `max`. Модель всегда `-m grok-4.7`:
+  в `modelUsage` она называется `grok-4.7-build`. **Никогда** fast (`grok-4.7-build-fast`) —
+  он тратит отдельные лимиты подписки. После каждого запуска скрипт смотрит `modelUsage`
+  (в конце потока и в `grok usage`). Если в имени модели есть `fast` — громкое предупреждение,
+  запись в итог и ненулевой код выхода.
+* Права: `--permission-mode bypassPermissions` (headless отменяет весь запуск на любом
+  запросе разрешения; `dontAsk` это не лечит) и широкий `--deny`. Запрещены разрушительный git
+  (`commit`/`add`/`reset`/`push`/`stash`/`checkout`/`restore`/`rm`/`clean`/`rebase`/`merge`/`switch`),
+  удаление (`rm`, `rmdir`, `del`, `Remove-Item`), останов процессов (`kill`, `taskkill`,
+  `Stop-Process`), установка (`npm`, `npx`, `pip`, `winget`, `choco`, `scoop`), `cargo run` и
+  `cargo install`, запуск `grok -p` / `grok --prompt` и `claude`. Запрещённая команда
+  отклоняется, запуск идёт дальше. `--disallowed-tools Agent` — без своих подагентов.
+* Продолжение: `scripts/subagent.sh resume RUN_DIR MESSAGE_FILE` — тот же сеанс, `grok --resume`.
+  Идентификатор сессии скрипт берёт из вывода Grok и пишет в `session_id`. Уровень рассуждений
+  тот же, что у запуска (`effort` в папке запуска).
+* Токены и оценка стоимости — из `grok usage <session>` (`costUsdTicks` / 10¹⁰ = USD). Сырой ответ
+  лежит в `usage.json` папки запуска, сумма этого запуска — в `cost-*`, она же в итоге и в `list`.
+  `grok usage` считает всю сессию, поэтому у `resume` в `cost-*` пишется разница с уже записанным,
+  и сумма в `list` равна итогу сессии. Это оценка xAI: пользователь платит подпиской, не этой суммой.
+* Папка запуска, памятка про артефакты, реестр, `status` и `list` — те же, что у DeepSeek.
+  Журнал зеркала читает `stream.jsonl` (сообщения, мысли, вызовы инструментов и их результат).
+  `follow` перерисовывает журнал каждые несколько секунд, пока жив процесс агента. Строка `end`
+  в потоке Grok — конец хода, не конец запуска: следующий ход и `resume` дописываются после неё,
+  и из-за неё слежение не останавливается. Неполная последняя строка растущего NDJSON пропускается.
+
 ### Журналы подагентов (`subagents/`)
 
 * Каждый подагент — свой файл `subagents/<дата_время>_<модель>_<задача>.md` (папка в
@@ -267,7 +314,7 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
   * `follow RUN_DIR` — один запуск `scripts/subagent.sh` (скрипт делает это сам).
 * Источники: штатные подагенты Claude Code —
   `~/.claude/projects/<проект>/<сессия>/subagents/agent-*.jsonl` (+ `.meta.json` с описанием
-  и моделью); запуски DeepSeek — `target/subagents/<запуск>/stream.jsonl`.
+  и моделью); запуски DeepSeek и Grok — `target/subagents/<запуск>/stream.jsonl`.
 * У запусков DeepSeek давать понятное имя: `scripts/subagent.sh run --name "7.1 Вкладки …" TASK_FILE`,
   у штатных — поле `description` при запуске.
 * Команды `scripts/subagent.sh status RUN_DIR` (сколько работает, жив ли процесс, последний шаг)
@@ -324,10 +371,11 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
   проекта (без игнорируемых) и базу `git stash create` (git при этом не меняется). Итог —
   `changes-<run|resume-…>.patch` в папке запуска и в артефактах: добавленные, изменённые,
   удалённые файлы с диффом. Правки параллельного запуска тоже попадут — это помечено в файле.
-* **Стоимость.** Токены из итога запуска × цены модели из публичного списка OpenRouter
+* **Стоимость.** Для DeepSeek — токены из итога запуска × цены модели из публичного списка OpenRouter
   (`token_cost`; модели API DeepSeek сопоставлены с той же моделью в списке OpenRouter);
   счётчик расходов по ключу (OpenRouter — с задержкой, баланс DeepSeek — до центов) служит только
-  запасным способом. Пишется в `cost-<…>`, видна в итоге запуска, в шапке лога и в `list`.
+  запасным способом. Для Grok — оценка xAI из `grok usage` (см. «Подагенты на Grok»).
+  Пишется в `cost-<…>`, видна в итоге запуска, в шапке лога и в `list`.
 * **Архив.** Завершённый запуск, журнал которого не менялся дольше срока, зеркало переносит
   в `subagents/archive/` (лог) и `subagents/archive/artifacts/` (артефакты), ничего не удаляя.
   Срок — `subagents/config.json` → `archiveAfterHours` (по умолчанию 6), переменная

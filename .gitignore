@@ -8,3 +8,6 @@ dist/
 
 # Readable dialogs of subagents (scripts/subagent-log.mjs)
 subagents/
+
+# Node tools of the workflow (scripts)
+tools/*/node_modules/

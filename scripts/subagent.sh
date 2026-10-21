@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
-# Runs one task with a headless Claude Code driven by a cheaper model: through OpenRouter or
-# DeepSeek's own Anthropic-compatible API. The lead (the model the user talks to) calls it and reviews the result.
-# A run lives in target/subagents/<time>-<rand>/ so that long runs can be watched and continued:
+# Runs one task with a headless agent. DeepSeek and OpenRouter go through Claude Code;
+# Grok goes through the Grok CLI (`grok`). The lead calls this and reviews the result.
+# A run lives in target/subagents/<name>/ so that long runs can be watched and continued:
 #
-#   scripts/subagent.sh run    [--provider deepseek|openrouter] [--model ID] [--max-turns N] [--name TITLE] TASK_FILE
+#   scripts/subagent.sh run    [--provider deepseek|openrouter|grok] [--model ID] [--effort LEVEL] [--max-turns N] [--name TITLE] TASK_FILE
 #   scripts/subagent.sh resume RUN_DIR MESSAGE_FILE [--max-turns N]
 #   scripts/subagent.sh status RUN_DIR
 #   scripts/subagent.sh list             # every run: running / finished / gone (crashed)
 #   scripts/subagent.sh ... -            # the task from stdin
 #
-# `run` is the default command: it prints the run directory first, streams claude into
+# `run` is the default command: it prints the run directory first, streams the agent into
 # RUN_DIR/stream.jsonl and prints a summary at the end. `resume` sends another message to the
 # same session; `status` reports progress without starting anything.
 # Keys (never in the repository): OPENROUTER_API_KEY / DEEPSEEK_API_KEY, else
-# ~/.secrets/openrouter.key / ~/.secrets/deepseek.key.
-# Claude Code's `total_cost_usd` is computed with Anthropic prices and is wrong for these models:
-# see the provider's dashboard.
+# ~/.secrets/openrouter.key / ~/.secrets/deepseek.key. Grok uses the logged-in `grok` CLI.
+# Claude Code's `total_cost_usd` is computed with Anthropic prices and is wrong for DeepSeek:
+# see cost-* (OpenRouter prices). Grok's cost-* is xAI's estimate from `grok usage`
+# (costUsdTicks); the user pays by subscription, not that amount.
+# Grok always runs `-m grok-4.7` (resolves to grok-4.7-build). Never the fast model.
 set -euo pipefail
 
 # The repository root is the directory above this script; runs go under target/.
@@ -24,9 +26,10 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 model=""
 base=""
 key=""
+effort=""
 max_turns=200
 run_dir=""
-claude_pid=""
+agent_pid=""
 
 usage() { sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d'; }
 usage_error() { usage >&2; exit 2; }
@@ -51,8 +54,26 @@ setup_provider() { # provider, model override; sets base, key, model
             # DeepSeek's own name of V4.1 Flash (GET https://api.deepseek.com/models lists them).
             model="${2:-deepseek-flash}"
             ;;
-        *) echo "unknown provider: $1 (openrouter or deepseek)" >&2; exit 2 ;;
+        grok)
+            # The flag is always grok-4.7. It resolves to grok-4.7-build. The fast model is refused.
+            if [[ -n "$2" && "$2" != "grok-4.7" ]]; then
+                echo "grok provider always uses -m grok-4.7 (got $2). Never the fast model." >&2
+                exit 2
+            fi
+            model="grok-4.7"
+            if [[ -z "$effort" ]]; then effort="medium"; fi
+            case "$effort" in
+                none|minimal|low|medium|high|xhigh|max) ;;
+                *) echo "unknown effort: $effort (none|minimal|low|medium|high|xhigh|max)" >&2; exit 2 ;;
+            esac
+            ;;
+        *) echo "unknown provider: $1 (openrouter, deepseek or grok)" >&2; exit 2 ;;
     esac
+}
+
+# A Windows grok.exe does not understand a Git Bash /c/... path.
+to_win() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi
 }
 
 prepare_env() {
@@ -108,12 +129,53 @@ start_claude() { # prompt, session id (empty for a new session), run dir
     CLAUDE_CODE_ALLOW_OTHER_MODELS=1 \
     claude "${args[@]}" \
         >> "$dir/stream.jsonl" 2>> "$dir/stderr.log" &
-    claude_pid=$!
-    # Pids for watching and recovery: this script, claude (Git Bash and Windows numbers).
-    printf '%s\n' "$claude_pid" > "$dir/pid"
-    printf '%s\n' "$$" > "$dir/script_pid"
+    agent_pid=$!
+    record_pid "$dir" "$agent_pid"
+}
+
+# Headless grok cancels the whole run on any approval prompt, so this is always-approve.
+# The deny rules still apply and refuse the command; the run continues.
+start_grok() { # prompt file, session id (empty for a new session), run dir
+    local prompt_file="$1" session="$2" dir="$3"
+    local saved
+    saved="$(cat "$dir/effort" 2>/dev/null || echo "${effort:-medium}")"
+    local -a args=(
+        --cwd "$(to_win "$repo_root")"
+        -m grok-4.7
+        --effort "$saved"
+        --max-turns "$max_turns"
+        --output-format streaming-json
+        # Background commands grok started must not keep the run (or fail it) after its last turn.
+        --no-wait-for-background
+        # A headless grok cancels the whole run on any call that would need approval (dontAsk does
+        # not help), so it runs with always-approve and the deny rules (they still apply) fence it.
+        --permission-mode bypassPermissions
+        --disallowed-tools Agent
+        --deny "Bash(git commit*)" --deny "Bash(git add*)" --deny "Bash(git reset*)"
+        --deny "Bash(git push*)" --deny "Bash(git stash*)" --deny "Bash(git checkout*)"
+        --deny "Bash(git restore*)" --deny "Bash(git rm*)" --deny "Bash(git clean*)"
+        --deny "Bash(git rebase*)" --deny "Bash(git merge*)" --deny "Bash(git switch*)"
+        --deny "Bash(cargo run*)" --deny "Bash(cargo install*)"
+        --deny "Bash(rm *)" --deny "Bash(rmdir*)" --deny "Bash(del *)" --deny "Bash(Remove-Item*)"
+        --deny "Bash(kill*)" --deny "Bash(taskkill*)" --deny "Bash(Stop-Process*)"
+        --deny "Bash(npm *)" --deny "Bash(npx *)" --deny "Bash(pip *)" --deny "Bash(winget*)"
+        --deny "Bash(choco*)" --deny "Bash(scoop*)" --deny "Bash(Set-ExecutionPolicy*)"
+        --deny "Bash(reg *)" --deny "Bash(shutdown*)" --deny "Bash(Restart-Computer*)"
+        --deny "Bash(grok -p*)" --deny "Bash(grok --prompt*)" --deny "Bash(claude*)"
+        --prompt-file "$(to_win "$prompt_file")"
+    )
+    [[ -z "$session" ]] || args+=(--resume "$session")
+    grok "${args[@]}" \
+        >> "$dir/stream.jsonl" 2>> "$dir/stderr.log" &
+    agent_pid=$!
+    record_pid "$dir" "$agent_pid"
+}
+
+record_pid() { # run dir, child pid
+    printf '%s\n' "$2" > "$1/pid"
+    printf '%s\n' "$$" > "$1/script_pid"
     sleep 1
-    [[ ! -r "/proc/$claude_pid/winpid" ]] || cat "/proc/$claude_pid/winpid" > "$dir/winpid"
+    [[ ! -r "/proc/$2/winpid" ]] || cat "/proc/$2/winpid" > "$1/winpid"
 }
 
 # The readable dialog in subagents/ (scripts/subagent-log.mjs), kept up to date while it runs.
@@ -127,7 +189,7 @@ follow_log() { # run dir
 wait_session() { # run dir
     local i sid
     for i in $(seq 1 60); do
-        sid="$(grep -m 1 -o '"session_id":"[^"]*"' "$1/stream.jsonl" 2>/dev/null | head -n 1 | sed 's/.*:"\(.*\)"/\1/' || true)"
+        sid="$(grep -m 1 -oE '"(session_id|sessionId)":"[^"]+"' "$1/stream.jsonl" 2>/dev/null | head -n 1 | sed -E 's/^"[^"]+":"([^"]+)"$/\1/' || true)"
         if [[ -n "$sid" ]]; then printf '%s\n' "$sid" > "$1/session_id"; return 0; fi
         sleep 1
     done
@@ -143,8 +205,10 @@ register_run() { # run dir
             "Пишется при старте каждого запуска. Проверить, кто жив: \`scripts/subagent.sh list\`." "" \
             "| Начало | Задача | Модель | Процессы | Сессия | Папка запуска |" "|---|---|---|---|---|---|" > "$reg"
     fi
-    printf '| %s | %s | %s | claude %s (Windows %s), скрипт %s | `%s` | `%s` |\n' \
-        "$(date '+%Y-%m-%d %H:%M:%S')" "$(r name | tr '|' '/')" "$(r model)" "$(r pid)" "$(r winpid)" "$(r script_pid)" \
+    local bin="claude"
+    [[ "$(r provider)" == grok ]] && bin="grok"
+    printf '| %s | %s | %s | %s %s (Windows %s), скрипт %s | `%s` | `%s` |\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$(r name | tr '|' '/')" "$(r model)" "$bin" "$(r pid)" "$(r winpid)" "$(r script_pid)" \
         "$(r session_id)" "${dir#"$repo_root"/}" >> "$reg"
 }
 
@@ -180,11 +244,8 @@ extract_result() { # run dir: session id and the last result line
     local f="$dir/stream.jsonl" line sid
     [[ -f "$f" ]] || return 0
 
-    line="$(grep -m 1 '"session_id"' "$f" 2>/dev/null || true)"
-    if [[ -n "$line" ]]; then
-        sid="$(printf '%s\n' "$line" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
-        [[ -z "$sid" ]] || printf '%s\n' "$sid" > "$dir/session_id"
-    fi
+    sid="$(grep -m 1 -oE '"(session_id|sessionId)":"[^"]+"' "$f" 2>/dev/null | head -n 1 | sed -E 's/^"[^"]+":"([^"]+)"$/\1/' || true)"
+    [[ -z "$sid" ]] || printf '%s\n' "$sid" > "$dir/session_id"
 
     line="$(grep -E '"type"[[:space:]]*:[[:space:]]*"result"' "$f" 2>/dev/null | tail -n 1 || true)"
     [[ -z "$line" ]] || printf '%s\n' "$line" > "$dir/result.json"
@@ -200,11 +261,18 @@ json_num() { # file, key
     sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$1" 2>/dev/null | head -n 1 || true
 }
 
+print_usage_notes() { # result.json
+    local notes="${1%/result.json}/usage-notes"
+    [[ -f "$notes" ]] && cat "$notes"
+}
+
 print_summary() { # result.json
     local f="$1"
-    if [[ ! -f "$f" ]]; then echo "(no result)"; return 0; fi
+    if [[ ! -f "$f" ]]; then echo "(no result)"; print_usage_notes "$f"; return 0; fi
     if command -v jq >/dev/null 2>&1; then
-        if jq -r '"subtype: \(.subtype // "?")\nnum_turns: \(.num_turns // "?")\nduration_ms: \(.duration_ms // "?")\nsession_id: \(.session_id // "?")\nresult:\n\(.result // "")"' "$f"; then
+        # One line: a multiline program breaks when the script has CR characters.
+        if jq -r '"subtype: \(.subtype // "?")\nnum_turns: \(.num_turns // "?")\nduration_ms: \(.duration_ms // "?")\nsession_id: \(.session_id // "?")" + (if .cost_note != null and .cost_note != "" then "\nmodel: \(.model // "?")\ntokens: in \(.usage.input_tokens // 0) out \(.usage.output_tokens // 0) reasoning \(.usage.reasoning_tokens // 0)\ncost: $\(.cost_usd) (\(.cost_note))" else "" end) + (if .fast_warning != null and .fast_warning != "" then "\n" + .fast_warning else "" end) + "\nresult:\n" + (.result // "")' "$f"; then
+            print_usage_notes "$f"
             return 0
         fi
     fi
@@ -212,8 +280,47 @@ print_summary() { # result.json
     echo "num_turns: $(json_num "$f" num_turns)"
     echo "duration_ms: $(json_num "$f" duration_ms)"
     echo "session_id: $(json_str "$f" session_id)"
+    if [[ -n "$(json_str "$f" cost_note)" ]]; then
+        echo "model: $(json_str "$f" model)"
+        echo "tokens: in $(json_num "$f" input_tokens) out $(json_num "$f" output_tokens) reasoning $(json_num "$f" reasoning_tokens)"
+        echo "cost: \$$(json_str "$f" cost_usd) ($(json_str "$f" cost_note))"
+    fi
+    if [[ -s "${f%/result.json}/fast-model" ]]; then cat "${f%/result.json}/fast-model"; fi
+    print_usage_notes "$f"
     echo "result:"
     json_str "$f" result
+}
+
+# One meter reading. A failure is a note later, never a failed run.
+# Grok runs record the subscription %; DeepSeek runs record the balance.
+# The lead's own snapshot (no --only) records both, plus Claude limits.
+usage_snapshot() { # run dir, start|end
+    local dir="$1" kind="$2" name out only
+    name="$(head -n 1 "$dir/name" 2>/dev/null | tr -d '\r' || true)"
+    [[ -n "$name" ]] || name="$(basename "$dir")"
+    case "$(tr -d '\r' < "$dir/provider" 2>/dev/null || true)" in
+        grok) only=grok ;;
+        deepseek) only=deepseek ;;
+        *) return 0 ;;
+    esac
+    out="$(node "$repo_root/scripts/usage.mjs" snapshot --label "$kind $name" --only "$only" 2>>"$dir/stderr.log" || true)"
+    if [[ -n "$out" ]]; then
+        printf '%s\n' "$out" | tail -n 1 > "$dir/usage-$kind.json" || true
+    else
+        printf '%s\n' '{"ok":false,"error":"snapshot produced no output"}' > "$dir/usage-$kind.json" || true
+    fi
+    return 0
+}
+
+append_usage_note() { # run dir
+    local dir="$1" line
+    line="$(node "$repo_root/scripts/usage.mjs" note "$dir" 2>>"$dir/stderr.log" || true)"
+    if [[ -n "$line" ]]; then
+        printf '%s\n' "$line" >> "$dir/usage-notes" || true
+    else
+        printf '%s\n' "usage snapshot: not recorded" >> "$dir/usage-notes" || true
+    fi
+    return 0
 }
 
 pid_alive() { # pid from $!
@@ -229,10 +336,18 @@ pid_alive() { # pid from $!
 
 last_tool() { # stream.jsonl
     local line tail name input
-    line="$(grep -E '"type"[[:space:]]*:[[:space:]]*"tool_use"' "$1" 2>/dev/null | tail -n 1 || true)"
+    line="$(grep -E '"type"[[:space:]]*:[[:space:]]*"tool_use"|"type"[[:space:]]*:[[:space:]]*"tool_call"|"sessionUpdate"[[:space:]]*:[[:space:]]*"tool_call"' "$1" 2>/dev/null | tail -n 1 || true)"
     if [[ -z "$line" ]]; then echo "last tool: (none)"; return 0; fi
     if command -v jq >/dev/null 2>&1; then
-        if printf '%s\n' "$line" | jq -r '[.message.content[]? | select(.type == "tool_use")] | last | "last tool: \(.name): \(.input | tostring | .[0:200])"'; then
+        if printf '%s\n' "$line" | jq -r '
+            if .params.update.sessionUpdate == "tool_call" then
+                "last tool: \(.params.update.title // .params.update._meta["x.ai/tool"].name // "tool"): \(.params.update.rawInput | tostring | .[0:200])"
+            elif .type == "tool_call" then
+                "last tool: \(.toolName // .title // "tool"): \(.rawInput | tostring | .[0:200])"
+            else
+                ([.message.content[]? | select(.type == "tool_use")] | last | "last tool: \(.name): \(.input | tostring | .[0:200])")
+            end
+        '; then
             return 0
         fi
     fi
@@ -322,17 +437,51 @@ end_accounting() { # run dir, label
     n="$(grep -c '^# [AMD] ' "$patch" || true)"
     art="$repo_root/$(cat "$dir/artifacts" 2>/dev/null || echo "subagents/artifacts/$(basename "$dir")")"
     mkdir -p "$art" && cp "$patch" "$art/"
-    # The run's tokens (its result line) × the model's prices from OpenRouter's public list: exact
-    # at once; the key's spending counter lags by minutes, so it is only the fallback.
-    cost="$(token_cost "$dir")"
-    if [[ -z "$cost" ]]; then
-        before="$(cat "$dir/spent-before-$label" 2>/dev/null || true)"
-        after="$(spent "$dir" || true)"
-        cost="?"
-        if [[ -n "$before" && -n "$after" ]]; then cost="$(awk -v a="$after" -v b="$before" 'BEGIN { printf "%.4f", a - b }')"; fi
+    local note=""
+    if [[ "$(cat "$dir/provider" 2>/dev/null)" == grok ]]; then
+        # grok usage is the whole session. cost-* stays this invocation, so list's sum matches the session.
+        grok_settle "$dir" || true
+        cost="$(grok_invocation_cost "$dir")"
+        note=" (xAI's estimate; the user pays by subscription)"
+    else
+        # The run's tokens (its result line) × the model's prices from OpenRouter's public list: exact
+        # at once; the key's spending counter lags by minutes, so it is only the fallback.
+        cost="$(token_cost "$dir")"
+        if [[ -z "$cost" ]]; then
+            before="$(cat "$dir/spent-before-$label" 2>/dev/null || true)"
+            after="$(spent "$dir" || true)"
+            cost="?"
+            if [[ -n "$before" && -n "$after" ]]; then cost="$(awk -v a="$after" -v b="$before" 'BEGIN { printf "%.4f", a - b }')"; fi
+        fi
     fi
     printf '%s\n' "$cost" > "$dir/cost-$label"
-    printf 'changed files: %s (changes-%s.patch) · cost: $%s\n' "$n" "$label" "$cost"
+    printf 'changed files: %s (changes-%s.patch) · cost: $%s%s\n' "$n" "$label" "$cost" "$note"
+}
+
+# Asks `grok usage` and writes result.json. The model check lives in subagent-log.mjs (grok-facts).
+grok_settle() { # run dir
+    local dir="$1" sid
+    sid="$(cat "$dir/session_id" 2>/dev/null || true)"
+    if [[ -n "$sid" ]]; then
+        grok usage "$sid" > "$dir/usage.json" 2>> "$dir/stderr.log" || true
+    fi
+    node "$repo_root/scripts/subagent-log.mjs" grok-facts "$dir"
+}
+
+# USD of this invocation: session total minus cost-* already on disk, else this turn's ticks.
+grok_invocation_cost() { # run dir
+    local dir="$1" mode session turn prev
+    mode="$(cat "$dir/grok-cost-mode" 2>/dev/null || echo unknown)"
+    session="$(cat "$dir/grok-usd-session" 2>/dev/null || true)"
+    turn="$(cat "$dir/grok-usd-turn" 2>/dev/null || true)"
+    if [[ "$mode" == session && -n "$session" ]]; then
+        prev="$(cat "$dir"/cost-* 2>/dev/null | awk '{s+=$1} END {printf "%.4f", s+0}' || true)"
+        awk -v a="$session" -v b="${prev:-0}" 'BEGIN { d=a-b; if (d<0) d=0; printf "%.4f", d }'
+    elif [[ -n "$turn" ]]; then
+        awk -v a="$turn" 'BEGIN { printf "%.4f", a+0 }'
+    else
+        printf '?'
+    fi
 }
 
 cmd_run() {
@@ -343,6 +492,7 @@ cmd_run() {
             --provider) [[ $# -ge 2 ]] || usage_error; prov="$2"; shift 2 ;;
             --model) [[ $# -ge 2 ]] || usage_error; override="$2"; shift 2 ;;
             --name) [[ $# -ge 2 ]] || usage_error; name="$2"; shift 2 ;;
+            --effort) [[ $# -ge 2 ]] || usage_error; effort="$2"; shift 2 ;;
             --max-turns) [[ $# -ge 2 ]] || usage_error; max_turns="$2"; shift 2 ;;
             -h|--help) usage; exit 0 ;;
             *) rest+=("$1"); shift ;;
@@ -365,20 +515,20 @@ cmd_run() {
     printf '%s\n' "$task" > "$run_dir/task.md"
     printf '%s\n' "$prov" > "$run_dir/provider"
     printf '%s\n' "$model" > "$run_dir/model"
+    [[ "$prov" != grok ]] || printf '%s\n' "$effort" > "$run_dir/effort"
     date +%s > "$run_dir/started"
 
     begin_accounting "$run_dir" run
+    usage_snapshot "$run_dir" start || true
     prepare_env
+    # follow after record_pid (inside start_*): the pid file must already be this process,
+    # otherwise a previous turn's `end` looks like the run is over and the follower exits.
+    if [[ "$prov" == grok ]]; then start_grok "$run_dir/task.md" "" "$run_dir"; else start_claude "$task" "" "$run_dir"; fi
     follow_log "$run_dir"
-    start_claude "$task" "" "$run_dir"
     wait_session "$run_dir"
     register_run "$run_dir"
-    wait "$claude_pid" || rc=$?
-    extract_result "$run_dir"
-    printf 'exit: %s\n' "$rc"
-    end_accounting "$run_dir" run
-    print_summary "$run_dir/result.json"
-    exit "$rc"
+    wait "$agent_pid" || rc=$?
+    finish_agent "$run_dir" run "$rc"
 }
 
 cmd_resume() {
@@ -400,18 +550,37 @@ cmd_resume() {
     sid="$(cat "$dir/session_id")"
     msg="$(cat "$msg_file")"
 
-    setup_provider "$(cat "$dir/provider")" "$(cat "$dir/model")"
-    local label
+    local label prov
+    prov="$(cat "$dir/provider")"
     label="resume-$(date +%Y%m%d-%H%M%S)"
     begin_accounting "$dir" "$label"
+    usage_snapshot "$dir" start || true
     prepare_env
+    if [[ "$prov" == grok ]]; then
+        printf '%s\n' "$msg" > "$dir/pending-prompt.md"
+        start_grok "$dir/pending-prompt.md" "$sid" "$dir"
+    else
+        setup_provider "$prov" "$(cat "$dir/model")"
+        start_claude "$msg" "$sid" "$dir"
+    fi
     follow_log "$dir"
-    start_claude "$msg" "$sid" "$dir"
     register_run "$dir"
-    wait "$claude_pid" || rc=$?
+    wait "$agent_pid" || rc=$?
+    finish_agent "$dir" "$label" "$rc"
+}
+
+# Result, cost, the fast-model check, then the summary. A fast model fails the run.
+finish_agent() { # run dir, accounting label, agent exit code
+    local dir="$1" label="$2" rc="$3"
     extract_result "$dir"
-    printf 'exit: %s\n' "$rc"
     end_accounting "$dir" "$label"
+    usage_snapshot "$dir" end || true
+    append_usage_note "$dir" || true
+    if [[ -s "$dir/fast-model" ]]; then
+        cat "$dir/fast-model" >&2
+        rc=1
+    fi
+    printf 'exit: %s\n' "$rc"
     print_summary "$dir/result.json"
     exit "$rc"
 }
@@ -449,7 +618,7 @@ cmd_status() {
         else
             echo "stream idle: unknown"
         fi
-        count="$(grep -cE '"type"[[:space:]]*:[[:space:]]*"assistant"' "$stream" 2>/dev/null || true)"
+        count="$(grep -cE '"type"[[:space:]]*:[[:space:]]*"assistant"|"type"[[:space:]]*:[[:space:]]*"text"|"sessionUpdate"[[:space:]]*:[[:space:]]*"agent_message_chunk"' "$stream" 2>/dev/null || true)"
         echo "assistant messages: ${count:-0}"
         last_tool "$stream"
     else
