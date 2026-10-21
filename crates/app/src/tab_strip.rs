@@ -1,6 +1,6 @@
 //! A strip of document tabs (chats today, studios later): fixed-width titles cut with «…»,
 //! a «×» on the current tab and on the one under the pointer, and horizontal scrolling when
-//! the tabs do not fit. The current tab is scrolled into view when it changes.
+//! the tabs do not fit. The current tab is scrolled into view when it changes. No tooltips.
 
 use crate::theme;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Sense, Stroke, Vec2};
@@ -45,13 +45,13 @@ pub enum TabAction<I> {
     Closed(I),
 }
 
-/// Tabs in a horizontally scrolling strip; returns the click (if any). `close_tooltip` is the
-/// hint of the «×».
+/// Tabs in a horizontally scrolling strip; returns the click (if any). Tabs show no tooltip;
+/// `close_label` is the accessible name of the «×».
 pub fn tab_strip<I: Copy + Eq + Hash>(
     ui: &mut egui::Ui,
     id_salt: impl Hash + std::fmt::Debug,
     tabs: &[Tab<I>],
-    close_tooltip: &str,
+    close_label: &str,
 ) -> Option<TabAction<I>> {
     let strip_id = ui.id().with(id_salt);
     // The current tab changes: bring it into view (once, not every frame).
@@ -88,10 +88,9 @@ pub fn tab_strip<I: Copy + Eq + Hash>(
                         );
                         let close = (tab.closable && (tab.active || hovered)).then(|| {
                             let r = ui.interact(close_rect, strip_id.with(("close", i)), Sense::click());
-                            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, close_tooltip));
+                            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, close_label));
                             r
                         });
-                        let close_hovered = close.as_ref().is_some_and(|r| r.hovered());
 
                         if ui.is_rect_visible(rect) {
                             let (fill, stroke) = if tab.active {
@@ -129,13 +128,12 @@ pub fn tab_strip<I: Copy + Eq + Hash>(
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
                         if let Some(r) = close {
-                            let r = r.on_hover_text(close_tooltip);
+                            // No tooltips on tabs: neither on the title nor on the «×».
                             if r.clicked() {
                                 action = Some(TabAction::Closed(tab.id));
                                 continue;
                             }
                         }
-                        let resp = if close_hovered { resp } else { resp.on_hover_text(&tab.title) };
                         if resp.clicked() {
                             action = Some(TabAction::Selected(tab.id));
                         }

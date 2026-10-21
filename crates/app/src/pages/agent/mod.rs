@@ -1,5 +1,6 @@
 //! Agent section: virtual catalogs of files, LLM providers and the models used per role.
 
+pub mod analysis;
 pub mod budget;
 pub mod catalogs;
 pub mod chat;
@@ -9,11 +10,14 @@ pub mod models;
 pub mod providers;
 pub mod queue;
 pub mod studio;
+pub mod task_label;
+pub mod timeline;
 pub mod topics;
 
 use eframe::egui;
+use mediaa_agent::diarize::Diarize;
 use mediaa_agent::index::Index;
-use mediaa_agent::outline::Outline;
+use mediaa_agent::outline;
 use mediaa_agent::slots::Slots;
 use mediaa_agent::transcribe::Transcribe;
 use mediaa_agent::worker::{self, TaskHandler};
@@ -102,13 +106,15 @@ impl AgentUi {
         let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || s.read().expect("settings lock").clone());
         let slots = self.slots.clone();
         let engine = self.engine.clone();
-        let handlers: Vec<Box<dyn TaskHandler>> = vec![
-            Box::new(Transcribe::new(ai_dir, engine.clone(), slots.clone(), current.clone())),
-            Box::new(Index::new(ai_dir, engine.clone(), slots.clone(), current.clone())),
-            Box::new(Outline::new(ai_dir, engine, slots, current)),
+        let mut handlers: Vec<Box<dyn TaskHandler>> = vec![
+            Box::new(Transcribe::new(ai_dir, slots.clone(), current.clone())),
+            Box::new(Diarize::new(ai_dir, slots.clone(), current.clone())),
+            Box::new(Index::new(ai_dir, slots.clone(), current.clone())),
         ];
+        // The topics stage: the plan, a digest per topic, the merge and a detail per topic.
+        handlers.extend(outline::handlers(ai_dir, slots, current));
         let stop = Arc::new(AtomicBool::new(false));
-        match worker::spawn(ai_dir.to_path_buf(), handlers, stop.clone()) {
+        match worker::spawn(ai_dir.to_path_buf(), engine, handlers, stop.clone()) {
             Ok(_) => self.worker = Some(Worker { dir: ai_dir.to_path_buf(), stop, settings }),
             Err(e) => log::error!("agent worker: {e}"),
         }

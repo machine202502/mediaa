@@ -1,14 +1,17 @@
 //! A provider's model as the agent's brain: native OpenAI tool calls (`tools`, `tool_choice`),
 //! streamed (the answer shows as it is written), arguments checked as JSON with one corrective
 //! retry; a reply that is a step written as text (models imitate the history) is accepted too.
-//! Each request takes a «provider calls» slot of the budget.
+//! Each request takes a «provider calls» slot of the budget and is counted in the task that
+//! runs it (tokens from the response's usage).
 
-use super::brain::{parse_step, AnswerStream, Brain, Message, Role, Step, ToolSpec};
+use super::brain::{parse_step, AnswerStream, Brain, Message, Piece, Role, Step, ToolSpec};
 use crate::providers::chat_completion_stream;
+use crate::scope::Scope;
 use crate::slots::Slots;
-use mediaa_core::agent::{Provider, WorkKind};
+use mediaa_core::agent::{Provider, ProviderKind, WorkKind};
 use serde_json::{json, Value};
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 pub struct ProviderBrain {
     pub provider: Provider,
@@ -16,12 +19,24 @@ pub struct ProviderBrain {
     pub slots: Slots,
     /// Longest step (tokens).
     pub max_tokens: u32,
+    /// Where the calls are counted.
+    pub scope: Scope,
+    /// The model reasons before it acts: the reasoning parameter is sent and the reasoning text
+    /// of the response is passed on.
+    pub thinking: bool,
 }
 
-/// The request body for a step.
-pub fn request(model: &str, messages: &[Message], tools: &[ToolSpec], may_answer: bool, max_tokens: u32) -> Value {
+/// The request body for a step; `reasoning`: the kind of provider when the model should reason.
+pub fn request(model: &str, messages: &[Message], tools: &[ToolSpec], may_answer: bool, max_tokens: u32, reasoning: Option<ProviderKind>) -> Value {
     let messages: Vec<Value> = messages.iter().map(|m| json!({"role": m.role.as_str(), "content": m.content})).collect();
     let mut body = json!({"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.2});
+    match reasoning {
+        // OpenRouter's own parameter, the same for every model it serves.
+        Some(ProviderKind::OpenRouter) => body["reasoning"] = json!({"effort": "medium"}),
+        // The OpenAI parameter that compatible servers (and Hugging Face's router) understand.
+        Some(_) => body["reasoning_effort"] = json!("medium"),
+        None => {}
+    }
     if !tools.is_empty() {
         let specs: Vec<Value> = tools
             .iter()
@@ -49,10 +64,22 @@ struct Collected {
     tool: String,
     arguments: String,
     json_text: Option<AnswerStream>,
+    prompt_tokens: u64,
+    completion_tokens: u64,
 }
 
 impl Collected {
-    fn add(&mut self, delta: &Value, on_answer: &mut dyn FnMut(&str)) {
+    /// One chunk of the stream: reasoning and answer text go on at once, the tokens used are kept.
+    fn add(&mut self, chunk: &Value, on_piece: &mut dyn FnMut(Piece)) {
+        if let Some(usage) = chunk.get("usage").filter(|u| u.is_object()) {
+            self.prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
+            self.completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
+        }
+        let delta = &chunk["choices"][0]["delta"];
+        // `reasoning_content` (DeepSeek, vLLM) or `reasoning` (OpenRouter).
+        if let Some(thought) = delta["reasoning_content"].as_str().or_else(|| delta["reasoning"].as_str()).filter(|t| !t.is_empty()) {
+            on_piece(Piece::Thinking(thought));
+        }
         if let Some(calls) = delta["tool_calls"].as_array() {
             for c in calls.iter().filter(|c| c["index"].as_u64().unwrap_or(0) == 0) {
                 self.tool.push_str(c["function"]["name"].as_str().unwrap_or_default());
@@ -69,7 +96,7 @@ impl Collected {
             let shown = s.push(&self.content);
             self.json_text = Some(s);
             if !shown.is_empty() {
-                on_answer(&shown);
+                on_piece(Piece::Answer(&shown));
             }
             return;
         }
@@ -79,7 +106,7 @@ impl Collected {
             None => piece.to_string(),
         };
         if !text.is_empty() {
-            on_answer(&text);
+            on_piece(Piece::Answer(&text));
         }
     }
 
@@ -115,17 +142,32 @@ pub fn read_response(body: &Value) -> anyhow::Result<Step> {
     Ok(Step::Answer { thought: String::new(), text: content })
 }
 
+impl ProviderBrain {
+    /// The kind of provider to send the reasoning parameter to, when the model should reason.
+    fn reasoning(&self) -> Option<ProviderKind> {
+        self.thinking.then_some(self.provider.kind)
+    }
+
+    /// Counts one request in the task that is running it.
+    fn count(&self, started: Instant, collected: &Collected) {
+        self.scope.record_call(&self.model, started, collected.prompt_tokens, collected.completion_tokens);
+    }
+}
+
 impl Brain for ProviderBrain {
-    fn step(&self, messages: &[Message], tools: &[ToolSpec], may_answer: bool, cancel: &AtomicBool, on_answer: &mut dyn FnMut(&str)) -> anyhow::Result<Step> {
+    fn step(&self, messages: &[Message], tools: &[ToolSpec], may_answer: bool, cancel: &AtomicBool, on_piece: &mut dyn FnMut(Piece)) -> anyhow::Result<Step> {
         let mut messages = messages.to_vec();
         let mut retried = false;
         loop {
             let lease = self.slots.request(WorkKind::ProviderCalls, true).wait(cancel)?;
+            let started = Instant::now();
             let mut collected = Collected::default();
-            let streamed = chat_completion_stream(&self.provider, &request(&self.model, &messages, tools, may_answer, self.max_tokens), &mut |delta| {
-                collected.add(delta, on_answer);
+            let body = request(&self.model, &messages, tools, may_answer, self.max_tokens, self.reasoning());
+            let streamed = chat_completion_stream(&self.provider, &body, &mut |chunk| {
+                collected.add(chunk, on_piece);
             });
             drop(lease);
+            self.count(started, &collected);
             match streamed.and_then(|()| read_response(&collected.response())) {
                 Ok(step) => return Ok(step),
                 // A malformed call: once more, telling the model what was wrong.
@@ -140,23 +182,31 @@ impl Brain for ProviderBrain {
 
     fn complete(&self, messages: &[Message], cancel: &AtomicBool) -> anyhow::Result<String> {
         let lease = self.slots.request(WorkKind::ProviderCalls, true).wait(cancel)?;
-        let mut text = String::new();
-        chat_completion_stream(&self.provider, &request(&self.model, messages, &[], true, self.max_tokens), &mut |delta| {
-            text.push_str(delta["content"].as_str().unwrap_or_default());
-        })?;
+        let started = Instant::now();
+        let mut collected = Collected::default();
+        let streamed = chat_completion_stream(&self.provider, &request(&self.model, messages, &[], true, self.max_tokens, None), &mut |chunk| {
+            collected.add(chunk, &mut |_| {});
+        });
         drop(lease);
-        Ok(text.trim().to_string())
+        self.count(started, &collected);
+        streamed?;
+        Ok(collected.content.trim().to_string())
     }
 
     fn context(&self) -> u32 {
         self.provider.context
+    }
+
+    fn thinking(&self) -> bool {
+        self.thinking
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaa_core::agent::{Budget, ProviderKind};
+    use mediaa_core::agent::Budget;
+    use mediaa_core::queue::{Queue, TaskId};
     use std::sync::{Arc, Mutex};
 
     fn spec() -> ToolSpec {
@@ -165,14 +215,14 @@ mod tests {
 
     #[test]
     fn requests_carry_tools_and_the_choice() {
-        let body = request("m", &[Message::new(Role::User, "q")], &[spec()], false, 100);
+        let body = request("m", &[Message::new(Role::User, "q")], &[spec()], false, 100, None);
         assert_eq!(body["tool_choice"], "required");
         let f = &body["tools"][0]["function"];
         assert_eq!(f["name"], "search");
         assert_eq!(f["parameters"]["required"], json!(["query", "title"]));
         assert_eq!(body["messages"][0], json!({"role": "user", "content": "q"}));
-        assert_eq!(request("m", &[], &[spec()], true, 100)["tool_choice"], "auto");
-        assert!(request("m", &[], &[], true, 100).get("tools").is_none());
+        assert_eq!(request("m", &[], &[spec()], true, 100, None)["tool_choice"], "auto");
+        assert!(request("m", &[], &[], true, 100, None).get("tools").is_none());
     }
 
     #[test]
@@ -201,7 +251,7 @@ mod tests {
                 b.lock().unwrap().push(serde_json::from_str(&s).unwrap());
                 let mut events: String = script[n].iter().map(|d| format!("data: {}
 
-", json!({"choices": [{"delta": d}]}))).collect();
+", if d.get("usage").is_some() { d.clone() } else { json!({"choices": [{"delta": d}]}) })).collect();
                 events.push_str("data: [DONE]
 
 ");
@@ -211,10 +261,14 @@ mod tests {
         (format!("http://{addr}/v1"), bodies)
     }
 
-    fn brain(url: String) -> ProviderBrain {
+    /// A brain over the server at `url`, counted in a task of a queue in `dir`.
+    fn brain(url: String, dir: &std::path::Path) -> (ProviderBrain, Queue, TaskId) {
         let mut p = Provider::new(ProviderKind::OpenAiCompatible, "Local");
         p.base_url = url;
-        ProviderBrain { provider: p, model: "m".into(), slots: Slots::new(Budget::default()), max_tokens: 100 }
+        let queue = Queue::open(dir).unwrap();
+        let task = queue.begin_inline("model-step", "step", &json!({}), None, None).unwrap();
+        let scope = Scope::new(dir, task, Arc::new(mediaa_engine::testing::FakeEngine::new()), None);
+        (ProviderBrain { provider: p, model: "m".into(), slots: Slots::new(Budget::default()), max_tokens: 100, scope, thinking: false }, queue, task)
     }
 
     fn call(name: &str, args: &str) -> Value {
@@ -232,9 +286,17 @@ mod tests {
             // A step written as JSON text: only its answer streams.
             vec![json!({"content": r#"{"thought":"","action":"answer","#}), json!({"content": r#""answer":"Нет."}"#})],
         ]);
-        let b = brain(url);
+        let dir = tempfile::tempdir().unwrap();
+        let (b, ..) = brain(url, dir.path());
         let mut shown = String::new();
-        let mut step = |may_answer| b.step(&[Message::new(Role::User, "q")], &[spec()], may_answer, &AtomicBool::new(false), &mut |t: &str| shown.push_str(t)).unwrap();
+        let mut step = |may_answer| {
+            b.step(&[Message::new(Role::User, "q")], &[spec()], may_answer, &AtomicBool::new(false), &mut |p| {
+                if let Piece::Answer(t) = p {
+                    shown.push_str(t)
+                }
+            })
+            .unwrap()
+        };
         assert_eq!(step(false), Step::Tool { thought: String::new(), title: "Ищу".into(), tool: "search".into(), args: json!({"query": "бюджет"}) });
         assert_eq!(step(true), Step::Answer { thought: String::new(), text: "Да, [1:00].".into() });
         assert_eq!(step(true), Step::Answer { thought: String::new(), text: "Нет.".into() });
@@ -242,6 +304,59 @@ mod tests {
         let sent = bodies.lock().unwrap();
         assert_eq!(sent.len(), 4);
         assert_eq!(sent[0]["stream"], true);
+        assert_eq!(sent[0]["stream_options"]["include_usage"], true, "the tokens used are asked for");
         assert!(sent[1]["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().contains("malformed"));
+    }
+
+    #[test]
+    fn requests_are_counted_with_the_tokens_of_the_response() {
+        let (url, _) = sse_server(vec![
+            vec![json!({"content": "Да."}), json!({"usage": {"prompt_tokens": 120, "completion_tokens": 7}, "choices": []})],
+            // No usage in the stream: the call is counted, the tokens are not known.
+            vec![json!({"content": "Сводка"})],
+            vec![call("search", "{query:")],
+        ]);
+        let dir = tempfile::tempdir().unwrap();
+        let (b, queue, task) = brain(url, dir.path());
+        let cancel = AtomicBool::new(false);
+        b.step(&[Message::new(Role::User, "q")], &[], true, &cancel, &mut |_| {}).unwrap();
+        let stats = queue.get(task).unwrap().unwrap().stats;
+        assert_eq!((stats.model_calls, stats.prompt_tokens, stats.completion_tokens), (1, 120, 7));
+        assert_eq!(stats.models, ["m"]);
+        assert_eq!(b.complete(&[Message::new(Role::User, "q")], &cancel).unwrap(), "Сводка");
+        let stats = queue.get(task).unwrap().unwrap().stats;
+        assert_eq!((stats.model_calls, stats.prompt_tokens, stats.completion_tokens), (2, 120, 7));
+        // A failed request is a call too.
+        assert!(b.step(&[Message::new(Role::User, "q")], &[spec()], false, &cancel, &mut |_| {}).is_err());
+        assert_eq!(queue.get(task).unwrap().unwrap().stats.model_calls, 4, "the malformed call and its retry (the script is over)");
+    }
+
+    #[test]
+    fn reasoning_is_asked_for_and_streamed() {
+        // The parameter, per kind of provider.
+        let on = |kind| request("m", &[], &[], true, 100, Some(kind));
+        assert_eq!(on(ProviderKind::OpenRouter)["reasoning"], json!({"effort": "medium"}));
+        assert_eq!(on(ProviderKind::OpenAiCompatible)["reasoning_effort"], "medium");
+        assert!(request("m", &[], &[], true, 100, None).get("reasoning_effort").is_none(), "off: nothing is sent");
+
+        let (url, bodies) = sse_server(vec![vec![
+            json!({"reasoning_content": "Надо "}),
+            json!({"reasoning": "поискать."}),
+            json!({"content": "Ответ"}),
+            json!({"content": " готов."}),
+        ]]);
+        let dir = tempfile::tempdir().unwrap();
+        let (mut b, ..) = brain(url, dir.path());
+        b.thinking = true;
+        let (mut thinking, mut answer) = (String::new(), String::new());
+        let step = b
+            .step(&[Message::new(Role::User, "q")], &[], true, &AtomicBool::new(false), &mut |p| match p {
+                Piece::Thinking(t) => thinking.push_str(t),
+                Piece::Answer(t) => answer.push_str(t),
+            })
+            .unwrap();
+        assert_eq!(step, Step::Answer { thought: String::new(), text: "Ответ готов.".into() }, "the reasoning is not in the answer");
+        assert_eq!((thinking.as_str(), answer.as_str()), ("Надо поискать.", "Ответ готов."));
+        assert_eq!(bodies.lock().unwrap()[0]["reasoning_effort"], "medium");
     }
 }

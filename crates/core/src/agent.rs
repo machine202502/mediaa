@@ -336,6 +336,53 @@ fn gb(v: f32) -> u64 {
     (f64::from(v.max(0.0)) * 1024.0 * 1024.0 * 1024.0) as u64
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnalysisOptions {
+    /// Speakers by diarization (needs a diarization model).
+    pub diarize: bool,
+    /// How many people speak; `None`: let diarization decide.
+    pub speakers: Option<u32>,
+    /// Chunks, full-text search and embeddings.
+    pub index: bool,
+    /// Topics (needs the index).
+    pub topics: bool,
+    /// Details of each topic (needs topics).
+    pub details: bool,
+}
+
+impl Default for AnalysisOptions {
+    fn default() -> Self {
+        AnalysisOptions { diarize: true, speakers: None, index: true, topics: true, details: true }
+    }
+}
+
+impl AnalysisOptions {
+    /// Turns off what cannot run: details without topics, topics without the index, and
+    /// diarization without a speaker count model.
+    pub fn resolved(mut self, models: &ModelChoices) -> AnalysisOptions {
+        if models.diarization.is_none() {
+            self.diarize = false;
+        }
+        self.enforced()
+    }
+
+    /// Stages that depend on a disabled one are off. Earlier stages are not required here: a
+    /// restart from a later stage keeps their data.
+    pub fn enforced(mut self) -> AnalysisOptions {
+        if !self.index {
+            self.topics = false;
+        }
+        if !self.topics {
+            self.details = false;
+        }
+        if !self.diarize {
+            self.speakers = None;
+        }
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentSettings {
@@ -347,6 +394,11 @@ pub struct AgentSettings {
     /// memory (the KV cache).
     pub agent_context: u32,
     pub web: WebSettings,
+    /// Stages of the analysis of recordings, the default for the next one.
+    pub analysis: AnalysisOptions,
+    /// Models that reason before they act (the «Thinking» switch); off for every model until
+    /// the user turns it on.
+    pub thinking: Vec<ModelSource>,
 }
 
 /// Where the agent searches the web.
@@ -394,11 +446,39 @@ impl Default for AgentSettings {
             budget: Budget::default(),
             agent_context: 8192,
             web: WebSettings::default(),
+            analysis: AnalysisOptions::default(),
+            thinking: Vec::new(),
+        }
+    }
+}
+
+impl ModelSource {
+    /// Whether the model can reason before it acts, so the «Thinking» switch is shown for it:
+    /// local models of the Qwen3 family (their chat template has a thinking mode), and every
+    /// provider model (a provider that does not know the reasoning parameter ignores it).
+    pub fn supports_thinking(&self) -> bool {
+        match self {
+            ModelSource::Provider { .. } => true,
+            ModelSource::HuggingFace { repo: name } => name.to_lowercase().contains("qwen3"),
+            ModelSource::Local { path } => path.to_string_lossy().to_lowercase().contains("qwen3"),
         }
     }
 }
 
 impl AgentSettings {
+    /// Whether `model` reasons before it acts (and can).
+    pub fn thinking_on(&self, model: &ModelSource) -> bool {
+        model.supports_thinking() && self.thinking.contains(model)
+    }
+
+    /// Turns the reasoning of `model` on or off.
+    pub fn set_thinking(&mut self, model: &ModelSource, on: bool) {
+        self.thinking.retain(|m| m != model);
+        if on {
+            self.thinking.push(model.clone());
+        }
+    }
+
     pub fn provider(&self, id: &str) -> Option<&Provider> {
         self.providers.iter().find(|p| p.id == id)
     }
@@ -443,6 +523,27 @@ mod tests {
         let text = toml::to_string(&a).unwrap();
         assert!(text.contains("source = \"hugging_face\""), "{text}");
         assert_eq!(toml::from_str::<AgentSettings>(&text).unwrap(), a);
+    }
+
+    #[test]
+    fn thinking_is_off_until_turned_on_per_model() {
+        let mut a = AgentSettings::default();
+        let qwen = ModelSource::HuggingFace { repo: "unsloth/Qwen3.5-4B-GGUF".into() };
+        let other = ModelSource::HuggingFace { repo: "unsloth/gemma-3-4b-it-GGUF".into() };
+        let provider = ModelSource::Provider { provider: "p".into(), model: "deepseek-reasoner".into() };
+        assert!(a.models.agent.as_ref().is_some_and(|m| !a.thinking_on(m)), "off by default");
+        assert!(qwen.supports_thinking() && provider.supports_thinking() && !other.supports_thinking());
+        assert!(ModelSource::Local { path: "C:/m/Qwen3-8B-Q4.gguf".into() }.supports_thinking());
+        a.set_thinking(&qwen, true);
+        a.set_thinking(&other, true);
+        assert!(a.thinking_on(&qwen));
+        assert!(!a.thinking_on(&other), "a model without the mode never thinks");
+        a.set_thinking(&qwen, true);
+        assert_eq!(a.thinking.iter().filter(|m| **m == qwen).count(), 1, "no duplicates");
+        let back: AgentSettings = toml::from_str(&toml::to_string(&a).unwrap()).unwrap();
+        assert_eq!(back, a);
+        a.set_thinking(&qwen, false);
+        assert!(!a.thinking_on(&qwen));
     }
 
     #[test]

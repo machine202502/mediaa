@@ -705,6 +705,16 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                         });
                     }
                 }
+                // Reasoning before acting: only for models that have the mode.
+                if role == ModelRole::Agent {
+                    if let Some(model) = app.settings.agent.models.agent.clone().filter(ModelSource::supports_thinking) {
+                        let mut on = app.settings.agent.thinking_on(&model);
+                        if ui.checkbox(&mut on, t!("agent.thinking")).on_hover_text(t!("agent.thinking_hint")).changed() {
+                            app.settings.agent.set_thinking(&model, on);
+                            changed = true;
+                        }
+                    }
+                }
             });
             if let Some(ModelSource::HuggingFace { repo }) = source {
                 let downloaded = is_downloaded(&repo, downloaded.iter().map(String::as_str));

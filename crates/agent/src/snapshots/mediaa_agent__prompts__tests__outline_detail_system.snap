@@ -1,0 +1,5 @@
+---
+source: crates/agent/src/prompts.rs
+expression: "render(\"outline/detail_system.j2\", ())"
+---
+You write a detailed breakdown of one topic of a recorded conversation, so that a reader can understand the topic without listening to it. Write in the language of the conversation. Use only what is said; never invent names, numbers, facts or advice.

@@ -3,6 +3,7 @@
 
 use crate::transcript::Transcript;
 use rusqlite::{params, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type ChatId = i64;
@@ -37,8 +38,142 @@ pub enum Author {
 pub struct ChatMessage {
     pub author: Author,
     pub text: String,
-    /// The agent's steps (JSON), `Null` for the user's messages.
+    /// The agent's steps and timeline (JSON, see [`Timeline`]), `Null` for the user's messages.
     pub details: serde_json::Value,
+}
+
+impl ChatMessage {
+    /// What happened while the answer was written (empty for the user's messages and for
+    /// answers stored before timelines).
+    pub fn timeline(&self) -> Timeline {
+        Timeline::from_details(&self.details)
+    }
+
+    /// The answer was stopped by the user before it was finished.
+    pub fn stopped(&self) -> bool {
+        self.details["stopped"].as_bool() == Some(true)
+    }
+}
+
+/// How a step of the timeline went (`running` until it is known).
+pub const STEP_RUNNING: &str = "running";
+/// A step that was still running when the answer was stopped.
+pub const STEP_STOPPED: &str = "stopped";
+
+/// One entry of an answer's timeline, in the order it happened.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TimelineEntry {
+    /// A tool call: the title the model gave it, the tool and how it went (`running`, `found`,
+    /// `nothing`, `repeated`, `failed` or `stopped`). The arguments and the result are in the
+    /// message's `steps`.
+    Step { title: String, tool: String, status: String },
+    /// The model's reasoning.
+    Thinking { text: String },
+    /// A part of the answer; `section`: it was also stored as a message of its own.
+    Answer {
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        section: bool,
+    },
+}
+
+/// The steps, reasoning and parts of the answer of one question, in order: a timeline growing
+/// downward. A piece of reasoning or of the answer continues the entry before it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Timeline {
+    pub entries: Vec<TimelineEntry>,
+}
+
+impl Timeline {
+    /// The timeline in a message's details (`details["timeline"]`).
+    pub fn from_details(details: &serde_json::Value) -> Timeline {
+        let entries = serde_json::from_value(details["timeline"].clone()).unwrap_or_default();
+        Timeline { entries }
+    }
+
+    /// The entries as JSON, for `details["timeline"]`.
+    pub fn to_value(&self) -> serde_json::Value {
+        serde_json::to_value(&self.entries).unwrap_or(serde_json::Value::Null)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// A tool call begins (`status` is not known yet) or is known already.
+    pub fn step(&mut self, title: &str, tool: &str, status: &str) {
+        self.entries.push(TimelineEntry::Step { title: title.to_string(), tool: tool.to_string(), status: status.to_string() });
+    }
+
+    /// The last tool call is over.
+    pub fn finish_step(&mut self, status: &str) {
+        if let Some(TimelineEntry::Step { status: s, .. }) = self.entries.iter_mut().rev().find(|e| matches!(e, TimelineEntry::Step { .. })) {
+            *s = status.to_string();
+        }
+    }
+
+    /// More reasoning: it continues the entry before when that is reasoning too.
+    pub fn thinking(&mut self, piece: &str) {
+        match self.entries.last_mut() {
+            Some(TimelineEntry::Thinking { text }) => text.push_str(piece),
+            _ => self.entries.push(TimelineEntry::Thinking { text: piece.to_string() }),
+        }
+    }
+
+    /// More of the answer: it continues the entry before when that is a part of the answer.
+    pub fn answer(&mut self, piece: &str) {
+        match self.entries.last_mut() {
+            Some(TimelineEntry::Answer { text, section: false }) => text.push_str(piece),
+            _ => self.entries.push(TimelineEntry::Answer { text: piece.to_string(), section: false }),
+        }
+    }
+
+    /// The part of the answer being written is a message of its own now (`text`, the cleaned
+    /// version of what was streamed).
+    pub fn section(&mut self, text: &str) {
+        self.discard_answer();
+        self.entries.push(TimelineEntry::Answer { text: text.to_string(), section: true });
+    }
+
+    /// The text streamed last was not the answer after all: it is taken back.
+    pub fn discard_answer(&mut self) {
+        if matches!(self.entries.last(), Some(TimelineEntry::Answer { section: false, .. })) {
+            self.entries.pop();
+        }
+    }
+
+    /// The answer is final: its last streamed part becomes `text` (the cleaned version), or is
+    /// added when nothing was streamed.
+    pub fn finish_answer(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            self.discard_answer();
+            return;
+        }
+        match self.entries.last_mut() {
+            Some(TimelineEntry::Answer { text: t, section: false }) => *t = text.to_string(),
+            _ => self.entries.push(TimelineEntry::Answer { text: text.to_string(), section: false }),
+        }
+    }
+
+    /// The answer was stopped: steps still running are marked so.
+    pub fn stop(&mut self) {
+        for e in &mut self.entries {
+            if let TimelineEntry::Step { status, .. } = e {
+                if status == STEP_RUNNING {
+                    *status = STEP_STOPPED.to_string();
+                }
+            }
+        }
+    }
+
+    /// The part of the answer after the last stored section: what is being written.
+    pub fn draft(&self) -> &str {
+        match self.entries.last() {
+            Some(TimelineEntry::Answer { text, section: false }) => text,
+            _ => "",
+        }
+    }
 }
 
 impl Transcript {
@@ -85,9 +220,16 @@ impl Transcript {
         Ok(self.db.query_row("SELECT title FROM chats WHERE id = ?1", [chat], |r| r.get(0)).optional()?)
     }
 
-    pub fn rename_chat(&self, chat: ChatId, title: &str) -> anyhow::Result<()> {
-        self.db.execute("UPDATE chats SET title = ?1 WHERE id = ?2", params![title.trim(), chat])?;
-        Ok(())
+    /// Gives a chat its title, once: a chat that has a title keeps it (there is no renaming, the
+    /// user cannot rename a chat). A new chat has an empty title until this is called. Returns
+    /// whether the title was set.
+    pub fn set_chat_title(&self, chat: ChatId, title: &str) -> anyhow::Result<bool> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Ok(false);
+        }
+        let changed = self.db.execute("UPDATE chats SET title = ?1 WHERE id = ?2 AND title = ''", params![title, chat])?;
+        Ok(changed > 0)
     }
 
     /// Removes a chat with its messages, memory and tab.
@@ -160,13 +302,87 @@ mod tests {
         t.set_chat_memory(a, r#"{"facts":["x"]}"#).unwrap();
         assert_eq!(t.chat_memory(a).unwrap().as_deref(), Some(r#"{"facts":["x"]}"#));
         assert_eq!(t.chat_memory(b).unwrap(), None);
-        t.rename_chat(b, " Деньги ").unwrap();
-        assert_eq!(t.chat_title(b).unwrap().as_deref(), Some("Деньги"));
+        // The title is set once: an empty one is filled, a set one never changes.
+        let fresh = t.create_chat("").unwrap();
+        assert!(!t.set_chat_title(fresh, "  ").unwrap(), "an empty title is nothing");
+        assert!(t.set_chat_title(fresh, " Деньги ").unwrap());
+        assert!(!t.set_chat_title(fresh, "Другое").unwrap());
+        assert!(!t.set_chat_title(b, "Другое").unwrap());
+        assert_eq!(t.chat_title(fresh).unwrap().as_deref(), Some("Деньги"));
+        assert_eq!(t.chat_title(b).unwrap().as_deref(), Some("Бюджет"));
+        t.delete_chat(fresh).unwrap();
         t.delete_chat(a).unwrap();
         assert!(t.messages(a).unwrap().is_empty(), "messages go with the chat");
         assert_eq!(t.chat_memory(a).unwrap(), None, "and its memory");
         assert_eq!(t.chats().unwrap().len(), 1);
         assert_eq!(t.chat_title(a).unwrap(), None);
+    }
+
+    #[test]
+    fn a_timeline_grows_downward_and_round_trips_through_the_details() {
+        let mut tl = Timeline::default();
+        tl.thinking("Надо ");
+        tl.thinking("поискать.");
+        tl.step("Ищу сроки", "search", STEP_RUNNING);
+        tl.finish_step("found");
+        tl.thinking("Нашёл.");
+        tl.answer("В пят");
+        tl.answer("ницу.");
+        assert_eq!(tl.draft(), "В пятницу.");
+        // More steps after a part of the answer continue the same timeline.
+        tl.step("Проверяю", "read", STEP_RUNNING);
+        assert_eq!(tl.draft(), "");
+        tl.answer("И ещё.");
+        tl.finish_answer("И ещё [0:10].");
+        assert_eq!(
+            tl.entries,
+            [
+                TimelineEntry::Thinking { text: "Надо поискать.".into() },
+                TimelineEntry::Step { title: "Ищу сроки".into(), tool: "search".into(), status: "found".into() },
+                TimelineEntry::Thinking { text: "Нашёл.".into() },
+                TimelineEntry::Answer { text: "В пятницу.".into(), section: false },
+                TimelineEntry::Step { title: "Проверяю".into(), tool: "read".into(), status: "running".into() },
+                TimelineEntry::Answer { text: "И ещё [0:10].".into(), section: false },
+            ]
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let t = Transcript::open(dir.path(), "f").unwrap();
+        let chat = t.create_chat("Сроки").unwrap();
+        t.add_message(chat, Author::Agent, "И ещё [0:10].", &json!({"steps": [], "timeline": tl.to_value(), "stopped": true})).unwrap();
+        t.add_message(chat, Author::Agent, "Старый ответ", &json!({"steps": []})).unwrap();
+        let messages = t.messages(chat).unwrap();
+        assert_eq!(messages[0].timeline(), tl, "the saved details give the same timeline");
+        assert!(messages[0].stopped() && !messages[1].stopped());
+        assert!(messages[1].timeline().is_empty(), "an answer from before timelines has none");
+    }
+
+    #[test]
+    fn sections_replace_the_streamed_draft_and_a_stop_marks_running_steps() {
+        let mut tl = Timeline::default();
+        tl.answer("Часть 1 черновик");
+        tl.section("Часть 1.");
+        tl.answer("Не то");
+        tl.discard_answer();
+        tl.step("Читаю", "read", STEP_RUNNING);
+        tl.thinking("Думаю");
+        tl.stop();
+        assert_eq!(
+            tl.entries,
+            [
+                TimelineEntry::Answer { text: "Часть 1.".into(), section: true },
+                TimelineEntry::Step { title: "Читаю".into(), tool: "read".into(), status: "stopped".into() },
+                TimelineEntry::Thinking { text: "Думаю".into() },
+            ]
+        );
+        assert_eq!(tl.draft(), "");
+        // A finished answer with no text adds nothing; the same text after a section is a new part.
+        tl.finish_answer("  ");
+        tl.finish_answer("Итог.");
+        assert_eq!(tl.entries.last(), Some(&TimelineEntry::Answer { text: "Итог.".into(), section: false }));
+        // `section` is written only when set.
+        assert_eq!(tl.to_value()[0], json!({"kind": "answer", "text": "Часть 1.", "section": true}));
+        assert_eq!(tl.to_value()[3], json!({"kind": "answer", "text": "Итог."}));
     }
 
     #[test]

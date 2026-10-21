@@ -273,6 +273,25 @@ impl Transcript {
         tx.commit()?;
         Ok(())
     }
+
+    /// Forgets who speaks: the speakers of the replies and the names given to them (to diarize
+    /// again); the words stay.
+    pub fn clear_speakers(&self) -> anyhow::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute_batch(
+            "UPDATE replies SET speaker = NULL;
+             DELETE FROM speakers;
+             DELETE FROM meta WHERE key = 'diarized';",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Removes the meta keys that start with `prefix`.
+    pub fn remove_meta_prefix(&self, prefix: &str) -> anyhow::Result<()> {
+        self.db.execute("DELETE FROM meta WHERE substr(key, 1, length(?1)) = ?1", [prefix])?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

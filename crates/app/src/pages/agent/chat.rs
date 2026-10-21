@@ -1,23 +1,25 @@
 //! The studio's chat pane: conversations with the agent about the recording (several chats per
 //! recording, kept with its transcript). Answers are Markdown; cited times (`[12:30]`) are links
-//! that seek the player; while the agent works its steps appear under «Thinking…», and each
-//! answer keeps them in its details.
+//! that seek the player; an answer is its timeline (steps, reasoning, text; see `timeline`), and
+//! a chat is named once by the titles model after its first question.
 
 use super::studio::{panel, StudioAction};
 use super::Services;
 use crate::player::Player;
 use crate::tab_strip::{self, Tab, TabAction};
 use crate::theme;
-use crossbeam_channel::Receiver;
-use eframe::egui::{self, FontId, Rect, RichText};
+use eframe::egui::{self, Rect, RichText};
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_phosphor::regular as icon;
 use mediaa_agent::assistant::folder::Item;
-use mediaa_agent::assistant::{self, Event, Memory, Recording, StepRecord, StepStatus, Turn};
+use mediaa_agent::assistant::chat::{self as answering, Run, State};
+use mediaa_agent::assistant::{self, title, Memory, Recording, Turn};
+use mediaa_agent::scope::Scope as TaskScope;
 use mediaa_agent::tools::parse_time;
 use mediaa_core::chat::{Author, ChatId, ChatInfo, ChatMessage};
 use mediaa_core::transcript::{self, Transcript};
 use rust_i18n::t;
+use super::timeline;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,10 +27,6 @@ use std::time::{Duration, Instant};
 
 /// How often the chats are re-read (another studio of the same file may write).
 const REFRESH: Duration = Duration::from_secs(5);
-/// Characters of a step's result shown in the details.
-const RESULT_CHARS: usize = 400;
-/// Characters of the first question that name a new chat.
-const TITLE_CHARS: usize = 48;
 
 /// Times written without brackets (`в 1:05`, `0:00–0:11`) as links too.
 fn link_bare(text: &str) -> String {
@@ -122,45 +120,12 @@ pub fn history(messages: &[ChatMessage]) -> Vec<Turn> {
     turns
 }
 
-/// The name of a chat from its first question.
-pub fn chat_title(question: &str) -> String {
-    let q = question.split_whitespace().collect::<Vec<_>>().join(" ");
-    if q.chars().count() <= TITLE_CHARS {
-        return q;
-    }
-    let cut: String = q.chars().take(TITLE_CHARS).collect();
-    format!("{}…", cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head))
-}
-
-fn status_icon(s: StepStatus) -> &'static str {
-    match s {
-        StepStatus::Found => icon::CHECK_CIRCLE,
-        StepStatus::Nothing => icon::CIRCLE_DASHED,
-        StepStatus::Repeated => icon::ARROW_COUNTER_CLOCKWISE,
-        StepStatus::Failed => icon::WARNING_CIRCLE,
-    }
-}
-
-enum Progress {
-    Step(StepRecord),
-    Draft(String),
-    DraftDiscarded,
-    Scanning(usize, usize),
-    /// A section was stored as a message.
-    Said,
-    Done(Result<(), String>),
-}
-
-/// An answer being written.
+/// An answer being written: the task in the queue, shared with the thread that writes it.
 struct Running {
-    rx: Receiver<Progress>,
-    cancel: Arc<AtomicBool>,
-    steps: Vec<StepRecord>,
-    /// The answer as it is being written.
-    draft: String,
-    /// Parts of the recording read by a running scan, of all.
-    scanning: Option<(usize, usize)>,
-    started: Instant,
+    run: Run,
+    chat: ChatId,
+    /// Sections of the answer stored as messages that the pane has read.
+    stored: usize,
 }
 
 /// Where a clicked citation goes.
@@ -232,6 +197,10 @@ pub struct Chat {
     messages: Vec<ChatMessage>,
     input: String,
     running: Option<Running>,
+    /// The title task of a new chat is running; set when it is over.
+    titling: Option<Arc<AtomicBool>>,
+    /// Chats whose title task was started again in this session (once each).
+    retitled: std::collections::HashSet<ChatId>,
     error: Option<String>,
     /// An archived chat waiting for the delete confirmation.
     confirm_delete: Option<ChatInfo>,
@@ -263,6 +232,8 @@ impl Chat {
             messages: Vec::new(),
             input: String::new(),
             running: None,
+            titling: None,
+            retitled: std::collections::HashSet::new(),
             error: None,
             confirm_delete: None,
             read: None,
@@ -337,10 +308,12 @@ impl Chat {
         if question.is_empty() || self.running.is_some() {
             return;
         }
+        let new_chat = self.current.is_none();
         let stored = (|| -> anyhow::Result<ChatId> {
             let chat = match self.current {
                 Some(c) => c,
-                None => t.create_chat(&chat_title(&question))?,
+                // The title comes from the titles model after the first question.
+                None => t.create_chat("")?,
             };
             t.add_message(chat, Author::User, &question, &serde_json::Value::Null)?;
             // The first question gives the new chat its tab.
@@ -364,96 +337,150 @@ impl Chat {
         self.error = None;
         self.refresh(true);
 
-        let (tx, rx) = crossbeam_channel::unbounded();
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (s, c, ai) = (services.clone(), cancel.clone(), self.ai_dir.clone());
+        let (s, ai) = (services.clone(), self.ai_dir.clone());
         let (store, target) = match &self.scope {
             Scope::File { path, file_id } => (file_id.clone().unwrap_or_default(), Target::File(path.clone(), player.map(|p| (p.duration(), p.position())))),
             Scope::Folder { store, files } => (store.clone(), Target::Folder(files.clone())),
         };
+        if new_chat {
+            self.start_title(&s, &store, chat, &question);
+        }
+        // The answer is a task of the queue from the first moment: it shows there while it waits.
+        let input = serde_json::json!({ "chat": chat, "question": question });
+        let scope = match TaskScope::begin(&ai, s.engine.clone(), "chat", &title::task_title(&question), &input, Some(&store)) {
+            Ok(scope) => scope,
+            Err(e) => {
+                self.error = Some(format!("{e:#}"));
+                return;
+            }
+        };
+        let run = Run::new(&scope);
+        let worker_run = run.clone();
         let _ = std::thread::Builder::new().name("agent-answer".into()).spawn(move || {
-            let run = || -> anyhow::Result<()> {
-                let t = Transcript::open(&ai, &store)?;
-                let settings = s.settings.read().expect("settings lock").clone();
-                let mut on_event = |e: &Event| {
-                    let p = match e {
-                        Event::Step(step) => Progress::Step(step.clone()),
-                        Event::Draft(text) => Progress::Draft(text.clone()),
-                        Event::DraftDiscarded => Progress::DraftDiscarded,
-                        Event::Scanning { done, total } => Progress::Scanning(*done, *total),
-                        // A section of a long answer: a message of its own, shown at once.
-                        Event::Say(text) => match t.add_message(chat, Author::Agent, text, &serde_json::json!({ "section": true })) {
-                            Ok(()) => Progress::Said,
-                            Err(e) => return log::warn!("chat: {e:#}"),
-                        },
-                        Event::Answer(_) => return,
-                    };
-                    let _ = tx.send(p);
-                };
-                let mut memory: Memory = t.chat_memory(chat)?.and_then(|m| serde_json::from_str(&m).ok()).unwrap_or_default();
-                let answered = match &target {
-                    Target::File(path, timing) => {
-                        let recording = recording_of(&ai, &store, path, *timing)?;
-                        assistant::ask(s.engine.as_ref(), &s.slots, &settings, &ai, &store, &recording, &history, &mut memory, &question, &c, &mut on_event)
-                    }
-                    Target::Folder(files) => {
-                        let items = items_of(&ai, files);
-                        assistant::ask_folder(s.engine.as_ref(), &s.slots, &settings, &ai, &items, &history, &mut memory, &question, &c, &mut on_event)
-                    }
-                };
-                // What the chat learned is kept even when the answer failed.
-                t.set_chat_memory(chat, &serde_json::to_string(&memory)?)?;
-                let a = answered?;
-                let details = serde_json::json!({ "steps": a.steps, "forced": a.forced });
-                t.add_message(chat, Author::Agent, &a.text, &details)?;
-                Ok(())
-            };
-            let _ = tx.send(Progress::Done(run().map_err(|e| format!("{e:#}"))));
+            let settings = s.settings.read().expect("settings lock").clone();
+            let mut memory: Memory = Transcript::open(&ai, &store)
+                .and_then(|t| t.chat_memory(chat))
+                .map_err(|e| log::warn!("chat memory: {e:#}"))
+                .ok()
+                .flatten()
+                .and_then(|m| serde_json::from_str(&m).ok())
+                .unwrap_or_default();
+            let cancel = worker_run.cancel.clone();
+            answering::work(&worker_run, &scope, &ai, &store, chat, &mut memory, |memory, on_event| match &target {
+                Target::File(path, timing) => {
+                    let recording = recording_of(&ai, &store, path, *timing)?;
+                    assistant::ask(&scope, &s.slots, &settings, &ai, &store, &recording, &history, memory, &question, &cancel, on_event)
+                }
+                Target::Folder(files) => {
+                    let items = items_of(&ai, files);
+                    assistant::ask_folder(&scope, &s.slots, &settings, &ai, &items, &history, memory, &question, &cancel, on_event)
+                }
+            });
         });
-        self.running = Some(Running { rx, cancel, steps: Vec::new(), draft: String::new(), scanning: None, started: Instant::now() });
+        self.running = Some(Running { run, chat, stored: 0 });
+    }
+
+    /// The key of the store the chats live in.
+    fn store_key(&self) -> String {
+        match &self.scope {
+            Scope::File { file_id, .. } => file_id.clone().unwrap_or_default(),
+            Scope::Folder { store, .. } => store.clone(),
+        }
+    }
+
+    /// A chat whose title task never finished (the program was closed meanwhile) is named again
+    /// when it is opened — once.
+    fn retitle(&mut self, services: &Services) {
+        if self.running.is_some() || self.titling.is_some() {
+            return;
+        }
+        let Some((chat, question)) = retitle_candidate(&self.chats, self.current, &self.messages, &self.retitled) else { return };
+        self.retitled.insert(chat);
+        let store = self.store_key();
+        self.start_title(services, &store, chat, &question);
+    }
+
+    /// Names a new chat: a task of the queue asks the titles model, once; the first question
+    /// (trimmed and capitalised) is the title when the task cannot be started or fails.
+    fn start_title(&mut self, services: &Services, store: &str, chat: ChatId, question: &str) {
+        let ai = self.ai_dir.clone();
+        let input = serde_json::json!({ "chat": chat, "question": question });
+        let scope = TaskScope::begin(&ai, services.engine.clone(), "chat-title", &title::task_title(question), &input, Some(store));
+        let scope = match scope {
+            Ok(scope) => scope,
+            Err(e) => {
+                log::warn!("the title task was not started: {e:#}");
+                if let Some(t) = self.transcript() {
+                    let _ = t.set_chat_title(chat, &title::fallback_title(question));
+                }
+                return;
+            }
+        };
+        let done = Arc::new(AtomicBool::new(false));
+        self.titling = Some(done.clone());
+        let (settings, store, question) = (services.settings.clone(), store.to_string(), question.to_string());
+        let _ = std::thread::Builder::new().name("chat-title".into()).spawn(move || {
+            let settings = settings.read().expect("settings lock").clone();
+            title::work(&scope, &settings, &ai, &store, chat, &question, &AtomicBool::new(false));
+            done.store(true, Ordering::Release);
+        });
     }
 
     fn poll(&mut self, ctx: &egui::Context) {
+        // The title is ready (or the first question stands in for it): the tabs read it.
+        if let Some(done) = &self.titling {
+            ctx.request_repaint_after(Duration::from_millis(300));
+            if done.load(Ordering::Acquire) {
+                self.titling = None;
+                self.refresh(true);
+            }
+        }
         let Some(r) = &mut self.running else { return };
         ctx.request_repaint_after(Duration::from_millis(200));
-        let mut done = None;
-        let mut said = false;
-        for p in r.rx.try_iter() {
-            match p {
-                Progress::Step(s) => {
-                    r.steps.push(s);
-                    r.scanning = None;
-                }
-                Progress::Scanning(done, total) => r.scanning = Some((done, total)),
-                Progress::Draft(t) => r.draft.push_str(&t),
-                Progress::DraftDiscarded => r.draft.clear(),
-                // The section is a message now (the draft streamed it).
-                Progress::Said => {
-                    r.draft.clear();
-                    said = true;
-                }
-                Progress::Done(result) => done = Some(result),
-            }
-        }
-        if said {
-            self.refresh(true);
-        }
-        let Some(r) = &mut self.running else { return };
-        if let Some(result) = done {
-            if let Err(e) = result {
-                // Stopped on purpose is not an error.
-                if !r.cancel.load(Ordering::Relaxed) {
-                    self.error = Some(e);
+        let (stored, state) = {
+            let live = r.run.live();
+            (live.stored, live.state.clone())
+        };
+        // A section of a long answer is a message now.
+        let said = stored != r.stored;
+        r.stored = stored;
+        match state {
+            State::Running => {
+                if said {
+                    self.refresh(true);
                 }
             }
-            self.running = None;
-            self.refresh(true);
+            // A stop is not an error; the pane stored the stopped answer itself.
+            State::Done | State::Stopped => {
+                self.running = None;
+                self.refresh(true);
+            }
+            State::Failed(e) => {
+                self.error = Some(e);
+                self.running = None;
+                self.refresh(true);
+            }
         }
+    }
+
+    /// Stops the answer at once: it ends in the chat here and now (the worker may take longer to
+    /// notice; whatever it brings later is dropped) and the next question can be asked.
+    fn stop(&mut self) {
+        let Some(r) = self.running.take() else { return };
+        if let Some(t) = self.transcript() {
+            if let Err(e) = r.run.stop(&t, r.chat) {
+                self.error = Some(format!("{e:#}"));
+            }
+        }
+        self.refresh(true);
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, player: Option<&mut Player>, services: Option<&Services>, p: theme::Palette) -> Option<StudioAction> {
         self.refresh(false);
         self.poll(ui.ctx());
+        if let Some(s) = services {
+            self.retitle(s);
+        }
         ui.ctx().request_repaint_after(REFRESH);
         let body = panel(ui, rect, &t!("studio.chat"), p);
         let mut seek = None;
@@ -479,13 +506,18 @@ impl Chat {
                     if self.messages.is_empty() && self.running.is_none() {
                         theme::hint(ui, t!("studio.chat_hint"));
                     }
-                    for m in &self.messages {
-                        if let Some(t) = message_ui(ui, m, &mut self.cache, bare, p) {
+                    let hidden = timeline::hidden_sections(&self.messages, self.running.is_some());
+                    for (n, m) in self.messages.iter().enumerate() {
+                        if hidden[n] {
+                            continue;
+                        }
+                        if let Some(t) = message_ui(ui, n, m, &mut self.cache, bare, p) {
                             seek = Some(t);
                         }
                     }
                     if let Some(r) = &self.running {
-                        if let Some(t) = thinking_ui(ui, r, &mut self.cache, bare, p) {
+                        let live = r.run.live().clone();
+                        if let Some(t) = timeline::live_ui(ui, &live, &mut self.cache, bare, p) {
                             seek = Some(t);
                         }
                     }
@@ -554,7 +586,7 @@ impl Chat {
                                 egui::vec2((ui.available_width() - buttons).max(80.0), 36.0),
                                 egui::Layout::top_down(egui::Align::LEFT),
                                 |ui| {
-                                    ui.add(egui::Label::new(RichText::new(&c.title).size(13.0)).truncate()).on_hover_text(&c.title);
+                                    ui.add(egui::Label::new(RichText::new(shown_title(&c.title)).size(13.0)).truncate());
                                     theme::hint(ui, chat_date(c.created_ms));
                                 },
                             );
@@ -656,7 +688,7 @@ impl Chat {
         let modal = egui::Modal::new(egui::Id::new(("chat-delete", self.salt()))).show(ctx, |ui| {
             ui.set_width(340.0);
             ui.label(RichText::new(format!("{}  {}", icon::TRASH, t!("studio.delete_chat"))).size(15.0).strong());
-            ui.label(t!("studio.delete_chat_confirm", title = info.title));
+            ui.label(t!("studio.delete_chat_confirm", title = shown_title(&info.title)));
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui.add(theme::danger(ui, icon::TRASH, &t!("studio.delete_chat"))).clicked() {
@@ -695,9 +727,7 @@ impl Chat {
             ui.vertical(|ui| {
                 if running {
                     if theme::icon_button(ui, icon::STOP, &t!("studio.stop")).clicked() {
-                        if let Some(r) = &self.running {
-                            r.cancel.store(true, Ordering::Relaxed);
-                        }
+                        self.stop();
                     }
                 } else if (theme::icon_button(ui, icon::PAPER_PLANE_RIGHT, &t!("studio.send")).clicked() || enter) && !self.input.trim().is_empty() {
                     match services {
@@ -710,13 +740,35 @@ impl Chat {
     }
 }
 
+/// What a chat is called on screen: its title, or «Новый чат» until the titles model has
+/// written one.
+fn shown_title(title: &str) -> String {
+    if title.is_empty() {
+        t!("studio.new_chat").to_string()
+    } else {
+        title.to_string()
+    }
+}
+
+/// The chat to name again and the question to name it by: the open chat has no title yet, has a
+/// question, and was not tried in this session.
+fn retitle_candidate(chats: &[ChatInfo], current: Option<ChatId>, messages: &[ChatMessage], tried: &std::collections::HashSet<ChatId>) -> Option<(ChatId, String)> {
+    let chat = current?;
+    if tried.contains(&chat) || chats.iter().find(|c| c.id == chat).is_none_or(|c| !c.title.is_empty()) {
+        return None;
+    }
+    let question = messages.iter().find(|m| m.author == Author::User)?.text.trim().to_string();
+    (!question.is_empty()).then_some((chat, question))
+}
+
 /// The tabs to draw: the open chats in their tab order, and «Новый чат» while no chat is
-/// current (a new chat is stored only with its first question).
+/// current (a new chat is stored only with its first question); a chat whose title is not
+/// written yet is called the same.
 fn tab_list(chats: &[ChatInfo], open: &[ChatId], current: Option<ChatId>, new_title: &str) -> Vec<Tab<Option<ChatId>>> {
     let mut tabs: Vec<Tab<Option<ChatId>>> = open
         .iter()
         .filter_map(|&id| chats.iter().find(|c| c.id == id))
-        .map(|c| Tab::new(Some(c.id), c.title.clone(), current == Some(c.id)))
+        .map(|c| Tab::new(Some(c.id), if c.title.is_empty() { new_title.to_string() } else { c.title.clone() }, current == Some(c.id)))
         .collect();
     if current.is_none() {
         tabs.push(Tab::new(None, new_title, true).fixed());
@@ -749,8 +801,9 @@ fn chat_date(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local).format("%d.%m.%Y").to_string()).unwrap_or_default()
 }
 
-/// A message; returns the time of a clicked citation.
-fn message_ui(ui: &mut egui::Ui, m: &ChatMessage, cache: &mut CommonMarkCache, bare_times: bool, p: theme::Palette) -> Option<String> {
+/// A message (the `n`-th of the chat); returns the time of a clicked citation. An answer is its
+/// timeline: the final one folds its steps and reasoning, a stopped one shows them as they were.
+fn message_ui(ui: &mut egui::Ui, n: usize, m: &ChatMessage, cache: &mut CommonMarkCache, bare_times: bool, p: theme::Palette) -> Option<String> {
     match m.author {
         Author::User => {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -759,89 +812,49 @@ fn message_ui(ui: &mut egui::Ui, m: &ChatMessage, cache: &mut CommonMarkCache, b
                     ui.add(egui::Label::new(RichText::new(&m.text).size(13.5)).wrap());
                 });
             });
-            ui.add_space(6.0);
+            ui.add_space(timeline::GAP);
             None
         }
         Author::Agent => {
-            CommonMarkViewer::new().show(ui, cache, &linkify(&m.text, bare_times));
-            let seek = take_seek(ui);
-            let steps: Vec<StepRecord> = serde_json::from_value(m.details["steps"].clone()).unwrap_or_default();
-            if !steps.is_empty() {
-                egui::CollapsingHeader::new(RichText::new(t!("studio.steps", n = steps.len())).size(11.5).color(p.text_weak))
-                    .id_salt(("steps", m.text.len(), steps.len(), &steps[0].title))
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        for s in &steps {
-                            step_ui(ui, s, true, p);
-                        }
-                        if m.details["forced"].as_bool() == Some(true) {
-                            theme::hint(ui, t!("studio.forced"));
-                        }
-                    });
+            let timeline = m.timeline();
+            let mut seek = None;
+            if timeline.is_empty() {
+                // A section, or an answer from before timelines: just the text.
+                if !m.text.is_empty() {
+                    CommonMarkViewer::new().show(ui, cache, &linkify(&m.text, bare_times));
+                    seek = timeline::take_seek(ui);
+                }
+            } else {
+                let forced = m.details["forced"].as_bool() == Some(true);
+                seek = timeline::timeline_ui(ui, ("message", n), &timeline.entries, true, forced, cache, bare_times, p);
             }
-            ui.add_space(10.0);
+            if m.stopped() {
+                theme::hint(ui, t!("studio.stopped"));
+            }
+            ui.add_space(timeline::GAP);
             seek
         }
     }
 }
 
-fn step_ui(ui: &mut egui::Ui, s: &StepRecord, full: bool, p: theme::Palette) {
-    let color = match s.status {
-        StepStatus::Found => p.success,
-        StepStatus::Failed => p.danger,
-        _ => p.text_weak,
-    };
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(status_icon(s.status)).color(color));
-        ui.add(egui::Label::new(RichText::new(&s.title).size(12.5)).truncate());
-    });
-    if full {
-        ui.label(RichText::new(format!("{} {}", s.tool, s.args)).font(FontId::monospace(10.5)).color(p.text_weak));
-        let result: String = s.result.chars().take(RESULT_CHARS).collect();
-        ui.add(egui::Label::new(RichText::new(result).size(11.5).color(p.text_weak)).wrap());
-        ui.add_space(4.0);
-    }
-}
-
-/// The answer being written: its steps so far and the text as it comes; returns the time of a
-/// clicked citation.
-fn thinking_ui(ui: &mut egui::Ui, r: &Running, cache: &mut CommonMarkCache, bare_times: bool, p: theme::Palette) -> Option<String> {
-    for s in &r.steps {
-        step_ui(ui, s, false, p);
-    }
-    if let Some((done, total)) = r.scanning {
-        ui.label(RichText::new(t!("studio.scanning", done = done, total = total)).size(12.5).color(p.text_weak));
-        ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32).desired_height(5.0));
-    }
-    if !r.draft.is_empty() {
-        CommonMarkViewer::new().show(ui, cache, &linkify(&r.draft, bare_times));
-    }
-    ui.horizontal(|ui| {
-        ui.spinner();
-        let label = if r.draft.is_empty() { t!("studio.thinking", s = r.started.elapsed().as_secs()) } else { t!("studio.writing") };
-        ui.label(RichText::new(label).color(p.text_weak));
-    });
-    take_seek(ui)
-}
-
-/// A clicked citation link (what follows `seek:`): it seeks instead of opening a browser.
-fn take_seek(ui: &egui::Ui) -> Option<String> {
-    let mut seek = None;
-    ui.ctx().output_mut(|o| {
-        o.commands.retain(|c| match c {
-            egui::OutputCommand::OpenUrl(u) if u.url.starts_with("seek:") => {
-                seek = Some(u.url["seek:".len()..].to_string());
-                false
-            }
-            _ => true,
-        })
-    });
-    seek
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chat_without_a_title_is_named_again_once() {
+        let info = |id: ChatId, title: &str| ChatInfo { id, title: title.into(), created_ms: 1, messages: 1 };
+        let user = |text: &str| ChatMessage { author: Author::User, text: text.into(), details: serde_json::Value::Null };
+        let chats = [info(5, ""), info(7, "Семь")];
+        let messages = [user("  Когда отчёт? "), user("и что?")];
+        let mut tried = std::collections::HashSet::new();
+        assert_eq!(retitle_candidate(&chats, Some(5), &messages, &tried), Some((5, "Когда отчёт?".to_string())), "the first question names it");
+        assert_eq!(retitle_candidate(&chats, Some(7), &messages, &tried), None, "it has a title");
+        assert_eq!(retitle_candidate(&chats, None, &messages, &tried), None, "the new-chat tab");
+        assert_eq!(retitle_candidate(&chats, Some(5), &[], &tried), None, "nothing to name it by");
+        tried.insert(5);
+        assert_eq!(retitle_candidate(&chats, Some(5), &messages, &tried), None, "only once");
+    }
 
     #[test]
     fn citations_become_seek_links() {
@@ -898,9 +911,12 @@ mod tests {
     }
 
     #[test]
-    fn chats_are_named_by_their_first_question() {
-        assert_eq!(chat_title("  Когда   отчёт? "), "Когда отчёт?");
-        let long = chat_title("Расскажи подробно, что решили про бюджет на следующий квартал и кто отвечает");
-        assert!(long.ends_with('…') && long.chars().count() <= TITLE_CHARS + 1, "{long}");
+    fn a_chat_without_a_title_is_a_new_chat_until_it_is_named() {
+        let info = |id: ChatId, title: &str| ChatInfo { id, title: title.into(), created_ms: 1, messages: 2 };
+        let chats = [info(5, ""), info(7, "Приветствие")];
+        let tabs = tab_list(&chats, &[5, 7], Some(5), "Новый чат");
+        assert_eq!(tabs.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Новый чат", "Приветствие"]);
+        assert_eq!(shown_title(""), t!("studio.new_chat"));
+        assert_eq!(shown_title("Сроки"), "Сроки");
     }
 }

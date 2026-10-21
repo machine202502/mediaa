@@ -128,6 +128,41 @@ mod tests {
         assert!(pair.ends_with("Write a JSON object:\nsame — true or false, as above."), "{pair}");
     }
 
+    /// The details templates carry the topic and its text (or its points); their wording is a
+    /// placeholder until the lead writes it (P3a), so only the data wiring is tested.
+    #[test]
+    fn outline_details() {
+        insta::assert_snapshot!("outline_detail_system", render("outline/detail_system.j2", ()));
+        let window = render(
+            "outline/detail_window.j2",
+            context! { title => "Отчёт", summary => "Сроки.", start => "0:00", end => "10:00", number => 2, parts => 3, language => "Russian", text => "[0:10] Анна: Сроки." },
+        );
+        insta::assert_snapshot!("outline_detail_window", window);
+        assert!(window.starts_with("Part 2 of 3 of one topic of the recording (0:00 – 10:00).\nThe topic: Отчёт — Сроки.\nWrite everything in Russian.\n\n"), "{window}");
+        assert!(window.contains("\"[time] speaker: text\":\n[0:10] Анна: Сроки.\n\nList the concrete points"), "{window}");
+
+        let short = render(
+            "outline/detail.j2",
+            context! { title => "Отчёт", summary => "Сроки.", start => "0:00", end => "10:00", language => "Russian", parts => Vec::<String>::new(), points => Vec::<String>::new(), text => "[0:10] Анна: Сроки." },
+        );
+        insta::assert_snapshot!("outline_detail_transcript", short);
+        assert!(short.starts_with("One topic of the recording (0:00 – 10:00).\nThe topic: Отчёт — Сроки.\nWrite everything in Russian.\n\nTranscript of the topic"), "{short}");
+        assert!(!short.contains("subtopics") && !short.contains("The points said"), "{short}");
+
+        let points = [context! { time => "0:10", text => "Сроки обсудили" }, context! { time => "0:20", text => "Олег проверит" }];
+        let parts = [context! { start => "0:00", end => "5:00", title => "Сроки" }, context! { start => "5:00", end => "10:00", title => "Бюджет" }];
+        let assembled = render(
+            "outline/detail.j2",
+            context! { title => "Отчёт", summary => "Сроки.", start => "0:00", end => "10:00", language => "Russian", parts, points, text => "" },
+        );
+        insta::assert_snapshot!("outline_detail_points", assembled);
+        assert!(
+            assembled.contains("It joins these subtopics: 0:00–5:00 Сроки; 5:00–10:00 Бюджет\n\nThe points said in the topic, in order (\"time text\"):\n0:10 Сроки обсудили\n0:20 Олег проверит\n"),
+            "{assembled}"
+        );
+        assert!(assembled.contains("The subtopics may become sections") && !assembled.contains("Transcript of the topic"), "{assembled}");
+    }
+
     fn tools() -> Vec<minijinja::Value> {
         vec![context! { name => "search", description => tool("search"), example => r#"{"query":"сроки"}"# }]
     }
@@ -270,5 +305,14 @@ mod tests {
     fn delegate() {
         insta::assert_snapshot!("delegate_system", render("delegate_system.j2", ()));
         insta::assert_snapshot!("delegate_task", render("delegate_task.j2", context! { task => "Кратко перескажи", text => "[0:10] (Анна) Отчёт в пятницу." }));
+    }
+
+    #[test]
+    fn chat_title() {
+        insta::assert_snapshot!("chat_title_system", render("chat/title_system.j2", ()));
+        let user = render("chat/title.j2", context! { language => "Russian", question => "привет как дела" });
+        insta::assert_snapshot!("chat_title", user);
+        assert!(user.starts_with("Write the title in Russian.\n\nExamples:\n"), "{user}");
+        assert!(user.ends_with("First message:\nпривет как дела\n\nTitle:"), "{user}");
     }
 }

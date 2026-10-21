@@ -38,13 +38,15 @@ fn get(p: &Provider, url: &str) -> anyhow::Result<serde_json::Value> {
 /// Answers longer than this are given up on (a long answer of a slow model).
 const CHAT_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// A streamed chat completion (`"stream": true` is set): `on_delta` gets each chunk's
-/// `choices[0].delta` as it arrives (server-sent events).
-pub fn chat_completion_stream(p: &Provider, body: &serde_json::Value, on_delta: &mut dyn FnMut(&serde_json::Value)) -> anyhow::Result<()> {
+/// A streamed chat completion (`"stream": true` is set): `on_chunk` gets each chunk as it arrives
+/// (server-sent events): its `choices[0].delta`, and at the end its `usage` when the server sends it.
+pub fn chat_completion_stream(p: &Provider, body: &serde_json::Value, on_chunk: &mut dyn FnMut(&serde_json::Value)) -> anyhow::Result<()> {
     use std::io::BufRead;
     let url = format!("{}/chat/completions", p.api_url());
     let mut body = body.clone();
     body["stream"] = serde_json::Value::Bool(true);
+    // The last chunk then carries the tokens used.
+    body["stream_options"] = serde_json::json!({"include_usage": true});
     let mut req = client(p, CHAT_TIMEOUT)?.post(&url).json(&body);
     if !p.api_key.trim().is_empty() {
         req = req.bearer_auth(p.api_key.trim());
@@ -67,7 +69,7 @@ pub fn chat_completion_stream(p: &Provider, body: &serde_json::Value, on_delta: 
         if let Some(e) = chunk.get("error") {
             anyhow::bail!("{}: {e}", p.name);
         }
-        on_delta(&chunk["choices"][0]["delta"]);
+        on_chunk(&chunk);
     }
     Ok(())
 }

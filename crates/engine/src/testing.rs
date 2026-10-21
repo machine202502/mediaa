@@ -12,7 +12,7 @@
 use crate::engine::{
     inspect_files, role_name, Budget, ChatAnswer, ChatRequest, DiarizeRequest, EmbedKind, EmbeddingsRequest, Engine, EngineError, Gpu, Health,
     LoadedModel, ModelCheck, ModelFile, ModelFormat, ModelInfo, ModelInspect, Pool, ProgressCallback, RerankRequest, RerankResult, SpeechSegment,
-    Status, Used, Usage, VadSession, WaitingModel, DEFAULT_CHAT_N_CTX,
+    Status, Thinking, Used, Usage, VadSession, WaitingModel, DEFAULT_CHAT_N_CTX,
 };
 use crate::speech::{Phrase, Turn, Word};
 use mediaa_core::agent::ModelRole;
@@ -36,6 +36,8 @@ pub struct RecordedChat {
     pub device: String,
     pub interactive: bool,
     pub hf_token: Option<String>,
+    /// The reasoning budget (tokens) of a `chat_thinking` request.
+    pub thinking: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,6 +96,62 @@ struct Inner {
 }
 
 impl FakeEngine {
+    fn chat_inner(&self, request: &ChatRequest, thinking: Option<u32>, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError> {
+        request.clone().into_call()?;
+        self.inner.chats.lock().unwrap().push(RecordedChat {
+            model: request.model.trim().to_string(),
+            messages: request.messages.len(),
+            texts: request.messages.iter().map(|m| m.content.clone()).collect(),
+            max_tokens: request.max_tokens,
+            temperature: request.temperature,
+            no_repeats: request.no_repeats,
+            json_schema: request.json_schema.as_ref().map(|schema| schema.to_string()),
+            n_ctx: request.n_ctx.unwrap_or(DEFAULT_CHAT_N_CTX),
+            device: device_name(request.device),
+            interactive: request.priority.is_none_or(|priority| priority.interactive()),
+            hf_token: request.hf_token.clone(),
+            thinking,
+        });
+        if request.model.trim() == "unsupported/model" {
+            return Err(EngineError::model_unsupported("not a chat model"));
+        }
+        // An error after the first token: the stream must report it and not say [DONE].
+        if request.model.trim() == "fails/midstream" {
+            on_text("partial");
+            return Err(EngineError::internal("the model crashed"));
+        }
+        // A long answer that only ends when the client goes away.
+        if request.model.trim() == "slow/model" {
+            for _ in 0..1000 {
+                if cancel.load(Ordering::Relaxed) {
+                    self.inner.cancel_observed.store(true, Ordering::SeqCst);
+                    return Ok(ChatAnswer::default());
+                }
+                if !on_text("x") {
+                    if cancel.load(Ordering::Relaxed) {
+                        self.inner.cancel_observed.store(true, Ordering::SeqCst);
+                    }
+                    return Ok(ChatAnswer::default());
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let next = {
+            let mut answers = self.inner.answers.lock().unwrap();
+            if answers.is_empty() { None } else { Some(answers.remove(0)) }
+        };
+        let deltas = next.map(|answer| vec![answer]).unwrap_or_else(|| self.inner.deltas.lock().unwrap().clone().unwrap_or_else(|| vec!["Привет".into(), ", ".into(), "мир".into()]));
+        let mut content = String::new();
+        for delta in &deltas {
+            if !on_text(delta) {
+                break;
+            }
+            content.push_str(delta);
+        }
+        let usage = (*self.inner.usage.lock().unwrap()).unwrap_or(Some(Usage { prompt_tokens: 7, completion_tokens: 3 }));
+        Ok(ChatAnswer { content, usage })
+    }
+
     pub fn new() -> FakeEngine {
         FakeEngine::default()
     }
@@ -226,58 +284,11 @@ impl Engine for FakeEngine {
     }
 
     fn chat(&self, request: &ChatRequest, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError> {
-        request.clone().into_call()?;
-        self.inner.chats.lock().unwrap().push(RecordedChat {
-            model: request.model.trim().to_string(),
-            messages: request.messages.len(),
-            texts: request.messages.iter().map(|m| m.content.clone()).collect(),
-            max_tokens: request.max_tokens,
-            temperature: request.temperature,
-            no_repeats: request.no_repeats,
-            json_schema: request.json_schema.as_ref().map(|schema| schema.to_string()),
-            n_ctx: request.n_ctx.unwrap_or(DEFAULT_CHAT_N_CTX),
-            device: device_name(request.device),
-            interactive: request.priority.is_none_or(|priority| priority.interactive()),
-            hf_token: request.hf_token.clone(),
-        });
-        if request.model.trim() == "unsupported/model" {
-            return Err(EngineError::model_unsupported("not a chat model"));
-        }
-        // An error after the first token: the stream must report it and not say [DONE].
-        if request.model.trim() == "fails/midstream" {
-            on_text("partial");
-            return Err(EngineError::internal("the model crashed"));
-        }
-        // A long answer that only ends when the client goes away.
-        if request.model.trim() == "slow/model" {
-            for _ in 0..1000 {
-                if cancel.load(Ordering::Relaxed) {
-                    self.inner.cancel_observed.store(true, Ordering::SeqCst);
-                    return Ok(ChatAnswer::default());
-                }
-                if !on_text("x") {
-                    if cancel.load(Ordering::Relaxed) {
-                        self.inner.cancel_observed.store(true, Ordering::SeqCst);
-                    }
-                    return Ok(ChatAnswer::default());
-                }
-                std::thread::sleep(Duration::from_millis(2));
-            }
-        }
-        let next = {
-            let mut answers = self.inner.answers.lock().unwrap();
-            if answers.is_empty() { None } else { Some(answers.remove(0)) }
-        };
-        let deltas = next.map(|answer| vec![answer]).unwrap_or_else(|| self.inner.deltas.lock().unwrap().clone().unwrap_or_else(|| vec!["Привет".into(), ", ".into(), "мир".into()]));
-        let mut content = String::new();
-        for delta in &deltas {
-            if !on_text(delta) {
-                break;
-            }
-            content.push_str(delta);
-        }
-        let usage = (*self.inner.usage.lock().unwrap()).unwrap_or(Some(Usage { prompt_tokens: 7, completion_tokens: 3 }));
-        Ok(ChatAnswer { content, usage })
+        self.chat_inner(request, None, cancel, on_text)
+    }
+
+    fn chat_thinking(&self, request: &ChatRequest, thinking: Thinking, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError> {
+        self.chat_inner(request, Some(thinking.budget), cancel, on_text)
     }
 
     fn embeddings(&self, request: &EmbeddingsRequest) -> Result<Vec<Vec<f32>>, EngineError> {

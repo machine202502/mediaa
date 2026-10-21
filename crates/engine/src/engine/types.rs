@@ -105,6 +105,16 @@ impl Default for ChatRequest {
     }
 }
 
+/// A chat answer that starts with reasoning (local models): the model thinks inside
+/// `<think>…</think>` for at most `budget` tokens and only then writes the answer, which the
+/// request's `json_schema` constrains. The reasoning stays in the streamed text and in
+/// [`ChatAnswer::content`] (split it off with `llm::ThinkSplitter` / `llm::split_thinking`);
+/// `max_tokens` counts what follows the reasoning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Thinking {
+    pub budget: u32,
+}
+
 /// A finished answer: its text and the token usage.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChatAnswer {
@@ -343,7 +353,7 @@ impl ChatRequest {
         Ok(ChatCall {
             source,
             messages,
-            generate: llm::Generate { max_tokens: self.max_tokens, temperature: self.temperature, json_schema, no_repeats: self.no_repeats },
+            generate: llm::Generate { max_tokens: self.max_tokens, temperature: self.temperature, json_schema, no_repeats: self.no_repeats, think_tokens: None },
             n_ctx: self.n_ctx.unwrap_or(DEFAULT_CHAT_N_CTX),
             device: self.device.unwrap_or_default(),
             interactive: self.priority.is_none_or(Priority::interactive),

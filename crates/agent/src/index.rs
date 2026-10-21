@@ -1,14 +1,16 @@
 //! The `index` queue task: a file's dialog cut into chunks with a keyword index
 //! (`mediaa_core::retrieval`), then an embedding per chunk with the Embedding role's model.
-//! Queued after every transcription (and queues the outline); resumable chunk by chunk.
+//! Resumable chunk by chunk. The pipeline queues it after the transcription (or diarization)
+//! and the topics after it.
 
 use crate::slots::Slots;
-use mediaa_engine::{EmbedKind, EmbeddingsRequest, Engine};
 use crate::worker::{Checkpoints, TaskHandler};
 use mediaa_core::agent::{AgentSettings, ModelRole, WorkKind};
-use mediaa_core::queue::{Queue, Task};
+use mediaa_core::queue::Task;
 use mediaa_core::retrieval;
 use mediaa_core::transcript::{self, Transcript};
+use mediaa_engine::EmbedKind;
+use mediaa_engine::EmbeddingsRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -24,23 +26,15 @@ pub struct Input {
     pub path: PathBuf,
 }
 
-/// Queues indexing of `path` (after its transcription).
-pub fn enqueue(ai_dir: &Path, path: &Path) -> anyhow::Result<()> {
-    let title = path.file_name().unwrap_or_default().to_string_lossy();
-    Queue::open(ai_dir)?.enqueue_once(KIND, &title, &serde_json::to_value(Input { path: path.to_path_buf() })?, 0)?;
-    Ok(())
-}
-
 pub struct Index {
     ai_dir: PathBuf,
-    engine: Arc<dyn Engine>,
     slots: Slots,
     settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>,
 }
 
 impl Index {
-    pub fn new(ai_dir: &Path, engine: Arc<dyn Engine>, slots: Slots, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Index {
-        Index { ai_dir: ai_dir.to_path_buf(), engine, slots, settings }
+    pub fn new(ai_dir: &Path, slots: Slots, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Index {
+        Index { ai_dir: ai_dir.to_path_buf(), slots, settings }
     }
 }
 
@@ -56,8 +50,6 @@ impl TaskHandler for Index {
         let mut t = Transcript::open(&self.ai_dir, &id)?;
         if task.cursor.is_null() {
             t.set_chunks(&retrieval::chunks(&t.dialog()?))?;
-            // The outline next: its own task (the language model, slower), not needing embeddings.
-            crate::outline::enqueue(&self.ai_dir, &input.path)?;
             cp.save(&json!("chunked"), &Value::Null, 0.0)?;
         }
         let chunks = t.chunks()?;
@@ -76,6 +68,7 @@ impl TaskHandler for Index {
         let device = settings.devices.get(ModelRole::Embedding);
         let hf_token = crate::assistant::hf_token(&settings);
         let _lease = self.slots.request(WorkKind::Indexing, false).wait(cp.stopping())?;
+        let engine = cp.engine();
         for (n, (chunk, text)) in todo.iter().enumerate() {
             let request = EmbeddingsRequest {
                 model: model.clone(),
@@ -85,7 +78,7 @@ impl TaskHandler for Index {
                 device: Some(device),
                 hf_token: hf_token.clone(),
             };
-            let vector = self.engine.embeddings(&request)?.into_iter().next().filter(|v| !v.is_empty());
+            let vector = engine.embeddings(&request)?.into_iter().next().filter(|v| !v.is_empty());
             t.set_embedding(*chunk, &vector.ok_or_else(|| anyhow::anyhow!("the engine returned no embedding"))?)?;
             cp.save(&json!("embedding"), &Value::Null, (before + n + 1) as f32 / total)?;
         }

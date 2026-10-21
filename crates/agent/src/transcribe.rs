@@ -1,14 +1,15 @@
 //! The `transcribe` queue task: the sound of a file → voice activity → speech recognition,
 //! phrase by phrase into the file's transcript (`mediaa_core::transcript`), checkpointing the
-//! time recognised up to; then (optionally) diarization and the dialog's replies. A stopped or
-//! crashed task continues from its last phrase.
+//! time recognised up to, then the dialog's replies without speakers. A stopped or crashed task
+//! continues from its last phrase. Speakers are a task of their own (`diarize`), the index and
+//! the topics too: the pipeline links them by dependencies.
 
 use crate::slots::Slots;
 use crate::worker::{Checkpoints, TaskHandler};
-use mediaa_core::agent::{AgentSettings, ModelSource, WorkKind};
-use mediaa_engine::{DiarizeRequest, Engine, SpeechSegment};
+use mediaa_core::agent::{AgentSettings, WorkKind};
 use mediaa_core::queue::Task;
 use mediaa_core::transcript::{self, Transcript};
+use mediaa_engine::{Engine, SpeechSegment};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -22,19 +23,11 @@ pub const SAMPLE_RATE: u32 = 16_000;
 
 /// Voice activity detection (engine model spec).
 pub const VAD_MODEL: &str = "csukuangfj/vad/silero_vad.onnx";
-/// Speaker segmentation for diarization (engine model spec).
-pub const SEGMENTATION_MODEL: &str = "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/model.onnx";
 
-/// What to transcribe and with which models (chosen when the task is created).
+/// What to transcribe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Input {
     pub path: PathBuf,
-    pub recognizer: ModelSource,
-    /// Speaker model; `None`: no diarization.
-    pub diarizer: Option<ModelSource>,
-    /// Number of speakers when known.
-    #[serde(default)]
-    pub speakers: Option<u32>,
 }
 
 /// Where a task stopped.
@@ -42,48 +35,46 @@ pub struct Input {
 struct Cursor {
     /// Seconds of the recording recognised.
     t: f64,
-    /// Recognition is complete (diarization next).
-    recognized: bool,
 }
-
-/// Share of the progress bar for recognition when diarization follows.
-const RECOGNITION_SHARE: f32 = 0.85;
 
 /// The engine's model specs of a task.
 struct Specs {
     recognizer: String,
     vad: String,
-    /// Speaker embedding and segmentation models.
-    diarizer: Option<(String, String)>,
 }
 
 impl Specs {
-    fn get(input: &Input) -> anyhow::Result<Specs> {
-        let diarizer = match &input.diarizer {
-            Some(d) => Some((crate::models::local_spec(d)?, SEGMENTATION_MODEL.to_string())),
-            None => None,
-        };
-        Ok(Specs { recognizer: crate::models::local_spec(&input.recognizer)?, vad: VAD_MODEL.to_string(), diarizer })
+    fn get(settings: &AgentSettings) -> anyhow::Result<Specs> {
+        let source = settings.models.speech_recognition.as_ref().ok_or_else(|| anyhow::anyhow!("the speech recognition model is not chosen"))?;
+        Ok(Specs { recognizer: crate::models::local_spec(source)?, vad: VAD_MODEL.to_string() })
     }
 }
 
 pub struct Transcribe {
     ai_dir: PathBuf,
-    engine: Arc<dyn Engine>,
     slots: Slots,
     settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>,
 }
 
 impl Transcribe {
-    pub fn new(ai_dir: &std::path::Path, engine: Arc<dyn Engine>, slots: Slots, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Transcribe {
-        Transcribe { ai_dir: ai_dir.to_path_buf(), engine, slots, settings }
+    pub fn new(ai_dir: &std::path::Path, slots: Slots, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Transcribe {
+        Transcribe { ai_dir: ai_dir.to_path_buf(), slots, settings }
     }
 
     /// Recognises from `cursor.t` to the end, a checkpoint after every phrase.
     #[allow(clippy::too_many_arguments)]
-    fn recognize(&self, input: &Input, specs: &Specs, progress: (f64, f32), transcript: &mut Transcript, cursor: &mut Cursor, cp: &mut Checkpoints, hf_token: Option<&str>) -> anyhow::Result<()> {
-        let (duration, share) = progress;
-        let mut session = self.engine.vad_open(&specs.vad, cursor.t, hf_token)?;
+    fn recognize(
+        &self,
+        engine: &dyn Engine,
+        input: &Input,
+        specs: &Specs,
+        duration: f64,
+        transcript: &mut Transcript,
+        cursor: &mut Cursor,
+        cp: &mut Checkpoints,
+        hf_token: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut session = engine.vad_open(&specs.vad, cursor.t, hf_token)?;
 
         let (tx, rx) = crossbeam_channel::bounded::<Vec<f32>>(16);
         let stop = Arc::new(AtomicBool::new(false));
@@ -93,11 +84,11 @@ impl Transcribe {
             .spawn(move || mediaa_media::preview::decode_mono(&path, start, SAMPLE_RATE, s, move |samples| tx.send(samples.to_vec()).is_ok()))?;
 
         let mut step = |speech: SpeechSegment, cursor: &mut Cursor, cp: &mut Checkpoints| -> anyhow::Result<()> {
-            let phrase = self.engine.recognize(&specs.recognizer, speech.start, &speech.samples, hf_token)?;
+            let phrase = engine.recognize(&specs.recognizer, speech.start, &speech.samples, hf_token)?;
             let phrases = if phrase.words.is_empty() { vec![] } else { vec![phrase.clone()] };
             transcript.put_phrases(phrase.start, &phrases)?;
             cursor.t = phrase.end;
-            let progress = if duration > 0.0 { (phrase.end / duration).min(1.0) as f32 * share } else { 0.0 };
+            let progress = if duration > 0.0 { (phrase.end / duration).min(1.0) as f32 } else { 0.0 };
             cp.save(&serde_json::to_value(&*cursor)?, &Value::Null, progress)
         };
         let mut result = Ok(());
@@ -124,24 +115,6 @@ impl Transcribe {
         result?;
         decoded
     }
-
-    /// Who speaks when, over the whole recording.
-    fn diarize(&self, input: &Input, embedding: &str, segmentation: &str, hf_token: Option<&str>) -> anyhow::Result<Vec<transcript::Turn>> {
-        let samples = Arc::new(std::sync::Mutex::new(Vec::<f32>::new()));
-        let s = samples.clone();
-        mediaa_media::preview::decode_mono(&input.path, 0.0, SAMPLE_RATE, Arc::new(AtomicBool::new(false)), move |chunk| {
-            s.lock().expect("samples lock").extend_from_slice(chunk);
-            true
-        })?;
-        let samples = std::mem::take(&mut *samples.lock().expect("samples lock"));
-        let request = DiarizeRequest {
-            segmentation: segmentation.to_string(),
-            embedding: embedding.to_string(),
-            speakers: input.speakers,
-            hf_token: hf_token.map(str::to_string),
-        };
-        Ok(self.engine.diarize(&request, &samples)?)
-    }
 }
 
 impl TaskHandler for Transcribe {
@@ -160,38 +133,27 @@ impl TaskHandler for Transcribe {
         }
         transcript.set_meta("path", &input.path.to_string_lossy())?;
         let duration = mediaa_media::info::probe(&input.path)?.duration_secs().unwrap_or(0.0);
-        let share = if input.diarizer.is_some() { RECOGNITION_SHARE } else { 1.0 };
-        let specs = Specs::get(&input)?;
-        let hf_token = crate::assistant::hf_token(&(self.settings)());
+        let settings = (self.settings)();
+        let specs = Specs::get(&settings)?;
+        let hf_token = crate::assistant::hf_token(&settings);
+        let engine = cp.engine();
 
         // Transcriptions at once per the budget.
-        let lease = self.slots.request(WorkKind::Transcription, false).wait(cp.stopping())?;
-        if !cursor.recognized {
-            self.recognize(&input, &specs, (duration, share), &mut transcript, &mut cursor, cp, hf_token.as_deref())?;
-            cursor.recognized = true;
-            cp.save(&serde_json::to_value(&cursor)?, &Value::Null, share)?;
-        }
+        let _lease = self.slots.request(WorkKind::Transcription, false).wait(cp.stopping())?;
+        self.recognize(engine.as_ref(), &input, &specs, duration, &mut transcript, &mut cursor, cp, hf_token.as_deref())?;
         let phrases = transcript.phrases()?;
-        let turns = match &specs.diarizer {
-            Some((embedding, segmentation)) if !phrases.is_empty() => self.diarize(&input, embedding, segmentation, hf_token.as_deref())?,
-            _ => Vec::new(),
-        };
-        drop(lease);
-        log::info!("{}: {} phrases, {} speaker turns", input.path.display(), phrases.len(), turns.len());
-        let replies = transcript::replies(&phrases, &turns);
+        log::info!("{}: {} phrases", input.path.display(), phrases.len());
+        let replies = transcript::replies(&phrases, &[]);
         transcript.set_replies(&replies)?;
-        transcript.set_meta("diarized", if turns.is_empty() { "0" } else { "1" })?;
-        // Searchable next (a task of its own: the indexing budget, resumable).
-        crate::index::enqueue(&self.ai_dir, &input.path)?;
-        let speakers = replies.iter().filter_map(|r| r.speaker).collect::<std::collections::BTreeSet<_>>().len();
-        Ok(json!({ "file_id": id, "replies": replies.len(), "speakers": speakers }))
+        transcript.remove_meta("diarized")?;
+        Ok(json!({ "file_id": id, "replies": replies.len() }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaa_core::agent::{AgentSettings, Budget};
+    use mediaa_core::agent::{AgentSettings, AnalysisOptions, Budget};
     use mediaa_core::queue::{Queue, TaskStatus};
 
     /// A real transcription through the queue with models in `MEDIAA_TEST_MODELS` (the app's
@@ -216,18 +178,19 @@ mod tests {
             q.remove(t.id).unwrap();
         }
         let defaults = AgentSettings::default();
-        let input = Input { path: media.clone(), recognizer: defaults.models.speech_recognition.clone().unwrap(), diarizer: defaults.models.diarization.clone(), speakers: None };
-        let id = q.enqueue(KIND, "talk.wav", &serde_json::to_value(&input).unwrap(), 0).unwrap();
+        let options = AnalysisOptions { diarize: true, speakers: None, index: true, topics: false, details: false };
+        let id = crate::pipeline::start(&ai, &media, options).unwrap();
 
         let engine = crate::live::engine();
         let slots = Slots::new(Budget::default());
         let settings: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(AgentSettings::default);
         let handlers: Vec<Box<dyn TaskHandler>> = vec![
-            Box::new(Transcribe::new(&ai, engine.clone(), slots.clone(), settings.clone())),
-            Box::new(crate::index::Index::new(&ai, engine.clone(), slots.clone(), settings)),
+            Box::new(Transcribe::new(&ai, slots.clone(), settings.clone())),
+            Box::new(crate::diarize::Diarize::new(&ai, slots.clone(), settings.clone())),
+            Box::new(crate::index::Index::new(&ai, slots.clone(), settings)),
         ];
         let stop = AtomicBool::new(false);
-        assert!(crate::worker::run_next(&q, &handlers, &stop).unwrap());
+        while crate::worker::run_next(&q, &engine, &handlers, &stop).unwrap() {}
         let task = q.get(id).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Done, "{:?}", task.error);
         let t = Transcript::open(&ai, &transcript::file_id(&media).unwrap()).unwrap();
@@ -236,11 +199,6 @@ mod tests {
         assert!(!dialog.is_empty());
         assert!(dialog.iter().all(|r| r.speaker.is_some()), "diarized");
         assert!(dialog.iter().any(|r| r.text().to_lowercase().contains("лукоморья")));
-
-        // Indexing was queued and runs next; then a question in other words finds the place.
-        assert!(crate::worker::run_next(&q, &handlers, &stop).unwrap());
-        let index = q.list().unwrap().into_iter().find(|t| t.kind == crate::index::KIND).unwrap();
-        assert_eq!(index.status, TaskStatus::Done, "{:?}", index.error);
         assert!(t.chunks().unwrap().iter().all(|(_, _, embedded)| *embedded));
         let (hits, trace) = crate::search::search(engine.as_ref(), &slots, &defaults, &ai, &transcript::file_id(&media).unwrap(), "где растёт дерево у моря?", 3, true).unwrap();
         assert!(trace.by_meaning && trace.reranked && trace.not_indexed == 0, "{trace:?}");

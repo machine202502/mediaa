@@ -11,6 +11,8 @@ use crate::player::Player;
 use crate::theme;
 use eframe::egui::{self, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke};
 use egui_phosphor::regular as icon;
+use mediaa_agent::pipeline::Stage;
+use mediaa_core::agent::AnalysisOptions;
 use mediaa_core::library::human_duration;
 use mediaa_core::MediaKind;
 use rust_i18n::t;
@@ -176,6 +178,7 @@ impl Studio {
                     }
                 }
                 1 => self.video_pane(ui, pane, p),
+                _ if !self.dialog.has_replies() => chat_later(ui, pane, p),
                 _ => {
                     if let Some(a) = self.chat.ui(ui, pane, Some(&mut self.player), services, p) {
                         self.pending = Some(a);
@@ -410,12 +413,24 @@ fn speed_label_width(ui: &egui::Ui) -> f32 {
 pub enum StudioAction {
     Open(PathBuf),
     Reveal(PathBuf),
-    /// Queue a transcription of the file.
-    Transcribe(PathBuf),
-    /// Continue a failed transcription task.
+    /// Analyse the file with the chosen stages: `from` `None` is a first analysis (earlier data
+    /// is left alone), `Some(stage)` rebuilds that stage and what follows. `remember` saves the
+    /// options as the default for the next analysis.
+    Analyse { path: PathBuf, from: Option<Stage>, options: AnalysisOptions, remember: bool },
+    /// Cancel the running analysis of the recording.
+    Stop(mediaa_core::queue::TaskId),
+    /// Continue a failed task.
     ResumeTask(mediaa_core::queue::TaskId),
     /// Open a recording at a time (a citation in a folder's chat).
     OpenAt(PathBuf, f64),
+}
+
+/// The chat pane of a recording that has no replies yet: the frame and a note, no chat.
+fn chat_later(ui: &mut egui::Ui, rect: Rect, p: theme::Palette) {
+    let body = panel(ui, rect, &t!("studio.chat"), p);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(body.shrink2(egui::vec2(10.0, 8.0))), |ui| {
+        ui.centered_and_justified(|ui| theme::hint(ui, t!("analysis.chat_later")));
+    });
 }
 
 /// A pane frame with its title row; returns the body rect.

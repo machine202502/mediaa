@@ -1,0 +1,264 @@
+use super::super::tools::tests::recording;
+use super::super::{answer, ask, Brain, Message, Piece, Step, ToolSpec, Tools};
+use super::*;
+use crate::slots::Slots;
+use mediaa_core::agent::{AgentSettings, Budget};
+use mediaa_core::queue::TaskStatus;
+use mediaa_engine::testing::FakeEngine;
+use std::time::{Duration, Instant};
+
+const STEP_SEARCH: &str = r#"{"thought":"","action":"search","title":"Ищу отчёт","args":{"query":"отчёт"}}"#;
+const STEP_ANSWER: &str = r#"{"thought":"","action":"answer","answer":"В пятницу [0:10]."}"#;
+
+fn nothing(_: &str, _: usize) -> anyhow::Result<Vec<mediaa_core::retrieval::Hit>> {
+    Ok(vec![])
+}
+
+#[test]
+fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let ai = dir.path();
+    let engine = FakeEngine::new();
+    engine.chat_answers(&[STEP_SEARCH, STEP_ANSWER]);
+    let t = Transcript::open(ai, "rec").unwrap();
+    let chat = t.create_chat("Сроки").unwrap();
+    let input = json!({ "chat": chat, "question": "Когда отчёт?" });
+    let scope = Scope::begin(ai, Arc::new(engine.clone()), "chat", "Когда отчёт?", &input, Some("rec")).unwrap();
+    let run = Run::new(&scope);
+    let (rec, settings, slots) = (recording(), AgentSettings::default(), Slots::new(Budget::default()));
+    let mut memory = Memory::default();
+
+    let outcome = work(&run, &scope, ai, "rec", chat, &mut memory, |memory, on_event| {
+        ask(&scope, &slots, &settings, ai, "rec", &rec, &[], memory, "Когда отчёт?", &run.cancel, on_event)
+    });
+    assert_eq!(outcome, Outcome::Done);
+    assert_eq!(engine.chats().len(), 2, "one model call for each step");
+
+    // The queue: the answer, and under it every step of the model and every tool call.
+    let q = Queue::open(ai).unwrap();
+    let root = q.get(scope.task()).unwrap().unwrap();
+    assert_eq!((root.kind.as_str(), root.status, root.scope.as_deref()), ("chat", TaskStatus::Done, Some("rec")));
+    assert_eq!(root.title, "Когда отчёт?");
+    assert_eq!(root.input, input);
+    let children = q.children(root.id).unwrap();
+    assert_eq!(
+        children.iter().map(|c| (c.kind.as_str(), c.status)).collect::<Vec<_>>(),
+        [("model-step", TaskStatus::Done), ("tool", TaskStatus::Done), ("model-step", TaskStatus::Done)]
+    );
+    assert!(children.iter().all(|c| c.inline && c.scope.as_deref() == Some("rec")));
+    // A model step: its call, tokens (from the answer) and model.
+    let agent_model = "unsloth/Qwen3.5-4B-GGUF";
+    for step in [&children[0], &children[2]] {
+        assert_eq!((step.stats.model_calls, step.stats.prompt_tokens, step.stats.completion_tokens), (1, 7, 3), "{}", step.title);
+        assert_eq!(step.stats.models, [agent_model]);
+    }
+    assert_eq!((children[0].title.as_str(), children[2].title.as_str()), ("1", "2"));
+    // A tool: the title the model gave, what it was and what it cost (the query's embedding).
+    let tool = &children[1];
+    assert_eq!(tool.title, "Ищу отчёт");
+    assert_eq!(tool.detail["tool"], "search");
+    assert_eq!(tool.detail["args"], r#"{"query":"отчёт"}"#);
+    assert!(tool.detail["result_chars"].as_u64().unwrap() > 0);
+    assert_eq!(tool.stats.model_calls, 1);
+    assert_eq!(tool.stats.models, ["ggml-org/embeddinggemma-300M-GGUF"]);
+    // The answer itself does no model work: its children do.
+    assert_eq!(root.stats.model_calls, 0);
+
+    // The stored message and the pane's state tell the same story.
+    let messages = t.messages(chat).unwrap();
+    let answer_message = messages.last().unwrap();
+    assert_eq!(answer_message.text, "В пятницу [0:10].");
+    let live = run.live();
+    assert_eq!(live.state, State::Done);
+    assert_eq!(answer_message.timeline(), live.timeline, "the details keep the timeline");
+    assert_eq!(answer_message.details["steps"][0]["tool"], "search");
+    assert!(!answer_message.stopped());
+    use mediaa_core::chat::TimelineEntry::{Answer, Step as StepEntry};
+    assert_eq!(
+        live.timeline.entries,
+        [
+            StepEntry { title: "Ищу отчёт".into(), tool: "search".into(), status: "nothing".into() },
+            Answer { text: "В пятницу [0:10].".into(), section: false },
+        ]
+    );
+}
+
+/// A model that writes some reasoning, waits for the stop and then goes on for a while (as a tool
+/// that cannot stop at once).
+struct Blocking;
+
+impl Brain for Blocking {
+    fn step(&self, _: &[Message], _: &[ToolSpec], _: bool, cancel: &AtomicBool, on_piece: &mut dyn FnMut(Piece)) -> anyhow::Result<Step> {
+        on_piece(Piece::Thinking("Думаю про "));
+        on_piece(Piece::Thinking("отчёт."));
+        while !cancel.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        on_piece(Piece::Thinking(" Уже поздно."));
+        on_piece(Piece::Answer("Поздний ответ."));
+        Ok(Step::Answer { thought: String::new(), text: "Поздний ответ.".into() })
+    }
+
+    fn complete(&self, _: &[Message], _: &AtomicBool) -> anyhow::Result<String> {
+        Ok(String::new())
+    }
+
+    fn context(&self) -> u32 {
+        8192
+    }
+}
+
+#[test]
+fn stop_ends_the_answer_at_once_and_what_comes_later_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let ai = dir.path();
+    let t = Transcript::open(ai, "rec").unwrap();
+    let chat = t.create_chat("Сроки").unwrap();
+    let scope = Scope::begin(ai, Arc::new(FakeEngine::new()), "chat", "Когда?", &json!({}), Some("rec")).unwrap();
+    let run = Run::new(&scope);
+    let stopped_in = std::thread::scope(|s| {
+        let worker = s.spawn(|| {
+            let (rec, mut memory) = (recording(), Memory::default());
+            let tools = Tools::new(&rec, &nothing, 4000);
+            work(&run, &scope, ai, "rec", chat, &mut memory, |memory, on_event| answer(&Blocking, &tools, &scope, &[], memory, "Когда?", &run.cancel, None, on_event))
+        });
+        while run.live().timeline.is_empty() {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let begun = Instant::now();
+        run.stop(&t, chat).unwrap();
+        let took = begun.elapsed();
+        // Over for the pane before the worker has even noticed.
+        assert_eq!(run.live().state, State::Stopped);
+        assert!(!worker.is_finished(), "the worker is still going");
+        assert_eq!(worker.join().unwrap(), Outcome::Stopped);
+        took
+    });
+    assert!(stopped_in < Duration::from_millis(250), "the stop does not wait for the worker: {stopped_in:?}");
+
+    // The message keeps the timeline up to the stop, marked as stopped; what the worker wrote
+    // afterwards is nowhere.
+    let messages = t.messages(chat).unwrap();
+    assert_eq!(messages.len(), 1, "no second message from the worker");
+    let m = &messages[0];
+    assert!(m.stopped());
+    assert_eq!(m.text, "");
+    assert_eq!(m.timeline().entries, [mediaa_core::chat::TimelineEntry::Thinking { text: "Думаю про отчёт.".into() }]);
+    assert_eq!(run.live().timeline.entries, m.timeline().entries, "the pane did not take the later events either");
+    assert_eq!(t.chat_memory(chat).unwrap(), None, "a stopped answer saves nothing of the worker's");
+
+    // The queue: the answer and its running step are cancelled, not done or failed.
+    let q = Queue::open(ai).unwrap();
+    assert_eq!(q.get(scope.task()).unwrap().unwrap().status, TaskStatus::Cancelled);
+    let children = q.children(scope.task()).unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].status, TaskStatus::Cancelled, "{:?}", children[0]);
+    // Stopping twice does nothing more.
+    run.stop(&t, chat).unwrap();
+    assert_eq!(t.messages(chat).unwrap().len(), 1);
+}
+
+#[test]
+fn a_stop_keeps_the_partial_answer_text_and_marks_a_step_that_was_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let ai = dir.path();
+    let t = Transcript::open(ai, "rec").unwrap();
+    let chat = t.create_chat("Сроки").unwrap();
+    let scope = Scope::begin(ai, Arc::new(FakeEngine::new()), "chat", "Когда?", &json!({}), Some("rec")).unwrap();
+    let run = Run::new(&scope);
+    {
+        let mut live = run.live();
+        live.apply(&Event::Thinking("Сначала ищу.".into()));
+        live.apply(&Event::StepStarted { title: "Читаю всё".into(), tool: "scan".into() });
+        live.apply(&Event::Scanning { done: 2, total: 9 });
+        live.apply(&Event::AnswerText("Пока что извест".into()));
+        assert_eq!(live.scanning, Some((2, 9)));
+    }
+    run.stop(&t, chat).unwrap();
+    let m = &t.messages(chat).unwrap()[0];
+    assert_eq!(m.text, "Пока что извест", "what was written so far is the text");
+    use mediaa_core::chat::TimelineEntry::{Answer, Step as StepEntry, Thinking};
+    assert_eq!(
+        m.timeline().entries,
+        [
+            Thinking { text: "Сначала ищу.".into() },
+            StepEntry { title: "Читаю всё".into(), tool: "scan".into(), status: "stopped".into() },
+            Answer { text: "Пока что извест".into(), section: false },
+        ]
+    );
+}
+
+#[test]
+fn a_failed_answer_is_a_failed_task_and_the_chat_keeps_what_it_learned() {
+    let dir = tempfile::tempdir().unwrap();
+    let ai = dir.path();
+    let t = Transcript::open(ai, "rec").unwrap();
+    let chat = t.create_chat("Сроки").unwrap();
+    let scope = Scope::begin(ai, Arc::new(FakeEngine::new()), "chat", "Когда?", &json!({}), Some("rec")).unwrap();
+    let run = Run::new(&scope);
+    let mut memory = Memory::default();
+    let outcome = work(&run, &scope, ai, "rec", chat, &mut memory, |memory, _| {
+        memory.remember("Пользователь любит кратко");
+        anyhow::bail!("the provider is down")
+    });
+    assert_eq!(outcome, Outcome::Failed("the provider is down".into()));
+    assert_eq!(run.live().state, State::Failed("the provider is down".into()));
+    let task = Queue::open(ai).unwrap().get(scope.task()).unwrap().unwrap();
+    assert_eq!((task.status, task.error.as_deref()), (TaskStatus::Failed, Some("the provider is down")));
+    assert!(t.messages(chat).unwrap().is_empty(), "no answer was stored");
+    assert!(t.chat_memory(chat).unwrap().unwrap().contains("кратко"));
+}
+
+#[test]
+fn sections_are_stored_as_they_come_and_the_closing_text_after_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let ai = dir.path();
+    let t = Transcript::open(ai, "rec").unwrap();
+    let chat = t.create_chat("Сроки").unwrap();
+    let scope = Scope::begin(ai, Arc::new(FakeEngine::new()), "chat", "Когда?", &json!({}), Some("rec")).unwrap();
+    let run = Run::new(&scope);
+    let mut memory = Memory::default();
+    let seen = std::sync::Mutex::new(Vec::new());
+    let outcome = work(&run, &scope, ai, "rec", chat, &mut memory, |_, on_event| {
+        on_event(&Event::AnswerText("Часть 1 [0:10].".into()));
+        on_event(&Event::Say("Часть 1 [0:10].".into()));
+        // The pane can see the stored section while the answer goes on.
+        seen.lock().unwrap().push((run.live().stored, t.messages(chat).unwrap().len()));
+        on_event(&Event::AnswerText("Итог.".into()));
+        Ok(Answer { text: "Итог.".into(), steps: vec![], forced: true })
+    });
+    assert_eq!(outcome, Outcome::Done);
+    assert_eq!(*seen.lock().unwrap(), [(1, 1)]);
+    let messages = t.messages(chat).unwrap();
+    assert_eq!(messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["Часть 1 [0:10].", "Итог."]);
+    assert_eq!(messages[0].details, json!({"section": true}));
+    assert_eq!(messages[1].details["forced"], true);
+    // The timeline of the closing message holds both parts; the first one is marked as stored.
+    use mediaa_core::chat::TimelineEntry::Answer as AnswerEntry;
+    assert_eq!(
+        messages[1].timeline().entries,
+        [AnswerEntry { text: "Часть 1 [0:10].".into(), section: true }, AnswerEntry { text: "Итог.".into(), section: false }]
+    );
+}
+
+#[test]
+fn the_pane_state_follows_events() {
+    let mut live = Live::new();
+    live.apply(&Event::Waiting { reason: WaitReason::Loading { model: "m".into() } });
+    assert!(live.waiting.is_some());
+    live.apply(&Event::Thinking("Думаю".into()));
+    assert_eq!(live.waiting, None, "any other event ends the waiting");
+    live.apply(&Event::Scanning { done: 1, total: 3 });
+    live.apply(&Event::StepStarted { title: "Ищу".into(), tool: "search".into() });
+    assert_eq!(live.scanning, None, "a step ends the scan shown");
+    live.apply(&Event::AnswerText("Черн".into()));
+    live.apply(&Event::AnswerDiscarded);
+    assert_eq!(live.timeline.draft(), "");
+    live.apply(&Event::Failed("плохо".into()));
+    assert_eq!(live.state, State::Failed("плохо".into()));
+    assert!(
+        live.timeline.entries.iter().any(|e| matches!(e, mediaa_core::chat::TimelineEntry::Step { status, .. } if status == "stopped")),
+        "a step that never ended is marked"
+    );
+}

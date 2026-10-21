@@ -1,7 +1,7 @@
 //! The studio's dialog pane: the transcript of the file as replies of speakers, with the time of
 //! each; the word being played is highlighted, a click on a word or a time seeks there, a click
-//! on a speaker names them. Without a transcript: the «Transcribe» button; while transcription
-//! runs: its progress and the text so far.
+//! on a speaker names them. Without replies: the «Transcribe» button, or the progress of the
+//! analysis; with replies: the topics, the analysis line, the search and the dialog.
 
 use super::studio::{panel, StudioAction};
 use super::topics;
@@ -11,14 +11,16 @@ use eframe::egui::{self, text::LayoutJob, Color32, CornerRadius, FontId, Margin,
 use egui_phosphor::regular as icon;
 use super::Services;
 use crossbeam_channel::Receiver;
-use mediaa_agent::transcribe::KIND;
+use super::analysis::{self, CardView, Command, ConfirmWindow, Offer, OptionsWindow, Outcome, Pane, RowState, StageRow};
+use mediaa_agent::pipeline::{self, Readiness, Stage};
+use mediaa_core::agent::AnalysisOptions;
 use mediaa_core::retrieval::Hit;
 use mediaa_core::library::human_duration;
 use mediaa_core::outline::Chapter;
-use mediaa_core::queue::{Queue, Task, TaskStatus};
+use mediaa_core::queue::{KindStat, Queue, Task, TaskStatus};
 use mediaa_core::transcript::{self, Reply, Transcript};
 use rust_i18n::t;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -46,10 +48,17 @@ pub fn speaker_color(speaker: u32) -> Color32 {
     SPEAKER_COLORS[speaker as usize % SPEAKER_COLORS.len()]
 }
 
-/// The latest transcription task of `path` among `tasks`.
-pub fn task_of<'a>(tasks: &'a [Task], path: &Path) -> Option<&'a Task> {
-    let path = path.to_string_lossy();
-    tasks.iter().filter(|t| t.kind == KIND && t.input["path"].as_str() == Some(&path)).max_by_key(|t| t.id)
+/// Now, in milliseconds since the epoch (the queue's clock).
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+/// The latest analysis of the recording with `file_id` among `tasks`.
+pub fn task_of<'a>(tasks: &'a [Task], file_id: &str) -> Option<&'a Task> {
+    tasks
+        .iter()
+        .filter(|t| t.parent.is_none() && t.kind == pipeline::ANALYSIS_KIND && t.scope.as_deref() == Some(file_id))
+        .max_by_key(|t| t.id)
 }
 
 /// The word of `reply` at character `index` of its text (words joined by single spaces).
@@ -101,8 +110,19 @@ pub struct Dialog {
     playing: Option<usize>,
     /// The reply to bring into view (a click on a topic).
     scroll_to: Option<usize>,
-    /// Chunks indexed for search.
-    indexed: usize,
+    /// What of the recording is ready, from its data.
+    ready: Readiness,
+    /// The latest analysis with all its tasks, and the history of run times (for the estimates).
+    tree: Vec<Task>,
+    stats: Vec<KindStat>,
+    /// The topic whose breakdown is open (it takes the whole pane).
+    reading: Option<usize>,
+    /// Topics whose breakdown the queue was already asked to hurry.
+    asked: HashSet<usize>,
+    /// The analysis line over the topics is unfolded into the stage rows.
+    compact_open: bool,
+    options: Option<OptionsWindow>,
+    confirm: Option<ConfirmWindow>,
     search: Search,
 }
 
@@ -123,13 +143,25 @@ impl Dialog {
             naming: None,
             playing: None,
             scroll_to: None,
-            indexed: 0,
+            ready: Readiness::default(),
+            tree: Vec::new(),
+            stats: Vec::new(),
+            reading: None,
+            asked: HashSet::new(),
+            compact_open: false,
+            options: None,
+            confirm: None,
             search: Search::default(),
         }
     }
 
     fn active(&self) -> bool {
-        self.task.as_ref().is_some_and(|t| matches!(t.status, TaskStatus::Queued | TaskStatus::Running))
+        self.task.as_ref().is_some_and(|t| !t.status.is_finished())
+    }
+
+    /// Whether the recording has replies: the dialog and the chat work only then.
+    pub fn has_replies(&self) -> bool {
+        self.ready.replies
     }
 
     fn refresh(&mut self) {
@@ -141,13 +173,28 @@ impl Dialog {
         if self.queue.is_none() {
             self.queue = Queue::open(&self.ai_dir).map_err(|e| log::warn!("queue: {e:#}")).ok();
         }
-        if let Some(q) = &self.queue {
+        if let (Some(q), Some(id)) = (&self.queue, &self.file_id) {
             match q.list() {
-                Ok(tasks) => self.task = task_of(&tasks, &self.path).cloned(),
+                Ok(tasks) => self.task = task_of(&tasks, id).cloned(),
                 Err(e) => log::warn!("queue: {e:#}"),
+            }
+            // The stages of the analysis and the run-time history for the progress rows.
+            match &self.task {
+                Some(task) => match (q.subtree(task.id), q.kind_stats()) {
+                    (Ok(tree), Ok(stats)) => {
+                        self.tree = tree;
+                        self.stats = stats;
+                    }
+                    (Err(e), _) | (_, Err(e)) => log::warn!("queue: {e:#}"),
+                },
+                None => self.tree.clear(),
             }
         }
         let Some(id) = &self.file_id else { return };
+        match pipeline::readiness(&self.ai_dir, id) {
+            Ok(ready) => self.ready = ready,
+            Err(e) => log::warn!("readiness: {e:#}"),
+        }
         if self.transcript.is_none() && Transcript::exists(&self.ai_dir, id) {
             self.transcript = Transcript::open(&self.ai_dir, id).map_err(|e| log::warn!("transcript: {e:#}")).ok();
         }
@@ -156,8 +203,8 @@ impl Dialog {
                 (Ok(r), Ok(n)) => {
                     self.replies = r;
                     self.names = n;
-                    self.indexed = t.chunks().map_or(0, |c| c.len());
-                    self.chapters = t.chapters().unwrap_or_default();
+                    // The topics exist for the interface only when they are all ready.
+                    self.chapters = if self.ready.topics { t.chapters().unwrap_or_default() } else { Vec::new() };
                 }
                 (Err(e), _) | (_, Err(e)) => log::warn!("transcript: {e:#}"),
             }
@@ -179,31 +226,83 @@ impl Dialog {
         ui.ctx().request_repaint_after(if self.active() { ACTIVE_REFRESH } else { IDLE_REFRESH });
         let body = panel(ui, rect, &t!("studio.dialog"), p);
         let mut action = None;
-        // Header tool: transcribe again.
+        // What the analysis settings and models allow.
+        let (defaults, model) = services
+            .map(|s| {
+                let agent = s.settings.read().expect("settings lock");
+                (agent.analysis, agent.models.diarization.is_some())
+            })
+            .unwrap_or((AnalysisOptions::default(), false));
+        let av = analysis::availability(&self.ready, self.task.as_ref().map(|t| t.status));
+        if !av.topics {
+            // The topics are being rebuilt (or not there yet): no breakdown to read.
+            self.reading = None;
+        }
+        // Header tool: the «⋯» menu of the analysis.
         let head = Rect::from_min_max(egui::pos2(rect.max.x - 40.0, rect.min.y), egui::pos2(rect.max.x - 6.0, body.min.y - 1.0));
-        if !self.replies.is_empty() && !self.active() {
-            ui.scope_builder(egui::UiBuilder::new().max_rect(head), |ui| {
-                ui.centered_and_justified(|ui| {
-                    if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("studio.retranscribe")).clicked() {
-                        action = Some(StudioAction::Transcribe(self.path.clone()));
-                    }
-                });
-            });
+        if self.task.is_some() || av.pane == Pane::Replies {
+            let items = analysis::menu(&self.ready, self.active(), model);
+            let command = ui
+                .scope_builder(egui::UiBuilder::new().max_rect(head), |ui| {
+                    ui.centered_and_justified(|ui| {
+                        let button = theme::icon_button(ui, icon::DOTS_THREE_CIRCLE, &t!("analysis.menu"));
+                        analysis::menu_popup(&button, &items, p)
+                    })
+                    .inner
+                })
+                .inner;
+            match command {
+                Some(Command::Stop) => action = self.task.as_ref().map(|t| StudioAction::Stop(t.id)),
+                Some(Command::Analyse) => self.options = Some(OptionsWindow::new(true, &defaults, model)),
+                Some(Command::Stage(stage)) => {
+                    let add = analysis::offer(stage, &self.ready, model) == Offer::Add;
+                    self.confirm = Some(ConfirmWindow::new(stage, add, &defaults));
+                }
+                None => {}
+            }
         }
         ui.scope_builder(egui::UiBuilder::new().max_rect(body.shrink2(egui::vec2(12.0, 8.0))), |ui| {
-            if let Some(a) = self.status(ui, p) {
-                action = Some(a);
-            }
-            if self.replies.is_empty() {
-                if !self.active() && self.task.as_ref().is_none_or(|t| t.status == TaskStatus::Done) {
-                    action = action.take().or(self.empty(ui, p));
+            match av.pane {
+                Pane::Start | Pane::NoSpeech => {
+                    if self.empty(ui, p) {
+                        self.options = Some(OptionsWindow::new(false, &defaults, model));
+                    }
+                    return;
                 }
-                return;
+                Pane::Progress => {
+                    action = self.progress_ui(ui, p);
+                    if !self.active() {
+                        ui.add_space(6.0);
+                        if self.empty(ui, p) {
+                            self.options = Some(OptionsWindow::new(false, &defaults, model));
+                        }
+                    }
+                    return;
+                }
+                Pane::Replies => {}
+            }
+            // The rest of the analysis, one line over the topics (it unfolds into the stages).
+            if av.compact {
+                if let Some(a) = self.compact_ui(ui, p) {
+                    action = Some(a);
+                }
+                ui.add_space(6.0);
             }
             // The topics stay at the top of the pane while the replies scroll below.
-            if !self.chapters.is_empty() {
+            if av.topics && !self.chapters.is_empty() {
+                if self.reading.is_some() {
+                    // A topic's breakdown takes the whole pane; the replies are out of view.
+                    let building = self.details_building();
+                    if let Some(topic) = topics::reading(ui, &self.chapters, &mut self.reading, player, building, p) {
+                        self.hurry_detail(topic);
+                    }
+                    if self.reading.is_none() {
+                        self.asked.clear();
+                    }
+                    return;
+                }
                 // A topic or one of its parts was clicked: seek there and show its first reply.
-                if let Some(start) = topics::block(ui, &self.chapters, player.position(), player, body.height() * 0.4, p) {
+                if let Some(start) = topics::block(ui, &self.chapters, player.position(), body.height() * 0.4, &mut self.reading, p) {
                     player.seek(start);
                     self.scroll_to = self.replies.iter().position(|r| r.end > start + 0.001).or(Some(0));
                     // The reply to scroll to is in the dialog, not in the search results.
@@ -211,49 +310,93 @@ impl Dialog {
                 }
                 ui.add_space(6.0);
             }
-            if self.search_ui(ui, player, services, p) {
+            if self.search_ui(ui, player, services, av.search, p) {
                 return;
             }
             self.replies_ui(ui, player, p);
         });
-        action
-    }
-
-    /// The transcription task's state, when there is one to show.
-    fn status(&mut self, ui: &mut egui::Ui, p: theme::Palette) -> Option<StudioAction> {
-        let task = self.task.as_ref()?;
-        let mut action = None;
-        match task.status {
-            TaskStatus::Queued | TaskStatus::Running | TaskStatus::Paused => {
-                let label = match task.status {
-                    TaskStatus::Queued => t!("studio.transcribe_queued"),
-                    TaskStatus::Paused => t!("studio.transcribe_paused"),
-                    _ => t!("studio.transcribing"),
-                };
-                ui.horizontal(|ui| {
-                    if task.status == TaskStatus::Running {
-                        ui.spinner();
-                    }
-                    ui.label(RichText::new(label).color(p.text_weak));
-                });
-                ui.add(egui::ProgressBar::new(task.progress).desired_width(ui.available_width()).desired_height(6.0));
-                ui.add_space(6.0);
-            }
-            TaskStatus::Failed => {
-                ui.colored_label(p.danger, t!("studio.transcribe_failed", error = task.error.clone().unwrap_or_default()));
-                if ui.add(theme::secondary(icon::PLAY, &t!("queue.resume"))).clicked() {
-                    action = Some(StudioAction::ResumeTask(task.id));
-                }
-                ui.add_space(6.0);
-            }
-            TaskStatus::Done => {}
+        if let Some(a) = self.windows(ui.ctx(), &defaults, model, p) {
+            action = Some(a);
         }
         action
     }
 
-    /// No transcript yet: what it gives and the button.
-    fn empty(&self, ui: &mut egui::Ui, p: theme::Palette) -> Option<StudioAction> {
+    /// The analysis options window and the restart confirmation, when one is open; returns the
+    /// action they end in.
+    fn windows(&mut self, ctx: &egui::Context, defaults: &AnalysisOptions, model: bool, p: theme::Palette) -> Option<StudioAction> {
         let mut action = None;
+        if let Some(window) = &mut self.options {
+            match window.show(ctx, egui::Id::new(("analysis-options", &self.path)), p) {
+                Outcome::Open => {}
+                Outcome::Cancel => self.options = None,
+                Outcome::Run(options) => {
+                    let from = window.restart.then_some(Stage::Transcribe);
+                    action = Some(StudioAction::Analyse { path: self.path.clone(), from, options, remember: true });
+                    self.options = None;
+                }
+            }
+        }
+        if let Some(window) = &mut self.confirm {
+            let plan = window.plan(&self.ready, defaults, model);
+            match window.show(ctx, egui::Id::new(("analysis-confirm", &self.path)), &plan, p) {
+                Outcome::Open => {}
+                Outcome::Cancel => self.confirm = None,
+                Outcome::Run(plan) => {
+                    action = Some(StudioAction::Analyse { path: self.path.clone(), from: Some(window.stage), options: plan.options, remember: false });
+                    self.confirm = None;
+                }
+            }
+        }
+        action
+    }
+
+    /// The rows of the stages of the latest analysis, its status and the estimate of what is left.
+    fn analysis_rows(&self) -> Option<(TaskStatus, Vec<StageRow>, analysis::Left)> {
+        let task = self.task.as_ref()?;
+        let now = now_ms();
+        let rows = analysis::rows(task, &self.tree, &self.stats, &self.ready, now);
+        let total = analysis::left(mediaa_core::queue::estimate_tree(task, &self.tree, now, &self.stats));
+        Some((task.status, rows, total))
+    }
+
+    /// Whether the details of the topics are still being built (the breakdown is "being prepared").
+    fn details_building(&self) -> bool {
+        self.analysis_rows().is_some_and(|(_, rows, _)| rows.iter().any(|r| r.stage == Stage::Details && matches!(r.state, RowState::Running | RowState::Waiting)))
+    }
+
+    /// Asks the queue to build the breakdown of the topic being read first — once per topic.
+    fn hurry_detail(&mut self, topic: usize) {
+        if !self.asked.insert(topic) {
+            return;
+        }
+        if let Some(id) = &self.file_id {
+            if let Err(e) = pipeline::prioritize_detail(&self.ai_dir, id, topic) {
+                log::warn!("prioritize detail: {e:#}");
+            }
+        }
+    }
+
+    /// The whole progress of the analysis while there are no replies: the stage rows under the
+    /// total. Returns the resume of a failed stage.
+    fn progress_ui(&mut self, ui: &mut egui::Ui, p: theme::Palette) -> Option<StudioAction> {
+        let (status, rows, total) = self.analysis_rows()?;
+        let title = analysis::total_title(status, total);
+        let view = CardView { title: &title, rows: &rows, running: matches!(status, TaskStatus::Running | TaskStatus::Queued | TaskStatus::Waiting), failed: status == TaskStatus::Failed };
+        analysis::card(ui, &view, None, p).map(StudioAction::ResumeTask)
+    }
+
+    /// The one-line state of the analysis over the topics; a click unfolds the stage rows.
+    fn compact_ui(&mut self, ui: &mut egui::Ui, p: theme::Palette) -> Option<StudioAction> {
+        let (status, rows, total) = self.analysis_rows()?;
+        let title = analysis::compact_title(status, &rows, total);
+        let view = CardView { title: &title, rows: &rows, running: matches!(status, TaskStatus::Running | TaskStatus::Queued | TaskStatus::Waiting), failed: status == TaskStatus::Failed };
+        analysis::card(ui, &view, Some(&mut self.compact_open), p).map(StudioAction::ResumeTask)
+    }
+
+    /// No transcript yet (or no speech in it): what the analysis gives and its button; returns
+    /// whether the button was pressed.
+    fn empty(&self, ui: &mut egui::Ui, p: theme::Palette) -> bool {
+        let mut pressed = false;
         ui.vertical_centered(|ui| {
             ui.add_space((ui.available_height() / 2.0 - 70.0).max(0.0));
             ui.label(RichText::new(icon::CHAT_TEXT).size(28.0).color(p.text_weak));
@@ -261,16 +404,14 @@ impl Dialog {
             let done = self.task.as_ref().is_some_and(|t| t.status == TaskStatus::Done);
             theme::hint(ui, if done { t!("studio.no_speech") } else { t!("studio.no_transcript") });
             ui.add_space(8.0);
-            if ui.add(theme::primary(ui, icon::WAVEFORM, &t!("studio.transcribe"))).clicked() {
-                action = Some(StudioAction::Transcribe(self.path.clone()));
-            }
+            pressed = ui.add(theme::primary(ui, icon::WAVEFORM, &t!("studio.transcribe"))).clicked();
         });
-        action
+        pressed
     }
 
     /// The search field; returns whether results are shown instead of the dialog.
-    fn search_ui(&mut self, ui: &mut egui::Ui, player: &mut Player, services: Option<&Services>, p: theme::Palette) -> bool {
-        if self.indexed == 0 {
+    fn search_ui(&mut self, ui: &mut egui::Ui, player: &mut Player, services: Option<&Services>, available: bool, p: theme::Palette) -> bool {
+        if !available {
             if self.task.as_ref().is_none_or(|t| t.status == TaskStatus::Done) {
                 theme::hint(ui, t!("studio.search_soon"));
                 ui.add_space(4.0);
@@ -506,14 +647,14 @@ mod tests {
     fn the_latest_task_of_the_file() {
         let dir = tempfile::tempdir().unwrap();
         let q = Queue::open(dir.path()).unwrap();
-        let a = Path::new("/m/a.mp4");
-        q.enqueue(KIND, "a", &json!({"path": "/m/a.mp4"}), 0).unwrap();
-        q.enqueue(KIND, "b", &json!({"path": "/m/b.mp4"}), 0).unwrap();
-        let again = q.enqueue(KIND, "a", &json!({"path": "/m/a.mp4"}), 0).unwrap();
-        q.enqueue("other", "a", &json!({"path": "/m/a.mp4"}), 0).unwrap();
+        let new = |title: &str, scope: &str| mediaa_core::queue::NewTask::new(pipeline::ANALYSIS_KIND, title, &json!({})).composite().scope(scope);
+        q.enqueue(new("a", "a")).unwrap();
+        q.enqueue(new("b", "b")).unwrap();
+        let again = q.enqueue(new("a", "a")).unwrap();
+        q.enqueue(mediaa_core::queue::NewTask::new("other", "a", &json!({})).scope("a")).unwrap();
         let tasks = q.list().unwrap();
-        assert_eq!(task_of(&tasks, a).map(|t| t.id), Some(again));
-        assert!(task_of(&tasks, Path::new("/m/c.mp4")).is_none());
+        assert_eq!(task_of(&tasks, "a").map(|t| t.id), Some(again));
+        assert!(task_of(&tasks, "c").is_none());
         assert_ne!(speaker_color(0), speaker_color(1));
         assert_eq!(speaker_color(0), speaker_color(SPEAKER_COLORS.len() as u32));
     }

@@ -41,6 +41,9 @@ pub trait Engine: Send + Sync + 'static {
     /// Answers `request`; `on_text` gets the answer as it is produced (returning `false` stops),
     /// and a set `cancel` stops the model at the next token.
     fn chat(&self, request: &ChatRequest, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError>;
+    /// Like [`Engine::chat`], but the model reasons first (see [`Thinking`]): the text starts
+    /// with `<think>`, the reasoning is streamed and kept in the answer.
+    fn chat_thinking(&self, request: &ChatRequest, thinking: Thinking, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError>;
     /// Embeddings of `request.input`, in the order of the inputs.
     fn embeddings(&self, request: &EmbeddingsRequest) -> Result<Vec<Vec<f32>>, EngineError>;
     /// The documents by relevance to the query, most relevant first.
@@ -128,6 +131,24 @@ impl LocalEngine {
     }
 }
 
+impl LocalEngine {
+    /// A chat answer, with reasoning first when `thinking` is set.
+    fn chat_with(&self, request: &ChatRequest, thinking: Option<Thinking>, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError> {
+        let mut call = request.clone().into_call()?;
+        call.generate.think_tokens = thinking.map(|t| t.budget);
+        self.ensure(&call.source, call.hf_token.as_deref())?;
+        let how = Use { kind: WorkKind::Agent, device: call.device, n_ctx: call.n_ctx, interactive: call.interactive };
+        let generated = self
+            .runtime
+            .with_model::<LocalModel, _>(&call.source, how, cancel, |model, _lease| {
+                model.chat(&call.messages, &call.generate, cancel, &mut *on_text)
+            })
+            .map_err(EngineError::classify)?;
+        let usage = Usage { prompt_tokens: generated.prompt_tokens, completion_tokens: generated.completion_tokens };
+        Ok(ChatAnswer { content: generated.text, usage: Some(usage) })
+    }
+}
+
 impl Engine for LocalEngine {
     fn health(&self) -> Health {
         let gpus = crate::llm::gpus()
@@ -185,17 +206,11 @@ impl Engine for LocalEngine {
     }
 
     fn chat(&self, request: &ChatRequest, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError> {
-        let call = request.clone().into_call()?;
-        self.ensure(&call.source, call.hf_token.as_deref())?;
-        let how = Use { kind: WorkKind::Agent, device: call.device, n_ctx: call.n_ctx, interactive: call.interactive };
-        let generated = self
-            .runtime
-            .with_model::<LocalModel, _>(&call.source, how, cancel, |model, _lease| {
-                model.chat(&call.messages, &call.generate, cancel, &mut *on_text)
-            })
-            .map_err(EngineError::classify)?;
-        let usage = Usage { prompt_tokens: generated.prompt_tokens, completion_tokens: generated.completion_tokens };
-        Ok(ChatAnswer { content: generated.text, usage: Some(usage) })
+        self.chat_with(request, None, cancel, on_text)
+    }
+
+    fn chat_thinking(&self, request: &ChatRequest, thinking: Thinking, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError> {
+        self.chat_with(request, Some(thinking), cancel, on_text)
     }
 
     fn embeddings(&self, request: &EmbeddingsRequest) -> Result<Vec<Vec<f32>>, EngineError> {

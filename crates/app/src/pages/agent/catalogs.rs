@@ -11,11 +11,12 @@ use egui_ltreeview::{Action, DirPosition, NodeBuilder, TreeView, TreeViewBuilder
 use egui_phosphor::regular as icon;
 use super::super::library::library_dir;
 use crossbeam_channel::Receiver;
+use mediaa_agent::pipeline::{self, Stage};
 use mediaa_agent::search::{self, FileHit, Source, Trace};
-use mediaa_agent::transcribe::{self, Input};
 use mediaa_core::library::human_duration;
 use mediaa_core::transcript;
 use mediaa_core::catalogs::{ai_dir, Catalogs, NodeId, NodeKind};
+use mediaa_core::agent::AnalysisOptions;
 use mediaa_core::queue::Queue;
 
 use mediaa_core::MediaKind;
@@ -615,7 +616,8 @@ enum TabCmd {
     /// A recording at a time (a citation in a folder's chat).
     OpenAt(PathBuf, f64),
     Reveal(PathBuf),
-    Transcribe(PathBuf),
+    Analyse { path: PathBuf, from: Option<Stage>, options: AnalysisOptions, remember: bool },
+    Stop(mediaa_core::queue::TaskId),
     ResumeTask(mediaa_core::queue::TaskId),
 }
 
@@ -678,7 +680,8 @@ impl TabViewer for Tabs<'_> {
                 Some(StudioAction::OpenAt(p, t)) => self.cmds.push(TabCmd::OpenAt(p, t)),
                 Some(StudioAction::Open(p)) => self.cmds.push(TabCmd::Open(p)),
                 Some(StudioAction::Reveal(p)) => self.cmds.push(TabCmd::Reveal(p)),
-                Some(StudioAction::Transcribe(p)) => self.cmds.push(TabCmd::Transcribe(p)),
+                Some(StudioAction::Analyse { path, from, options, remember }) => self.cmds.push(TabCmd::Analyse { path, from, options, remember }),
+                Some(StudioAction::Stop(id)) => self.cmds.push(TabCmd::Stop(id)),
                 Some(StudioAction::ResumeTask(id)) => self.cmds.push(TabCmd::ResumeTask(id)),
                 None => {}
             },
@@ -799,8 +802,19 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
                     app.error(format!("{e:#}"));
                 }
             }
-            TabCmd::Transcribe(p) => {
-                if let Err(e) = transcribe(app, &p) {
+            TabCmd::Analyse { path, from, options, remember } => {
+                if remember {
+                    // The choice is the default for the next analysis.
+                    app.settings.agent.analysis = options.enforced();
+                    app.settings_changed();
+                }
+                if let Err(e) = analyse(app, &path, from, options) {
+                    app.error(format!("{e:#}"));
+                }
+            }
+            TabCmd::Stop(id) => {
+                let ai = ai_dir(&library_dir(&app.settings));
+                if let Err(e) = Queue::open(&ai).and_then(|q| q.cancel(id)) {
                     app.error(format!("{e:#}"));
                 }
             }
@@ -814,16 +828,18 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Queues a transcription of `path` with the models chosen now (diarization when a speaker model
-/// is set). The task continues in the background; the studio shows its progress.
-fn transcribe(app: &App, path: &Path) -> anyhow::Result<()> {
-    let models = &app.settings.agent.models;
-    let recognizer = models.speech_recognition.clone().ok_or_else(|| anyhow::anyhow!("{}", t!("studio.no_recognizer")))?;
-    let input = Input { path: path.to_path_buf(), recognizer, diarizer: models.diarization.clone(), speakers: None };
-    let title = path.file_name().unwrap_or_default().to_string_lossy();
-    let queue = Queue::open(&ai_dir(&library_dir(&app.settings)))?;
-    // Asked for by the user: before background work.
-    queue.enqueue(transcribe::KIND, &title, &serde_json::to_value(&input)?, 10)?;
+/// Starts the analysis of `path` (or, with `from`, rebuilds it from that stage) with the stages of
+/// `options` (what cannot run is switched off). It continues in the background; the studio shows
+/// its progress.
+fn analyse(app: &App, path: &Path, from: Option<Stage>, options: AnalysisOptions) -> anyhow::Result<()> {
+    let agent = &app.settings.agent;
+    anyhow::ensure!(agent.models.speech_recognition.is_some(), "{}", t!("studio.no_recognizer"));
+    let options = options.resolved(&agent.models);
+    let ai = ai_dir(&library_dir(&app.settings));
+    match from {
+        Some(from) => pipeline::restart(&ai, path, from, options)?,
+        None => pipeline::start(&ai, path, options)?,
+    };
     Ok(())
 }
 

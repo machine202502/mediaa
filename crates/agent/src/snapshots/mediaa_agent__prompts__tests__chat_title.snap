@@ -1,0 +1,15 @@
+---
+source: crates/agent/src/prompts.rs
+expression: user
+---
+Write the title in Russian.
+
+Examples:
+"привет" → Приветствие
+"скок там по срокам сдачи отчета?" → Сроки сдачи отчёта
+"what did they decide about the budget for q3" → Q3 budget decision
+
+First message:
+привет как дела
+
+Title:

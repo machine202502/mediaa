@@ -1,15 +1,16 @@
 //! Topics of a recording in the studio: the seek bar cut into topic segments (with a tooltip
-//! per segment and a tick at every part boundary) and the pinned block above the dialog —
-//! folded to the current topic, unfolded to the whole list, each topic with its parts, digest
-//! and quotes. The place of a topic or a part in time and on the bar are pure functions,
-//! tested without a window.
+//! per segment and a tick at every part boundary), the pinned block above the dialog — folded
+//! to the current topic, unfolded to the whole list — and the breakdown of one topic, which
+//! stretches the block over the whole dialog pane. The place of a topic or a part in time, the
+//! bar and the order and numbering of the breakdown's lines are pure functions, tested without
+//! a window.
 
 use crate::player::Player;
 use crate::theme::Palette;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Margin, Rect, RichText, Sense, Stroke, StrokeKind};
 use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
-use mediaa_core::outline::{Chapter, Part};
+use mediaa_core::outline::{Chapter, Part, Section, SectionKind};
 use rust_i18n::t;
 
 /// Gap between neighbouring topic segments of the seek bar.
@@ -273,18 +274,18 @@ pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapter
 }
 
 /// The pinned block above the dialog. Folded: one line «m:ss Title (3/7)» of the current topic
-/// (a click unfolds it). Unfolded: the topics in their own scroll at most `max_height` tall,
-/// the current one highlighted, each with an expandable digest whose parts come first; a click
-/// on a topic or on one of its parts returns the time to seek to (the dialog scrolls to the
-/// first reply from there). A click on a quote seeks to the quote's time.
-pub fn block(ui: &mut egui::Ui, chapters: &[Chapter], position: f64, player: &mut Player, max_height: f32, p: Palette) -> Option<f64> {
+/// (a click unfolds it). Unfolded: the topics in their own scroll at most `max_height` tall, the
+/// current one highlighted; a click on a topic returns the time to seek to (the dialog scrolls
+/// to the first reply from there), the caret on its right opens its breakdown (`reading`, see
+/// [`reading`]).
+pub fn block(ui: &mut egui::Ui, chapters: &[Chapter], position: f64, max_height: f32, reading: &mut Option<usize>, p: Palette) -> Option<f64> {
     if chapters.is_empty() {
         return None;
     }
     let mut open = ui.ctx().data_mut(|d| d.get_persisted::<bool>(open_id())).unwrap_or(false);
     let current = current_topic(chapters, position).unwrap_or(0);
     let clicked = if open {
-        expanded(ui, chapters, current, player, max_height.max(96.0), p, &mut open)
+        expanded(ui, chapters, current, max_height.max(96.0), p, &mut open, reading)
     } else {
         folded(ui, chapters, current, p, &mut open)
     };
@@ -316,7 +317,7 @@ fn folded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, p: Palette, o
 }
 
 /// The unfolded block: a header that folds it and the list of topics in their own scroll.
-fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, player: &mut Player, max_height: f32, p: Palette, open: &mut bool) -> Option<f64> {
+fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, max_height: f32, p: Palette, open: &mut bool, reading: &mut Option<usize>) -> Option<f64> {
     let mut clicked = None;
     // The card is filled by a frameless frame and its border is painted over the final rect:
     // a frame stroke would inset the header by a pixel and make it jump against the folded one.
@@ -348,7 +349,7 @@ fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, player: &mu
                         .id_salt("studio-topics-list")
                         .show(ui, |ui| {
                             for (i, c) in chapters.iter().enumerate() {
-                                if let Some(topic) = topic_row(ui, i, c, i == current, player, p) {
+                                if let Some(topic) = topic_row(ui, i, c, i == current, reading, p) {
                                     clicked = Some(topic);
                                 }
                                 ui.add_space(2.0);
@@ -363,18 +364,13 @@ fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, player: &mu
 }
 
 /// One topic in the unfolded list: a click on it returns its start (the time to seek to); the
-/// caret unfolds its digest. The current topic is highlighted.
-fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, player: &mut Player, p: Palette) -> Option<f64> {
-    let digest_id = ui.id().with(("topic-digest", i));
-    let digest_open = ui.data(|d| d.get_temp::<bool>(digest_id)).unwrap_or(false);
+/// caret on its right opens the topic's breakdown. The current topic is highlighted.
+fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, reading: &mut Option<usize>, p: Palette) -> Option<f64> {
     let (rect, row) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());
     let row = row.on_hover_cursor(egui::CursorIcon::PointingHand);
     let caret = Rect::from_center_size(egui::pos2(rect.right() - 10.0, rect.center().y), egui::vec2(18.0, 18.0));
-    let toggle = ui
-        .interact(caret, ui.id().with(("topic-toggle", i)), Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(t!("studio.digest"));
-    // The row's delayed tooltip; over the caret the hit test prefers the caret's own hint.
+    let toggle = ui.interact(caret, ui.id().with(("topic-toggle", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    // The row's delayed tooltip is the summary (the breakdown does not repeat it).
     hover_tip(&row, c);
     let on_caret = row.interact_pointer_pos().is_some_and(|pt| caret.contains(pt));
     let mut clicked = None;
@@ -382,7 +378,7 @@ fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, player: &m
         clicked = Some(c.start);
     }
     if toggle.clicked() {
-        ui.data_mut(|d| d.insert_temp(digest_id, !digest_open));
+        *reading = Some(i);
     }
     let painter = painter_at(ui, rect);
     if current {
@@ -398,86 +394,217 @@ fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, player: &m
     let color = if current { p.accent } else { p.text };
     let galley = elided(ui, &c.digest.title, title.width(), FontId::proportional(13.0), color);
     painter.galley(egui::pos2(title.left(), rect.center().y - galley.size().y / 2.0), galley, color);
-    painter.text(caret.center(), Align2::CENTER_CENTER, if digest_open { icon::CARET_DOWN } else { icon::CARET_RIGHT }, FontId::proportional(12.0), p.text_weak);
-    if digest_open {
-        if let Some(start) = digest_ui(ui, i, c, player, p) {
-            clicked = Some(start);
-        }
-    }
+    painter.text(caret.center(), Align2::CENTER_CENTER, icon::CARET_RIGHT, FontId::proportional(12.0), p.text_weak);
     clicked
 }
 
-/// The digest of a topic under its row: its parts first (a click returns the part's start),
-/// then the summary, decisions, actions, questions and quotes (a click on a quote's time seeks
-/// there).
-fn digest_ui(ui: &mut egui::Ui, i: usize, c: &Chapter, player: &mut Player, p: Palette) -> Option<f64> {
-    let d = &c.digest;
-    ui.indent(("topic-digest-body", i), |ui| {
-        let mut clicked = None;
-        // The pieces a long merged topic is made of; a normal topic has none.
-        let parts: Vec<&Part> = d.parts.iter().filter(|part| part.end > part.start).collect();
-        if !parts.is_empty() {
-            ui.indent(("topic-parts", i), |ui| {
-                for part in parts {
-                    if part_row(ui, part, p) {
-                        clicked = Some(part.start);
-                    }
-                }
-            });
-            ui.add_space(4.0);
-        }
-        if !d.summary.trim().is_empty() {
-            ui.add(egui::Label::new(RichText::new(d.summary.trim()).size(12.5)).wrap());
-        }
-        for (label, items) in [(t!("studio.decisions"), &d.decisions), (t!("studio.actions"), &d.actions), (t!("studio.questions"), &d.questions)] {
-            // Empty strings are written while the outline is still being filled in.
-            let items: Vec<&String> = items.iter().filter(|s| !s.trim().is_empty()).collect();
-            if items.is_empty() {
-                continue;
-            }
-            ui.add_space(4.0);
-            ui.label(RichText::new(label).size(11.5).strong().color(p.text_weak));
-            for item in items {
-                ui.add(egui::Label::new(RichText::new(format!("•  {item}")).size(12.5)).wrap());
-            }
-        }
-        let quotes: Vec<_> = d.quotes.iter().filter(|q| !q.text.trim().is_empty()).collect();
-        if !quotes.is_empty() {
-            ui.add_space(4.0);
-            ui.label(RichText::new(t!("studio.quotes")).size(11.5).strong().color(p.text_weak));
-            for q in quotes {
-                ui.horizontal(|ui| {
-                    let time = ui.add(egui::Button::new(RichText::new(human_duration(q.time)).font(FontId::monospace(11.0)).color(p.accent)).frame(false));
-                    if time.on_hover_text(t!("studio.go_there")).clicked() {
-                        player.seek(q.time);
-                    }
-                    ui.add(egui::Label::new(RichText::new(&q.text).size(12.5).italics()).wrap());
-                });
-            }
-        }
-        ui.add_space(2.0);
-        clicked
-    })
-    .inner
+// ---------------------------------------------------------------- the breakdown of a topic
+
+/// Distance between the centres of the header's small buttons in the breakdown.
+const READING_STEP: f32 = 22.0;
+/// Width of the marker column («1.», «•») and of the time column in the breakdown.
+const MARKER_W: f32 = 22.0;
+const TIME_COL: f32 = 46.0;
+/// Height of one text line of an item (the time button is as tall).
+const ITEM_LINE: f32 = 18.0;
+
+/// The header row of the breakdown. The icon, the text and the collapse button are exactly
+/// those of [`header`] (the collapse sits where the block's caret is), so opening a topic
+/// moves nothing in the header; «‹ ›» take the room [`header`] keeps for the count.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ReadingHeader {
+    pub icon: egui::Pos2,
+    pub text: Rect,
+    pub prev: Rect,
+    pub next: Rect,
+    pub collapse: Rect,
 }
 
-/// One part of a long topic in its digest: «m:ss  title»; a click returns its start (the same
-/// path as a topic click: the dialog scrolls to the first reply of the part).
-fn part_row(ui: &mut egui::Ui, part: &Part, p: Palette) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::click());
-    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    if resp.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(4), p.card_hover);
+pub fn reading_header(rect: Rect) -> ReadingHeader {
+    let h = header(rect);
+    ReadingHeader {
+        icon: h.icon,
+        text: h.text,
+        prev: h.caret.translate(egui::vec2(-2.0 * READING_STEP, 0.0)),
+        next: h.caret.translate(egui::vec2(-READING_STEP, 0.0)),
+        collapse: h.caret,
     }
-    let painter = painter_at(ui, rect);
-    let font = FontId::monospace(11.0);
-    let time = ui.fonts_mut(|f| f.layout_no_wrap(human_duration(part.start), font, p.accent));
-    painter.galley(egui::pos2(rect.left() + 4.0, rect.center().y - time.size().y / 2.0), time.clone(), p.accent);
-    let left = rect.left() + 4.0 + time.size().x + 8.0;
-    let title = Rect::from_min_max(egui::pos2(left, rect.top()), rect.max);
-    let galley = elided(ui, part.title.trim(), title.width(), FontId::proportional(12.5), p.text);
-    painter.galley(egui::pos2(title.left(), rect.center().y - galley.size().y / 2.0), galley, p.text);
-    resp.clicked()
+}
+
+/// One line of a section: the marker («1.», «•», nothing for prose), the time of the place in
+/// the recording and the text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+    pub marker: String,
+    pub time: Option<f64>,
+    pub text: String,
+}
+
+/// The lines of a section in the order shown: steps numbered, a list with bullets, prose bare.
+/// Items with no text are skipped (and not counted).
+pub fn section_lines(section: &Section) -> Vec<Line> {
+    let mut n = 0;
+    section
+        .items
+        .iter()
+        .filter(|item| !item.text.trim().is_empty())
+        .map(|item| {
+            n += 1;
+            let marker = match section.kind {
+                SectionKind::Steps => format!("{n}."),
+                SectionKind::List => "•".to_string(),
+                SectionKind::Text => String::new(),
+            };
+            Line { marker, time: item.time, text: item.text.trim().to_string() }
+        })
+        .collect()
+}
+
+/// The breakdown of topic `*current`: the topics block stretched over the whole `rect` (the
+/// dialog's replies are out of view). A pinned header — time, title, «‹ ›» to the neighbour
+/// topics, collapse (also Esc) — and below it the scrolling breakdown: the sections, the parts
+/// of a long topic and the quotes. A time is a small link that seeks `player` and leaves the
+/// breakdown open. A topic with no breakdown yet shows «Разбор готовится…» (while `building`)
+/// and its summary; the topic is then returned, so the caller can ask the queue to hurry it.
+pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usize>, player: &mut Player, building: bool, p: Palette) -> Option<usize> {
+    let i = (*current)?.min(chapters.len().checked_sub(1)?);
+    let c = &chapters[i];
+    let esc = !ui.ctx().egui_wants_keyboard_input() && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    let (card, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+    ui.painter().rect_filled(card, CornerRadius::same(8), p.card);
+    // The pinned header: the same row as the block's.
+    let head = Rect::from_min_size(card.min, egui::vec2(card.width(), HEADER_H));
+    let h = reading_header(head);
+    let painter = painter_at(ui, head);
+    painter.text(h.icon, Align2::LEFT_CENTER, icon::LIST_BULLETS, FontId::proportional(14.0), p.accent);
+    let text = format!("{}  {}", human_duration(c.start), c.digest.title.trim());
+    let galley = elided(ui, &text, h.text.width(), FontId::proportional(13.0), p.text);
+    painter.galley(egui::pos2(h.text.left(), head.center().y - galley.size().y / 2.0), galley, p.text);
+    let mut leave = esc;
+    let buttons = [
+        (h.prev, icon::CARET_LEFT, t!("analysis.prev_topic"), i.checked_sub(1), "prev"),
+        (h.next, icon::CARET_RIGHT, t!("analysis.next_topic"), (i + 1 < chapters.len()).then_some(i + 1), "next"),
+        (h.collapse, icon::CARET_UP, t!("analysis.collapse_topic"), None, "collapse"),
+    ];
+    for (rect, glyph, tip, target, id) in buttons {
+        let enabled = target.is_some() || id == "collapse";
+        let resp = ui.interact(rect, ui.id().with(("reading", id)), Sense::click());
+        if enabled && resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            painter.rect_filled(rect, CornerRadius::same(5), p.card_hover);
+        }
+        painter.text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(12.0), if enabled { p.text } else { p.text_weak.gamma_multiply(0.5) });
+        text_tip(&resp, &tip);
+        if enabled && resp.clicked() {
+            match target {
+                Some(t) => *current = Some(t),
+                None => leave = true,
+            }
+        }
+    }
+    ui.painter().hline(card.x_range(), head.bottom(), Stroke::new(1.0, p.border));
+    // The scrolling breakdown below; every topic has its own scroll position (the top, when opened).
+    let body = Rect::from_min_max(egui::pos2(card.left() + 12.0, head.bottom() + 6.0), egui::pos2(card.right() - 12.0, card.bottom() - 8.0));
+    let mut pending = None;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
+        egui::ScrollArea::vertical().id_salt(("studio-topic-reading", i)).auto_shrink([false, false]).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let d = &c.digest;
+            if d.sections.is_empty() {
+                pending = building.then_some(i);
+                ui.horizontal(|ui| {
+                    if building {
+                        ui.spinner();
+                        ui.label(RichText::new(t!("analysis.reading_pending")).color(p.text_weak));
+                    } else {
+                        ui.label(RichText::new(t!("analysis.reading_missing")).color(p.text_weak));
+                    }
+                });
+                if !d.summary.trim().is_empty() {
+                    ui.add_space(6.0);
+                    ui.add(egui::Label::new(RichText::new(d.summary.trim()).size(13.0)).wrap());
+                }
+            }
+            for section in &d.sections {
+                let lines = section_lines(section);
+                if lines.is_empty() {
+                    continue;
+                }
+                if !section.title.trim().is_empty() {
+                    ui.label(RichText::new(section.title.trim()).size(13.5).strong());
+                    ui.add_space(2.0);
+                }
+                for line in lines {
+                    item_row(ui, &line, false, player, p);
+                }
+                ui.add_space(10.0);
+            }
+            let parts: Vec<&Part> = d.parts.iter().filter(|part| part.end > part.start && !part.title.trim().is_empty()).collect();
+            if !parts.is_empty() {
+                ui.label(RichText::new(t!("analysis.parts")).size(13.5).strong());
+                ui.add_space(2.0);
+                for part in parts {
+                    item_row(ui, &Line { marker: "•".into(), time: Some(part.start), text: part.title.trim().to_string() }, false, player, p);
+                }
+                ui.add_space(10.0);
+            }
+            let quotes: Vec<_> = d.quotes.iter().filter(|q| !q.text.trim().is_empty()).collect();
+            if !quotes.is_empty() {
+                ui.label(RichText::new(t!("studio.quotes")).size(13.5).strong());
+                ui.add_space(2.0);
+                for q in quotes {
+                    item_row(ui, &Line { marker: String::new(), time: Some(q.time), text: q.text.trim().to_string() }, true, player, p);
+                }
+            }
+        });
+    });
+    ui.painter().rect(card, CornerRadius::same(8), Color32::TRANSPARENT, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    if leave {
+        *current = None;
+    }
+    pending
+}
+
+/// One line of the breakdown in three columns — marker, time link, wrapped text — so every item
+/// of a section starts at the same x whether it has a time or not.
+fn item_row(ui: &mut egui::Ui, line: &Line, italic: bool, player: &mut Player, p: Palette) {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let (marker, _) = ui.allocate_exact_size(egui::vec2(MARKER_W, ITEM_LINE), Sense::hover());
+        if !line.marker.is_empty() {
+            ui.painter().text(marker.left_center(), Align2::LEFT_CENTER, &line.marker, FontId::proportional(13.0), p.text_weak);
+        }
+        let (slot, resp) = ui.allocate_exact_size(egui::vec2(TIME_COL, ITEM_LINE), if line.time.is_some() { Sense::click() } else { Sense::hover() });
+        if let Some(time) = line.time {
+            let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+            let color = if resp.hovered() { p.text } else { p.accent };
+            let galley = ui.fonts_mut(|f| f.layout_no_wrap(human_duration(time), FontId::monospace(11.0), color));
+            ui.painter().galley(egui::pos2(slot.left(), slot.center().y - galley.size().y / 2.0), galley.clone(), color);
+            if resp.hovered() {
+                ui.painter().hline(slot.left()..=slot.left() + galley.size().x, slot.center().y + galley.size().y / 2.0, Stroke::new(1.0, color));
+            }
+            text_tip(&resp, &t!("studio.go_there"));
+            if resp.clicked() {
+                player.seek(time);
+            }
+        }
+        let mut text = RichText::new(&line.text).size(13.0);
+        if italic {
+            text = text.italics();
+        }
+        ui.add(egui::Label::new(text).wrap());
+    });
+    ui.add_space(3.0);
+}
+
+/// A shadowless tooltip with plain text (the interface's hints have no shadow).
+pub fn text_tip(resp: &egui::Response, text: &str) {
+    let mut tip = egui::Tooltip::for_enabled(resp);
+    tip.popup = tip.popup.width(360.0).frame(tooltip_frame(resp.ctx.global_style().as_ref()));
+    tip.show(|ui| {
+        ui.set_max_width(360.0);
+        ui.add(egui::Label::new(RichText::new(text).size(12.0)).wrap());
+    });
 }
 
 /// The delayed hover tooltip of a topic in the block: what is said in it, wrapped to about
@@ -693,5 +820,41 @@ mod tests {
         }
         assert_eq!(mix(Color32::BLACK, Color32::WHITE, 0.0), Color32::BLACK);
         assert_eq!(mix(Color32::BLACK, Color32::WHITE, 1.0), Color32::WHITE);
+    }
+
+    #[test]
+    fn the_breakdown_header_keeps_the_blocks_header_geometry() {
+        // Collapsed, unfolded and reading all lay their header out from a full-width row of
+        // `HEADER_H` at the block's top-left; the breakdown adds only «‹ ›» in the count's room.
+        let rect = Rect::from_min_size(egui::pos2(100.0, 200.0), egui::vec2(400.0, HEADER_H));
+        let (h, r) = (header(rect), reading_header(rect));
+        assert_eq!((r.icon, r.text), (h.icon, h.text), "the icon and the text do not move");
+        assert_eq!(r.collapse, h.caret, "the collapse button is where the caret is");
+        assert_eq!(r.next.center().y, h.caret.center().y);
+        assert_eq!(r.prev.center().y, h.caret.center().y);
+        // The buttons are one step apart, in order, and clear of the text.
+        assert!((r.collapse.center().x - r.next.center().x - READING_STEP).abs() < 1e-6);
+        assert!((r.next.center().x - r.prev.center().x - READING_STEP).abs() < 1e-6);
+        assert!(r.prev.left() >= r.text.right(), "{r:?}");
+        assert!(r.prev.right() <= r.next.left() && r.next.right() <= r.collapse.left());
+    }
+
+    fn item(text: &str, time: Option<f64>) -> mediaa_core::outline::Item {
+        mediaa_core::outline::Item { text: text.into(), time }
+    }
+
+    #[test]
+    fn steps_are_numbered_lists_bulleted_and_prose_bare() {
+        let items = vec![item("раз", Some(10.0)), item("  ", Some(20.0)), item("два", None), item("три", Some(30.0))];
+        let steps = Section { title: "Шаги".into(), kind: SectionKind::Steps, items: items.clone() };
+        let lines = section_lines(&steps);
+        assert_eq!(lines.iter().map(|l| l.marker.as_str()).collect::<Vec<_>>(), ["1.", "2.", "3."], "an empty item is skipped and not counted");
+        assert_eq!(lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["раз", "два", "три"], "the order is kept");
+        assert_eq!(lines.iter().map(|l| l.time).collect::<Vec<_>>(), [Some(10.0), None, Some(30.0)], "a missing time stays missing");
+        let list = Section { kind: SectionKind::List, ..steps.clone() };
+        assert!(section_lines(&list).iter().all(|l| l.marker == "•"));
+        let text = Section { kind: SectionKind::Text, ..steps };
+        assert!(section_lines(&text).iter().all(|l| l.marker.is_empty()));
+        assert!(section_lines(&Section::default()).is_empty());
     }
 }
