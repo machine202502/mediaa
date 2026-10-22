@@ -153,6 +153,7 @@ impl Extract for EngineExtract<'_> {
             device: Some(self.device),
             priority: Some(self.priority),
             hf_token: self.hf_token.clone(),
+            ..ChatRequest::default()
         };
         read_facts(&self.engine.chat(&request, cancel, &mut |_| true)?.content)
     }
@@ -176,8 +177,7 @@ fn cache_key(instruction: &str, parts: usize) -> String {
 /// Scans the recording for `instruction`; `progress(done, total)` after every part. A finished
 /// scan is kept in `transcript` and reused.
 pub fn scan(extract: &dyn Extract, recording: &Recording, transcript: Option<&Transcript>, instruction: &str, cancel: &AtomicBool, progress: &mut dyn FnMut(usize, usize)) -> anyhow::Result<Scan> {
-    let language = recording.language();
-    let parts = outline::windows(&recording.replies, SCAN_WORDS, &recording.names, |s| outline::unnamed_speaker(language, s));
+    let parts = outline::windows(&recording.replies, SCAN_WORDS);
     let key = cache_key(instruction, parts.len());
     if let Some(cached) = transcript.and_then(|t| t.meta(&key).ok().flatten()).and_then(|v| serde_json::from_str::<Scan>(&v).ok()) {
         return Ok(cached);

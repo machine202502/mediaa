@@ -26,11 +26,11 @@ pub use tools::{Recording, Tools};
 
 use crate::prompts;
 use crate::slots::Slots;
-use crate::tools::parse_time;
+use crate::tools::{format_time, parse_time};
 use serde::{Deserialize, Serialize};
 use crate::scope::Scope;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -41,6 +41,14 @@ pub const MAX_STEPS: usize = 8;
 const STALL_STEPS: usize = 3;
 /// A cited time is right when a reply is this close (seconds).
 const NEAR: f64 = 15.0;
+/// Replies overlapping a cited moment by this much are shown to the answer check (seconds).
+const CITE_WINDOW: f64 = 30.0;
+/// The draft, kept as a folded step of the timeline (not a task of the queue).
+const DRAFT_TITLE: &str = "Черновик ответа";
+const DRAFT_TOOL: &str = "draft";
+/// The check: a model step of the queue and a step of the timeline.
+const VERIFY_TITLE: &str = "Проверка ответа";
+const VERIFY_TOOL: &str = "verify";
 /// Share of the context the prompt may fill before old results are shortened.
 const PROMPT_SHARE: f32 = 0.6;
 /// Longest answer after sections were sent (longer: only its first paragraph is kept).
@@ -155,6 +163,10 @@ pub trait Toolbox {
     fn web(&self) -> Option<&internet::Web<'_>> {
         None
     }
+    /// Replies (±[`CITE_WINDOW`]) and nothing else the draft cites. Empty when there is no recording.
+    fn cited_context(&self, _text: &str) -> String {
+        String::new()
+    }
 }
 
 impl Toolbox for Tools<'_> {
@@ -181,6 +193,11 @@ impl Toolbox for Tools<'_> {
     fn web(&self) -> Option<&internet::Web<'_>> {
         self.web
     }
+
+    fn cited_context(&self, text: &str) -> String {
+        let times: Vec<f64> = citations(text).into_iter().map(|(_, t)| t).collect();
+        cited_replies(self.recording, &times).into_iter().map(|r| reply_line(self.recording, r)).collect::<Vec<_>>().join("\n")
+    }
 }
 
 /// The system prompt: how to work, what is known up front, the tools and the chat's memory.
@@ -188,6 +205,16 @@ pub fn system_prompt(toolbox: &dyn Toolbox, specs: &[ToolSpec], memory: &Memory)
     let tools: Vec<Value> = specs.iter().map(|t| json!({"name": t.name, "description": t.description, "example": t.example.to_string()})).collect();
     let ctx = minijinja::context! { kind => toolbox.kind(), web => toolbox.web().is_some(), card => toolbox.card(), tools, facts => &memory.facts, summary => &memory.summary };
     prompts::render("agent/system.j2", ctx)
+}
+
+/// One reply as the tools show it (`[m:ss] speaker: text`).
+pub(crate) fn reply_line(rec: &Recording, reply: &mediaa_core::transcript::Reply) -> String {
+    prompts::render("results/recording/line.j2", minijinja::context! { time => format_time(reply.start), speaker => reply.speaker.map(|s| rec.speaker(s)), text => reply.text() })
+}
+
+/// Replies that overlap any of `times` by ±[`CITE_WINDOW`], in the order they were said.
+pub(crate) fn cited_replies<'a>(rec: &'a Recording, times: &[f64]) -> Vec<&'a mediaa_core::transcript::Reply> {
+    rec.replies.iter().filter(|r| times.iter().any(|t| r.start <= t + CITE_WINDOW && r.end >= t - CITE_WINDOW)).collect()
 }
 
 /// Times cited as `[m:ss]`, `[mm:ss]` or `[h:mm:ss]` (also the start of `[m:ss–m:ss]`).
@@ -333,6 +360,16 @@ fn waiter(scope: &Scope, slots: &Slots, settings: &mediaa_core::agent::AgentSett
     }
 }
 
+/// History and the question as the model reads them: `@<name>` of a speaker becomes `@sN`
+/// (or `@sN#R` in a folder). Answers already store labels and are left as written.
+fn for_model(speakers: &[mediaa_core::speakers::Who], history: &[Turn], question: &str) -> (Vec<Turn>, String) {
+    let history = history
+        .iter()
+        .map(|t| Turn { question: mediaa_core::speakers::to_model(&t.question, speakers), answer: t.answer.clone() })
+        .collect();
+    (history, mediaa_core::speakers::to_model(question, speakers))
+}
+
 /// Answers `question` about the transcript `file_id` of `ai_dir` with the agent's model of
 /// `settings` (local through the engine, or a provider's), searching with the engine's models.
 /// `scope` is the task of the answer: its model steps and tools are children of it, and every
@@ -372,6 +409,7 @@ pub fn ask(
     let (web_search, web_read) = web_calls(slots, settings, cancel);
     let wait = waiter(scope, slots, settings);
     let waiter = Waiter { reason: &*wait, grace: WAIT_GRACE };
+    let (history, question) = for_model(&tools::whos(recording, None), history, question);
     let run = |brain: &dyn Brain, extract: &dyn scan::Extract| {
         let helper: &dyn Brain = sub.as_ref().map_or(brain, |s| s as &dyn Brain);
         let delegate = |task: &str, text: &str| {
@@ -385,7 +423,7 @@ pub fn ask(
         let max_chars = (brain.context() as usize) * 3 / 4;
         let web = settings.web.enabled.then(|| internet::Web::new(&*web_search, &*web_read, max_chars / 3));
         let tools = Tools { scan: Some(&scanner), rename: Some(&rename), delegate: Some(&delegate), web: web.as_ref(), ..Tools::new(recording, &find, max_chars) };
-        answer(brain, &tools, scope, history, memory, question, cancel, Some(&waiter), &mut events_out)
+        answer(brain, &tools, scope, &history, memory, &question, cancel, Some(&waiter), settings.verify_answers, &mut events_out)
     };
     with_brain(scope, slots, settings, run)
 }
@@ -476,11 +514,13 @@ pub fn ask_folder(
     let (web_search, web_read) = web_calls(slots, settings, cancel);
     let wait = waiter(scope, slots, settings);
     let waiter = Waiter { reason: &*wait, grace: WAIT_GRACE };
+    let speakers: Vec<_> = items.iter().enumerate().flat_map(|(i, it)| tools::whos(&it.recording, Some((i + 1) as u32))).collect();
+    let (history, question) = for_model(&speakers, history, question);
     with_brain(scope, slots, settings, |brain, _| {
         let max_chars = (brain.context() as usize) * 3 / 4;
         let web = settings.web.enabled.then(|| internet::Web::new(&*web_search, &*web_read, max_chars / 3));
         let tools = folder::FolderTools { items, search: &across, search_one: &one, max_chars, web: web.as_ref() };
-        answer(brain, &tools, scope, history, memory, question, cancel, Some(&waiter), on_event)
+        answer(brain, &tools, scope, &history, memory, &question, cancel, Some(&waiter), settings.verify_answers, on_event)
     })
 }
 
@@ -583,11 +623,206 @@ fn watch(waiter: &Waiter, started: &AtomicBool, finished: &AtomicBool, emit: &(d
     }
 }
 
+/// JSON the check must return: whether it changed the draft, and the answer to show.
+fn verify_schema() -> Value {
+    json!({"type":"object","properties":{"changed":{"type":"boolean"},"answer":{"type":"string"}},"required":["changed","answer"],"additionalProperties":false})
+}
+
+fn millis(seconds: f64) -> i64 {
+    (seconds * 1000.0).round() as i64
+}
+
+/// Cited times, as written and rounded to milliseconds.
+fn time_keys(text: &str) -> BTreeSet<(String, i64)> {
+    citations(text).into_iter().map(|(written, t)| (written, millis(t))).collect()
+}
+
+/// Folder citations `[#N m:ss]`, by recording and milliseconds.
+fn folder_keys(text: &str) -> BTreeSet<(usize, i64)> {
+    folder::folder_citations(text).into_iter().map(|(_, n, t)| (n, millis(t))).collect()
+}
+
+/// `](http…)` links.
+fn md_http(text: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("](http") {
+        rest = &rest[at + 2..];
+        let end = rest.find(')').unwrap_or(rest.len());
+        out.insert(rest[..end].to_string());
+    }
+    out
+}
+
+fn http_urls(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &text[i..];
+        let https = rest.starts_with("https://");
+        if https || rest.starts_with("http://") {
+            let start = i;
+            i += if https { 8 } else { 7 };
+            while i < bytes.len() {
+                let ch = text[i..].chars().next().unwrap();
+                if ch.is_whitespace() || matches!(ch, ')' | ']' | '>' | '"' | '\'') {
+                    break;
+                }
+                i += ch.len_utf8();
+            }
+            while i > start && matches!(bytes[i - 1], b'.' | b',' | b';') {
+                i -= 1;
+            }
+            out.push(&text[start..i]);
+        } else {
+            i += text[i..].chars().next().map(char::len_utf8).unwrap_or(1);
+        }
+    }
+    out
+}
+
+/// Web results the draft points at (a URL of the result occurs in the draft).
+fn web_evidence(steps: &[StepRecord], draft: &str) -> String {
+    steps
+        .iter()
+        .filter(|s| s.tool == "web_search" || s.tool == "web_read")
+        .filter(|s| http_urls(&s.result).iter().any(|url| draft.contains(url)))
+        .map(|s| s.result.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// `{changed, answer}` from the model's text. The object may sit inside other text.
+fn verdict(raw: &str) -> Option<(bool, String)> {
+    let raw = raw.trim();
+    let (Some(start), Some(end)) = (raw.find('{'), raw.rfind('}')) else { return None };
+    if start >= end {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&raw[start..=end]).ok()?;
+    Some((v.get("changed")?.as_bool()?, without_field_echo(v.get("answer")?.as_str()?)))
+}
+
+/// A small model sometimes copies the description of the JSON fields into the answer text (a
+/// last line "changed — true"); that line is not part of the answer.
+fn without_field_echo(answer: &str) -> String {
+    let mut lines: Vec<&str> = answer.trim_end().lines().collect();
+    while lines.last().is_some_and(|l| {
+        let l = l.trim().trim_matches('"').to_lowercase();
+        l.is_empty() || ["changed", "answer"].iter().any(|k| l.starts_with(k) && l[k.len()..].trim_start().starts_with(['—', '-', ':', '=']))
+    }) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+fn cancelled(error: &anyhow::Error, cancel: &AtomicBool) -> bool {
+    cancel.load(Ordering::Relaxed) || error.to_string().to_lowercase().contains("cancel")
+}
+
+/// The checked answer, or `draft` when the verdict is empty, unreadable, or loses or invents a link.
+fn accept(draft: &str, raw: &str, tools: &dyn Toolbox) -> String {
+    let Some((changed, answer)) = verdict(raw) else { return draft.to_string() };
+    if !changed {
+        return draft.to_string();
+    }
+    let mut answer = tidy(&answer);
+    if let Some(web) = tools.web() {
+        answer = web.known_links(&answer);
+    }
+    if answer.trim().is_empty() {
+        return draft.to_string();
+    }
+    // The check may drop statements with their citations, never bring new ones.
+    let kept = time_keys(&answer).is_subset(&time_keys(draft)) && folder_keys(&answer).is_subset(&folder_keys(draft)) && md_http(&answer).is_subset(&md_http(draft));
+    if !kept || !tools.bad_citations(&answer).is_empty() {
+        return draft.to_string();
+    }
+    answer
+}
+
+/// One check of `draft`. The draft becomes a folded step; the check is a model step. The text
+/// to show is returned, and streamed, only after the check. A cancelled check is an error; any
+/// other failure keeps the draft.
+#[allow(clippy::too_many_arguments)]
+fn check_answer(
+    brain: &dyn Brain,
+    tools: &dyn Toolbox,
+    scope: &Scope,
+    steps: &mut Vec<StepRecord>,
+    question: &str,
+    draft: String,
+    cancel: &AtomicBool,
+    waiter: Option<&Waiter>,
+    emit: &(dyn Fn(&Event) + Sync),
+) -> anyhow::Result<String> {
+    emit(&Event::AnswerDiscarded);
+    emit(&Event::StepStarted { title: DRAFT_TITLE.to_string(), tool: DRAFT_TOOL.to_string() });
+    let draft_step = StepRecord { title: DRAFT_TITLE.to_string(), tool: DRAFT_TOOL.to_string(), args: json!({}), result: draft.clone(), status: StepStatus::Found };
+    emit(&Event::Step(draft_step.clone()));
+    steps.push(draft_step);
+
+    let fragments = tools.cited_context(&draft);
+    let web = web_evidence(steps, &draft);
+    let messages = [
+        Message::new(Role::System, prompts::render("agent/verify_system.j2", ())),
+        Message::new(Role::User, prompts::render("agent/verify.j2", minijinja::context! { question, draft, fragments, web })),
+    ];
+    let child = begin_child(scope, "model-step", VERIFY_TITLE, &json!({ "step": VERIFY_TITLE }));
+    scope.focus(child.as_ref().map(Scope::task));
+    emit(&Event::StepStarted { title: VERIFY_TITLE.to_string(), tool: VERIFY_TOOL.to_string() });
+    // The flags live outside the scope: a thread spawned into it cannot borrow locals of the closure.
+    let (started, finished) = (AtomicBool::new(false), AtomicBool::new(false));
+    let verdict = std::thread::scope(|s| {
+        if let Some(w) = waiter {
+            s.spawn(|| watch(w, &started, &finished, emit));
+        }
+        let result = brain.complete_json(&messages, &verify_schema(), cancel);
+        started.store(true, Ordering::Relaxed);
+        finished.store(true, Ordering::Relaxed);
+        result
+    });
+    scope.focus(None);
+
+    let text = match verdict {
+        Err(e) if cancelled(&e, cancel) => {
+            return Err(e);
+        }
+        Err(e) => {
+            log::warn!("the answer check failed: {e:#}");
+            if let Some(child) = &child {
+                child.fail(&format!("{e:#}"));
+            }
+            let record = StepRecord { title: VERIFY_TITLE.to_string(), tool: VERIFY_TOOL.to_string(), args: json!({}), result: format!("Error: {e:#}"), status: StepStatus::Failed };
+            emit(&Event::Step(record.clone()));
+            steps.push(record);
+            draft
+        }
+        Ok(raw) => {
+            let text = accept(&draft, &raw, tools);
+            let status = if text == draft { StepStatus::Nothing } else { StepStatus::Found };
+            if let Some(child) = &child {
+                child.finish(&json!({ "status": status.as_str() }));
+            }
+            let record = StepRecord { title: VERIFY_TITLE.to_string(), tool: VERIFY_TOOL.to_string(), args: json!({}), result: raw, status };
+            emit(&Event::Step(record.clone()));
+            steps.push(record);
+            text
+        }
+    };
+    if !text.is_empty() {
+        emit(&Event::AnswerText(text.clone()));
+    }
+    Ok(text)
+}
+
 /// Answers `question` about the recording of `tools`, after the chat's `history` (folded into
 /// `memory`'s summary when it does not fit) with the chat's remembered facts. The answer is the
 /// task of `scope`: every model step and every tool call is a child of it (with its own
-/// statistics), and `on_event` hears all of it in order. A set `cancel` ends it at once (an
-/// error): nothing of the step in flight is used.
+/// statistics), and `on_event` hears all of it in order. When `verify` is set the draft is
+/// checked once before the final text. A set `cancel` ends it at once (an error): nothing of
+/// the step in flight is used.
 #[allow(clippy::too_many_arguments)]
 pub fn answer(
     brain: &dyn Brain,
@@ -598,6 +833,7 @@ pub fn answer(
     question: &str,
     cancel: &AtomicBool,
     waiter: Option<&Waiter>,
+    verify: bool,
     on_event: &mut (dyn FnMut(&Event) + Send),
 ) -> anyhow::Result<Answer> {
     let sink = Mutex::new(on_event);
@@ -747,6 +983,7 @@ pub fn answer(
                 if steps.iter().any(|s| s.tool == "say" && s.status == StepStatus::Found) && text.chars().count() > CLOSING_CHARS {
                     text = text.split("\n\n").next().unwrap_or_default().trim().to_string();
                 }
+                let text = if verify && !text.is_empty() { check_answer(brain, tools, scope, &mut steps, question, text, cancel, waiter, &emit)? } else { text };
                 return Ok(Answer { text, steps, forced: told_to_answer });
             }
         }
@@ -776,11 +1013,18 @@ mod tests {
         /// Reasoning written before the step of that number (from 0).
         thinking: Vec<(usize, &'static str)>,
         calls: std::cell::Cell<usize>,
+        /// One verdict of the answer check, consumed when `complete` sees the check's prompt.
+        check: RefCell<Option<String>>,
     }
 
     impl Scripted {
         fn new(steps: Vec<Step>) -> Scripted {
-            Scripted { steps: RefCell::new(steps.into_iter().rev().collect()), seen: RefCell::default(), context: 8192, thinking: Vec::new(), calls: std::cell::Cell::new(0) }
+            Scripted { steps: RefCell::new(steps.into_iter().rev().collect()), seen: RefCell::default(), context: 8192, thinking: Vec::new(), calls: std::cell::Cell::new(0), check: RefCell::new(None) }
+        }
+
+        fn checking(self, verdict: &str) -> Scripted {
+            self.check.replace(Some(verdict.to_string()));
+            self
         }
 
         fn thinking(mut self, before_step: usize, text: &'static str) -> Scripted {
@@ -820,6 +1064,12 @@ mod tests {
 
         fn complete(&self, messages: &[Message], _: &AtomicBool) -> anyhow::Result<String> {
             self.seen.borrow_mut().push((messages.to_vec(), 0));
+            // The check is told it checks a draft answer; a summary call is not.
+            if messages.iter().any(|m| m.content.contains("You check a draft answer")) {
+                if let Some(verdict) = self.check.borrow_mut().take() {
+                    return Ok(verdict);
+                }
+            }
             Ok(format!("сводка #{}", self.seen.borrow().len()))
         }
 
@@ -846,7 +1096,7 @@ mod tests {
         let mut events = Vec::new();
         let history = [Turn { question: "Привет".into(), answer: "Здравствуйте".into() }];
         let (_dir, scope) = test_scope();
-        let a = answer(brain, &tools, &scope, &history, &mut Memory::default(), question, &AtomicBool::new(false), None, &mut |e| events.push(e.clone())).unwrap();
+        let a = answer(brain, &tools, &scope, &history, &mut Memory::default(), question, &AtomicBool::new(false), None, false, &mut |e| events.push(e.clone())).unwrap();
         (a, events)
     }
 
@@ -880,7 +1130,7 @@ mod tests {
         assert!(first[0].content.contains("«Планёрка»") && first[0].content.contains("- search: "));
         assert_eq!((first[1].content.as_str(), first[2].content.as_str(), first[3].content.as_str()), ("Привет", "Здравствуйте", "Когда отчёт?"));
         let (second, _) = &brain.seen.borrow()[1];
-        assert!(second.last().unwrap().content.starts_with("Result of step 1 (search):\n[0:10–0:15] (Дана) Отчёт"));
+        assert!(second.last().unwrap().content.starts_with("Result of step 1 (search):\n[0:10–0:15] (@s1) Отчёт"));
     }
 
     /// What an event is, in a word (consecutive pieces of one kind are one).
@@ -989,7 +1239,7 @@ mod tests {
         let tools = Tools::new(&rec, &search, 4000);
         let (_dir, scope) = test_scope();
         let mut events = Vec::new();
-        answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Что?", &AtomicBool::new(false), Some(&waiter), &mut |e| events.push(e.clone())).unwrap();
+        answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Что?", &AtomicBool::new(false), Some(&waiter), false, &mut |e| events.push(e.clone())).unwrap();
         // Waiting before the first step (said once, however long it takes), nothing while the
         // second step answers at once.
         assert_eq!(tags(&events)[..3], ["wait", "start:outline", "step:outline"]);
@@ -1001,7 +1251,7 @@ mod tests {
         let waiter = Waiter { reason: &none, grace: Duration::from_millis(50) };
         let mut events = Vec::new();
         let brain = Slow(Scripted::new(vec![call("outline", json!({})), say("Готово.")]), Duration::from_millis(150));
-        answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Что?", &AtomicBool::new(false), Some(&waiter), &mut |e| events.push(e.clone())).unwrap();
+        answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Что?", &AtomicBool::new(false), Some(&waiter), false, &mut |e| events.push(e.clone())).unwrap();
         assert!(!events.iter().any(|e| matches!(e, Event::Waiting { .. })));
     }
 
@@ -1050,7 +1300,7 @@ mod tests {
         let tools = Tools { web: Some(&web), ..Tools::new(&rec, &search, 4000) };
         let mut events = Vec::new();
         let (_dir, scope) = test_scope();
-        let a = answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Что с трудовой?", &AtomicBool::new(false), None, &mut |e| events.push(e.clone())).unwrap();
+        let a = answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Что с трудовой?", &AtomicBool::new(false), None, false, &mut |e| events.push(e.clone())).unwrap();
         assert_eq!(a.text, "В записи: пятница [0:10]; см. [ТК РФ](https://example.org/tk) и блог.");
         assert!(a.steps.iter().all(|s| s.status == StepStatus::Found), "{:?}", a.steps);
         assert!(events.contains(&Event::Say("По закону — [ТК РФ](https://example.org/tk).".into())), "a section may rest on a page read");
@@ -1079,7 +1329,7 @@ mod tests {
         let mut memory = Memory::default();
         let mut events = Vec::new();
         let (_dir, scope) = test_scope();
-        let a = answer(&brain, &tools, &scope, &[], &mut memory, "Отчёт частями", &AtomicBool::new(false), None, &mut |e| events.push(e.clone())).unwrap();
+        let a = answer(&brain, &tools, &scope, &[], &mut memory, "Отчёт частями", &AtomicBool::new(false), None, false, &mut |e| events.push(e.clone())).unwrap();
         assert_eq!(memory.facts, ["Пользователь просит кратко"]);
         assert_eq!(a.steps[1].result, "Plan:\n[x] найти сроки\n[ ] написать отчёт");
         assert_eq!(a.steps[2].status, StepStatus::Failed, "a section without citations is refused");
@@ -1089,7 +1339,7 @@ mod tests {
         // The next answer of the chat sees the fact.
         let brain = Scripted::new(vec![call("outline", json!({})), say("Кратко.")]);
         let (_dir, scope) = test_scope();
-        answer(&brain, &tools, &scope, &[], &mut memory, "Ещё", &AtomicBool::new(false), None, &mut |_| {}).unwrap();
+        answer(&brain, &tools, &scope, &[], &mut memory, "Ещё", &AtomicBool::new(false), None, false, &mut |_| {}).unwrap();
         assert!(brain.seen.borrow()[0].0[0].content.contains("Remembered in this chat:\n- Пользователь просит кратко"));
     }
 
@@ -1115,7 +1365,7 @@ mod tests {
         let rec = recording();
         let tools = Tools::new(&rec, &search, 4000);
         let (_dir, scope) = test_scope();
-        let a = answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Отчёт", &AtomicBool::new(false), None, &mut |_| {}).unwrap();
+        let a = answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Отчёт", &AtomicBool::new(false), None, false, &mut |_| {}).unwrap();
         assert_eq!(a.text, "Готово [0:10].");
         assert!(brain.0.seen.borrow()[0].0.iter().any(|m| m.content.contains("got cut off")));
     }
@@ -1129,7 +1379,7 @@ mod tests {
         let history: Vec<Turn> = (0..6).map(|i| Turn { question: format!("вопрос {i}"), answer: "ответ ".repeat(150) }).collect();
         let mut memory = Memory::default();
         let (_dir, scope) = test_scope();
-        answer(&brain, &tools, &scope, &history, &mut memory, "Новый вопрос", &AtomicBool::new(false), None, &mut |_| {}).unwrap();
+        answer(&brain, &tools, &scope, &history, &mut memory, "Новый вопрос", &AtomicBool::new(false), None, false, &mut |_| {}).unwrap();
         assert_eq!(memory.summarized, 3, "the last three stay");
         assert!(memory.summary.starts_with("сводка"));
         let seen = brain.seen.borrow();
@@ -1188,6 +1438,97 @@ mod tests {
         assert!(a.forced);
     }
 
+    /// `answer` with the check on.
+    fn checked(brain: &Scripted, question: &str) -> (Answer, Vec<Event>) {
+        let rec = recording();
+        let tools = Tools::new(&rec, &search, 4000);
+        let mut events = Vec::new();
+        let (_dir, scope) = test_scope();
+        let a = answer(brain, &tools, &scope, &[], &mut Memory::default(), question, &AtomicBool::new(false), None, true, &mut |e| events.push(e.clone())).unwrap();
+        (a, events)
+    }
+
+    #[test]
+    fn a_check_may_drop_statements_but_never_brings_new_links() {
+        let rec = recording();
+        let tools = Tools::new(&rec, &search, 4000);
+        let draft = "В пятницу [0:10]. См. [закон](https://example.org/tk).";
+        let keep = |raw: &str| assert_eq!(accept(draft, raw, &tools), draft, "{raw}");
+        keep("не json");
+        keep(r#"{"changed":true}"#);
+        keep(r#"{"changed":false,"answer":"Другой текст [0:10]. См. [закон](https://example.org/tk)."}"#);
+        keep(r#"{"changed":true,"answer":"В пятницу [0:10] и [42:00]. См. [закон](https://example.org/tk)."}"#);
+        keep(r#"{"changed":true,"answer":"  "}"#);
+        keep(r#"{"changed":true,"answer":"В пятницу [0:10]. См. [закон](https://example.org/tk) и [ещё](https://made.up/x)."}"#);
+        let better = "Отчёт — в пятницу [0:10]. См. [закон](https://example.org/tk).";
+        assert_eq!(accept(draft, &format!("вот {{\"changed\":true,\"answer\":\"{better}\"}}"), &tools), better);
+        // Dropping a statement drops its time or link: that is what the check is for.
+        let take = |raw: &str, expected: &str| assert_eq!(accept(draft, raw, &tools), expected, "{raw}");
+        take(r#"{"changed":true,"answer":"В пятницу. См. [закон](https://example.org/tk)."}"#, "В пятницу. См. [закон](https://example.org/tk).");
+        take(r#"{"changed":true,"answer":"В пятницу [0:10]."}"#, "В пятницу [0:10].");
+        take(r#"{"changed":true,"answer":"В пятницу [0:10].\n\nchanged — true"}"#, "В пятницу [0:10].");
+        assert_eq!(accept("В [#1 0:10] решили.", r#"{"changed":true,"answer":"Решили."}"#, &tools), "Решили.");
+
+        let brain = Scripted::new(vec![call("outline", json!({})), say("В пятницу [0:10].")]).checking(r#"{"changed":true,"answer":"В [42:00]."}"#);
+        let (a, events) = checked(&brain, "Когда?");
+        assert_eq!(a.text, "В пятницу [0:10].", "a bad time keeps the draft");
+        assert!(events.iter().any(|e| matches!(e, Event::Step(s) if s.tool == "verify" && s.status == StepStatus::Nothing)));
+
+        let brain = Scripted::new(vec![call("outline", json!({})), say("В пятницу [0:10].")]).checking("не json");
+        assert_eq!(checked(&brain, "Когда?").0.text, "В пятницу [0:10].", "an unreadable verdict keeps the draft");
+
+        let brain = Scripted::new(vec![call("outline", json!({})), say("В пятницу [0:10].")]).checking(r#"{"changed":true,"answer":"Нет."}"#);
+        assert_eq!(run(&brain, "Когда?").0.text, "В пятницу [0:10].");
+        assert!(brain.check.borrow().is_some(), "the check is not called when it is off");
+    }
+
+    #[test]
+    fn the_check_streams_the_answer_after_itself_and_sees_the_cited_window() {
+        let brain = Scripted::new(vec![call("search", json!({"query": "отчёт"})), say("В пятницу [0:10] и потом.")])
+            .checking(r#"{"changed":true,"answer":"Отчёт в пятницу [0:10]."}"#);
+        let (a, events) = checked(&brain, "Когда отчёт?");
+        assert_eq!(a.text, "Отчёт в пятницу [0:10].");
+        assert_eq!(tags(&events), ["start:search", "step:search", "text", "discard", "start:draft", "step:draft", "start:verify", "step:verify", "text"]);
+        let discard = events.iter().position(|e| matches!(e, Event::AnswerDiscarded)).unwrap();
+        let verified = events.iter().rposition(|e| matches!(e, Event::Step(s) if s.tool == "verify")).unwrap();
+        assert!(events[discard + 1..verified].iter().all(|e| !matches!(e, Event::AnswerText(_))), "nothing of the answer is written during the check");
+        assert!(matches!(&events[verified + 1], Event::AnswerText(t) if t == "Отчёт в пятницу [0:10]."));
+        assert!(a.steps.iter().any(|s| s.tool == "draft" && s.result == "В пятницу [0:10] и потом."));
+        let prompt = brain.seen.borrow().last().unwrap().0.last().unwrap().content.clone();
+        assert!(prompt.contains("Когда отчёт?") && prompt.contains("В пятницу [0:10] и потом."));
+        assert!(prompt.contains("Отчёт отправляем в пятницу.") && prompt.contains("Графики будут к четвергу."), "{prompt}");
+        assert!(!prompt.contains("Бюджет на квартал"), "{prompt}");
+    }
+
+    #[test]
+    fn the_check_is_shown_the_web_result_only_when_the_draft_cites_it() {
+        let found = |q: &str, _: usize| {
+            Ok(if q.contains("закон") {
+                vec![crate::web::WebHit { title: "ТК".into(), url: "https://example.org/tk".into(), snippet: "Статья.".into() }]
+            } else {
+                vec![]
+            })
+        };
+        let page = |url: &str, _: usize| Ok(crate::web::Page { title: "Страница".into(), url: url.into(), text: format!("Текст {url}") });
+        let web = internet::Web::new(&found, &page, 4000);
+        let brain = Scripted::new(vec![
+            call("search", json!({"query": "отчёт"})),
+            call("web_search", json!({"query": "закон"})),
+            call("web_read", json!({"url": "https://example.org/other"})),
+            call("web_read", json!({"url": "https://example.org/tk"})),
+            say("В пятницу [0:10]. См. [ТК](https://example.org/tk)."),
+        ])
+        .checking(r#"{"changed":true,"answer":"Отчёт в пятницу [0:10]. См. [ТК](https://example.org/tk)."}"#);
+        let rec = recording();
+        let tools = Tools { web: Some(&web), ..Tools::new(&rec, &search, 4000) };
+        let (_dir, scope) = test_scope();
+        let a = answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Что с законом?", &AtomicBool::new(false), None, true, &mut |_| {}).unwrap();
+        assert_eq!(a.text, "Отчёт в пятницу [0:10]. См. [ТК](https://example.org/tk).");
+        let prompt = brain.seen.borrow().last().unwrap().0.last().unwrap().content.clone();
+        assert!(prompt.contains("https://example.org/tk") && prompt.contains("Отчёт отправляем в пятницу."), "{prompt}");
+        assert!(!prompt.contains("https://example.org/other"), "{prompt}");
+    }
+
     /// Models are required: the folder is `MEDIAA_TEST_MODELS` (the app's by default). The default
     /// agent model answers about the transcribed sample of `MEDIAA_TEST_AI` (run the
     /// `transcribes_through_the_queue` test first): it searches, finds the oak, cites the time.
@@ -1218,6 +1559,7 @@ mod tests {
     /// (a library with the file transcribed and indexed), `MEDIAA_BENCH_FILE`, questions in
     /// `MEDIAA_BENCH_QUESTIONS` (separated by `|`; none are asked when it is unset), a Tavily
     /// key in `MEDIAA_BENCH_TAVILY` and a proxy in `MEDIAA_BENCH_PROXY` for the web.
+    /// `MEDIAA_BENCH_ANALYSIS` runs the whole analysis from scratch through the worker (every stage);
     /// `MEDIAA_BENCH_OUTLINE` rebuilds the topics through the worker (plan, digests, merge and
     /// the details when the settings ask); `MEDIAA_BENCH_MERGE` runs only the merge over the
     /// chapters the digest stage left in `outline-topics` (and the details after it);
@@ -1253,13 +1595,33 @@ mod tests {
         let slots = Slots::new(Budget::default());
         let s = settings.clone();
         let current: std::sync::Arc<dyn Fn() -> AgentSettings + Send + Sync> = std::sync::Arc::new(move || s.clone());
-        let topic_handlers = || crate::outline::handlers(&ai, slots.clone(), current.clone());
+        // The handlers the app's worker has: every stage of the analysis.
+        let all_handlers = || {
+            let mut handlers: Vec<Box<dyn crate::worker::TaskHandler>> = vec![
+                Box::new(crate::transcribe::Transcribe::new(&ai, slots.clone(), current.clone())),
+                Box::new(crate::diarize::Diarize::new(&ai, slots.clone(), current.clone())),
+                Box::new(crate::index::Index::new(&ai, slots.clone(), current.clone())),
+            ];
+            handlers.extend(crate::outline::handlers(&ai, slots.clone(), current.clone()));
+            handlers
+        };
         let drain = |q: &mediaa_core::queue::Queue| {
-            let handlers = topic_handlers();
+            let handlers = all_handlers();
             let stop = AtomicBool::new(false);
             while crate::worker::run_next(q, &engine, &handlers, &stop).unwrap() {}
         };
-        if std::env::var_os("MEDIAA_BENCH_OUTLINE").is_some() {
+        if std::env::var_os("MEDIAA_BENCH_ANALYSIS").is_some() {
+            let started = std::time::Instant::now();
+            // The whole analysis from scratch, as «Распознать» starts it: every stage.
+            crate::pipeline::restart(&ai, &file, crate::pipeline::Stage::Transcribe, settings.analysis).unwrap();
+            let q = mediaa_core::queue::Queue::open(&ai).unwrap();
+            drain(&q);
+            for t in q.list().unwrap().iter().filter(|t| t.created_ms >= 0).take(40) {
+                eprintln!("task {} {} {:?} {:.0} s {}", t.kind, t.title, t.status, t.started_ms.zip(t.finished_ms).map_or(0.0, |(a, b)| (b - a) as f64 / 1000.0), t.error.clone().unwrap_or_default());
+            }
+            let ready = crate::pipeline::readiness(&ai, &id).unwrap();
+            eprintln!("analysis in {:.0} s, ready: {ready:?}", started.elapsed().as_secs_f32());
+        } else if std::env::var_os("MEDIAA_BENCH_OUTLINE").is_some() {
             let started = std::time::Instant::now();
             // The whole topics stage as the interface starts it: the plan, the digests, the merge
             // and the details the settings ask for.
@@ -1372,6 +1734,20 @@ mod tests {
     #[test]
     fn answers_are_markdown() {
         assert_eq!(tidy(" Один<br>два<br />три<br/>четыре "), "Один\nдва\nтри\nчетыре");
+    }
+
+    #[test]
+    fn a_user_mention_becomes_a_label_before_the_model_reads_it() {
+        let rec = tools::tests::recording();
+        let speakers = tools::whos(&rec, None);
+        let history = [Turn { question: "а @Дана?".into(), answer: "уже @s1".into() }];
+        let (history, question) = for_model(&speakers, &history, "и @Говорящий 2");
+        assert_eq!(question, "и @s2");
+        assert_eq!(history[0].question, "а @s1?");
+        assert_eq!(history[0].answer, "уже @s1", "an answer already stores labels");
+        let folder = tools::whos(&rec, Some(3));
+        assert_eq!(mediaa_core::speakers::to_model("@Дана", &folder), "@s1#3");
+        assert_eq!(mediaa_core::speakers::to_model("@s1", &speakers), "@s1");
     }
 
     #[test]

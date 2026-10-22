@@ -458,7 +458,11 @@ mod tests {
         for from in [Stage::Topics, Stage::Details] {
             let root = restart(&ai, &media, from, AnalysisOptions::default()).unwrap();
             let before = queue.subtree(root).unwrap();
-            assert!(before.iter().filter(|t| t.kind == "details" || t.kind == "topics" || t.kind == ANALYSIS_KIND).all(|t| t.status == TaskStatus::Waiting), "{from:?}: composites wait");
+            assert!(
+                before.iter().filter(|t| t.kind == "details" || t.kind == "topics" || t.kind == ANALYSIS_KIND).all(|t| t.status == TaskStatus::Running),
+                "{from:?}: a stage that can run makes its composites go: {:?}",
+                before.iter().map(|t| (&t.kind, t.status)).collect::<Vec<_>>()
+            );
             // The program is closed and opened again while the work is half done.
             let first = crate::worker::run_next(&queue, &engine, &handlers, &AtomicBool::new(false)).unwrap();
             assert!(first);
@@ -582,5 +586,200 @@ mod tests {
         assert!(active(&ai, &id(&media)).unwrap().is_none());
         let task = start(&ai, &media, AnalysisOptions::default()).unwrap();
         assert_eq!(active(&ai, &id(&media)).unwrap().map(|t| t.id), Some(task));
+    }
+
+    /// The analysis graph, stopped once the topics composite has digests and the details
+    /// composite has its `topic-detail` children. Later stages are still queued.
+    fn analysis_graph() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 3.0);
+        let settings = settings(ModelChoices::default());
+        let queue = Queue::open(&ai).unwrap();
+        let fake = FakeEngine::new();
+        fake.chat_answers(&[DIGEST, DIGEST, DIGEST, SECTIONS, SECTIONS]);
+        let engine: Arc<dyn Engine> = Arc::new(fake);
+        let handlers = handlers(&ai, &settings);
+        start(&ai, &media, AnalysisOptions::default()).unwrap();
+        let stop = AtomicBool::new(false);
+        let mut saw_detail = false;
+        for _ in 0..40 {
+            if queue.list().unwrap().iter().any(|t| t.kind == "topic-detail") {
+                saw_detail = true;
+                break;
+            }
+            assert!(crate::worker::run_next(&queue, &engine, &handlers, &stop).unwrap(), "the graph ended before the details");
+        }
+        assert!(saw_detail, "no topic-detail was queued");
+        let kinds: std::collections::HashSet<String> = queue.list().unwrap().into_iter().map(|t| t.kind).collect();
+        for kind in ["analysis", "transcribe", "diarize", "index", "topics", "topics-plan", "topic-digest", "topics-merge", "details", "topic-detail"] {
+            assert!(kinds.contains(kind), "{kind} missing from {kinds:?}");
+        }
+        drop(queue);
+        tmp
+    }
+
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let dest = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &dest);
+            } else {
+                std::fs::copy(entry.path(), &dest).unwrap();
+            }
+        }
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (self.0 >> 33) as usize % n
+        }
+    }
+
+    fn assert_rule(q: &Queue, seed: u64, step: usize) {
+        use mediaa_core::queue::{composite_status, ChildState};
+        use std::collections::{HashMap, HashSet};
+        let tasks = q.list().unwrap();
+        let by_id: HashMap<_, _> = tasks.iter().map(|t| (t.id, t)).collect();
+        for task in &tasks {
+            if matches!(task.status, TaskStatus::Queued | TaskStatus::Waiting | TaskStatus::Running | TaskStatus::Paused) {
+                let mut stack = q.needs(task.id).unwrap();
+                let mut seen = HashSet::new();
+                while let Some(dep) = stack.pop() {
+                    if !seen.insert(dep) {
+                        continue;
+                    }
+                    let Some(other) = by_id.get(&dep) else { continue };
+                    assert!(
+                        !matches!(other.status, TaskStatus::Failed | TaskStatus::Cancelled),
+                        "seed {seed} step {step}: {} {} {:?} waits on {} {} {:?}",
+                        task.id, task.kind, task.status, other.id, other.kind, other.status
+                    );
+                    stack.extend(q.needs(dep).unwrap());
+                }
+            }
+            let children: Vec<_> = tasks.iter().filter(|child| child.parent == Some(task.id)).collect();
+            if children.is_empty() || task.inline {
+                continue;
+            }
+            let states: Vec<ChildState> = children
+                .iter()
+                .map(|child| {
+                    let blocked = q.needs(child.id).unwrap().iter().any(|dep| by_id.get(dep).is_some_and(|other| other.status != TaskStatus::Done));
+                    ChildState::of(child.status, blocked)
+                })
+                .collect();
+            let expected = composite_status(&states).unwrap();
+            assert_eq!(task.status, expected, "seed {seed} step {step}: {} {} {:?}", task.kind, task.title, states);
+            if matches!(task.status, TaskStatus::Running | TaskStatus::Waiting | TaskStatus::Paused) {
+                assert!(task.error.is_none(), "seed {seed} step {step}: {} still shows {:?}", task.kind, task.error);
+            }
+        }
+    }
+
+    struct FinishKind(&'static str);
+
+    impl crate::worker::TaskHandler for FinishKind {
+        fn kind(&self) -> &'static str {
+            self.0
+        }
+        fn run(&self, _task: &mediaa_core::queue::Task, _cp: &mut crate::worker::Checkpoints) -> anyhow::Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+    }
+
+    fn drain_with_a_fake_handler(q: &Queue, seed: u64) {
+        let handlers: Vec<Box<dyn crate::worker::TaskHandler>> = ["transcribe", "diarize", "index", "topics-plan", "topic-digest", "topics-merge", "topic-detail"]
+            .into_iter()
+            .map(|kind| Box::new(FinishKind(kind)) as Box<dyn crate::worker::TaskHandler>)
+            .collect();
+        let engine: Arc<dyn Engine> = Arc::new(FakeEngine::new());
+        let stop = AtomicBool::new(false);
+        for step in 0..400 {
+            let tasks = q.list().unwrap();
+            if tasks.iter().all(|t| t.status.is_finished()) {
+                return;
+            }
+            for task in tasks.iter().filter(|t| t.status == TaskStatus::Paused) {
+                q.resume(task.id).unwrap();
+            }
+            if !crate::worker::run_next(q, &engine, &handlers, &stop).unwrap() {
+                let left: Vec<_> = q.list().unwrap().into_iter().filter(|t| !t.status.is_finished()).map(|t| format!("{} {} {:?}", t.id, t.kind, t.status)).collect();
+                panic!("seed {seed} step {step} stuck with {left:?}");
+            }
+        }
+        panic!("seed {seed} did not finish");
+    }
+
+    #[test]
+    fn restarting_a_failed_detail_runs_every_ancestor() {
+        let graph = analysis_graph();
+        let q = Queue::open(&graph.path().join(".ai")).unwrap();
+        let mut details: Vec<_> = q.list().unwrap().into_iter().filter(|t| t.kind == "topic-detail").map(|t| t.id).collect();
+        details.sort_unstable();
+        let failed = details.pop().unwrap();
+        for id in &details {
+            q.complete(*id, &json!({})).unwrap();
+        }
+        q.fail(failed, "model crashed").unwrap();
+        let mut ancestor = q.get(failed).unwrap().unwrap().parent;
+        let mut depth = 0;
+        while let Some(id) = ancestor {
+            let t = q.get(id).unwrap().unwrap();
+            assert_eq!(t.status, TaskStatus::Failed, "{} {}", t.kind, t.title);
+            assert!(t.error.is_some(), "{} has no error", t.kind);
+            ancestor = t.parent;
+            depth += 1;
+        }
+        assert!(depth >= 3, "details, topics and the analysis");
+        q.restart(failed).unwrap();
+        let restarted = q.get(failed).unwrap().unwrap();
+        assert_eq!(restarted.status, TaskStatus::Queued);
+        assert!(restarted.error.is_none());
+        ancestor = restarted.parent;
+        while let Some(id) = ancestor {
+            let t = q.get(id).unwrap().unwrap();
+            assert_eq!(t.status, TaskStatus::Running, "{} {}", t.kind, t.title);
+            assert!(t.error.is_none(), "{} kept {:?}", t.kind, t.error);
+            ancestor = t.parent;
+        }
+    }
+
+    #[test]
+    fn random_queue_ops_keep_the_analysis_graph_safe() {
+        let graph = analysis_graph();
+        let source = graph.path().join(".ai");
+        for seed in 1..=200 {
+            let dir = tempfile::tempdir().unwrap();
+            let ai = dir.path().join(".ai");
+            copy_dir(&source, &ai);
+            let q = Queue::open(&ai).unwrap();
+            assert_rule(&q, seed, 0);
+            let mut rng = Rng(seed);
+            for step in 1..=24 {
+                let tasks = q.list().unwrap();
+                if tasks.is_empty() {
+                    break;
+                }
+                let id = tasks[rng.below(tasks.len())].id;
+                match rng.below(6) {
+                    0 => q.cancel(id).unwrap(),
+                    1 => q.pause(id).unwrap(),
+                    2 => q.resume(id).unwrap(),
+                    3 => q.restart(id).unwrap(),
+                    4 => q.fail(id, "boom").unwrap(),
+                    _ => q.complete(id, &json!({})).unwrap(),
+                }
+                assert_rule(&q, seed, step);
+            }
+            drain_with_a_fake_handler(&q, seed);
+            assert!(q.list().unwrap().iter().all(|t| t.status.is_finished()), "seed {seed}");
+        }
     }
 }

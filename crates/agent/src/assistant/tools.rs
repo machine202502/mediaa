@@ -5,7 +5,7 @@
 use crate::prompts;
 use super::brain::ToolSpec;
 use crate::tools::{between, calculate, format_time, parse_time};
-use mediaa_core::outline::Chapter;
+use mediaa_core::outline::{Chapter, SectionKind};
 use mediaa_core::retrieval::{stems, Hit};
 use mediaa_core::transcript::Reply;
 use serde_json::{json, Value};
@@ -26,14 +26,25 @@ pub struct Recording {
 }
 
 impl Recording {
-    /// The language of the recording (from its first replies).
-    pub fn language(&self) -> &'static str {
-        mediaa_core::outline::language(&self.replies.iter().take(20).map(Reply::text).collect::<Vec<_>>().join(" "))
-    }
-
+    /// The label the model uses for a speaker. Names stay in `names` and are shown only in the UI.
     pub fn speaker(&self, s: u32) -> String {
-        self.names.get(&s).cloned().unwrap_or_else(|| mediaa_core::outline::unnamed_speaker(self.language(), s))
+        mediaa_core::speakers::label(s)
     }
+}
+
+/// Speakers the user can mention: one recording, or one recording of a folder (`number` is 1-based).
+pub fn whos(rec: &Recording, number: Option<u32>) -> Vec<mediaa_core::speakers::Who> {
+    let mut ids: Vec<u32> = rec.replies.iter().filter_map(|r| r.speaker).collect();
+    ids.extend(rec.names.keys().copied());
+    ids.sort_unstable();
+    ids.dedup();
+    let title = if number.is_some() { rec.title.clone() } else { String::new() };
+    ids.into_iter()
+        .map(|index| mediaa_core::speakers::Who { index, recording: number, name: rec.names.get(&index).cloned().unwrap_or_default(), title: title.clone() })
+        .collect()
+}
+
+impl Recording {
 
     /// The card at the top of the context.
     pub fn card(&self) -> String {
@@ -48,7 +59,13 @@ impl Recording {
                 length => format_time(self.duration),
                 minutes => self.duration / 60.0,
                 speakers,
-                chapters => self.chapters.len(),
+                topics => self.chapters.iter().enumerate().map(|(i, c)| minijinja::context! {
+                    number => i + 1,
+                    start => format_time(c.start),
+                    end => format_time(c.end),
+                    title => &c.digest.title,
+                    summary => &c.digest.summary,
+                }).collect::<Vec<_>>(),
                 position => self.position.map(format_time),
             },
         )
@@ -62,7 +79,7 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "outline",
             description: prompts::tool("outline"),
-            params: none.clone(),
+            params: json!({"type": "object", "properties": {"topic": {"type": "integer"}}}),
             example: json!({}),
         },
         ToolSpec {
@@ -144,6 +161,30 @@ fn line(rec: &Recording, r: &Reply) -> String {
 /// The focused scan of a recording: instruction → what matches, with coverage.
 pub type Scanner<'a> = dyn Fn(&str) -> anyhow::Result<super::scan::Scan> + 'a;
 
+fn section_kind(kind: SectionKind) -> &'static str {
+    match kind {
+        SectionKind::List => "list",
+        SectionKind::Steps => "steps",
+        SectionKind::Text => "text",
+    }
+}
+
+/// The topic a call asks for (1-based). `Ok(None)` is the map. Anything else is an error the
+/// model can answer by picking a number that exists.
+fn topic_number(args: &Value, count: usize) -> anyhow::Result<Option<usize>> {
+    let raw = match &args["topic"] {
+        Value::Null => return Ok(None),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) if s.trim().is_empty() => return Ok(None),
+        Value::String(s) => s.trim().to_string(),
+        other => other.to_string(),
+    };
+    match raw.parse::<usize>() {
+        Ok(n) if (1..=count).contains(&n) => Ok(Some(n)),
+        _ => Err(error("no_topic", minijinja::context! { topic => raw, count })),
+    }
+}
+
 /// Runs the tools of a recording.
 pub struct Tools<'a> {
     pub recording: &'a Recording,
@@ -173,15 +214,11 @@ impl<'a> Tools<'a> {
     }
 }
 
-/// The speaker a label means: its name, «Speaker N» / «Говорящий N», or the number.
+/// The speaker a model label means (`@sN`, `sN`, `@sN#R`). The recording number is ignored:
+/// the tool runs on one recording. A person's name is not a label.
 pub fn speaker_of(recording: &Recording, label: &str) -> Option<u32> {
-    let label = label.trim();
-    if let Some((&s, _)) = recording.names.iter().find(|(_, n)| n.eq_ignore_ascii_case(label) || n.to_lowercase() == label.to_lowercase()) {
-        return Some(s);
-    }
-    let n: u32 = label.rsplit(' ').next()?.trim_start_matches('#').parse().ok()?;
-    let s = n.checked_sub(1)?;
-    recording.replies.iter().any(|r| r.speaker == Some(s)).then_some(s)
+    let s = mediaa_core::speakers::parse_label(label)?.index;
+    (recording.replies.iter().any(|r| r.speaker == Some(s)) || recording.names.contains_key(&s)).then_some(s)
 }
 
 impl Tools<'_> {
@@ -201,7 +238,7 @@ impl Tools<'_> {
                 name: "rename_speakers",
                 description: prompts::tool("rename_speakers"),
                 params: json!({"type": "object", "properties": {"names": {"type": "array", "maxItems": 12, "items": {"type": "object", "properties": {"speaker": {"type": "string"}, "name": {"type": "string"}}, "required": ["speaker", "name"]}}}, "required": ["names"]}),
-                example: json!({"names": [{"speaker": "<a speaker as the tools show it>", "name": "<the name>"}]}),
+                example: json!({"names": [{"speaker": "@s1", "name": "<the name>"}]}),
             });
         }
         if self.delegate.is_some() {
@@ -223,14 +260,40 @@ impl Tools<'_> {
                 if rec.chapters.is_empty() {
                     return Ok(Outcome::plain(prompts::render("results/recording/no_outline.j2", ())));
                 }
-                let chapters: Vec<_> = rec
-                    .chapters
+                let Some(n) = topic_number(args, rec.chapters.len())? else {
+                    let chapters: Vec<_> = rec
+                        .chapters
+                        .iter()
+                        .map(|c| {
+                            let sections: Vec<&str> = c.digest.sections.iter().map(|s| s.title.as_str()).collect();
+                            minijinja::context! { start => format_time(c.start), end => format_time(c.end), title => &c.digest.title, summary => &c.digest.summary, sections }
+                        })
+                        .collect();
+                    let text = prompts::render("results/recording/outline.j2", minijinja::context! { chapters });
+                    let seen = rec.chapters.iter().map(|c| format!("chapter@{}", c.start as i64)).collect();
+                    return Ok(Outcome { text: bounded(text, self.max_chars, "chapters"), seen: Some(seen) });
+                };
+                let c = &rec.chapters[n - 1];
+                let seen = Some(vec![format!("topic@{n}")]);
+                if c.digest.sections.is_empty() {
+                    let text = prompts::render("results/recording/topic_empty.j2", minijinja::context! { number => n, title => &c.digest.title });
+                    return Ok(Outcome { text, seen });
+                }
+                let sections: Vec<_> = c
+                    .digest
+                    .sections
                     .iter()
-                    .map(|c| minijinja::context! { start => format_time(c.start), end => format_time(c.end), title => &c.digest.title, summary => &c.digest.summary })
+                    .map(|s| {
+                        let items: Vec<_> = s.items.iter().map(|item| minijinja::context! { time => item.time.map(format_time).unwrap_or_default(), text => &item.text }).collect();
+                        minijinja::context! { title => &s.title, kind => section_kind(s.kind), items }
+                    })
                     .collect();
-                let text = prompts::render("results/recording/outline.j2", minijinja::context! { chapters });
-                let seen = rec.chapters.iter().map(|c| format!("chapter@{}", c.start as i64)).collect();
-                Ok(Outcome { text: bounded(text, self.max_chars, "chapters"), seen: Some(seen) })
+                let quotes: Vec<_> = c.digest.quotes.iter().map(|q| minijinja::context! { time => format_time(q.time), text => &q.text }).collect();
+                let text = prompts::render(
+                    "results/recording/topic.j2",
+                    minijinja::context! { number => n, start => format_time(c.start), end => format_time(c.end), title => &c.digest.title, summary => &c.digest.summary, sections, quotes },
+                );
+                Ok(Outcome { text: bounded(text, self.max_chars, "plain"), seen })
             }
             "search" => {
                 let query = arg("query");
@@ -389,7 +452,7 @@ pub fn adds(known: &mut HashSet<String>, seen: &[String]) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use mediaa_core::outline::Digest;
+    use mediaa_core::outline::{Digest, Item, Quote, Section, SectionKind};
     use mediaa_core::retrieval::Chunk;
     use mediaa_core::transcript::Word;
 
@@ -422,8 +485,9 @@ pub(crate) mod tests {
     fn card_tells_what_is_there() {
         let card = recording().card();
         assert!(card.contains("«Планёрка», 10:00 long (medium)"), "{card}");
-        assert!(card.contains("Speakers: Дана, Говорящий 2."));
-        assert!(card.contains("Outline: 1 chapters"));
+        assert!(card.contains("Speakers: @s1, @s2."));
+        assert!(card.contains("1. [0:00–10:00] Отчёт и бюджет — Сроки отчёта, бюджет."));
+        assert!(!card.contains("Outline:"));
         assert!(card.contains("at [0:42]"));
     }
 
@@ -437,20 +501,74 @@ pub(crate) mod tests {
         let out = tools.run("outline", &json!({})).unwrap();
         assert!(out.text.contains("[0:00–10:00] Отчёт и бюджет — Сроки отчёта, бюджет."));
         let out = tools.run("search", &json!({"query": "бюджет"})).unwrap();
-        assert!(out.text.starts_with("[5:00–5:30] (Дана) Бюджет"), "{}", out.text);
+        assert!(out.text.starts_with("[5:00–5:30] (@s1) Бюджет"), "{}", out.text);
         assert_eq!(out.seen, Some(vec!["at@300".into()]));
         assert!(tools.run("search", &json!({"query": "погода"})).unwrap().text.starts_with("Nothing found"));
         assert!(tools.run("search", &json!({})).is_err());
         let out = tools.run("read", &json!({"from": "0:00", "to": "1:00"})).unwrap();
-        assert_eq!(out.text, "[0:10] Дана: Отчёт отправляем в пятницу.\n[0:30] Говорящий 2: Графики будут к четвергу.\n");
+        assert_eq!(out.text, "[0:10] @s1: Отчёт отправляем в пятницу.\n[0:30] @s2: Графики будут к четвергу.\n");
         assert!(tools.run("read", &json!({"from": "2:00", "to": "3:00"})).unwrap().text.starts_with("Nobody speaks"));
         assert!(tools.run("read", &json!({"from": "вчера", "to": "1:00"})).is_err());
         assert!(tools.run("read", &json!({"from": "20:00", "to": "30:00"})).is_err(), "past the end");
         let out = tools.run("speakers", &json!({})).unwrap();
-        assert!(out.text.starts_with("Дана: talks 0:07 in 2 replies, first at [0:10]"), "{}", out.text);
+        assert!(out.text.starts_with("@s1: talks 0:07 in 2 replies, first at [0:10]"), "{}", out.text);
         assert_eq!(tools.run("calculator", &json!({"expression": "2+2*2"})).unwrap().text, "6");
         assert_eq!(tools.run("time", &json!({"from": "0:10", "to": "5:00"})).unwrap().text, "4:50 (290 seconds)");
         assert!(tools.run("dance", &json!({})).is_err());
+    }
+
+    #[test]
+    fn outline_lists_section_titles_and_reads_one_topic() {
+        let mut rec = recording();
+        rec.chapters = vec![
+            Chapter {
+                start: 0.0,
+                end: 300.0,
+                digest: Digest {
+                    title: "Отчёт".into(),
+                    summary: "Сроки.".into(),
+                    quotes: vec![Quote { time: 10.0, text: "В пятницу.".into() }],
+                    sections: vec![
+                        Section {
+                            title: "Советы".into(),
+                            kind: SectionKind::List,
+                            items: vec![
+                                Item { text: "Сдать в пятницу".into(), time: Some(10.0) },
+                                Item { text: "Без времени".into(), time: None },
+                            ],
+                        },
+                        Section {
+                            title: "Порядок".into(),
+                            kind: SectionKind::Steps,
+                            items: vec![Item { text: "Сначала черновик".into(), time: Some(30.0) }],
+                        },
+                    ],
+                    ..Digest::default()
+                },
+            },
+            Chapter { start: 300.0, end: 600.0, digest: Digest { title: "Бюджет".into(), summary: "Цифры.".into(), ..Digest::default() } },
+        ];
+        let spec = specs().into_iter().find(|s| s.name == "outline").unwrap();
+        assert_eq!(spec.params["properties"]["topic"]["type"], "integer");
+        assert!(spec.params["required"].as_array().is_none());
+        assert!(spec.description.contains("topic"), "{}", spec.description);
+        let tools = Tools::new(&rec, &no_search, 4000);
+        let map = tools.run("outline", &json!({})).unwrap();
+        assert_eq!(map.text, "[0:00–5:00] Отчёт — Сроки. (Советы; Порядок)\n[5:00–10:00] Бюджет — Цифры.");
+        assert_eq!(map.seen, Some(vec!["chapter@0".into(), "chapter@300".into()]));
+        assert_eq!(tools.run("outline", &json!({"topic": null})).unwrap().text, map.text);
+        let topic = tools.run("outline", &json!({"topic": 1})).unwrap();
+        assert_eq!(
+            topic.text,
+            "Breakdown of topic\n1. [0:00–5:00] Отчёт — Сроки.\nСоветы (list)\n[0:10] Сдать в пятницу\nБез времени\nПорядок (steps)\n[0:30] Сначала черновик\n[0:10] В пятницу."
+        );
+        assert_eq!(topic.seen, Some(vec!["topic@1".into()]));
+        let note = tools.run("outline", &json!({"topic": 2})).unwrap();
+        assert_eq!(note.text.trim_end(), "Topic 2 «Бюджет» has no breakdown yet: use search and read within that topic.");
+        assert_eq!(note.seen, Some(vec!["topic@2".into()]));
+        let missing = tools.run("outline", &json!({"topic": 9})).unwrap_err().to_string();
+        assert!(missing.contains('9') && missing.contains('2'), "{missing}");
+        assert!(tools.run("outline", &json!({"topic": "нет"})).is_err());
     }
 
     #[test]
@@ -460,8 +578,8 @@ pub(crate) mod tests {
         let tools = Tools::new(&rec, &no_search, 4000);
         let out = tools.run("mentions", &json!({"query": "отчёт"})).unwrap();
         assert!(out.text.starts_with("«отчёт»: 3 mentions, first at [0:10], last at [6:45]."), "{}", out.text);
-        assert!(out.text.contains("[0:10] Дана: …Отчёт отправляем в пятницу.…"), "{}", out.text);
-        assert!(out.text.contains("[6:40] Говорящий 2: …Отчёты"), "the label in the recording's language: {}", out.text);
+        assert!(out.text.contains("[0:10] @s1: …Отчёт отправляем в пятницу.…"), "{}", out.text);
+        assert!(out.text.contains("[6:40] @s2: …Отчёты"), "{}", out.text);
         assert_eq!(out.seen.as_ref().map(Vec::len), Some(3));
         // A phrase: its words in a row.
         let out = tools.run("mentions", &json!({"query": "бюджет на квартал"})).unwrap();
@@ -473,10 +591,11 @@ pub(crate) mod tests {
     #[test]
     fn speakers_get_names_and_stretches_go_to_the_helper() {
         let rec = recording();
-        assert_eq!(speaker_of(&rec, "Дана"), Some(0));
-        assert_eq!(speaker_of(&rec, "Говорящий 2"), Some(1));
-        assert_eq!(speaker_of(&rec, "Speaker 2"), Some(1));
-        assert_eq!(speaker_of(&rec, "Говорящий 7"), None, "no such speaker");
+        assert_eq!(speaker_of(&rec, "@s1"), Some(0));
+        assert_eq!(speaker_of(&rec, "s2"), Some(1));
+        assert_eq!(speaker_of(&rec, "@s2#3"), Some(1), "the recording number is ignored on one recording");
+        assert_eq!(speaker_of(&rec, "Дана"), None, "a name is not a label");
+        assert_eq!(speaker_of(&rec, "@s9"), None, "no such speaker");
         let named = std::cell::RefCell::new(Vec::new());
         let rename = |s: u32, n: &str| {
             named.borrow_mut().push((s, n.to_string()));
@@ -490,13 +609,13 @@ pub(crate) mod tests {
         let tools = Tools { rename: Some(&rename), delegate: Some(&delegate), ..Tools::new(&rec, &no_search, 4000) };
         let names: Vec<&str> = tools.specs().iter().map(|s| s.name).collect();
         assert!(names.contains(&"rename_speakers") && names.contains(&"delegate") && !names.contains(&"scan"));
-        let out = tools.run("rename_speakers", &json!({"names": [{"speaker": "Говорящий 2", "name": " Олег "}]})).unwrap();
-        assert_eq!(out.text, "Named: Говорящий 2 → Олег.");
+        let out = tools.run("rename_speakers", &json!({"names": [{"speaker": "@s2", "name": " Олег "}]})).unwrap();
+        assert_eq!(out.text, "Named: @s2 → Олег.");
         assert_eq!(*named.borrow(), [(1, "Олег".to_string())]);
-        assert!(tools.run("rename_speakers", &json!({"names": [{"speaker": "Говорящий 9", "name": "X"}]})).is_err());
+        assert!(tools.run("rename_speakers", &json!({"names": [{"speaker": "@s9", "name": "X"}]})).is_err());
         let out = tools.run("delegate", &json!({"task": "перескажи", "from": "0:00", "to": "1:00"})).unwrap();
         assert_eq!(out.text, "Итог: про пятницу [0:10].");
-        assert!(seen.borrow().starts_with("перескажи|[0:10] Дана: Отчёт"), "{}", seen.borrow());
+        assert!(seen.borrow().starts_with("перескажи|[0:10] @s1: Отчёт"), "{}", seen.borrow());
         // Without diarization there is nobody to name.
         let plain = Recording { diarized: false, ..recording() };
         let tools = Tools { rename: Some(&rename), ..Tools::new(&plain, &no_search, 4000) };

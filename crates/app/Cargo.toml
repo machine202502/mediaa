@@ -11,8 +11,8 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = "1"
-# Markdown of the agent's answers.
-egui_commonmark = { version = "0.25", default-features = false, features = ["pulldown_cmark"] }
+# Markdown of the agent's answers (the chat lays the lines out itself).
+pulldown-cmark = "0.13"
 mediaa-core.workspace = true
 mediaa-media.workspace = true
 mediaa-platform.workspace = true

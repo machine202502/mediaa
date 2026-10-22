@@ -488,7 +488,7 @@ pub fn dialogs(app: &mut App, ctx: &egui::Context) {
         let mut decision = None;
         let modal = egui::Modal::new(egui::Id::new("catalog-rename")).show(ctx, |ui| {
             ui.set_width(360.0);
-            ui.label(RichText::new(format!("{}  {}", icon::PENCIL_SIMPLE, t!("agent.rename"))).size(15.0).strong());
+            theme::popup_title(ui, &t!("agent.rename"));
             let edit = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
             if !edit.has_focus() && ui.memory(|m| m.focused().is_none()) {
                 edit.request_focus();
@@ -532,7 +532,7 @@ pub fn dialogs(app: &mut App, ctx: &egui::Context) {
         let mut decision = None;
         let modal = egui::Modal::new(egui::Id::new("catalog-delete")).show(ctx, |ui| {
             ui.set_width(380.0);
-            ui.label(RichText::new(format!("{}  {}", icon::TRASH, t!("agent.delete_title"))).size(15.0).strong());
+            theme::popup_title(ui, &t!("agent.delete_title"));
             ui.label(t!("agent.delete_text", name = name));
             if copies > 0 {
                 ui.colored_label(theme::palette(ui).danger, t!("agent.delete_copies", n = copies));

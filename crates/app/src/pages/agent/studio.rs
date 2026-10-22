@@ -241,6 +241,7 @@ impl Studio {
     fn transport(&mut self, ui: &mut egui::Ui, rect: Rect, layout: &mut Layout, p: theme::Palette) {
         // The topics of the recording cut the seek bar into segments (loaded by the dialog).
         let chapters = self.dialog.chapters();
+        let roster = self.dialog.roster();
         ui.painter().hline(rect.x_range(), rect.min.y, Stroke::new(1.0, p.border));
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(12.0, 8.0))), |ui| {
             let width = ui.available_width();
@@ -306,7 +307,7 @@ impl Studio {
                 // Position: whatever width is left, in the recording's topics.
                 let frac = if duration > 0.0 { (pos / duration) as f32 } else { 0.0 };
                 let seek = boxes.seek;
-                let (resp, v) = at(ui, seek, 24.0, |ui| topics::seek_bar(ui, seek.width(), frac, duration, chapters, "studio-position", p));
+                let (resp, v) = at(ui, seek, 24.0, |ui| topics::seek_bar(ui, seek.width(), frac, duration, chapters, "studio-position", &roster, p));
                 if let Some(f) = v {
                     let t = f64::from(f) * duration;
                     if resp.dragged() {
@@ -330,7 +331,8 @@ impl Studio {
                 // A child UI at the bar's left edge keeps the line left-aligned with it (and the
                 // label truncates at the bar's right edge).
                 ui.scope_builder(egui::UiBuilder::new().max_rect(line), |ui| {
-                    ui.add(egui::Label::new(RichText::new(text).size(11.0).color(p.text_weak)).truncate());
+                    let galley = super::mentions::galley(ui, &text, &roster, FontId::proportional(11.0), p.text_weak, ui.available_width(), true, false, p);
+                    ui.add(egui::Label::new(galley).truncate());
                 });
             }
         });

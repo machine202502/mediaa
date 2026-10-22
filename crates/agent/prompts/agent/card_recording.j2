@@ -5,8 +5,11 @@ Speakers: {{ speakers | join(", ") }}.
 {% else %}
 Speakers were not told apart.
 {% endif %}
-{% if chapters %}
-Outline: {{ chapters }} chapters (tool outline).
+{% if topics %}
+Topics (the map; outline with a topic number gives its breakdown):
+{% for t in topics %}
+{{ t.number }}. [{{ t.start }}–{{ t.end }}] {{ t.title }} — {{ t.summary }}
+{% endfor %}
 {% else %}
 No outline yet: use search and read.
 {% endif %}

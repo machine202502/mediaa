@@ -10,10 +10,9 @@
 use super::chat::linkify;
 use crate::theme;
 use eframe::egui::{self, RichText};
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_phosphor::regular as icon;
 use mediaa_agent::assistant::chat::Live;
-use mediaa_agent::assistant::WaitReason;
+use mediaa_agent::assistant::{StepRecord, WaitReason};
 use mediaa_core::chat::{ChatMessage, TimelineEntry, STEP_RUNNING};
 use rust_i18n::t;
 use std::hash::Hash;
@@ -26,7 +25,7 @@ const ROW_TEXT: f32 = 12.5;
 /// A step or a piece of reasoning.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row<'a> {
-    Step { title: &'a str, status: &'a str },
+    Step { title: &'a str, tool: &'a str, status: &'a str },
     Thinking { text: &'a str },
 }
 
@@ -47,7 +46,7 @@ pub fn blocks(entries: &[TimelineEntry], fold: bool) -> Vec<Block<'_>> {
     let mut folded = Vec::new();
     for e in entries {
         let block = match e {
-            TimelineEntry::Step { title, status, .. } => Block::Row(Row::Step { title, status }),
+            TimelineEntry::Step { title, tool, status } => Block::Row(Row::Step { title, tool, status }),
             TimelineEntry::Thinking { text } if text.trim().is_empty() => continue,
             TimelineEntry::Thinking { text } => Block::Row(Row::Thinking { text }),
             TimelineEntry::Answer { text, .. } if text.trim().is_empty() => continue,
@@ -155,7 +154,7 @@ fn status_text(status: &Status) -> String {
 }
 
 /// A step as one line: the icon of how it went and the title the model gave it.
-fn step_row(ui: &mut egui::Ui, title: &str, status: &str, p: theme::Palette) {
+fn step_row(ui: &mut egui::Ui, title: &str, status: &str, roster: &super::mentions::Roster, p: theme::Palette) {
     let (glyph, color) = match status {
         "found" => (icon::CHECK_CIRCLE, p.success),
         "nothing" => (icon::CIRCLE_DASHED, p.text_weak),
@@ -166,25 +165,58 @@ fn step_row(ui: &mut egui::Ui, title: &str, status: &str, p: theme::Palette) {
     };
     ui.horizontal(|ui| {
         ui.label(RichText::new(glyph).color(color));
-        ui.add(egui::Label::new(RichText::new(title).size(ROW_TEXT)).truncate());
+        let galley = super::mentions::galley(ui, title, roster, egui::FontId::proportional(ROW_TEXT), p.text, ui.available_width(), true, false, p);
+        ui.add(egui::Label::new(galley).truncate());
     });
 }
 
 /// A piece of reasoning: a header, closed until the user opens it; the text grows while the
 /// model thinks.
-fn thinking_row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, text: &str, p: theme::Palette) {
+fn thinking_row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, text: &str, roster: &super::mentions::Roster, p: theme::Palette) {
     egui::CollapsingHeader::new(RichText::new(t!("studio.thinking_block")).size(ROW_TEXT).color(p.text_weak))
         .id_salt(id)
         .default_open(false)
         .show(ui, |ui| {
-            ui.add(egui::Label::new(RichText::new(text.trim()).size(12.0).color(p.text_weak)).wrap());
+            super::mentions::show(ui, text.trim(), roster, egui::FontId::proportional(12.0), p.text_weak, false, p);
         });
 }
 
-fn row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, row: &Row, p: theme::Palette) {
+/// The title shown for a step. The draft and the check use the interface's language; the text
+/// stored with the answer stays the one the queue shows.
+fn step_title(tool: &str, title: &str) -> String {
+    match tool {
+        "verify" => t!("studio.verify_step").to_string(),
+        _ => title.to_string(),
+    }
+}
+
+/// The draft, folded until the user opens it. Its text is the step's result.
+fn draft_row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, body: &str, bare: bool, roster: &super::mentions::Roster, p: theme::Palette) -> Option<String> {
+    let mut seek = None;
+    egui::CollapsingHeader::new(RichText::new(t!("studio.draft_step")).size(ROW_TEXT).color(p.text_weak))
+        .id_salt(id)
+        .default_open(false)
+        .show(ui, |ui| {
+            seek = super::markdown::show(ui, &linkify(body, bare), roster, p);
+        });
+    seek
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, row: &Row, steps: &[StepRecord], draft_at: usize, bare: bool, roster: &super::mentions::Roster, p: theme::Palette) -> Option<String> {
     match row {
-        Row::Step { title, status } => step_row(ui, title, status, p),
-        Row::Thinking { text } => thinking_row(ui, id, text, p),
+        Row::Step { tool, .. } if *tool == "draft" => {
+            let body = steps.iter().filter(|s| s.tool == "draft").nth(draft_at).map(|s| s.result.as_str()).unwrap_or("");
+            draft_row(ui, id, body, bare, roster, p)
+        }
+        Row::Step { title, tool, status } => {
+            step_row(ui, &step_title(tool, title), status, roster, p);
+            None
+        }
+        Row::Thinking { text } => {
+            thinking_row(ui, id, text, roster, p);
+            None
+        }
     }
 }
 
@@ -195,24 +227,40 @@ pub fn timeline_ui(
     ui: &mut egui::Ui,
     id: impl Hash + std::fmt::Debug,
     entries: &[TimelineEntry],
+    steps: &[StepRecord],
     fold: bool,
     forced: bool,
-    cache: &mut CommonMarkCache,
     bare_times: bool,
+    roster: &super::mentions::Roster,
     p: theme::Palette,
 ) -> Option<String> {
     let mut seek = None;
+    let mut draft_at = 0usize;
     ui.push_id(id, |ui| {
         ui.spacing_mut().item_spacing.y = GAP;
         for (n, block) in blocks(entries, fold).iter().enumerate() {
             ui.push_id(n, |ui| match block {
-                Block::Row(r) => row(ui, "row", r, p),
+                Block::Row(r) => {
+                    let at = draft_at;
+                    if matches!(r, Row::Step { tool: "draft", .. }) {
+                        draft_at += 1;
+                    }
+                    if let Some(t) = row(ui, "row", r, steps, at, bare_times, roster, p) {
+                        seek = Some(t);
+                    }
+                }
                 Block::Folded(rows) => {
                     let header = RichText::new(t!("studio.steps_folded", n = rows.len())).size(11.5).color(p.text_weak);
                     egui::CollapsingHeader::new(header).id_salt("folded").default_open(false).show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = GAP / 2.0;
                         for (i, r) in rows.iter().enumerate() {
-                            row(ui, ("folded-row", i), r, p);
+                            let at = draft_at;
+                            if matches!(r, Row::Step { tool: "draft", .. }) {
+                                draft_at += 1;
+                            }
+                            if let Some(t) = row(ui, ("folded-row", i), r, steps, at, bare_times, roster, p) {
+                                seek = Some(t);
+                            }
                         }
                         if forced {
                             theme::hint(ui, t!("studio.forced"));
@@ -220,8 +268,7 @@ pub fn timeline_ui(
                     });
                 }
                 Block::Answer(text) => {
-                    CommonMarkViewer::new().show(ui, cache, &linkify(text, bare_times));
-                    if let Some(t) = take_seek(ui) {
+                    if let Some(t) = super::markdown::show(ui, &linkify(text, bare_times), roster, p) {
                         seek = Some(t);
                     }
                 }
@@ -232,8 +279,8 @@ pub fn timeline_ui(
 }
 
 /// The answer being written: its timeline as it is, the progress of a scan and the status line.
-pub fn live_ui(ui: &mut egui::Ui, live: &Live, cache: &mut CommonMarkCache, bare_times: bool, p: theme::Palette) -> Option<String> {
-    let seek = timeline_ui(ui, "live", &live.timeline.entries, false, false, cache, bare_times, p);
+pub fn live_ui(ui: &mut egui::Ui, live: &Live, bare_times: bool, roster: &super::mentions::Roster, p: theme::Palette) -> Option<String> {
+    let seek = timeline_ui(ui, "live", &live.timeline.entries, &live.steps, false, false, bare_times, roster, p);
     ui.spacing_mut().item_spacing.y = GAP;
     if let Some((done, total)) = live.scanning {
         ui.label(RichText::new(t!("studio.scanning", done = done, total = total)).size(ROW_TEXT).color(p.text_weak));
@@ -245,21 +292,6 @@ pub fn live_ui(ui: &mut egui::Ui, live: &Live, cache: &mut CommonMarkCache, bare
             ui.label(RichText::new(status_text(&status)).color(p.text_weak));
         });
     }
-    seek
-}
-
-/// A clicked citation link (what follows `seek:`): it seeks instead of opening a browser.
-pub fn take_seek(ui: &egui::Ui) -> Option<String> {
-    let mut seek = None;
-    ui.ctx().output_mut(|o| {
-        o.commands.retain(|c| match c {
-            egui::OutputCommand::OpenUrl(u) if u.url.starts_with("seek:") => {
-                seek = Some(u.url["seek:".len()..].to_string());
-                false
-            }
-            _ => true,
-        })
-    });
     seek
 }
 
@@ -288,7 +320,7 @@ mod tests {
     fn a_running_or_stopped_answer_is_drawn_in_order_and_a_final_one_is_folded() {
         let entries = [thinking("Надо искать."), step("Ищу сроки", "found"), thinking("  "), step("Читаю", "found"), answer("", false), answer("В пятницу.", false)];
         let row = |i: usize| match &entries[i] {
-            TimelineEntry::Step { title, status, .. } => Row::Step { title, status },
+            TimelineEntry::Step { title, tool, status } => Row::Step { title, tool, status },
             TimelineEntry::Thinking { text } => Row::Thinking { text },
             _ => unreachable!(),
         };
@@ -363,5 +395,15 @@ mod tests {
         // A stopped answer keeps its timeline in the message it stored.
         let stopped = [user(), section(), message(Author::Agent, "", json!({ "steps": [], "timeline": tl.to_value(), "stopped": true }))];
         assert_eq!(hidden_sections(&stopped, false), [false, true, false]);
+    }
+
+    #[test]
+    fn a_draft_and_its_check_fold_above_the_answer() {
+        let draft = TimelineEntry::Step { title: "Черновик ответа".into(), tool: "draft".into(), status: "found".into() };
+        let verify = TimelineEntry::Step { title: "Проверка ответа".into(), tool: "verify".into(), status: "found".into() };
+        let entries = [draft, verify, answer("В пятницу.", false)];
+        let done = blocks(&entries, true);
+        assert!(matches!(&done[0], Block::Folded(rows) if rows.len() == 2 && matches!(rows[0], Row::Step { tool: "draft", .. }) && matches!(rows[1], Row::Step { tool: "verify", .. })));
+        assert_eq!(done[1], Block::Answer("В пятницу."));
     }
 }

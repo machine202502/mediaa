@@ -52,6 +52,7 @@ pub fn tab_strip<I: Copy + Eq + Hash>(
     id_salt: impl Hash + std::fmt::Debug,
     tabs: &[Tab<I>],
     close_label: &str,
+    roster: &crate::pages::agent::mentions::Roster,
 ) -> Option<TabAction<I>> {
     let strip_id = ui.id().with(id_salt);
     // The current tab changes: bring it into view (once, not every frame).
@@ -104,16 +105,22 @@ pub fn tab_strip<I: Copy + Eq + Hash>(
                             painter.rect(rect, CornerRadius::same(6), fill, stroke, egui::StrokeKind::Inside);
                             // Title, one row, cut with «…».
                             let title_w = (TAB_WIDTH - PAD - if close.is_some() { CLOSE } else { PAD }).max(10.0);
-                            let mut job = egui::text::LayoutJob::single_section(
-                                tab.title.clone(),
-                                egui::TextFormat { font_id: FontId::proportional(12.5), color, ..Default::default() },
-                            );
-                            job.wrap = egui::text::TextWrapping {
-                                max_width: title_w,
-                                max_rows: 1,
-                                break_anywhere: true,
-                                overflow_character: Some('…'),
+                            let mut job = egui::text::LayoutJob {
+                                wrap: egui::text::TextWrapping {
+                                    max_width: title_w,
+                                    max_rows: 1,
+                                    break_anywhere: true,
+                                    overflow_character: Some('…'),
+                                },
+                                ..Default::default()
                             };
+                            crate::pages::agent::mentions::append(
+                                &mut job,
+                                &tab.title,
+                                roster,
+                                egui::TextFormat { font_id: FontId::proportional(12.5), color, ..Default::default() },
+                                &p,
+                            );
                             let galley = painter.layout_job(job);
                             painter.galley(egui::pos2(rect.min.x + PAD, rect.center().y - galley.size().y / 2.0), galley, color);
                             if let Some(r) = &close {
@@ -152,7 +159,7 @@ mod tests {
         egui_kittest::Harness::new_ui_state(
             move |ui, action: &mut Option<TabAction<i64>>| {
                 ui.set_width(400.0);
-                if let Some(a) = tab_strip(ui, "test-tabs", tabs, "Закрыть") {
+                if let Some(a) = tab_strip(ui, "test-tabs", tabs, "Закрыть", &crate::pages::agent::mentions::Roster::default()) {
                     *action = Some(a);
                 }
             },

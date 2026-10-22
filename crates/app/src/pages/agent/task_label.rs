@@ -30,7 +30,7 @@ pub fn label(kind: &str, title: &str) -> String {
 }
 
 /// [`label`] in a given language.
-fn label_in(locale: &str, kind: &str, title: &str) -> String {
+pub(crate) fn label_in(locale: &str, kind: &str, title: &str) -> String {
     let text: String = match kind {
         "analysis" => t!("queue.kind.analysis", locale = locale, title = title),
         "transcribe" => t!("queue.kind.transcribe", locale = locale, title = title),

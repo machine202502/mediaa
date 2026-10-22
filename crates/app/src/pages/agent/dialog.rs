@@ -11,7 +11,8 @@ use eframe::egui::{self, text::LayoutJob, Color32, CornerRadius, FontId, Margin,
 use egui_phosphor::regular as icon;
 use super::Services;
 use crossbeam_channel::Receiver;
-use super::analysis::{self, CardView, Command, ConfirmWindow, Offer, OptionsWindow, Outcome, Pane, RowState, StageRow};
+use super::analysis::{self, CardView, Command, ConfirmWindow, Offer, OptionsWindow, Outcome, Pane, RowState, StageHit, StageRow};
+use super::task_details;
 use mediaa_agent::pipeline::{self, Readiness, Stage};
 use mediaa_core::agent::AnalysisOptions;
 use mediaa_core::retrieval::Hit;
@@ -123,6 +124,10 @@ pub struct Dialog {
     compact_open: bool,
     options: Option<OptionsWindow>,
     confirm: Option<ConfirmWindow>,
+    /// A failed stage whose details are open, and the log excerpt taken when it was opened.
+    details: Option<mediaa_core::queue::TaskId>,
+    details_log: String,
+    details_copied: bool,
     search: Search,
 }
 
@@ -151,6 +156,9 @@ impl Dialog {
             compact_open: false,
             options: None,
             confirm: None,
+            details: None,
+            details_log: String::new(),
+            details_copied: false,
             search: Search::default(),
         }
     }
@@ -212,6 +220,11 @@ impl Dialog {
     }
 
     /// The topics of the recording (read with the transcript).
+    /// Speakers as the panes show them. Built from the names in memory, so a rename is immediate.
+    pub fn roster(&self) -> super::mentions::Roster {
+        super::mentions::Roster::recording(&self.names, self.replies.iter().filter_map(|r| r.speaker))
+    }
+
     pub fn chapters(&self) -> &[Chapter] {
         &self.chapters
     }
@@ -290,10 +303,13 @@ impl Dialog {
             }
             // The topics stay at the top of the pane while the replies scroll below.
             if av.topics && !self.chapters.is_empty() {
+                // Owned, so the topic widgets can borrow `chapters` and `reading` together.
+                let roster = self.roster();
                 if self.reading.is_some() {
                     // A topic's breakdown takes the whole pane; the replies are out of view.
                     let building = self.details_building();
-                    if let Some(topic) = topics::reading(ui, &self.chapters, &mut self.reading, player, building, p) {
+                    let spin = analysis::topics_running(&self.tree);
+                    if let Some(topic) = topics::reading(ui, &self.chapters, &mut self.reading, player, building, spin, &roster, p) {
                         self.hurry_detail(topic);
                     }
                     if self.reading.is_none() {
@@ -302,7 +318,8 @@ impl Dialog {
                     return;
                 }
                 // A topic or one of its parts was clicked: seek there and show its first reply.
-                if let Some(start) = topics::block(ui, &self.chapters, player.position(), body.height() * 0.4, &mut self.reading, p) {
+                let spin = analysis::topics_running(&self.tree);
+                if let Some(start) = topics::block(ui, &self.chapters, player.position(), body.height() * 0.4, &mut self.reading, spin, &roster, p) {
                     player.seek(start);
                     self.scroll_to = self.replies.iter().position(|r| r.end > start + 0.001).or(Some(0));
                     // The reply to scroll to is in the dialog, not in the search results.
@@ -319,6 +336,27 @@ impl Dialog {
             action = Some(a);
         }
         action
+    }
+
+    fn open_details(&mut self, id: mediaa_core::queue::TaskId) {
+        if self.details == Some(id) {
+            return;
+        }
+        let around = self.tree.iter().find(|t| t.id == id).and_then(|t| t.finished_ms).and_then(task_details::local_time);
+        self.details_log = task_details::log_excerpt(&task_details::read_program_log(), id, around);
+        self.details = Some(id);
+        self.details_copied = false;
+    }
+
+    fn take_stage(&mut self, hit: Option<StageHit>) -> Option<StudioAction> {
+        match hit {
+            Some(StageHit::Retry(id)) => Some(StudioAction::ResumeTask(id)),
+            Some(StageHit::Details(id)) => {
+                self.open_details(id);
+                None
+            }
+            None => None,
+        }
     }
 
     /// The analysis options window and the restart confirmation, when one is open; returns the
@@ -347,7 +385,31 @@ impl Dialog {
                 }
             }
         }
+        if let Some(a) = self.show_details(ctx) {
+            action = Some(a);
+        }
         action
+    }
+
+    fn show_details(&mut self, ctx: &egui::Context) -> Option<StudioAction> {
+        let id = self.details?;
+        let Some(task) = self.tree.iter().find(|t| t.id == id).cloned() else {
+            self.details = None;
+            return None;
+        };
+        let stats = super::queue::subtree_stats(&task, &self.tree);
+        let roster = task.scope.as_deref().map(|id| super::mentions::Roster::of_file(&self.ai_dir, id)).unwrap_or_else(|| self.roster());
+        match task_details::show(ctx, &task, &stats, &self.details_log, &mut self.details_copied, &roster) {
+            Some(task_details::Cmd::Close) => {
+                self.details = None;
+                None
+            }
+            Some(task_details::Cmd::CopyFailed(e)) => {
+                log::warn!("task details: {e}");
+                None
+            }
+            None => None,
+        }
     }
 
     /// The rows of the stages of the latest analysis, its status and the estimate of what is left.
@@ -381,16 +443,17 @@ impl Dialog {
     fn progress_ui(&mut self, ui: &mut egui::Ui, p: theme::Palette) -> Option<StudioAction> {
         let (status, rows, total) = self.analysis_rows()?;
         let title = analysis::total_title(status, total);
-        let view = CardView { title: &title, rows: &rows, running: matches!(status, TaskStatus::Running | TaskStatus::Queued | TaskStatus::Waiting), failed: status == TaskStatus::Failed };
-        analysis::card(ui, &view, None, p).map(StudioAction::ResumeTask)
+        let view = CardView { title: &title, rows: &rows, running: analysis::shows_spinner(status, &rows), failed: status == TaskStatus::Failed };
+        self.take_stage(analysis::card(ui, &view, None, p))
     }
 
     /// The one-line state of the analysis over the topics; a click unfolds the stage rows.
     fn compact_ui(&mut self, ui: &mut egui::Ui, p: theme::Palette) -> Option<StudioAction> {
         let (status, rows, total) = self.analysis_rows()?;
         let title = analysis::compact_title(status, &rows, total);
-        let view = CardView { title: &title, rows: &rows, running: matches!(status, TaskStatus::Running | TaskStatus::Queued | TaskStatus::Waiting), failed: status == TaskStatus::Failed };
-        analysis::card(ui, &view, Some(&mut self.compact_open), p).map(StudioAction::ResumeTask)
+        let view = CardView { title: &title, rows: &rows, running: analysis::shows_spinner(status, &rows), failed: status == TaskStatus::Failed };
+        let hit = analysis::card(ui, &view, Some(&mut self.compact_open), p);
+        self.take_stage(hit)
     }
 
     /// No transcript yet (or no speech in it): what the analysis gives and its button; returns
@@ -565,13 +628,15 @@ impl Dialog {
         let speaker = *speaker;
         let mut open = true;
         let mut done = false;
-        egui::Window::new(t!("studio.rename_speaker"))
-            .id(egui::Id::new(("speaker-name", &self.path)))
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ui.ctx(), |ui| {
+        let ctx = ui.ctx().clone();
+        theme::with_compact_title(&ctx, || {
+            egui::Window::new(t!("studio.rename_speaker"))
+                .id(egui::Id::new(("speaker-name", &self.path)))
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(&ctx, |ui| {
                 let edit = ui.add(egui::TextEdit::singleline(name).desired_width(240.0).hint_text(t!("studio.speaker", n = speaker + 1)));
                 edit.request_focus();
                 if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -581,6 +646,7 @@ impl Dialog {
                     done = true;
                 }
             });
+        });
         if done {
             let name = name.clone();
             if let Some(t) = &self.transcript {

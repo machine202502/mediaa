@@ -86,6 +86,9 @@ pub struct ChatRequest {
     pub priority: Option<Priority>,
     /// The Hugging Face token for downloading a model that is not on disk yet.
     pub hf_token: Option<String>,
+    /// When false, the model must not reason first (`enable_thinking=false`). Short service
+    /// calls (a chat title) set this; a request that does not say leaves thinking to the model.
+    pub enable_thinking: bool,
 }
 
 impl Default for ChatRequest {
@@ -101,6 +104,7 @@ impl Default for ChatRequest {
             device: None,
             priority: None,
             hf_token: None,
+            enable_thinking: true,
         }
     }
 }
@@ -353,7 +357,14 @@ impl ChatRequest {
         Ok(ChatCall {
             source,
             messages,
-            generate: llm::Generate { max_tokens: self.max_tokens, temperature: self.temperature, json_schema, no_repeats: self.no_repeats, think_tokens: None },
+            generate: llm::Generate {
+                max_tokens: self.max_tokens,
+                temperature: self.temperature,
+                json_schema,
+                no_repeats: self.no_repeats,
+                think_tokens: None,
+                enable_thinking: self.enable_thinking,
+            },
             n_ctx: self.n_ctx.unwrap_or(DEFAULT_CHAT_N_CTX),
             device: self.device.unwrap_or_default(),
             interactive: self.priority.is_none_or(Priority::interactive),
@@ -477,6 +488,7 @@ mod tests {
             device: Some(Device::Cpu),
             priority: Some(Priority::Background),
             hf_token: Some("token".into()),
+            enable_thinking: false,
         };
         let call = request.into_call().unwrap();
         assert_eq!(call.messages.len(), 2);
@@ -484,6 +496,7 @@ mod tests {
         assert_eq!((call.generate.max_tokens, call.generate.temperature), (10, 0.5));
         assert!(call.generate.no_repeats);
         assert_eq!(call.generate.json_schema.as_deref(), Some(r#"{"type":"object"}"#));
+        assert!(!call.generate.enable_thinking);
         assert_eq!((call.n_ctx, call.device, call.interactive), (1000, Device::Cpu, false));
         assert_eq!(call.hf_token.as_deref(), Some("token"));
     }
@@ -497,6 +510,7 @@ mod tests {
         assert_eq!(call.n_ctx, DEFAULT_CHAT_N_CTX);
         assert_eq!(call.device, Device::Auto);
         assert!(call.interactive, "a request without a priority is interactive");
+        assert!(call.generate.enable_thinking, "thinking stays available unless the call turns it off");
     }
 
     #[test]

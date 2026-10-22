@@ -92,7 +92,7 @@ impl LocalEngine {
     /// shown in [`Engine::status`].
     fn ensure(&self, source: &ModelSource, hf_token: Option<&str>) -> Result<(), EngineError> {
         let ModelSource::HuggingFace { repo } = source else { return Ok(()) };
-        if hub::is_downloaded(&self.models_dir, hub::split_spec(repo).0) {
+        if hub::is_downloaded(&self.models_dir, repo) {
             return Ok(());
         }
         self.download(repo, hf_token, None).map(drop)
@@ -121,9 +121,9 @@ impl LocalEngine {
             ModelSource::Local { path } => Ok(path.clone()),
             ModelSource::HuggingFace { repo } => {
                 self.ensure(source, hf_token)?;
-                // The download folder is named after the repository, not the file part.
-                let (repo_id, file) = hub::split_spec(repo);
-                let dir = hub::model_dir(&self.models_dir, repo_id);
+                // A spec with a file part has a folder of its own (`hub::model_dir`), the file inside.
+                let (_, file) = hub::split_spec(repo);
+                let dir = hub::model_dir(&self.models_dir, repo);
                 Ok(file.map_or_else(|| dir.clone(), |file| dir.join(file)))
             }
             ModelSource::Provider { .. } => Err(EngineError::bad_request("speech models run locally, not at a provider")),
@@ -312,9 +312,9 @@ impl Engine for LocalEngine {
     fn pull(&self, spec: &str, hf_token: Option<&str>, on_progress: ProgressCallback) -> Result<PathBuf, EngineError> {
         match types::parse_spec(spec)? {
             ModelSource::HuggingFace { repo } => {
-                let (repo_id, file) = hub::split_spec(&repo);
-                if hub::is_downloaded(&self.models_dir, repo_id) {
-                    let dir = hub::model_dir(&self.models_dir, repo_id);
+                let (_, file) = hub::split_spec(&repo);
+                if hub::is_downloaded(&self.models_dir, &repo) {
+                    let dir = hub::model_dir(&self.models_dir, &repo);
                     let bytes = walk_files(&dir).map_or(0, |files| total_bytes(&files));
                     on_progress(bytes, bytes);
                     return Ok(file.map_or_else(|| dir.clone(), |file| dir.join(file)));
@@ -335,7 +335,7 @@ impl Engine for LocalEngine {
         let root = std::fs::canonicalize(&self.models_dir)
             .map_err(|e| EngineError::internal(format!("reading the models folder {}: {e}", self.models_dir.display())))?;
         let path = match types::parse_spec(spec)? {
-            ModelSource::HuggingFace { repo } => hub::model_dir(&self.models_dir, hub::split_spec(&repo).0),
+            ModelSource::HuggingFace { repo } => hub::model_dir(&self.models_dir, &repo),
             ModelSource::Local { path } => path,
             ModelSource::Provider { .. } => return Err(EngineError::bad_request("provider models are not stored by the engine")),
         };
@@ -495,27 +495,30 @@ mod tests {
     }
 
     #[test]
-    fn a_speech_spec_resolves_into_its_repository_folder() {
+    fn a_file_spec_resolves_into_the_folder_its_download_made() {
         let root = tempfile::tempdir().unwrap();
-        let dir = downloaded(root.path(), "csukuangfj/vad", &["silero_vad.onnx"]);
+        // Where `hub::download` puts one file of a repository: a folder of its own.
+        let dir = downloaded(root.path(), "csukuangfj/vad/silero_vad.onnx", &["silero_vad.onnx"]);
+        assert_eq!(dir, hub::model_dir(root.path(), "csukuangfj/vad/silero_vad.onnx"));
         let engine = LocalEngine::new(root.path().to_path_buf(), Budget::default());
         // No network: the completion marker is already there.
         let spec = ModelSource::HuggingFace { repo: "csukuangfj/vad/silero_vad.onnx".into() };
         assert_eq!(engine.source_path(&spec, None).unwrap(), dir.join("silero_vad.onnx"));
-        let folder = ModelSource::HuggingFace { repo: "csukuangfj/vad".into() };
-        assert_eq!(engine.source_path(&folder, None).unwrap(), dir);
+        let repo = downloaded(root.path(), "csukuangfj/other", &["model.onnx"]);
+        let folder = ModelSource::HuggingFace { repo: "csukuangfj/other".into() };
+        assert_eq!(engine.source_path(&folder, None).unwrap(), repo);
         assert!(engine.source_path(&ModelSource::Provider { provider: "p".into(), model: "m".into() }, None).is_err());
     }
 
     #[test]
-    fn a_file_spec_deletes_its_repository_and_the_folder_itself_is_kept() {
+    fn a_file_spec_deletes_its_folder_and_the_models_folder_itself_is_kept() {
         let root = tempfile::tempdir().unwrap();
-        let model = downloaded(root.path(), "a/b", &["model.onnx"]);
+        let model = downloaded(root.path(), "a/b/model.onnx", &["model.onnx"]);
         let other = downloaded(root.path(), "c/d", &["m.gguf"]);
         let engine = LocalEngine::new(root.path().to_path_buf(), Budget::default());
 
         engine.delete_model("a/b/model.onnx").unwrap();
-        assert!(!model.exists(), "the whole downloaded repository goes");
+        assert!(!model.exists(), "the folder of the downloaded file goes");
         assert!(other.exists(), "another model is untouched");
 
         let outside = tempfile::tempdir().unwrap();

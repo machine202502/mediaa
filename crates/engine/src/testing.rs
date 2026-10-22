@@ -38,6 +38,8 @@ pub struct RecordedChat {
     pub hf_token: Option<String>,
     /// The reasoning budget (tokens) of a `chat_thinking` request.
     pub thinking: Option<u32>,
+    /// `enable_thinking` of the request. Short service calls set it to false.
+    pub enable_thinking: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -111,6 +113,7 @@ impl FakeEngine {
             interactive: request.priority.is_none_or(|priority| priority.interactive()),
             hf_token: request.hf_token.clone(),
             thinking,
+            enable_thinking: request.enable_thinking,
         });
         if request.model.trim() == "unsupported/model" {
             return Err(EngineError::model_unsupported("not a chat model"));

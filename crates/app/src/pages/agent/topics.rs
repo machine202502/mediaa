@@ -5,6 +5,7 @@
 //! bar and the order and numbering of the breakdown's lines are pure functions, tested without
 //! a window.
 
+use super::mentions::{self, Roster};
 use crate::player::Player;
 use crate::theme::Palette;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Margin, Rect, RichText, Sense, Stroke, StrokeKind};
@@ -205,7 +206,8 @@ pub fn header(rect: Rect) -> Header {
 /// the pointer highlighted and its tooltip shown, a tick at every boundary between the parts
 /// of a topic), the played part and the knob as before. A recording without topics gets the
 /// plain bar. Returns the clicked or dragged fraction.
-pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapters: &[Chapter], id: &str, p: Palette) -> (egui::Response, Option<f32>) {
+#[allow(clippy::too_many_arguments)]
+pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapters: &[Chapter], id: &str, roster: &Roster, p: Palette) -> (egui::Response, Option<f32>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width.max(40.0), 24.0), Sense::hover());
     let resp = ui.interact(rect, ui.id().with(id), Sense::click_and_drag());
     let track = Rect::from_center_size(rect.center(), egui::vec2(rect.width() - 2.0 * TRACK_INSET, TRACK));
@@ -259,14 +261,16 @@ pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapter
     if let (Some(i), Some(pt)) = (hovered, resp.hover_pos()) {
         let text = tooltip(&chapters[i], hovered_part);
         let font = FontId::proportional(12.0);
-        let text_width = ui.fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), p.text)).size().x;
+        let shown = roster.render(&text);
+        let text_width = ui.fonts_mut(|f| f.layout_no_wrap(shown, font.clone(), p.text)).size().x;
         let margin = ui.style().spacing.menu_margin;
         let width = text_width + f32::from(margin.left) + f32::from(margin.right);
         let left = tooltip_x(pt.x, width, ui.ctx().content_rect());
         let mut tip = egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), ui.id().with((id, "topic-tip")), egui::PopupAnchor::Position(egui::pos2(left, track.min.y)));
         tip.popup = tip.popup.align(egui::RectAlign::TOP_START).width(width).frame(tooltip_frame(ui.style()));
         tip.show(|ui| {
-            ui.add(egui::Label::new(RichText::new(text).size(12.0)).wrap_mode(egui::TextWrapMode::Extend));
+            let galley = mentions::galley(ui, &text, roster, font, p.text, width, false, false, p);
+            ui.add(egui::Label::new(galley).wrap_mode(egui::TextWrapMode::Extend));
         });
     }
     let value = resp.interact_pointer_pos().filter(|_| resp.clicked() || resp.dragged()).map(|pt| ((pt.x - track.left() - KNOB) / (track.width() - 2.0 * KNOB)).clamp(0.0, 1.0));
@@ -278,16 +282,17 @@ pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapter
 /// current one highlighted; a click on a topic returns the time to seek to (the dialog scrolls
 /// to the first reply from there), the caret on its right opens its breakdown (`reading`, see
 /// [`reading`]).
-pub fn block(ui: &mut egui::Ui, chapters: &[Chapter], position: f64, max_height: f32, reading: &mut Option<usize>, p: Palette) -> Option<f64> {
+#[allow(clippy::too_many_arguments)]
+pub fn block(ui: &mut egui::Ui, chapters: &[Chapter], position: f64, max_height: f32, reading: &mut Option<usize>, spin: bool, roster: &Roster, p: Palette) -> Option<f64> {
     if chapters.is_empty() {
         return None;
     }
     let mut open = ui.ctx().data_mut(|d| d.get_persisted::<bool>(open_id())).unwrap_or(false);
     let current = current_topic(chapters, position).unwrap_or(0);
     let clicked = if open {
-        expanded(ui, chapters, current, max_height.max(96.0), p, &mut open, reading)
+        expanded(ui, chapters, current, max_height.max(96.0), p, &mut open, reading, spin, roster)
     } else {
-        folded(ui, chapters, current, p, &mut open)
+        folded(ui, chapters, current, p, &mut open, spin, roster)
     };
     if ui.ctx().data_mut(|d| d.get_persisted::<bool>(open_id())) != Some(open) {
         ui.ctx().data_mut(|d| d.insert_persisted(open_id(), open));
@@ -296,20 +301,20 @@ pub fn block(ui: &mut egui::Ui, chapters: &[Chapter], position: f64, max_height:
 }
 
 /// The folded line: the current topic; a click unfolds the block.
-fn folded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, p: Palette, open: &mut bool) -> Option<f64> {
+fn folded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, p: Palette, open: &mut bool, spin: bool, roster: &Roster) -> Option<f64> {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER_H), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    hover_tip(&resp, &chapters[current]);
+    hover_tip(&resp, &chapters[current], roster);
     if resp.clicked() {
         *open = true;
     }
     let head = header(rect);
     let painter = ui.painter_at(rect);
     painter.rect(rect, CornerRadius::same(8), if resp.hovered() { p.card_hover } else { p.card }, Stroke::new(1.0, p.border), StrokeKind::Inside);
-    painter.text(head.icon, Align2::LEFT_CENTER, icon::LIST_BULLETS, FontId::proportional(14.0), p.accent);
+    header_icon(ui, head.icon, spin, p);
     let c = &chapters[current];
     let text = format!("{}  {}", human_duration(c.start), c.digest.title);
-    let galley = elided(ui, &text, head.text.width(), FontId::proportional(13.0), p.text);
+    let galley = elided(ui, &text, head.text.width(), FontId::proportional(13.0), p.text, roster, p);
     painter.galley(egui::pos2(head.text.left(), rect.center().y - galley.size().y / 2.0), galley, p.text);
     painter.text(head.count, Align2::RIGHT_CENTER, format!("({}/{})", current + 1, chapters.len()), FontId::monospace(11.0), p.text_weak);
     painter.text(head.caret.center(), Align2::CENTER_CENTER, icon::CARET_DOWN, FontId::proportional(12.0), p.text_weak);
@@ -317,7 +322,8 @@ fn folded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, p: Palette, o
 }
 
 /// The unfolded block: a header that folds it and the list of topics in their own scroll.
-fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, max_height: f32, p: Palette, open: &mut bool, reading: &mut Option<usize>) -> Option<f64> {
+#[allow(clippy::too_many_arguments)] // the header's pieces, plus whether the list icon is a spinner
+fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, max_height: f32, p: Palette, open: &mut bool, reading: &mut Option<usize>, spin: bool, roster: &Roster) -> Option<f64> {
     let mut clicked = None;
     // The card is filled by a frameless frame and its border is painted over the final rect:
     // a frame stroke would inset the header by a pixel and make it jump against the folded one.
@@ -334,7 +340,7 @@ fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, max_height:
             }
             let h = header(head);
             let painter = painter_at(ui, head);
-            painter.text(h.icon, Align2::LEFT_CENTER, icon::LIST_BULLETS, FontId::proportional(14.0), p.accent);
+            header_icon(ui, h.icon, spin, p);
             painter_at(ui, h.text).text(egui::pos2(h.text.left(), head.center().y), Align2::LEFT_CENTER, t!("studio.topics"), FontId::proportional(13.0), p.text);
             painter.text(h.caret.center(), Align2::CENTER_CENTER, icon::CARET_UP, FontId::proportional(12.0), p.text_weak);
             ui.add_space(2.0);
@@ -349,7 +355,7 @@ fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, max_height:
                         .id_salt("studio-topics-list")
                         .show(ui, |ui| {
                             for (i, c) in chapters.iter().enumerate() {
-                                if let Some(topic) = topic_row(ui, i, c, i == current, reading, p) {
+                                if let Some(topic) = topic_row(ui, i, c, i == current, reading, roster, p) {
                                     clicked = Some(topic);
                                 }
                                 ui.add_space(2.0);
@@ -365,13 +371,13 @@ fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, max_height:
 
 /// One topic in the unfolded list: a click on it returns its start (the time to seek to); the
 /// caret on its right opens the topic's breakdown. The current topic is highlighted.
-fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, reading: &mut Option<usize>, p: Palette) -> Option<f64> {
+fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, reading: &mut Option<usize>, roster: &Roster, p: Palette) -> Option<f64> {
     let (rect, row) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());
     let row = row.on_hover_cursor(egui::CursorIcon::PointingHand);
     let caret = Rect::from_center_size(egui::pos2(rect.right() - 10.0, rect.center().y), egui::vec2(18.0, 18.0));
     let toggle = ui.interact(caret, ui.id().with(("topic-toggle", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
     // The row's delayed tooltip is the summary (the breakdown does not repeat it).
-    hover_tip(&row, c);
+    hover_tip(&row, c, roster);
     let on_caret = row.interact_pointer_pos().is_some_and(|pt| caret.contains(pt));
     let mut clicked = None;
     if row.clicked() && !on_caret {
@@ -392,7 +398,7 @@ fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, reading: &
     let left = rect.left() + 8.0 + time.size().x + 10.0;
     let title = Rect::from_min_max(egui::pos2(left, rect.top()), egui::pos2(caret.left() - 2.0, rect.bottom()));
     let color = if current { p.accent } else { p.text };
-    let galley = elided(ui, &c.digest.title, title.width(), FontId::proportional(13.0), color);
+    let galley = elided(ui, &c.digest.title, title.width(), FontId::proportional(13.0), color, roster, p);
     painter.galley(egui::pos2(title.left(), rect.center().y - galley.size().y / 2.0), galley, color);
     painter.text(caret.center(), Align2::CENTER_CENTER, icon::CARET_RIGHT, FontId::proportional(12.0), p.text_weak);
     clicked
@@ -466,7 +472,8 @@ pub fn section_lines(section: &Section) -> Vec<Line> {
 /// of a long topic and the quotes. A time is a small link that seeks `player` and leaves the
 /// breakdown open. A topic with no breakdown yet shows «Разбор готовится…» (while `building`)
 /// and its summary; the topic is then returned, so the caller can ask the queue to hurry it.
-pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usize>, player: &mut Player, building: bool, p: Palette) -> Option<usize> {
+#[allow(clippy::too_many_arguments)]
+pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usize>, player: &mut Player, building: bool, spin: bool, roster: &Roster, p: Palette) -> Option<usize> {
     let i = (*current)?.min(chapters.len().checked_sub(1)?);
     let c = &chapters[i];
     let esc = !ui.ctx().egui_wants_keyboard_input() && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -476,9 +483,9 @@ pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usi
     let head = Rect::from_min_size(card.min, egui::vec2(card.width(), HEADER_H));
     let h = reading_header(head);
     let painter = painter_at(ui, head);
-    painter.text(h.icon, Align2::LEFT_CENTER, icon::LIST_BULLETS, FontId::proportional(14.0), p.accent);
+    header_icon(ui, h.icon, spin, p);
     let text = format!("{}  {}", human_duration(c.start), c.digest.title.trim());
-    let galley = elided(ui, &text, h.text.width(), FontId::proportional(13.0), p.text);
+    let galley = elided(ui, &text, h.text.width(), FontId::proportional(13.0), p.text, roster, p);
     painter.galley(egui::pos2(h.text.left(), head.center().y - galley.size().y / 2.0), galley, p.text);
     let mut leave = esc;
     let buttons = [
@@ -494,7 +501,7 @@ pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usi
             painter.rect_filled(rect, CornerRadius::same(5), p.card_hover);
         }
         painter.text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(12.0), if enabled { p.text } else { p.text_weak.gamma_multiply(0.5) });
-        text_tip(&resp, &tip);
+        text_tip(&resp, &tip, roster);
         if enabled && resp.clicked() {
             match target {
                 Some(t) => *current = Some(t),
@@ -522,7 +529,7 @@ pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usi
                 });
                 if !d.summary.trim().is_empty() {
                     ui.add_space(6.0);
-                    ui.add(egui::Label::new(RichText::new(d.summary.trim()).size(13.0)).wrap());
+                    mentions::show(ui, d.summary.trim(), roster, FontId::proportional(13.0), p.text, false, p);
                 }
             }
             for section in &d.sections {
@@ -531,11 +538,11 @@ pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usi
                     continue;
                 }
                 if !section.title.trim().is_empty() {
-                    ui.label(RichText::new(section.title.trim()).size(13.5).strong());
+                    mentions::show(ui, section.title.trim(), roster, FontId::proportional(13.5), ui.visuals().strong_text_color(), false, p);
                     ui.add_space(2.0);
                 }
                 for line in lines {
-                    item_row(ui, &line, false, player, p);
+                    item_row(ui, &line, false, player, roster, p);
                 }
                 ui.add_space(10.0);
             }
@@ -544,7 +551,7 @@ pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usi
                 ui.label(RichText::new(t!("analysis.parts")).size(13.5).strong());
                 ui.add_space(2.0);
                 for part in parts {
-                    item_row(ui, &Line { marker: "•".into(), time: Some(part.start), text: part.title.trim().to_string() }, false, player, p);
+                    item_row(ui, &Line { marker: "•".into(), time: Some(part.start), text: part.title.trim().to_string() }, false, player, roster, p);
                 }
                 ui.add_space(10.0);
             }
@@ -553,7 +560,7 @@ pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usi
                 ui.label(RichText::new(t!("studio.quotes")).size(13.5).strong());
                 ui.add_space(2.0);
                 for q in quotes {
-                    item_row(ui, &Line { marker: String::new(), time: Some(q.time), text: q.text.trim().to_string() }, true, player, p);
+                    item_row(ui, &Line { marker: String::new(), time: Some(q.time), text: q.text.trim().to_string() }, true, player, roster, p);
                 }
             }
         });
@@ -565,17 +572,26 @@ pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usi
     pending
 }
 
-/// One line of the breakdown in three columns — marker, time link, wrapped text — so every item
-/// of a section starts at the same x whether it has a time or not.
-fn item_row(ui: &mut egui::Ui, line: &Line, italic: bool, player: &mut Player, p: Palette) {
+/// The list icon, or a spinner of the same size while topics or the breakdown are running.
+fn header_icon(ui: &egui::Ui, at: egui::Pos2, spin: bool, p: Palette) {
+    if spin {
+        egui::Spinner::new().size(14.0).color(p.accent).paint_at(ui, Rect::from_center_size(at + egui::vec2(7.0, 0.0), egui::vec2(14.0, 14.0)));
+    } else {
+        ui.painter().text(at, Align2::LEFT_CENTER, icon::LIST_BULLETS, FontId::proportional(14.0), p.accent);
+    }
+}
+
+/// One line of the breakdown: marker, then a time link only when the item has a time (no empty
+/// column), then the wrapped text.
+fn item_row(ui: &mut egui::Ui, line: &Line, italic: bool, player: &mut Player, roster: &Roster, p: Palette) {
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         let (marker, _) = ui.allocate_exact_size(egui::vec2(MARKER_W, ITEM_LINE), Sense::hover());
         if !line.marker.is_empty() {
             ui.painter().text(marker.left_center(), Align2::LEFT_CENTER, &line.marker, FontId::proportional(13.0), p.text_weak);
         }
-        let (slot, resp) = ui.allocate_exact_size(egui::vec2(TIME_COL, ITEM_LINE), if line.time.is_some() { Sense::click() } else { Sense::hover() });
         if let Some(time) = line.time {
+            let (slot, resp) = ui.allocate_exact_size(egui::vec2(TIME_COL, ITEM_LINE), Sense::click());
             let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
             let color = if resp.hovered() { p.text } else { p.accent };
             let galley = ui.fonts_mut(|f| f.layout_no_wrap(human_duration(time), FontId::monospace(11.0), color));
@@ -583,38 +599,36 @@ fn item_row(ui: &mut egui::Ui, line: &Line, italic: bool, player: &mut Player, p
             if resp.hovered() {
                 ui.painter().hline(slot.left()..=slot.left() + galley.size().x, slot.center().y + galley.size().y / 2.0, Stroke::new(1.0, color));
             }
-            text_tip(&resp, &t!("studio.go_there"));
+            text_tip(&resp, &t!("studio.go_there"), roster);
             if resp.clicked() {
                 player.seek(time);
             }
         }
-        let mut text = RichText::new(&line.text).size(13.0);
-        if italic {
-            text = text.italics();
-        }
-        ui.add(egui::Label::new(text).wrap());
+        mentions::show(ui, &line.text, roster, FontId::proportional(13.0), p.text, italic, p);
     });
     ui.add_space(3.0);
 }
 
 /// A shadowless tooltip with plain text (the interface's hints have no shadow).
-pub fn text_tip(resp: &egui::Response, text: &str) {
+pub fn text_tip(resp: &egui::Response, text: &str, roster: &Roster) {
     let mut tip = egui::Tooltip::for_enabled(resp);
     tip.popup = tip.popup.width(360.0).frame(tooltip_frame(resp.ctx.global_style().as_ref()));
     tip.show(|ui| {
         ui.set_max_width(360.0);
-        ui.add(egui::Label::new(RichText::new(text).size(12.0)).wrap());
+        let p = crate::theme::palette(ui);
+        mentions::show(ui, text, roster, FontId::proportional(12.0), p.text, false, p);
     });
 }
 
 /// The delayed hover tooltip of a topic in the block: what is said in it, wrapped to about
 /// 360 px in the same shadowless frame as the one above the seek bar.
-fn hover_tip(resp: &egui::Response, c: &Chapter) {
+fn hover_tip(resp: &egui::Response, c: &Chapter, roster: &Roster) {
     let mut tip = egui::Tooltip::for_enabled(resp);
     tip.popup = tip.popup.width(360.0).frame(tooltip_frame(resp.ctx.global_style().as_ref()));
     tip.show(|ui| {
         ui.set_max_width(360.0);
-        ui.add(egui::Label::new(RichText::new(hover_text(c)).size(12.0)).wrap());
+        let p = crate::theme::palette(ui);
+        mentions::show(ui, &hover_text(c), roster, FontId::proportional(12.0), p.text, false, p);
     });
 }
 
@@ -627,13 +641,8 @@ fn painter_at(ui: &egui::Ui, rect: Rect) -> egui::Painter {
 
 /// One line of `text`, cut at `width` with egui's ellipsis: a title too long for its row ends
 /// with «…» instead of being clipped mid-letter.
-fn elided(ui: &egui::Ui, text: &str, width: f32, font: FontId, color: Color32) -> std::sync::Arc<egui::Galley> {
-    egui::WidgetText::from(RichText::new(text).font(font).color(color)).into_galley(
-        ui,
-        Some(egui::TextWrapMode::Truncate),
-        width.max(0.0),
-        egui::TextStyle::Body,
-    )
+fn elided(ui: &egui::Ui, text: &str, width: f32, font: FontId, color: Color32, roster: &Roster, p: Palette) -> std::sync::Arc<egui::Galley> {
+    mentions::galley(ui, text, roster, font, color, width, true, false, p)
 }
 
 #[cfg(test)]

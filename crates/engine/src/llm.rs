@@ -119,11 +119,14 @@ pub struct Generate {
     /// the block is closed for it) and only after it the schema constrains the text. The
     /// reasoning stays in the stream and in the text, `max_tokens` counts what follows it.
     pub think_tokens: Option<u32>,
+    /// When false, the prompt closes an empty `<think>` block (`enable_thinking=false`), so a
+    /// model that reasons by default answers at once. Short service calls set this.
+    pub enable_thinking: bool,
 }
 
 impl Default for Generate {
     fn default() -> Self {
-        Self { max_tokens: 512, temperature: 0.0, json_schema: None, no_repeats: true, think_tokens: None }
+        Self { max_tokens: 512, temperature: 0.0, json_schema: None, no_repeats: true, think_tokens: None, enable_thinking: true }
     }
 }
 
@@ -190,9 +193,15 @@ impl LocalModel {
 
     /// Answers `messages`; `on_text` gets the text as it is produced (returning `false` stops).
     /// Stops at the end of the answer, at `max_tokens` or when `cancel` is set. Reasoning (`<think>…</think>`) is not
-    /// part of the returned answer nor of the streamed text.
+    /// part of the returned answer nor of the streamed text, except a call with thinking turned
+    /// off (`enable_thinking`): that returns the text as the model wrote it.
     pub fn chat(&self, messages: &[Message], opts: &Generate, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> anyhow::Result<Generated> {
         let prompt = self.prompt(messages)?;
+        // No reasoning: the same empty block a Qwen template writes for `enable_thinking=false`.
+        // The raw text is kept, so a caller with no answer can say what the model returned.
+        if !opts.enable_thinking && opts.think_tokens.is_none() {
+            return self.complete(&suppress_thinking(prompt), opts, cancel, on_text);
+        }
         if opts.think_tokens.is_some() {
             // The reasoning is part of the stream and of the text; the caller splits it off
             // ([`ThinkSplitter`], [`split_thinking`]). The block is opened in the prompt, so the
@@ -336,6 +345,18 @@ impl LocalModel {
 
 const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
+
+/// The prompt with reasoning already closed, so the model writes the answer next.
+fn suppress_thinking(prompt: String) -> String {
+    let trimmed = prompt.trim_end();
+    if trimmed.ends_with(THINK_CLOSE) {
+        prompt
+    } else if trimmed.ends_with(THINK_OPEN) {
+        format!("{trimmed}\n\n{THINK_CLOSE}\n\n")
+    } else {
+        format!("{prompt}{THINK_OPEN}\n\n{THINK_CLOSE}\n\n")
+    }
+}
 /// Temperature of the reasoning phase (greedy reasoning loops).
 const THINK_TEMPERATURE: f32 = 0.6;
 
@@ -500,6 +521,16 @@ pub fn check_schema(schema: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_is_closed_in_the_prompt_when_it_is_off() {
+        let assistant = "<|im_start|>assistant\n";
+        let closed = suppress_thinking(assistant.to_string());
+        assert_eq!(closed, "<|im_start|>assistant\n<think>\n\n</think>\n\n");
+        assert_eq!(suppress_thinking(format!("{assistant}<think>")), format!("{assistant}<think>\n\n</think>\n\n"));
+        let done = format!("{assistant}<think>\n\n</think>");
+        assert_eq!(suppress_thinking(done.clone()), done);
+    }
 
     #[test]
     fn reasoning_is_not_part_of_the_answer() {

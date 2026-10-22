@@ -711,7 +711,7 @@ fn delete_dialog(app: &mut App, ctx: &egui::Context) {
     let mut decision = None;
     let modal = egui::Modal::new(egui::Id::new("confirm-delete")).show(ctx, |ui| {
         ui.set_width(340.0);
-        ui.label(RichText::new(format!("{}  {}", icon::TRASH, t!("lib.delete_title"))).size(15.0).strong());
+        theme::popup_title(ui, &t!("lib.delete_title"));
         ui.label(t!("lib.delete_text", name = name));
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -756,7 +756,7 @@ fn rename_dialog(app: &mut App, ctx: &egui::Context) {
     let mut decision = None;
     let modal = egui::Modal::new(egui::Id::new("rename-media")).show(ctx, |ui| {
         ui.set_width(380.0);
-        ui.label(RichText::new(format!("{}  {}", icon::PENCIL_SIMPLE, t!("lib.rename_title"))).size(15.0).strong());
+        theme::popup_title(ui, &t!("lib.rename_title"));
         let edit = ui.add(egui::TextEdit::singleline(&mut title).desired_width(f32::INFINITY));
         if !edit.has_focus() && ui.memory(|m| m.focused().is_none()) {
             edit.request_focus();

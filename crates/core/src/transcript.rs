@@ -249,6 +249,13 @@ impl Transcript {
         Ok(replies(&self.phrases()?, &[]))
     }
 
+    /// Speaker indexes that have a reply. Enough to render `@sN` without loading the dialog.
+    pub fn speaker_ids(&self) -> anyhow::Result<Vec<u32>> {
+        let mut q = self.db.prepare("SELECT DISTINCT speaker FROM replies WHERE speaker IS NOT NULL ORDER BY speaker")?;
+        let rows = q.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Names given to speakers.
     pub fn speaker_names(&self) -> anyhow::Result<BTreeMap<u32, String>> {
         let mut q = self.db.prepare("SELECT id, name FROM speakers")?;

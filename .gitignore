@@ -11,3 +11,6 @@ subagents/
 
 # Node tools of the workflow (scripts)
 tools/*/node_modules/
+
+# Local eval data that must not be published (third-party recordings)
+evals/local/

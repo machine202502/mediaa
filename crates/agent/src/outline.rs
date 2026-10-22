@@ -48,10 +48,9 @@ const TOPIC_PRIORITY: i64 = 10;
 /// [`crate::pipeline::prioritize_detail`]).
 pub const DETAIL_PRIORITY: i64 = 1000;
 
-/// Context of the model for one window (~1200 words of Russian ≈ 3000 tokens, plus the answer).
-const OUTLINE_CTX: u32 = 8192;
-/// The model's answer: a digest with quotes (also the answer of a reduce).
-const DIGEST_TOKENS: u32 = 800;
+/// Context of the model for one window (~1200 words of Russian ≈ 3000 tokens, plus the answer
+/// with its margin).
+const OUTLINE_CTX: u32 = 12288;
 /// The model's answer about one pair of topics: `{"same": true}`.
 const PAIR_TOKENS: u32 = 32;
 /// Characters of a model's answer per token (~3 for Russian and English alike).
@@ -60,12 +59,32 @@ const CHARS_PER_TOKEN: u32 = 3;
 const ITEM_OVERHEAD_TOKENS: u32 = 16;
 /// Tokens of the braces and the end of an answer.
 const ANSWER_OVERHEAD_TOKENS: u32 = 64;
+/// Spare past a full answer (a quarter of it), so a sentence can run past the length the prompt
+/// asks for and the JSON still closes instead of being cut.
+const ANSWER_MARGIN_DIV: u32 = 4;
 
-/// The answer limit of a schema: the characters of a fully filled answer at [`CHARS_PER_TOKEN`]
-/// plus the overhead of its items, so the caps of the schema always fit and no answer is cut
-/// off in the middle of its JSON.
+/// Lengths a full digest is budgeted for. The prompts ask the model to stay near them; the
+/// schema does not enforce them.
+const DIGEST_TITLE_CHARS: usize = 80;
+const DIGEST_SUMMARY_CHARS: usize = 400;
+const DIGEST_POINT_CHARS: usize = 160;
+const DIGEST_POINTS: usize = 5;
+const DIGEST_KEYWORD_CHARS: usize = 40;
+const DIGEST_QUOTE_CHARS: usize = 200;
+const DIGEST_QUOTES: usize = 3;
+
+/// The answer limit of a call: the characters of a full answer at [`CHARS_PER_TOKEN`], the
+/// overhead of its items, and a margin, so the answer is not cut in the middle of its JSON.
 fn answer_tokens(chars: usize, items: usize) -> u32 {
-    (chars as u32).div_ceil(CHARS_PER_TOKEN) + items as u32 * ITEM_OVERHEAD_TOKENS + ANSWER_OVERHEAD_TOKENS
+    let base = (chars as u32).div_ceil(CHARS_PER_TOKEN) + items as u32 * ITEM_OVERHEAD_TOKENS + ANSWER_OVERHEAD_TOKENS;
+    base + base / ANSWER_MARGIN_DIV
+}
+
+/// The limit of a digest (a window, or the reduce of a topic).
+fn digest_tokens() -> u32 {
+    let chars = DIGEST_TITLE_CHARS + DIGEST_SUMMARY_CHARS + 3 * DIGEST_POINTS * DIGEST_POINT_CHARS + DIGEST_POINTS * DIGEST_KEYWORD_CHARS + DIGEST_QUOTES * DIGEST_QUOTE_CHARS;
+    let items = 2 + 3 * DIGEST_POINTS + DIGEST_POINTS + DIGEST_QUOTES;
+    answer_tokens(chars, items)
 }
 
 /// The limit of the sections of a topic (from the caps of [`outline::sections_schema`]).
@@ -267,6 +286,7 @@ fn chat_request(model: &str, system: String, user: String, schema: Value, max_to
         device: Some(device),
         priority: Some(Priority::Background),
         hf_token: hf_token.map(str::to_string),
+        ..ChatRequest::default()
     }
 }
 
@@ -289,7 +309,7 @@ pub fn digest(engine: &dyn Engine, model: &str, device: Device, hf_token: Option
         prompts::render("outline/system.j2", ()),
         prompt(window, i, n, previous),
         serde_json::from_str(DIGEST_SCHEMA)?,
-        DIGEST_TOKENS,
+        digest_tokens(),
         cancel,
     )
 }
@@ -363,7 +383,7 @@ impl Ask<'_> {
             prompts::render("outline/reduce_system.j2", ()),
             user,
             serde_json::from_str(DIGEST_SCHEMA)?,
-            DIGEST_TOKENS,
+            digest_tokens(),
             self.cancel,
         )?;
         digest.quotes = quotes_of(parts);
@@ -504,18 +524,17 @@ fn topic_replies(replies: &[Reply], topic: &PlanTopic, with_end: bool) -> Vec<Re
 
 /// The digest of one topic: one call when its text fits a window, else the digests of its
 /// windows and then a digest of those. Every quote is checked against the topic's replies.
-fn digest_topic(ask: &Ask<'_>, replies: &[Reply], names: &std::collections::BTreeMap<u32, String>, language: &str, topic: &PlanTopic, with_end: bool, previous: Option<&str>) -> anyhow::Result<Digest> {
+fn digest_topic(ask: &Ask<'_>, replies: &[Reply], topic: &PlanTopic, with_end: bool, previous: Option<&str>, language: &str) -> anyhow::Result<Digest> {
     let picked = topic_replies(replies, topic, with_end);
-    let label = |s: u32| outline::unnamed_speaker(language, s);
     let words: usize = picked.iter().map(|r| r.words.len()).sum();
     if words <= WINDOW_WORDS {
-        let text = picked.iter().map(|r| outline::line(r, names, label)).collect::<Vec<_>>().join("\n");
+        let text = picked.iter().map(outline::line).collect::<Vec<_>>().join("\n");
         let window = Window { start: topic.start, end: topic.end, text };
         let mut digest = ask.digest(&window, 0, 1, previous)?;
         digest.quotes = outline::verified_quotes(&digest.quotes, &picked);
         return Ok(digest);
     }
-    let windows = outline::windows(&picked, WINDOW_WORDS, names, label);
+    let windows = outline::windows(&picked, WINDOW_WORDS);
     let n = windows.len();
     let mut parts = Vec::with_capacity(n);
     // The title of the topic before this one, for the digest of the whole; inside the topic the
@@ -551,20 +570,12 @@ fn part_context(parts: &[Part]) -> Vec<minijinja::Value> {
 /// the points of every window and one more call that assembles the sections from them (the
 /// transcript is not read again). Every item's time is checked against the topic's replies like
 /// a quote: an unconfirmed time becomes `None`, the item stays.
-fn detail_topic(
-    ask: &Ask<'_>,
-    replies: &[Reply],
-    names: &BTreeMap<u32, String>,
-    language: &str,
-    chapter: &Chapter,
-    last: bool,
-) -> anyhow::Result<Vec<Section>> {
+fn detail_topic(ask: &Ask<'_>, replies: &[Reply], language: &str, chapter: &Chapter, last: bool) -> anyhow::Result<Vec<Section>> {
     let topic = PlanTopic { start: chapter.start, end: chapter.end };
     let picked = topic_replies(replies, &topic, last);
-    let label = |s: u32| outline::unnamed_speaker(language, s);
     // Short lines with their own times: one long reply would otherwise give every item the
-    // time of its start.
-    let lines = outline::fine_lines(&picked, names, label);
+    // time of its start. Speakers are `@sN`.
+    let lines = outline::fine_lines(&picked);
     let words: usize = picked.iter().map(|r| r.words.len()).sum();
     let (title, summary) = (&chapter.digest.title, &chapter.digest.summary);
     let (start, end) = (human_duration(chapter.start), human_duration(chapter.end));
@@ -1095,7 +1106,6 @@ fn merge_stage(
 struct Run {
     transcript: Transcript,
     dialog: Vec<Reply>,
-    names: BTreeMap<u32, String>,
     language: &'static str,
     model: String,
     device: Device,
@@ -1114,12 +1124,10 @@ fn open_run(ai_dir: &Path, path: &Path, settings: &AgentSettings) -> anyhow::Res
     };
     let transcript = Transcript::open(ai_dir, &id)?;
     let dialog = transcript.dialog()?;
-    let names = transcript.speaker_names()?;
     let language = outline::language(&dialog.iter().take(20).map(|r| r.text()).collect::<Vec<_>>().join(" "));
     Ok(Some(Run {
         transcript,
         dialog,
-        names,
         language,
         model,
         device: settings.devices.get(ModelRole::Agent),
@@ -1188,7 +1196,7 @@ impl TopicTask {
         let topics = match load_plan(t)? {
             Some(plan) => plan,
             None => {
-                let windows = outline::windows(&run.dialog, WINDOW_WORDS, &run.names, |s| outline::unnamed_speaker(run.language, s));
+                let windows = outline::windows(&run.dialog, WINDOW_WORDS);
                 let plan = plan_topics(t, &run.dialog, &windows)?;
                 t.set_meta(PLAN_KEY, &serde_json::to_string(&Plan { topics: plan.clone() })?)?;
                 let chapters: Vec<Chapter> = plan.iter().map(placeholder).collect();
@@ -1256,7 +1264,7 @@ impl TopicTask {
         };
         let previous = t.chapters()?.iter().take(input.topic).rev().find(|c| !c.digest.title.is_empty()).map(|c| c.digest.title.clone());
         let started = std::time::Instant::now();
-        let digest = digest_topic(&ask, &run.dialog, &run.names, run.language, &topic, input.topic + 1 == plan.len(), previous.as_deref())?;
+        let digest = digest_topic(&ask, &run.dialog, &topic, input.topic + 1 == plan.len(), previous.as_deref(), run.language)?;
         log::info!(
             "outline of {}: topic {}/{} in {:.1} s",
             input.path.display(),
@@ -1337,7 +1345,7 @@ impl TopicTask {
             hf_token: run.hf_token.as_deref(),
             cancel: cp.stopping(),
         };
-        let sections = detail_topic(&ask, &run.dialog, &run.names, run.language, &chapter, input.topic + 1 == chapters.len())?;
+        let sections = detail_topic(&ask, &run.dialog, run.language, &chapter, input.topic + 1 == chapters.len())?;
         let items: usize = sections.iter().map(|s| s.items.len()).sum();
         let mut chapter = chapter;
         chapter.digest.sections = sections;
@@ -1846,13 +1854,12 @@ mod tests {
         let replies: Vec<Reply> = (0..15).map(long_reply).collect();
         let cancel = AtomicBool::new(false);
         let ask = Ask { engine: &fake, model: "unsloth/Qwen3.5-4B-GGUF", device: Device::Auto, hf_token: None, cancel: &cancel };
-        let names = BTreeMap::new();
         let chapter = Chapter {
             start: 0.0,
             end: replies.last().unwrap().end,
             digest: Digest { title: "Отчёт".into(), summary: "сводка".into(), ..Digest::default() },
         };
-        let sections = detail_topic(&ask, &replies, &names, "Russian", &chapter, true).unwrap();
+        let sections = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
         let calls = fake.chats();
         assert_eq!(calls.len(), 3, "the points of two windows and one call that assembles the sections");
         assert!(calls[0].texts[1].contains("Part 1 of 2"), "{}", calls[0].texts[1]);
@@ -1882,7 +1889,7 @@ mod tests {
             end: 25.0,
             digest: Digest { title: "Отчёт".into(), summary: "сводка".into(), ..Digest::default() },
         };
-        let sections = detail_topic(&ask, &replies, &BTreeMap::new(), "Russian", &chapter, true).unwrap();
+        let sections = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
         assert_eq!(fake.chats().len(), 1, "a short topic: one call");
         assert!(fake.chats()[0].texts[1].contains("Transcript of the topic"));
         assert_eq!(sections[0].title, "Итоги");
@@ -1913,7 +1920,7 @@ mod tests {
             end: 50.0,
             digest: Digest { title: "Длинный монолог".into(), summary: "сводка".into(), ..Digest::default() },
         };
-        let sections = detail_topic(&ask, &replies, &BTreeMap::new(), "Russian", &chapter, true).unwrap();
+        let sections = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
         let prompt = &fake.chats()[0].texts[1];
         assert!(prompt.contains("[00:00] слово0 "), "{prompt}");
         assert!(prompt.contains("[00:26] слово51"), "the second line has its own time: {prompt}");
@@ -1937,17 +1944,22 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let ask = Ask { engine: &fake, model: "unsloth/Qwen3.5-4B-GGUF", device: Device::Auto, hf_token: None, cancel: &cancel };
         let chapter = Chapter { start: 0.0, end: 3.0, digest: Digest { title: "Ролик".into(), summary: "сводка".into(), ..Digest::default() } };
-        let sections = detail_topic(&ask, &replies, &BTreeMap::new(), "Russian", &chapter, true).unwrap();
+        let sections = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
         assert_eq!(sections.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Предлагаемые действия", "Другие"]);
         let texts: Vec<&str> = sections[0].items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(texts, ["лайкнуть видео", "подписаться"], "the order is kept, the repeat dropped");
         assert_eq!(sections[1].items[0].text, "первое");
     }
 
-    /// A fully filled answer of each detail schema fits in its token limit: the limit is computed
-    /// from the caps, so the grammar cannot overrun it and cut the JSON.
+    /// A full answer at the budgeted lengths fits, and the limit is larger than that answer by
+    /// the margin, so a sentence that runs long still closes the JSON.
     #[test]
     fn the_answer_limits_cover_a_maximal_answer() {
+        let fits = |answer: &str, limit: u32| {
+            let tokens = answer.chars().count().div_ceil(CHARS_PER_TOKEN as usize);
+            assert!(tokens <= limit as usize, "{tokens} tokens do not fit in {limit}");
+            assert!(limit as usize >= tokens + tokens / ANSWER_MARGIN_DIV as usize, "{limit} has no margin over {tokens}");
+        };
         let title = "т".repeat(outline::SECTION_TITLE_CHARS);
         let text = "я".repeat(outline::SECTION_TEXT_CHARS);
         let sections: Vec<Value> = (0..outline::SECTIONS_MAX)
@@ -1956,12 +1968,20 @@ mod tests {
                 json!({ "title": title, "kind": "list", "items": items })
             })
             .collect();
-        let answer = serde_json::to_string(&json!({ "sections": sections })).unwrap();
-        let chars = answer.chars().count();
-        assert!(chars.div_ceil(CHARS_PER_TOKEN as usize) <= sections_tokens() as usize, "{chars} chars do not fit in {}", sections_tokens());
+        fits(&serde_json::to_string(&json!({ "sections": sections })).unwrap(), sections_tokens());
         let points: Vec<Value> = (0..outline::POINTS_MAX).map(|_| json!({ "time": "0:00", "text": "я".repeat(outline::POINT_TEXT_CHARS) })).collect();
-        let answer = serde_json::to_string(&json!({ "points": points })).unwrap();
-        let chars = answer.chars().count();
-        assert!(chars.div_ceil(CHARS_PER_TOKEN as usize) <= points_tokens() as usize, "{chars} chars do not fit in {}", points_tokens());
+        fits(&serde_json::to_string(&json!({ "points": points })).unwrap(), points_tokens());
+        let list = vec!["я".repeat(DIGEST_POINT_CHARS); DIGEST_POINTS];
+        let quotes: Vec<Value> = (0..DIGEST_QUOTES).map(|_| json!({ "time": "0:00", "text": "я".repeat(DIGEST_QUOTE_CHARS) })).collect();
+        let digest = json!({
+            "title": "т".repeat(DIGEST_TITLE_CHARS),
+            "summary": "я".repeat(DIGEST_SUMMARY_CHARS),
+            "decisions": list.clone(),
+            "actions": list.clone(),
+            "questions": list,
+            "topics": vec!["я".repeat(DIGEST_KEYWORD_CHARS); DIGEST_POINTS],
+            "quotes": quotes,
+        });
+        fits(&serde_json::to_string(&digest).unwrap(), digest_tokens());
     }
 }

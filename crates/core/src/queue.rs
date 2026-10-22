@@ -7,11 +7,19 @@
 //! groups the child tasks of one logical piece of work; `task_deps` says which tasks have to be
 //! `done` before a task may be claimed; `kind_stats` remembers how long a kind of work takes per
 //! unit, so the queue can estimate what is left.
+//!
+//! Cancel, failure, pause and restart share one rule. Cancelling a task cancels its subtree and
+//! every unfinished task that depends on it. A failure leaves the task failed and cancels that
+//! same chain with [`failure_note`]. Pause stops only that task; dependents stay queued and
+//! record [`pause_note`] until it moves. Restart queues the task again together with what was
+//! cancelled because of it. A composite's status is never stored on its own: [`composite_status`]
+//! derives it from the children after every change.
 
 use anyhow::bail;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -46,6 +54,98 @@ impl TaskStatus {
     pub fn is_finished(self) -> bool {
         matches!(self, TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled)
     }
+}
+
+/// How one child counts when its parent's status is derived. A queued task that is free to run
+/// counts as going; one that still waits for a dependency counts as waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildState {
+    Going,
+    Paused,
+    Waiting,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+impl ChildState {
+    pub fn of(status: TaskStatus, blocked: bool) -> ChildState {
+        match status {
+            TaskStatus::Running => ChildState::Going,
+            TaskStatus::Queued if !blocked => ChildState::Going,
+            TaskStatus::Queued | TaskStatus::Waiting => ChildState::Waiting,
+            TaskStatus::Paused => ChildState::Paused,
+            TaskStatus::Done => ChildState::Done,
+            TaskStatus::Failed => ChildState::Failed,
+            TaskStatus::Cancelled => ChildState::Cancelled,
+        }
+    }
+}
+
+/// The status of a composite, from its children only: going, else paused, else waiting, else
+/// done when every child is done, else failed when any child failed, else cancelled.
+/// `None` when there are no children (the composite keeps the status it was created with).
+pub fn composite_status(children: &[ChildState]) -> Option<TaskStatus> {
+    if children.is_empty() {
+        return None;
+    }
+    if children.contains(&ChildState::Going) {
+        return Some(TaskStatus::Running);
+    }
+    if children.contains(&ChildState::Paused) {
+        return Some(TaskStatus::Paused);
+    }
+    if children.contains(&ChildState::Waiting) {
+        return Some(TaskStatus::Waiting);
+    }
+    if children.iter().all(|state| *state == ChildState::Done) {
+        return Some(TaskStatus::Done);
+    }
+    if children.contains(&ChildState::Failed) {
+        return Some(TaskStatus::Failed);
+    }
+    Some(TaskStatus::Cancelled)
+}
+
+/// The error a composite shows for [`composite_status`]: the failed child's error, or a cancelled
+/// child's note. Cleared while the composite is still going, paused or waiting.
+pub fn composite_error(children: &[ChildState], errors: &[Option<&str>]) -> Option<String> {
+    match composite_status(children)? {
+        TaskStatus::Failed => Some(
+            children
+                .iter()
+                .zip(errors)
+                .find(|(state, _)| **state == ChildState::Failed)
+                .and_then(|(_, error)| *error)
+                .filter(|error| !error.is_empty())
+                .unwrap_or("failed")
+                .to_string(),
+        ),
+        TaskStatus::Cancelled => children
+            .iter()
+            .zip(errors)
+            .find(|(state, error)| **state == ChildState::Cancelled && error.is_some_and(|text| !text.is_empty()))
+            .and_then(|(_, error)| error.map(str::to_string)),
+        _ => None,
+    }
+}
+
+/// Mark on a task cancelled because `title` failed.
+pub fn failure_note(title: &str) -> String {
+    format!("из-за ошибки в {title}")
+}
+
+/// Mark on a task that stays queued while `title` is paused.
+pub fn pause_note(title: &str) -> String {
+    format!("ждёт: {title} на паузе")
+}
+
+fn is_failure_note(error: &str) -> bool {
+    error.starts_with("из-за ошибки в ")
+}
+
+fn is_pause_note(error: &str) -> bool {
+    error.starts_with("ждёт: ") && error.ends_with(" на паузе")
 }
 
 /// What the inner calls of a task used: the queue counts this for every task (inline ones — chat
@@ -447,6 +547,7 @@ impl Queue {
         for need in &task.needs {
             tx.execute("INSERT OR IGNORE INTO task_deps (task, needs) VALUES (?1, ?2)", params![id, need])?;
         }
+        reconcile(&tx, now_ms())?;
         tx.commit()?;
         Ok(id)
     }
@@ -464,6 +565,7 @@ impl Queue {
         }
         let mut all = Vec::new();
         let ids = insert_children(&tx, Some(id), root.scope.as_deref(), children, &root.needs, &mut all)?;
+        reconcile(&tx, now_ms())?;
         tx.commit()?;
         Ok((id, ids))
     }
@@ -516,6 +618,13 @@ impl Queue {
         Ok(rows)
     }
 
+    /// The tasks this one waits for (`task_deps`).
+    pub fn needs(&self, id: TaskId) -> anyhow::Result<Vec<TaskId>> {
+        let mut q = self.db.prepare("SELECT needs FROM task_deps WHERE task = ?1 ORDER BY needs")?;
+        let ids = q.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
     /// The direct children of a composite task.
     pub fn children(&self, id: TaskId) -> anyhow::Result<Vec<Task>> {
         let mut q = self.db.prepare(&format!("SELECT {COLUMNS} FROM tasks WHERE parent = ?1 ORDER BY id"))?;
@@ -529,7 +638,8 @@ impl Queue {
     }
 
     /// Takes the next queued task of one of `kinds` and marks it running. Only tasks whose
-    /// dependencies are all `done` are taken; inline and waiting (composite) tasks never are.
+    /// direct dependencies are all `done` are taken, and none whose dependency chain reaches a
+    /// paused task. Inline and waiting (composite) tasks never are.
     pub fn claim(&self, kinds: &[&str]) -> anyhow::Result<Option<Task>> {
         if kinds.is_empty() {
             return Ok(None);
@@ -541,6 +651,14 @@ impl Queue {
                 &format!(
                     "SELECT id FROM tasks t WHERE status = 'queued' AND inline = 0 AND kind IN ({marks})
                      AND NOT EXISTS (SELECT 1 FROM task_deps d JOIN tasks n ON n.id = d.needs WHERE d.task = t.id AND n.status != 'done')
+                     AND NOT EXISTS (
+                         WITH RECURSIVE up(id) AS (
+                             SELECT needs FROM task_deps WHERE task = t.id
+                             UNION
+                             SELECT d.needs FROM task_deps d JOIN up ON d.task = up.id
+                         )
+                         SELECT 1 FROM up JOIN tasks n ON n.id = up.id WHERE n.status = 'paused'
+                     )
                      ORDER BY priority DESC, id LIMIT 1"
                 ),
                 rusqlite::params_from_iter(kinds),
@@ -554,7 +672,7 @@ impl Queue {
                     started_ms = COALESCE(started_ms, ?2), updated_ms = ?2 WHERE id = ?1",
             params![id, now],
         )?;
-        refresh_up(&tx, id, now)?;
+        reconcile(&tx, now)?;
         tx.commit()?;
         self.get(id)
     }
@@ -571,7 +689,7 @@ impl Queue {
         )?;
         let status: Option<String> = tx.query_row("SELECT status FROM tasks WHERE id = ?1", [id], |r| r.get(0)).optional()?;
         if status.as_deref() == Some("running") {
-            refresh_up(&tx, id, now)?;
+            reconcile(&tx, now)?;
         }
         tx.commit()?;
         // A removed task reads as paused: the worker just stops.
@@ -587,20 +705,25 @@ impl Queue {
         let tx = self.db.unchecked_transaction()?;
         let Some(task) = task_at(&tx, id)? else { bail!("task {id} is not in the queue") };
         let now = now_ms();
+        // A pause or a cancel that landed while the handler ran must stay. The handler of a
+        // plan completes the task itself and the worker completes it again; the second call
+        // finds it already done and changes nothing.
+        let changed = tx.execute(
+            "UPDATE tasks SET status = 'done', result = ?2, progress = 1, error = NULL, finished_ms = ?3, updated_ms = ?3
+             WHERE id = ?1 AND status IN ('queued', 'running')",
+            params![id, result.to_string(), now],
+        )?;
+        if changed == 0 {
+            tx.commit()?;
+            return Ok(Vec::new());
+        }
         let default_parent = task.parent.or(Some(task.id));
         if !has_children(&tx, id)? {
             add_kind_run(&tx, &task, now)?;
         }
-        tx.execute(
-            "UPDATE tasks SET status = 'done', result = ?2, progress = 1, error = NULL, finished_ms = ?3, updated_ms = ?3 WHERE id = ?1",
-            params![id, result.to_string(), now],
-        )?;
         let mut all = Vec::new();
         let ids = insert_children(&tx, default_parent, task.scope.as_deref(), children, &[], &mut all)?;
-        refresh_up(&tx, id, now)?;
-        for &child in &all {
-            refresh_up(&tx, child, now)?;
-        }
+        reconcile(&tx, now)?;
         tx.commit()?;
         Ok(ids)
     }
@@ -610,15 +733,17 @@ impl Queue {
         Ok(())
     }
 
-    /// The task stopped with an error; its checkpoint stays for a retry.
+    /// The task stopped with an error; its checkpoint stays for a retry. Every unfinished task
+    /// that depends on it is cancelled with [`failure_note`].
     pub fn fail(&self, id: TaskId, error: &str) -> anyhow::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         let now = now_ms();
         tx.execute(
-            "UPDATE tasks SET status = 'failed', error = ?2, finished_ms = ?3, updated_ms = ?3 WHERE id = ?1",
+            "UPDATE tasks SET status = 'failed', error = ?2, finished_ms = ?3, updated_ms = ?3
+             WHERE id = ?1 AND status IN ('queued', 'running', 'paused', 'waiting')",
             params![id, error, now],
         )?;
-        refresh_up(&tx, id, now)?;
+        reconcile(&tx, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -628,29 +753,30 @@ impl Queue {
         let tx = self.db.unchecked_transaction()?;
         let now = now_ms();
         tx.execute("UPDATE tasks SET status = 'queued', updated_ms = ?2 WHERE id = ?1 AND status = 'running'", params![id, now])?;
-        refresh_up(&tx, id, now)?;
+        reconcile(&tx, now)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Stops a task (a running one stops at its next checkpoint); a composite stops its whole
-    /// subtree.
+    /// Stops this task only (a running one stops at its next checkpoint). Tasks that depend on
+    /// it stay queued, with [`pause_note`], and are not claimed. The parent becomes paused when
+    /// nothing under it is still going.
     pub fn pause(&self, id: TaskId) -> anyhow::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         let now = now_ms();
         tx.execute(
-            "WITH RECURSIVE sub(id) AS (SELECT id FROM tasks WHERE id = ?1 UNION ALL SELECT t.id FROM tasks t JOIN sub ON t.parent = sub.id)
-             UPDATE tasks SET status = 'paused', updated_ms = ?2
-             WHERE id IN (SELECT id FROM sub) AND status IN ('queued', 'running', 'waiting')",
+            "UPDATE tasks SET status = 'paused', updated_ms = ?2
+             WHERE id = ?1 AND status IN ('queued', 'running', 'waiting')",
             params![id, now],
         )?;
-        refresh_up(&tx, id, now)?;
+        reconcile(&tx, now)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Back into the queue (paused or failed tasks), continuing from the checkpoint; a composite
-    /// resumes its whole subtree and goes back to `waiting` until a child runs.
+    /// Back into the queue (a paused or failed task, and the paused or failed tasks under it),
+    /// continuing from the checkpoint. What a failure had cancelled stays cancelled until
+    /// [`Queue::restart`].
     pub fn resume(&self, id: TaskId) -> anyhow::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         let now = now_ms();
@@ -661,65 +787,131 @@ impl Queue {
              WHERE id IN (SELECT id FROM sub) AND status IN ('paused', 'failed')",
             params![id, now],
         )?;
+        reconcile(&tx, now)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Starts over: drops the checkpoint and queues the task again; a composite starts over with
-    /// its whole subtree (a task that is running now is left alone).
+    /// Starts over: drops the checkpoint and queues the task again, and with it every failed or
+    /// cancelled task under it and every task that was cancelled because of it. A task that is
+    /// running now is left alone. Done work under it stays done.
     pub fn restart(&self, id: TaskId) -> anyhow::Result<()> {
+        let tx = self.db.unchecked_transaction()?;
+        let now = now_ms();
+        let Some(task) = task_at(&tx, id)? else {
+            tx.commit()?;
+            return Ok(());
+        };
+        let tasks = all_tasks(&tx)?;
+        let needs = all_needs(&tx)?;
+        let children = child_ids(&tasks);
+        let mut ids: HashSet<TaskId> = HashSet::new();
+        if task.status != TaskStatus::Running {
+            ids.insert(id);
+        }
+        let mut stack = children.get(&id).cloned().unwrap_or_default();
+        let mut seen = HashSet::from([id]);
+        while let Some(child) = stack.pop() {
+            if !seen.insert(child) {
+                continue;
+            }
+            if let Some(found) = tasks.iter().find(|item| item.id == child) {
+                if matches!(found.status, TaskStatus::Failed | TaskStatus::Cancelled) {
+                    ids.insert(child);
+                }
+            }
+            if let Some(more) = children.get(&child) {
+                stack.extend(more.iter().copied());
+            }
+        }
+        // Only a failed or cancelled task drags back what was cancelled because of it:
+        // dependents of it or of a failed or cancelled task under it, and the cancelled
+        // subtrees of those. A done task under it stays done, and does not revive work that
+        // was cancelled on its own.
+        if matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled) {
+            let by_id: HashMap<TaskId, &Task> = tasks.iter().map(|item| (item.id, item)).collect();
+            let mut roots: HashSet<TaskId> = ids.clone();
+            roots.insert(id);
+            loop {
+                let extra: Vec<TaskId> = tasks
+                    .iter()
+                    .filter(|item| item.status == TaskStatus::Cancelled && !ids.contains(&item.id))
+                    .filter(|item| roots.iter().any(|root| depends_on(item.id, *root, &needs)) || has_ancestor(item, &roots, &by_id))
+                    .map(|item| item.id)
+                    .collect();
+                if extra.is_empty() {
+                    break;
+                }
+                for extra_id in extra {
+                    ids.insert(extra_id);
+                    roots.insert(extra_id);
+                }
+            }
+        }
+        for rid in ids {
+            let status = if children.get(&rid).is_some_and(|kids| !kids.is_empty()) { "waiting" } else { "queued" };
+            tx.execute(
+                "UPDATE tasks SET status = ?2, cursor = NULL, partial = NULL, result = NULL, progress = 0, error = NULL,
+                        started_ms = NULL, finished_ms = NULL, updated_ms = ?3
+                 WHERE id = ?1 AND status != 'running'",
+                params![rid, status, now],
+            )?;
+        }
+        reconcile(&tx, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Cancels a task, its subtree and every unfinished task that depends on either; a running
+    /// task stops at its next checkpoint. Nothing is left waiting for a cancelled task.
+    pub fn cancel(&self, id: TaskId) -> anyhow::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         let now = now_ms();
         tx.execute(
             "WITH RECURSIVE sub(id) AS (SELECT id FROM tasks WHERE id = ?1 UNION ALL SELECT t.id FROM tasks t JOIN sub ON t.parent = sub.id)
-             UPDATE tasks SET status = CASE WHEN EXISTS (SELECT 1 FROM tasks c WHERE c.parent = tasks.id) THEN 'waiting' ELSE 'queued' END,
-                    cursor = NULL, partial = NULL, result = NULL, progress = 0, error = NULL,
-                    started_ms = NULL, finished_ms = NULL, updated_ms = ?2
-             WHERE id IN (SELECT id FROM sub) AND status != 'running'",
+             UPDATE tasks SET status = 'cancelled', error = NULL, finished_ms = ?2, updated_ms = ?2
+             WHERE id IN (SELECT id FROM sub) AND status IN ('queued', 'running', 'waiting', 'paused')",
             params![id, now],
         )?;
-        refresh_up(&tx, id, now)?;
+        reconcile(&tx, now)?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Cancels a task and its whole subtree; a running task stops at its next checkpoint.
-    pub fn cancel(&self, id: TaskId) -> anyhow::Result<()> {
-        let tx = self.db.unchecked_transaction()?;
-        tx.execute(
-            "WITH RECURSIVE sub(id) AS (SELECT id FROM tasks WHERE id = ?1 UNION ALL SELECT t.id FROM tasks t JOIN sub ON t.parent = sub.id)
-             UPDATE tasks SET status = 'cancelled', finished_ms = ?2, updated_ms = ?2
-             WHERE id IN (SELECT id FROM sub) AND status IN ('queued', 'running', 'waiting', 'paused')",
-            params![id, now_ms()],
-        )?;
-        refresh_up(&tx, id, now_ms())?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Cancels every unfinished task of one recording (or folder); returns how many.
+    /// Cancels every unfinished task of one recording (or folder); returns how many were
+    /// cancelled directly. Dependents outside the scope are cancelled too.
     pub fn cancel_scope(&self, scope: &str) -> anyhow::Result<usize> {
-        Ok(self.db.execute(
-            "UPDATE tasks SET status = 'cancelled', finished_ms = ?2, updated_ms = ?2
+        let tx = self.db.unchecked_transaction()?;
+        let now = now_ms();
+        let n = tx.execute(
+            "UPDATE tasks SET status = 'cancelled', error = NULL, finished_ms = ?2, updated_ms = ?2
              WHERE scope = ?1 AND status IN ('queued', 'running', 'waiting', 'paused')",
-            params![scope, now_ms()],
-        )?)
+            params![scope, now],
+        )?;
+        reconcile(&tx, now)?;
+        tx.commit()?;
+        Ok(n)
     }
 
     /// Cancels the analysis of one recording only — the top-level `analysis` composites of the
     /// scope with their whole subtrees — and leaves the rest of the scope's work alone (a chat
-    /// answer about the same recording keeps running); returns how many.
+    /// answer about the same recording keeps running); returns how many were cancelled directly.
     pub fn cancel_analysis(&self, scope: &str) -> anyhow::Result<usize> {
-        Ok(self.db.execute(
+        let tx = self.db.unchecked_transaction()?;
+        let now = now_ms();
+        let n = tx.execute(
             "WITH RECURSIVE sub(id) AS (
                  SELECT id FROM tasks WHERE scope = ?1 AND kind = 'analysis' AND parent IS NULL
                  UNION
                  SELECT t.id FROM tasks t JOIN sub ON t.parent = sub.id
              )
-             UPDATE tasks SET status = 'cancelled', finished_ms = ?2, updated_ms = ?2
+             UPDATE tasks SET status = 'cancelled', error = NULL, finished_ms = ?2, updated_ms = ?2
              WHERE id IN (SELECT id FROM sub) AND status IN ('queued', 'running', 'waiting', 'paused')",
-            params![scope, now_ms()],
-        )?)
+            params![scope, now],
+        )?;
+        reconcile(&tx, now)?;
+        tx.commit()?;
+        Ok(n)
     }
 
     /// Sets a task's priority (higher is taken first).
@@ -738,7 +930,7 @@ impl Queue {
             params![kind, title, input.to_string(), now, parent, scope],
         )?;
         let id = tx.last_insert_rowid();
-        refresh_up(&tx, id, now)?;
+        reconcile(&tx, now)?;
         tx.commit()?;
         Ok(id)
     }
@@ -785,13 +977,9 @@ impl Queue {
     /// Removes a task with its whole subtree.
     pub fn remove(&self, id: TaskId) -> anyhow::Result<()> {
         let tx = self.db.unchecked_transaction()?;
-        let parent = task_at(&tx, id)?.and_then(|t| t.parent);
         tx.execute("WITH RECURSIVE sub(id) AS (SELECT id FROM tasks WHERE id = ?1 UNION ALL SELECT t.id FROM tasks t JOIN sub ON t.parent = sub.id) DELETE FROM tasks WHERE id IN (SELECT id FROM sub)", [id])?;
         tx.execute("DELETE FROM task_deps WHERE task NOT IN (SELECT id FROM tasks) OR needs NOT IN (SELECT id FROM tasks)", [])?;
-        if let Some(parent) = parent {
-            refresh(&tx, parent, now_ms())?;
-            refresh_up(&tx, parent, now_ms())?;
-        }
+        reconcile(&tx, now_ms())?;
         tx.commit()?;
         Ok(())
     }
@@ -848,7 +1036,7 @@ impl Queue {
             "UPDATE tasks SET status = 'cancelled', finished_ms = ?1, updated_ms = ?1 WHERE status = 'running' AND inline = 1",
             [now],
         )?;
-        refresh_all(&tx, now)?;
+        reconcile(&tx, now)?;
         tx.commit()?;
         Ok(running + inline)
     }
@@ -862,7 +1050,7 @@ impl Queue {
             "UPDATE tasks SET status = 'queued', updated_ms = ?1 WHERE status = 'running' AND inline = 0 AND updated_ms < ?2 AND NOT EXISTS (SELECT 1 FROM tasks c WHERE c.parent = tasks.id)",
             params![now, now - timeout.as_millis() as i64],
         )?;
-        refresh_all(&tx, now)?;
+        reconcile(&tx, now)?;
         tx.commit()?;
         Ok(changed)
     }
@@ -1011,65 +1199,6 @@ fn add_kind_run(conn: &Connection, task: &Task, now: i64) -> rusqlite::Result<()
     Ok(())
 }
 
-/// Brings one composite in step with its children: `running` while a child runs, `failed` when a
-/// child failed (with its error), `done` when all are done, `waiting` otherwise. Its
-/// progress is the children's weighted mean (equal weights when there is nothing to estimate).
-fn refresh(conn: &Connection, parent: TaskId, now: i64) -> rusqlite::Result<()> {
-    let Some(parent_task) = task_at(conn, parent)? else { return Ok(()) };
-    if !matches!(parent_task.status, TaskStatus::Waiting | TaskStatus::Running | TaskStatus::Queued) {
-        return Ok(());
-    }
-    let children: Vec<Task> = {
-        let mut q = conn.prepare(&format!("SELECT {COLUMNS} FROM tasks WHERE parent = ?1 ORDER BY id"))?;
-        let rows = q.query_map([parent], task)?.collect::<rusqlite::Result<_>>()?;
-        rows
-    };
-    if children.is_empty() {
-        return Ok(());
-    }
-    // An inline task (a chat answer) is ended by its caller only: between its steps all its
-    // children are done while it still runs.
-    if parent_task.inline {
-        return Ok(());
-    }
-    let failed = children.iter().find(|c| c.status == TaskStatus::Failed);
-    let running = children.iter().any(|c| c.status == TaskStatus::Running);
-    let all_done = children.iter().all(|c| c.status == TaskStatus::Done);
-    let (status, error, finished) = if let Some(child) = failed {
-        (TaskStatus::Failed, Some(child.error.clone().unwrap_or_else(|| "failed".into())), Some(now))
-    } else if running {
-        (TaskStatus::Running, None, None)
-    } else if all_done {
-        (TaskStatus::Done, None, Some(now))
-    } else {
-        (TaskStatus::Waiting, None, None)
-    };
-    let progress = if all_done {
-        1.0
-    } else {
-        let tree = subtree_at(conn, parent)?;
-        let stats = kind_stats(conn)?;
-        let weights: Vec<Option<f64>> = children.iter().map(|c| weight(c, &tree, now, &stats)).collect();
-        let weighted = if weights.iter().all(Option::is_some) {
-            let total: f64 = weights.iter().flatten().sum();
-            if total > 0.0 {
-                children.iter().zip(&weights).map(|(c, w)| f64::from(c.progress) * w.unwrap_or(0.0)).sum::<f64>() / total
-            } else {
-                children.iter().map(|c| f64::from(c.progress)).sum::<f64>() / children.len() as f64
-            }
-        } else {
-            children.iter().map(|c| f64::from(c.progress)).sum::<f64>() / children.len() as f64
-        };
-        weighted as f32
-    };
-    let started = parent_task.started_ms.or_else(|| (status == TaskStatus::Running).then_some(now));
-    conn.execute(
-        "UPDATE tasks SET status = ?2, error = ?3, progress = ?4, started_ms = ?5, finished_ms = ?6, updated_ms = ?7 WHERE id = ?1",
-        params![parent, status_code(status), error, progress.clamp(0.0, 1.0), started, finished, now],
-    )?;
-    Ok(())
-}
-
 fn status_code(status: TaskStatus) -> &'static str {
     match status {
         TaskStatus::Queued => "queued",
@@ -1082,27 +1211,380 @@ fn status_code(status: TaskStatus) -> &'static str {
     }
 }
 
-/// Refreshes the composite tasks above `id`, nearest first.
-fn refresh_up(conn: &Connection, id: TaskId, now: i64) -> rusqlite::Result<()> {
-    let mut parent = task_at(conn, id)?.and_then(|t| t.parent);
+fn shown_name(task: &Task) -> String {
+    let title = task.title.trim();
+    if title.is_empty() { task.kind.clone() } else { title.to_string() }
+}
+
+fn all_tasks(conn: &Connection) -> rusqlite::Result<Vec<Task>> {
+    let mut q = conn.prepare(&format!("SELECT {COLUMNS} FROM tasks"))?;
+    let tasks = q.query_map([], task)?.collect::<rusqlite::Result<_>>()?;
+    Ok(tasks)
+}
+
+fn all_needs(conn: &Connection) -> rusqlite::Result<HashMap<TaskId, Vec<TaskId>>> {
+    let mut q = conn.prepare("SELECT task, needs FROM task_deps")?;
+    let mut map: HashMap<TaskId, Vec<TaskId>> = HashMap::new();
+    let rows = q.query_map([], |r| Ok((r.get::<_, TaskId>(0)?, r.get::<_, TaskId>(1)?)))?;
+    for row in rows {
+        let (task_id, need) = row?;
+        map.entry(task_id).or_default().push(need);
+    }
+    Ok(map)
+}
+
+fn child_ids(tasks: &[Task]) -> HashMap<TaskId, Vec<TaskId>> {
+    let mut map: HashMap<TaskId, Vec<TaskId>> = HashMap::new();
+    for item in tasks {
+        if let Some(parent) = item.parent {
+            map.entry(parent).or_default().push(item.id);
+        }
+    }
+    map
+}
+
+/// `task` sits under one of `roots` (a parent, or further up).
+fn has_ancestor(task: &Task, roots: &HashSet<TaskId>, by_id: &HashMap<TaskId, &Task>) -> bool {
+    let mut parent = task.parent;
+    let mut guard = 0;
     while let Some(id) = parent {
-        refresh(conn, id, now)?;
-        parent = task_at(conn, id)?.and_then(|t| t.parent);
+        if roots.contains(&id) {
+            return true;
+        }
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        parent = by_id.get(&id).and_then(|item| item.parent);
+    }
+    false
+}
+
+/// `task` waits for `target`, directly or through other tasks.
+fn depends_on(task: TaskId, target: TaskId, needs: &HashMap<TaskId, Vec<TaskId>>) -> bool {
+    let mut stack = needs.get(&task).cloned().unwrap_or_default();
+    let mut seen = HashSet::new();
+    while let Some(id) = stack.pop() {
+        if id == target {
+            return true;
+        }
+        if seen.insert(id) {
+            if let Some(more) = needs.get(&id) {
+                stack.extend(more.iter().copied());
+            }
+        }
+    }
+    false
+}
+
+fn blocked(conn: &Connection, id: TaskId) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM task_deps d JOIN tasks n ON n.id = d.needs WHERE d.task = ?1 AND n.status != 'done')",
+        [id],
+        |r| r.get(0),
+    )
+}
+
+#[derive(Clone)]
+enum CancelCause {
+    /// Cancel and store this note (`failure_note` of the task that failed).
+    Failure(String),
+    /// Cancel because a task upstream was cancelled.
+    Plain,
+}
+
+/// Why `task` cannot stay unfinished: a dependency failed or was cancelled, or a parent was
+/// cancelled. Failure wins, so the note names the task that actually failed.
+fn cancel_cause(task: &Task, by_id: &HashMap<TaskId, &Task>, needs: &HashMap<TaskId, Vec<TaskId>>) -> Option<CancelCause> {
+    if let Some(cause) = dependency_block(task.id, by_id, needs) {
+        if matches!(cause, CancelCause::Failure(_)) {
+            return Some(cause);
+        }
+        if let Some(CancelCause::Failure(note)) = ancestor_cancel(task, by_id) {
+            return Some(CancelCause::Failure(note));
+        }
+        return Some(cause);
+    }
+    ancestor_cancel(task, by_id)
+}
+
+/// A failed or cancelled task anywhere up the dependency chain. A `done` task in the middle
+/// does not hide it: the chain still cannot be run again while that upstream task is dead.
+fn dependency_block(id: TaskId, by_id: &HashMap<TaskId, &Task>, needs: &HashMap<TaskId, Vec<TaskId>>) -> Option<CancelCause> {
+    let mut queue = VecDeque::new();
+    let mut seen = HashSet::new();
+    if let Some(deps) = needs.get(&id) {
+        queue.extend(deps.iter().copied());
+    }
+    let mut saw_cancelled = false;
+    while let Some(dep) = queue.pop_front() {
+        if !seen.insert(dep) {
+            continue;
+        }
+        let Some(found) = by_id.get(&dep) else { continue };
+        match found.status {
+            TaskStatus::Failed => return Some(CancelCause::Failure(failure_note(&shown_name(found)))),
+            TaskStatus::Cancelled => saw_cancelled = true,
+            _ => {}
+        }
+        if let Some(more) = needs.get(&dep) {
+            queue.extend(more.iter().copied());
+        }
+    }
+    saw_cancelled.then_some(CancelCause::Plain)
+}
+
+fn ancestor_cancel(task: &Task, by_id: &HashMap<TaskId, &Task>) -> Option<CancelCause> {
+    let mut parent = task.parent;
+    let mut guard = 0;
+    while let Some(id) = parent {
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        let Some(found) = by_id.get(&id) else { break };
+        if found.status == TaskStatus::Cancelled {
+            if let Some(note) = found.error.as_deref().filter(|error| is_failure_note(error)) {
+                return Some(CancelCause::Failure(note.to_string()));
+            }
+            return Some(CancelCause::Plain);
+        }
+        parent = found.parent;
+    }
+    None
+}
+
+/// Cancels unfinished tasks that wait on a failed or cancelled one, and the unfinished subtree
+/// of each (a composite cannot stay "going" on children that this cancel already closed).
+/// Repeats until the chain is closed. Returns whether anything changed.
+fn cascade(conn: &Connection, now: i64) -> rusqlite::Result<bool> {
+    let mut any = false;
+    for _ in 0..64 {
+        let tasks = all_tasks(conn)?;
+        let needs = all_needs(conn)?;
+        let children = child_ids(&tasks);
+        let by_id: HashMap<TaskId, &Task> = tasks.iter().map(|item| (item.id, item)).collect();
+        let mut doomed: HashMap<TaskId, CancelCause> = HashMap::new();
+        for item in &tasks {
+            if item.status.is_finished() {
+                continue;
+            }
+            if let Some(cause) = cancel_cause(item, &by_id, &needs) {
+                doomed.insert(item.id, cause);
+            }
+        }
+        if doomed.is_empty() {
+            break;
+        }
+        let mut stack: Vec<TaskId> = doomed.keys().copied().collect();
+        while let Some(id) = stack.pop() {
+            let Some(cause) = doomed.get(&id).cloned() else { continue };
+            let Some(kids) = children.get(&id) else { continue };
+            for child in kids {
+                let Some(found) = by_id.get(child) else { continue };
+                if found.status.is_finished() {
+                    continue;
+                }
+                match doomed.get(child) {
+                    Some(CancelCause::Failure(_)) => {}
+                    Some(CancelCause::Plain) => {
+                        if let CancelCause::Failure(note) = &cause {
+                            doomed.insert(*child, CancelCause::Failure(note.clone()));
+                        }
+                    }
+                    None => {
+                        doomed.insert(*child, cause.clone());
+                        stack.push(*child);
+                    }
+                }
+            }
+        }
+        // A failure note on a parent covers the subtree, including a child first seen as a plain cancel.
+        for _ in 0..64 {
+            let mut upgraded = false;
+            let current: Vec<(TaskId, CancelCause)> = doomed.iter().map(|(id, cause)| (*id, cause.clone())).collect();
+            for (id, cause) in current {
+                let CancelCause::Failure(note) = cause else { continue };
+                let Some(kids) = children.get(&id) else { continue };
+                for child in kids {
+                    if matches!(doomed.get(child), Some(CancelCause::Plain)) {
+                        doomed.insert(*child, CancelCause::Failure(note.clone()));
+                        upgraded = true;
+                    }
+                }
+            }
+            if !upgraded {
+                break;
+            }
+        }
+        any = true;
+        for (id, cause) in doomed {
+            let error = match cause {
+                CancelCause::Failure(note) => Some(note),
+                CancelCause::Plain => None,
+            };
+            conn.execute(
+                "UPDATE tasks SET status = 'cancelled', error = ?2, finished_ms = ?3, updated_ms = ?3
+                 WHERE id = ?1 AND status IN ('queued', 'running', 'waiting', 'paused')",
+                params![id, error, now],
+            )?;
+        }
+    }
+    Ok(any)
+}
+
+fn depth_of(id: TaskId, parent_of: &HashMap<TaskId, Option<TaskId>>) -> usize {
+    let mut depth = 0;
+    let mut current = parent_of.get(&id).copied().flatten();
+    while let Some(parent) = current {
+        depth += 1;
+        if depth > 64 {
+            break;
+        }
+        current = parent_of.get(&parent).copied().flatten();
+    }
+    depth
+}
+
+/// Derives every composite from its children, deepest first. Returns whether a status or an
+/// error changed.
+fn refresh_all(conn: &Connection, now: i64) -> rusqlite::Result<bool> {
+    let tasks = all_tasks(conn)?;
+    let parent_of: HashMap<TaskId, Option<TaskId>> = tasks.iter().map(|item| (item.id, item.parent)).collect();
+    let mut parents: Vec<TaskId> = tasks.iter().filter_map(|item| item.parent).collect();
+    parents.sort_unstable();
+    parents.dedup();
+    parents.sort_by_key(|id| std::cmp::Reverse(depth_of(*id, &parent_of)));
+    let mut changed = false;
+    for parent in parents {
+        if refresh(conn, parent, now)? {
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// Brings one composite in step with its children ([`composite_status`]). Progress stays the
+/// children's weighted mean. An inline task is left to its caller.
+fn refresh(conn: &Connection, parent: TaskId, now: i64) -> rusqlite::Result<bool> {
+    let Some(parent_task) = task_at(conn, parent)? else { return Ok(false) };
+    if parent_task.inline {
+        return Ok(false);
+    }
+    let children: Vec<Task> = {
+        let mut q = conn.prepare(&format!("SELECT {COLUMNS} FROM tasks WHERE parent = ?1 ORDER BY id"))?;
+        let rows = q.query_map([parent], task)?.collect::<rusqlite::Result<_>>()?;
+        rows
+    };
+    if children.is_empty() {
+        return Ok(false);
+    }
+    let mut states = Vec::with_capacity(children.len());
+    for child in &children {
+        states.push(ChildState::of(child.status, blocked(conn, child.id)?));
+    }
+    let errors: Vec<Option<&str>> = children.iter().map(|child| child.error.as_deref()).collect();
+    let Some(status) = composite_status(&states) else { return Ok(false) };
+    let error = composite_error(&states, &errors);
+    let all_done = status == TaskStatus::Done;
+    let progress = if all_done {
+        1.0
+    } else {
+        let tree = subtree_at(conn, parent)?;
+        let stats = kind_stats(conn)?;
+        let weights: Vec<Option<f64>> = children.iter().map(|child| weight(child, &tree, now, &stats)).collect();
+        let weighted = if weights.iter().all(Option::is_some) {
+            let total: f64 = weights.iter().flatten().sum();
+            if total > 0.0 {
+                children.iter().zip(&weights).map(|(child, w)| f64::from(child.progress) * w.unwrap_or(0.0)).sum::<f64>() / total
+            } else {
+                children.iter().map(|child| f64::from(child.progress)).sum::<f64>() / children.len() as f64
+            }
+        } else {
+            children.iter().map(|child| f64::from(child.progress)).sum::<f64>() / children.len() as f64
+        };
+        weighted as f32
+    };
+    let progress = progress.clamp(0.0, 1.0);
+    let started = parent_task.started_ms.or_else(|| (status == TaskStatus::Running).then_some(now));
+    let finished = if status.is_finished() { Some(parent_task.finished_ms.unwrap_or(now)) } else { None };
+    let same = parent_task.status == status
+        && parent_task.error == error
+        && (parent_task.progress - progress).abs() < 0.000_1
+        && parent_task.started_ms == started
+        && parent_task.finished_ms == finished;
+    if same {
+        return Ok(false);
+    }
+    conn.execute(
+        "UPDATE tasks SET status = ?2, error = ?3, progress = ?4, started_ms = ?5, finished_ms = ?6, updated_ms = ?7 WHERE id = ?1",
+        params![parent, status_code(status), error, progress, started, finished, now],
+    )?;
+    Ok(parent_task.status != status || parent_task.error != error)
+}
+
+/// Writes [`pause_note`] on queued and waiting leaves that wait for a paused task, and clears
+/// a note that no longer applies. Composites keep the error [`refresh`] derived.
+fn write_pause_notes(conn: &Connection, now: i64) -> rusqlite::Result<()> {
+    let tasks = all_tasks(conn)?;
+    let needs = all_needs(conn)?;
+    let children = child_ids(&tasks);
+    let by_id: HashMap<TaskId, &Task> = tasks.iter().map(|item| (item.id, item)).collect();
+    for item in &tasks {
+        if item.inline || children.get(&item.id).is_some_and(|kids| !kids.is_empty()) {
+            continue;
+        }
+        if !matches!(item.status, TaskStatus::Queued | TaskStatus::Waiting) {
+            continue;
+        }
+        let note = paused_dependency(item.id, &by_id, &needs).map(|title| pause_note(&title));
+        let current = item.error.clone();
+        let next = match &note {
+            Some(text) => Some(text.clone()),
+            None if current.as_deref().is_some_and(is_pause_note) => None,
+            None => continue,
+        };
+        if current == next {
+            continue;
+        }
+        conn.execute("UPDATE tasks SET error = ?2, updated_ms = ?3 WHERE id = ?1", params![item.id, next, now])?;
     }
     Ok(())
 }
 
-/// Refreshes every composite task, deepest first (children are created after their parent, so
-/// their ids are higher).
-fn refresh_all(conn: &Connection, now: i64) -> rusqlite::Result<()> {
-    let parents: Vec<TaskId> = {
-        let mut q = conn.prepare("SELECT DISTINCT parent FROM tasks WHERE parent IS NOT NULL ORDER BY parent DESC")?;
-        let ids = q.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-        ids
-    };
-    for parent in parents {
-        refresh(conn, parent, now)?;
+/// The nearest paused task `id` waits for, including through a dependency that is already done.
+fn paused_dependency(id: TaskId, by_id: &HashMap<TaskId, &Task>, needs: &HashMap<TaskId, Vec<TaskId>>) -> Option<String> {
+    let mut queue = VecDeque::new();
+    let mut seen = HashSet::new();
+    if let Some(deps) = needs.get(&id) {
+        queue.extend(deps.iter().copied());
     }
+    while let Some(dep) = queue.pop_front() {
+        if !seen.insert(dep) {
+            continue;
+        }
+        let Some(found) = by_id.get(&dep) else { continue };
+        if found.status == TaskStatus::Paused {
+            return Some(shown_name(found));
+        }
+        if let Some(more) = needs.get(&dep) {
+            queue.extend(more.iter().copied());
+        }
+    }
+    None
+}
+
+/// Derives composite statuses and closes the cancel chain. Pause notes are written last, so a
+/// derived error is not overwritten and a stale pause note does not survive a resume.
+fn reconcile(conn: &Connection, now: i64) -> rusqlite::Result<()> {
+    for _ in 0..32 {
+        let refreshed = refresh_all(conn, now)?;
+        let cascaded = cascade(conn, now)?;
+        if !refreshed && !cascaded {
+            break;
+        }
+    }
+    write_pause_notes(conn, now)?;
     Ok(())
 }
 
@@ -1288,7 +1770,7 @@ mod tests {
         assert!((t.progress - 0.25).abs() < 0.001, "half of one of two equal children: {}", t.progress);
 
         q.complete(a, &json!({})).unwrap();
-        assert_eq!(status(&q, parent), TaskStatus::Waiting, "one child done, one queued: waiting");
+        assert_eq!(status(&q, parent), TaskStatus::Running, "the other child is free to run, so the composite is going");
         let t = q.get(parent).unwrap().unwrap();
         assert!((t.progress - 0.5).abs() < 0.001, "{}", t.progress);
 
@@ -1318,33 +1800,122 @@ mod tests {
     }
 
     #[test]
-    fn pause_and_cancel_cascade_over_the_subtree() {
+    fn pause_stops_one_task_and_cancel_closes_the_chain() {
         let dir = tempfile::tempdir().unwrap();
         let q = Queue::open(dir.path()).unwrap();
         let top = q.enqueue(plain("group", "top").composite()).unwrap();
         let middle = q.enqueue(plain("group", "middle").parent(top).composite()).unwrap();
         let leaf = q.enqueue(plain("k", "leaf").parent(middle)).unwrap();
+        let later = q.enqueue(plain("k", "later").needs(&[leaf])).unwrap();
         q.claim(&["k"]).unwrap();
-        assert_eq!(status(&q, top), TaskStatus::Running);
-        assert_eq!(status(&q, middle), TaskStatus::Running);
+        assert_eq!((status(&q, top), status(&q, middle)), (TaskStatus::Running, TaskStatus::Running));
 
-        q.pause(top).unwrap();
-        for id in [top, middle, leaf] {
-            assert_eq!(status(&q, id), TaskStatus::Paused, "task {id}");
-        }
+        q.pause(leaf).unwrap();
+        assert_eq!(status(&q, leaf), TaskStatus::Paused, "only the paused task stops");
+        assert_eq!(status(&q, later), TaskStatus::Queued, "a dependent waits, it is not paused");
+        assert_eq!(q.get(later).unwrap().unwrap().error.as_deref(), Some(pause_note("leaf").as_str()));
+        assert!(q.claim(&["k"]).unwrap().is_none(), "nobody is claimed while the dependency is paused");
+        assert_eq!(status(&q, middle), TaskStatus::Paused);
+        assert_eq!(status(&q, top), TaskStatus::Paused);
+        assert!(q.get(top).unwrap().unwrap().error.is_none(), "a paused composite carries no error");
         assert_eq!(q.checkpoint(leaf, &json!(1), &json!([]), 0.5).unwrap(), TaskStatus::Paused, "the worker stops");
 
-        q.resume(top).unwrap();
-        assert_eq!(status(&q, top), TaskStatus::Waiting);
-        assert_eq!(status(&q, middle), TaskStatus::Waiting);
+        q.resume(leaf).unwrap();
         assert_eq!(status(&q, leaf), TaskStatus::Queued);
+        assert_eq!(q.get(later).unwrap().unwrap().error, None, "the pause note goes away");
+        assert_eq!(status(&q, middle), TaskStatus::Running, "the leaf can run again");
+        assert_eq!(status(&q, top), TaskStatus::Running);
 
         q.claim(&["k"]).unwrap();
-        q.cancel(top).unwrap();
-        for id in [top, middle, leaf] {
+        q.cancel(leaf).unwrap();
+        assert_eq!(status(&q, leaf), TaskStatus::Cancelled);
+        assert_eq!(status(&q, later), TaskStatus::Cancelled, "what depends on it is cancelled too");
+        assert_eq!(q.get(later).unwrap().unwrap().error, None, "a plain cancel has no failure note");
+        assert_eq!(status(&q, middle), TaskStatus::Cancelled, "the subtree is finished, so the composite is cancelled");
+        assert_eq!(status(&q, top), TaskStatus::Cancelled);
+
+        // Restarting the cancelled composite brings back the leaf and what was cancelled
+        // because of that leaf, and the ancestors go again.
+        q.restart(middle).unwrap();
+        assert_eq!(status(&q, leaf), TaskStatus::Queued);
+        assert_eq!(status(&q, later), TaskStatus::Queued, "it was cancelled because of the leaf");
+        assert_eq!(q.get(later).unwrap().unwrap().error, None);
+        assert_eq!(status(&q, middle), TaskStatus::Running);
+        assert_eq!(status(&q, top), TaskStatus::Running);
+        assert!(q.get(top).unwrap().unwrap().error.is_none());
+    }
+
+    #[test]
+    fn a_pause_behind_a_done_task_holds_the_later_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = Queue::open(dir.path()).unwrap();
+        let early = q.enqueue(plain("k", "early")).unwrap();
+        let middle = q.enqueue(plain("k", "middle").needs(&[early])).unwrap();
+        let later = q.enqueue(plain("k", "later").needs(&[middle])).unwrap();
+        q.complete(early, &json!({})).unwrap();
+        q.complete(middle, &json!({})).unwrap();
+        q.restart(early).unwrap();
+        q.pause(early).unwrap();
+        assert_eq!(status(&q, early), TaskStatus::Paused);
+        assert_eq!(status(&q, later), TaskStatus::Queued, "a pause does not cancel the rest");
+        assert_eq!(q.get(later).unwrap().unwrap().error.as_deref(), Some(pause_note("early").as_str()));
+        assert!(q.claim(&["k"]).unwrap().is_none(), "the later task waits through the done one");
+        assert_eq!(status(&q, middle), TaskStatus::Done);
+    }
+
+    #[test]
+    fn a_failure_cancels_the_chain_and_a_restart_wakes_the_ancestors() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = Queue::open(dir.path()).unwrap();
+        let top = q.enqueue(plain("group", "top").composite()).unwrap();
+        let middle = q.enqueue(plain("group", "middle").parent(top).composite()).unwrap();
+        let leaf = q.enqueue(plain("k", "leaf").parent(middle)).unwrap();
+        let after = q.enqueue(plain("k", "after").parent(middle).needs(&[leaf])).unwrap();
+        let outside = q.enqueue(plain("k", "outside").needs(&[after])).unwrap();
+        q.claim(&["k"]).unwrap();
+        q.fail(leaf, "model crashed").unwrap();
+
+        assert_eq!(status(&q, leaf), TaskStatus::Failed);
+        assert_eq!(q.get(leaf).unwrap().unwrap().error.as_deref(), Some("model crashed"));
+        assert_eq!(q.get(leaf).unwrap().unwrap().cursor, Value::Null);
+        for id in [after, outside] {
             let t = q.get(id).unwrap().unwrap();
-            assert_eq!(t.status, TaskStatus::Cancelled, "task {id}");
-            assert!(t.finished_ms.is_some());
+            assert_eq!(t.status, TaskStatus::Cancelled, "task {id} waited on the failure");
+            assert_eq!(t.error.as_deref(), Some(failure_note("leaf").as_str()));
+        }
+        for id in [middle, top] {
+            let t = q.get(id).unwrap().unwrap();
+            assert_eq!(t.status, TaskStatus::Failed, "task {id}");
+            assert_eq!(t.error.as_deref(), Some("model crashed"));
+        }
+        assert!(q.claim(&["k"]).unwrap().is_none(), "nothing waits for a failed task");
+
+        // A done task between them does not keep the later task claimable.
+        let early = q.enqueue(plain("k", "early")).unwrap();
+        let done_middle = q.enqueue(plain("k", "done-middle").needs(&[early])).unwrap();
+        let waiting = q.enqueue(plain("k", "waiting").needs(&[done_middle])).unwrap();
+        q.complete(early, &json!({})).unwrap();
+        q.complete(done_middle, &json!({})).unwrap();
+        q.restart(early).unwrap();
+        assert_eq!(q.claim(&["k"]).unwrap().unwrap().id, early, "the restarted task is the one that is free");
+        q.fail(early, "model crashed").unwrap();
+        let waiting_task = q.get(waiting).unwrap().unwrap();
+        assert_eq!(waiting_task.status, TaskStatus::Cancelled);
+        assert_eq!(waiting_task.error.as_deref(), Some(failure_note("early").as_str()));
+        assert_eq!(status(&q, done_middle), TaskStatus::Done, "finished work stays");
+
+        q.restart(leaf).unwrap();
+        let leaf_task = q.get(leaf).unwrap().unwrap();
+        assert_eq!(leaf_task.status, TaskStatus::Queued);
+        assert!(leaf_task.error.is_none());
+        for id in [after, outside] {
+            let t = q.get(id).unwrap().unwrap();
+            assert_eq!((t.status, t.error), (TaskStatus::Queued, None), "cancelled because of the leaf, so it is queued again");
+        }
+        for id in [middle, top] {
+            let t = q.get(id).unwrap().unwrap();
+            assert_eq!(t.status, TaskStatus::Running, "ancestor {id}");
+            assert!(t.error.is_none(), "the old error is gone: {:?}", t.error);
         }
     }
 
@@ -1643,7 +2214,8 @@ mod tests {
         let tool = q.begin_inline("tool", "tool", &json!({}), Some(chat), Some("rec-2")).unwrap();
 
         let all = q.top_level(&Filter::default()).unwrap();
-        assert_eq!(all.iter().map(|t| t.id).collect::<Vec<_>>(), [chat, analysis], "children are not top-level; running first");
+        let ids: Vec<_> = all.iter().map(|t| t.id).collect();
+        assert!(ids.contains(&chat) && ids.contains(&analysis) && ids.len() == 2, "both top-level rows are running, so either may be first: {ids:?}");
         assert!(!all.iter().any(|t| t.id == step || t.id == tool));
         let analysis_only = q.top_level(&Filter::group(KindGroup::Analysis)).unwrap();
         assert_eq!(analysis_only.iter().map(|t| t.id).collect::<Vec<_>>(), [analysis]);
@@ -1671,18 +2243,17 @@ mod tests {
         // Clearing the finished work keeps a done child under a task that did not finish.
         q.clear_done().unwrap();
         assert!(q.get(a).unwrap().is_some(), "a done child of an unfinished task stays");
-        // Restart of the composite starts every child over.
+        // Restart of the composite retries what failed and leaves the done child done.
         q.restart(top).unwrap();
-        for id in [a, b] {
-            let t = q.get(id).unwrap().unwrap();
-            assert_eq!((t.status, t.progress, t.error), (TaskStatus::Queued, 0.0, None), "task {id}");
-        }
-        assert_eq!(status(&q, top), TaskStatus::Waiting);
-        // All done: clearing removes the whole tree.
-        for _ in 0..2 {
-            let t = q.claim(&["k"]).unwrap().unwrap();
-            q.complete(t.id, &json!({})).unwrap();
-        }
+        assert_eq!(status(&q, a), TaskStatus::Done, "finished work stays");
+        let restarted = q.get(b).unwrap().unwrap();
+        assert_eq!((restarted.status, restarted.progress, restarted.error), (TaskStatus::Queued, 0.0, None));
+        let top_task = q.get(top).unwrap().unwrap();
+        assert_eq!(top_task.status, TaskStatus::Running);
+        assert!(top_task.error.is_none());
+        let t = q.claim(&["k"]).unwrap().unwrap();
+        assert_eq!(t.id, b);
+        q.complete(t.id, &json!({})).unwrap();
         assert_eq!(status(&q, top), TaskStatus::Done);
         q.clear_done().unwrap();
         assert!(q.list().unwrap().is_empty());
@@ -1710,7 +2281,8 @@ mod tests {
         // The program was closed while the leaf ran.
         q.requeue_running().unwrap();
         assert_eq!(status(&q, leaf), TaskStatus::Queued);
-        assert_eq!((status(&q, top), status(&q, mid)), (TaskStatus::Waiting, TaskStatus::Waiting), "composites are never queued");
+        assert_eq!((status(&q, top), status(&q, mid)), (TaskStatus::Running, TaskStatus::Running), "the leaf can run, so the composites are going");
+        assert_ne!((status(&q, top), status(&q, mid)), (TaskStatus::Queued, TaskStatus::Queued), "composites are never queued");
         q.claim(&["k"]).unwrap();
         q.complete(leaf, &json!({})).unwrap();
         assert_eq!((status(&q, top), status(&q, mid)), (TaskStatus::Done, TaskStatus::Done));

@@ -204,6 +204,42 @@ pub fn secondary(icon: &str, text: &str) -> egui::Button<'static> {
     sized(egui::Button::new(format!("{icon}  {text}")))
 }
 
+/// Title size of every popup. Page sections keep the 18 px heading; a popup's bar uses the body size.
+pub const POPUP_TITLE: f32 = 13.0;
+
+/// The title line of a popup that has no egui title bar (a confirmation). Same size as the window bar
+/// [`with_compact_title`] gives to `egui::Window`.
+pub fn popup_title(ui: &mut egui::Ui, title: &str) {
+    ui.label(egui::RichText::new(title).size(POPUP_TITLE));
+}
+
+/// Runs `f` while popup title bars use [`POPUP_TITLE`] instead of the page heading, then restores it.
+pub fn with_compact_title<R>(ctx: &egui::Context, f: impl FnOnce() -> R) -> R {
+    let mut previous = FontId::new(18.0, FontFamily::Proportional);
+    ctx.all_styles_mut(|style| {
+        if let Some(font) = style.text_styles.get(&TextStyle::Heading) {
+            previous = font.clone();
+        }
+        style.text_styles.insert(TextStyle::Heading, FontId::new(POPUP_TITLE, FontFamily::Proportional));
+    });
+    let _restore = RestoreHeading { ctx, previous };
+    f()
+}
+
+struct RestoreHeading<'a> {
+    ctx: &'a egui::Context,
+    previous: FontId,
+}
+
+impl Drop for RestoreHeading<'_> {
+    fn drop(&mut self) {
+        let previous = self.previous.clone();
+        self.ctx.all_styles_mut(|style| {
+            style.text_styles.insert(TextStyle::Heading, previous.clone());
+        });
+    }
+}
+
 /// Small square icon button with a tooltip.
 /// A menu entry: icon and label across the menu's width, highlighted under the pointer
 /// (accent tint; red tint for `danger`) with a hand cursor.

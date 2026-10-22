@@ -92,7 +92,8 @@ impl FolderTools<'_> {
     fn one(&self, i: usize, tool: &str, args: &Value) -> anyhow::Result<Outcome> {
         let search = |q: &str, n: usize| (self.search_one)(i, q, n);
         let out = Tools::new(&self.items[i].recording, &search, self.max_chars).run(tool, args)?;
-        Ok(Outcome { text: tag_times(&out.text, i + 1), seen: out.seen.map(|s| s.into_iter().map(|k| format!("{}:{k}", i + 1)).collect()) })
+        let text = mediaa_core::speakers::tag_recording(&tag_times(&out.text, i + 1), (i + 1) as u32);
+        Ok(Outcome { text, seen: out.seen.map(|s| s.into_iter().map(|k| format!("{}:{k}", i + 1)).collect()) })
     }
 }
 
@@ -153,7 +154,7 @@ impl Toolbox for FolderTools<'_> {
                     .iter()
                     .map(|(i, h)| {
                         let r = &self.items[*i].recording;
-                        let who: Vec<String> = h.chunk.speakers.iter().map(|&s| r.speaker(s)).collect();
+                        let who: Vec<String> = h.chunk.speakers.iter().map(|&s| mediaa_core::speakers::folder_label(s, (i + 1) as u32)).collect();
                         minijinja::context! { number => i + 1, start => format_time(h.chunk.start), end => format_time(h.chunk.end), title => &r.title, who, text => &h.chunk.text }
                     })
                     .collect();
@@ -229,6 +230,24 @@ impl Toolbox for FolderTools<'_> {
         bad.extend(super::citations(text).into_iter().filter(|(s, _)| !s.starts_with('#')).map(|(s, _)| s));
         bad
     }
+
+    fn cited_context(&self, text: &str) -> String {
+        let cites = folder_citations(text);
+        let mut parts = Vec::new();
+        for (i, it) in self.items.iter().enumerate() {
+            let n = i + 1;
+            let times: Vec<f64> = cites.iter().filter(|(_, num, _)| *num == n).map(|(_, _, t)| *t).collect();
+            if times.is_empty() {
+                continue;
+            }
+            let lines: Vec<String> = super::cited_replies(&it.recording, &times).into_iter().map(|r| super::reply_line(&it.recording, r)).collect();
+            if lines.is_empty() {
+                continue;
+            }
+            parts.push(format!("#{n} {}\n{}", it.recording.title, lines.join("\n")));
+        }
+        parts.join("\n\n")
+    }
 }
 
 #[cfg(test)]
@@ -255,6 +274,10 @@ mod tests {
         let f = FolderTools { items: &items, search: &none, search_one: &one, max_chars: 4000, web: None };
         // #2 is two minutes long; #3 does not exist; a bare time names no recording.
         assert_eq!(f.bad_citations("[#1 5:00] [#2 5:00] [#3 0:10] [0:30] [#1 m:00]"), ["#2 5:00", "#3 0:10", "#1 m:00", "0:30"]);
+        let around = f.cited_context("[#1 0:10] решили");
+        assert!(around.contains("Отчёт отправляем в пятницу.") && around.contains("Графики будут к четвергу."), "{around}");
+        assert!(!around.contains("Бюджет на квартал"), "{around}");
+        assert!(around.starts_with("#1 Планёрка\n"), "{around}");
     }
 
     #[test]
@@ -272,9 +295,9 @@ mod tests {
         let list = f.run("recordings", &json!({})).unwrap().text;
         assert!(list.starts_with("#1 «Планёрка», 10:00. Chapters: Отчёт и бюджет\n#2 «Созвон», 2:00"), "{list}");
         let found = f.run("search", &json!({"query": "графики"})).unwrap();
-        assert!(found.text.starts_with("[#2 0:30–0:40] «Созвон» (Говорящий 2) Графики"), "{}", found.text);
+        assert!(found.text.starts_with("[#2 0:30–0:40] «Созвон» (@s2#2) Графики"), "{}", found.text);
         let read = f.run("read", &json!({"recording": 2, "from": "0:00", "to": "1:00"})).unwrap();
-        assert!(read.text.starts_with("[#2 0:10] Дана: Отчёт"), "{}", read.text);
+        assert!(read.text.starts_with("[#2 0:10] @s1#2: Отчёт"), "{}", read.text);
         assert_eq!(f.run("outline", &json!({"recording": "#1"})).unwrap().text.lines().next().unwrap(), "[#1 0:00–10:00] Отчёт и бюджет — Сроки отчёта, бюджет.");
         assert!(f.run("outline", &json!({"recording": "Созвон"})).unwrap().text.contains("No outline"));
         assert!(f.run("read", &json!({"recording": 5, "from": "0:00", "to": "1:00"})).is_err());
@@ -283,5 +306,9 @@ mod tests {
         assert!(all.starts_with("#1: «отчёт»: 1 mentions") && all.contains("#2: «отчёт»: 1 mentions"), "{all}");
         assert_eq!(f.run("calculator", &json!({"expression": "1+1"})).unwrap().text, "2");
         assert_eq!(f.card(), "The folder has 2 recordings:\n#1 «Планёрка», 10:00. About: Отчёт и бюджет\n#2 «Созвон», 2:00\n");
+        let topic = f.run("outline", &json!({"recording": 1, "topic": 1})).unwrap().text;
+        assert!(topic.contains("Topic 1 «Отчёт и бюджет» has no breakdown yet"), "{topic}");
+        let missing = f.run("outline", &json!({"recording": 1, "topic": 4})).unwrap_err().to_string();
+        assert!(missing.contains('4'), "{missing}");
     }
 }

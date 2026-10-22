@@ -93,7 +93,11 @@ pub fn run_next(queue: &Queue, engine: &Arc<dyn Engine>, handlers: &[Box<dyn Tas
                 queue.release(task.id)?;
             }
         }
-        Ok(Err(e)) => queue.fail(task.id, &format!("{e:#}"))?,
+        Ok(Err(e)) => {
+            // The details window quotes this line from the program log.
+            log::error!("task {} {} ({}) failed: {e:#}", task.id, task.kind, task.title);
+            queue.fail(task.id, &format!("{e:#}"))?;
+        }
         Err(panic) => {
             let msg = panic.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| panic.downcast_ref::<String>().cloned()).unwrap_or_default();
             log::error!("task {} ({}) crashed: {msg}", task.id, task.kind);
@@ -266,5 +270,31 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         handle.join().unwrap();
         assert_eq!(q.get(id).unwrap().unwrap().status, TaskStatus::Cancelled, "nobody can continue it");
+    }
+
+    #[test]
+    fn a_failure_cancels_the_dependent_and_the_worker_stops() {
+        struct Boom;
+        impl TaskHandler for Boom {
+            fn kind(&self) -> &'static str {
+                "count"
+            }
+            fn run(&self, _task: &Task, _cp: &mut Checkpoints) -> anyhow::Result<Value> {
+                anyhow::bail!("model exploded")
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let q = Queue::open(dir.path()).unwrap();
+        let first = q.enqueue(NewTask::new("count", "first", &json!({}))).unwrap();
+        let second = q.enqueue(NewTask::new("count", "second", &json!({})).needs(&[first])).unwrap();
+        let handlers: Vec<Box<dyn TaskHandler>> = vec![Box::new(Boom)];
+        let stop = AtomicBool::new(false);
+        let engine = engine();
+        assert!(run_next(&q, &engine, &handlers, &stop).unwrap());
+        assert_eq!(q.get(first).unwrap().unwrap().status, TaskStatus::Failed);
+        let blocked = q.get(second).unwrap().unwrap();
+        assert_eq!(blocked.status, TaskStatus::Cancelled);
+        assert_eq!(blocked.error.as_deref(), Some(mediaa_core::queue::failure_note("first").as_str()));
+        assert!(!run_next(&q, &engine, &handlers, &stop).unwrap(), "the dependent is not claimed");
     }
 }

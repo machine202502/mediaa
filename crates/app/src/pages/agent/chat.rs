@@ -3,13 +3,13 @@
 //! that seek the player; an answer is its timeline (steps, reasoning, text; see `timeline`), and
 //! a chat is named once by the titles model after its first question.
 
+use super::mentions::{self, Roster};
 use super::studio::{panel, StudioAction};
 use super::Services;
 use crate::player::Player;
 use crate::tab_strip::{self, Tab, TabAction};
 use crate::theme;
 use eframe::egui::{self, Rect, RichText};
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 use egui_phosphor::regular as icon;
 use mediaa_agent::assistant::folder::Item;
 use mediaa_agent::assistant::chat::{self as answering, Run, State};
@@ -17,6 +17,7 @@ use mediaa_agent::assistant::{self, title, Memory, Recording, Turn};
 use mediaa_agent::scope::Scope as TaskScope;
 use mediaa_agent::tools::parse_time;
 use mediaa_core::chat::{Author, ChatId, ChatInfo, ChatMessage};
+use mediaa_core::speakers::{self, Popup};
 use mediaa_core::transcript::{self, Transcript};
 use rust_i18n::t;
 use super::timeline;
@@ -45,7 +46,7 @@ fn link_bare(text: &str) -> String {
             let shape = token.split(':').collect::<Vec<_>>();
             let ok = (2..=3).contains(&shape.len()) && shape[0].len() <= 2 && shape[1..].iter().all(|p| p.len() == 2);
             if let (true, Some(t)) = (ok, parse_time(&token).filter(|_| ok)) {
-                out.push_str(&format!("[`{token}`](seek:{t})"));
+                out.push_str(&format!("[{token}](seek:{t})"));
                 i += token.chars().count();
                 continue;
             }
@@ -56,8 +57,8 @@ fn link_bare(text: &str) -> String {
     out
 }
 
-/// Cited times become `seek:` links shown as time chips (`[1:05]` → ``[`1:05`](seek:65)``; a
-/// range seeks to its start).
+/// Cited times become `seek:` links of the same size as the text (`[1:05]` → `[1:05](seek:65)`;
+/// a range seeks to its start).
 pub fn linkify(text: &str, bare_times: bool) -> String {
     let bare = |s: &str| if bare_times { link_bare(s) } else { s.to_string() };
     let mut out = String::with_capacity(text.len() + 32);
@@ -86,7 +87,7 @@ pub fn linkify(text: &str, bare_times: bool) -> String {
         });
         match link {
             Some((c, inside, target)) => {
-                out.push_str(&format!("[`{inside}`](seek:{target})"));
+                out.push_str(&format!("[{inside}](seek:{target})"));
                 rest = &after[c + 1..];
             }
             None => {
@@ -205,8 +206,14 @@ pub struct Chat {
     /// An archived chat waiting for the delete confirmation.
     confirm_delete: Option<ChatInfo>,
     read: Option<Instant>,
-    cache: CommonMarkCache,
     dev_asked: bool,
+    /// The `@` completion list. Pure state; the rows are the roster indexes from the last frame.
+    mention: Popup,
+    mention_open: bool,
+    mention_rows: Vec<usize>,
+    mention_query: String,
+    /// Caret byte to place after an insertion, before the editor draws.
+    mention_caret: Option<usize>,
 }
 
 impl Chat {
@@ -237,8 +244,20 @@ impl Chat {
             error: None,
             confirm_delete: None,
             read: None,
-            cache: CommonMarkCache::default(),
             dev_asked: false,
+            mention: Popup::default(),
+            mention_open: false,
+            mention_rows: Vec::new(),
+            mention_query: String::new(),
+            mention_caret: None,
+        }
+    }
+
+    /// Speakers the chat can mention, re-read so a rename shows up without a new answer.
+    fn roster(&self) -> Roster {
+        match &self.scope {
+            Scope::File { file_id, .. } => file_id.as_ref().map(|id| Roster::of_file(&self.ai_dir, id)).unwrap_or_default(),
+            Scope::Folder { files, .. } => Roster::of_files(&self.ai_dir, files),
         }
     }
 
@@ -404,7 +423,9 @@ impl Chat {
     /// (trimmed and capitalised) is the title when the task cannot be started or fails.
     fn start_title(&mut self, services: &Services, store: &str, chat: ChatId, question: &str) {
         let ai = self.ai_dir.clone();
-        let input = serde_json::json!({ "chat": chat, "question": question });
+        // The queue shows what was typed. The titles model reads labels (`@Антон` → `@s1`).
+        let for_model = self.roster().to_model(question);
+        let input = serde_json::json!({ "chat": chat, "question": for_model });
         let scope = TaskScope::begin(&ai, services.engine.clone(), "chat-title", &title::task_title(question), &input, Some(store));
         let scope = match scope {
             Ok(scope) => scope,
@@ -418,7 +439,7 @@ impl Chat {
         };
         let done = Arc::new(AtomicBool::new(false));
         self.titling = Some(done.clone());
-        let (settings, store, question) = (services.settings.clone(), store.to_string(), question.to_string());
+        let (settings, store, question) = (services.settings.clone(), store.to_string(), for_model);
         let _ = std::thread::Builder::new().name("chat-title".into()).spawn(move || {
             let settings = settings.read().expect("settings lock").clone();
             title::work(&scope, &settings, &ai, &store, chat, &question, &AtomicBool::new(false));
@@ -482,6 +503,7 @@ impl Chat {
             self.retitle(s);
         }
         ui.ctx().request_repaint_after(REFRESH);
+        let roster = self.roster();
         let body = panel(ui, rect, &t!("studio.chat"), p);
         let mut seek = None;
         ui.scope_builder(egui::UiBuilder::new().max_rect(body.shrink2(egui::vec2(10.0, 8.0))), |ui| {
@@ -495,7 +517,7 @@ impl Chat {
                 self.input = q;
                 self.send(s, player.as_deref());
             }
-            self.chats_bar(ui);
+            self.chats_bar(ui, &roster);
             let input_h = 86.0;
             let bare = self.bare_times();
             let list = Rect::from_min_max(ui.cursor().min, egui::pos2(ui.max_rect().max.x, ui.max_rect().max.y - input_h));
@@ -511,13 +533,13 @@ impl Chat {
                         if hidden[n] {
                             continue;
                         }
-                        if let Some(t) = message_ui(ui, n, m, &mut self.cache, bare, p) {
+                        if let Some(t) = message_ui(ui, n, m, bare, &roster, p) {
                             seek = Some(t);
                         }
                     }
                     if let Some(r) = &self.running {
                         let live = r.run.live().clone();
-                        if let Some(t) = timeline::live_ui(ui, &live, &mut self.cache, bare, p) {
+                        if let Some(t) = timeline::live_ui(ui, &live, bare, &roster, p) {
                             seek = Some(t);
                         }
                     }
@@ -527,9 +549,9 @@ impl Chat {
                 });
             });
             let input = Rect::from_min_max(egui::pos2(ui.max_rect().min.x, ui.max_rect().max.y - input_h + 6.0), ui.max_rect().max);
-            ui.scope_builder(egui::UiBuilder::new().max_rect(input), |ui| self.input_ui(ui, player.as_deref(), services));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(input), |ui| self.input_ui(ui, player.as_deref(), services, &roster));
         });
-        self.delete_dialog(ui.ctx());
+        self.delete_dialog(ui.ctx(), &roster);
         // A citation: this recording's player, or (in a folder) the recording it names.
         match (seek.as_deref().and_then(|s| self.jump(s)), player) {
             (Some(Jump::Here(t)), Some(p)) => {
@@ -554,7 +576,7 @@ impl Chat {
     }
 
     /// Tabs of the open chats, «+» (a new chat) and «История» (the archive, right of «+»).
-    fn chats_bar(&mut self, ui: &mut egui::Ui) {
+    fn chats_bar(&mut self, ui: &mut egui::Ui, roster: &Roster) {
         let tabs = tab_list(&self.chats, &self.open, self.current, &t!("studio.new_chat"));
         let archived = self.archived.clone();
         let salt = self.salt();
@@ -586,7 +608,9 @@ impl Chat {
                                 egui::vec2((ui.available_width() - buttons).max(80.0), 36.0),
                                 egui::Layout::top_down(egui::Align::LEFT),
                                 |ui| {
-                                    ui.add(egui::Label::new(RichText::new(shown_title(&c.title)).size(13.0)).truncate());
+                                    let p = theme::palette(ui);
+                                    let galley = mentions::galley(ui, &shown_title(&c.title), roster, egui::FontId::proportional(13.0), p.text, ui.available_width(), true, false, p);
+                                    ui.add(egui::Label::new(galley).truncate());
                                     theme::hint(ui, chat_date(c.created_ms));
                                 },
                             );
@@ -609,7 +633,7 @@ impl Chat {
                 select = Some(None);
             }
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                match tab_strip::tab_strip(ui, ("chat-tabs", &salt), &tabs, &t!("studio.close_chat")) {
+                match tab_strip::tab_strip(ui, ("chat-tabs", &salt), &tabs, &t!("studio.close_chat"), roster) {
                     Some(TabAction::Selected(chat)) => select = Some(chat),
                     Some(TabAction::Closed(chat)) => close = chat,
                     None => {}
@@ -682,13 +706,15 @@ impl Chat {
     }
 
     /// The permanent-delete confirmation of an archived chat.
-    fn delete_dialog(&mut self, ctx: &egui::Context) {
+    fn delete_dialog(&mut self, ctx: &egui::Context, roster: &Roster) {
         let Some(info) = self.confirm_delete.clone() else { return };
         let mut decision = None;
         let modal = egui::Modal::new(egui::Id::new(("chat-delete", self.salt()))).show(ctx, |ui| {
             ui.set_width(340.0);
             ui.label(RichText::new(format!("{}  {}", icon::TRASH, t!("studio.delete_chat"))).size(15.0).strong());
-            ui.label(t!("studio.delete_chat_confirm", title = shown_title(&info.title)));
+            let confirm = t!("studio.delete_chat_confirm", title = shown_title(&info.title)).to_string();
+            let p = theme::palette(ui);
+            mentions::show(ui, &confirm, roster, egui::FontId::proportional(13.0), p.text, false, p);
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui.add(theme::danger(ui, icon::TRASH, &t!("studio.delete_chat"))).clicked() {
@@ -714,14 +740,45 @@ impl Chat {
         }
     }
 
-    fn input_ui(&mut self, ui: &mut egui::Ui, player: Option<&Player>, services: Option<&Services>) {
-        ui.horizontal(|ui| {
-            let running = self.running.is_some();
-            let edit = egui::TextEdit::multiline(&mut self.input).hint_text(t!("studio.ask_hint")).desired_rows(3).desired_width(ui.available_width() - 36.0);
-            let resp = ui.add_enabled(!running, edit);
-            let enter = resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+    fn input_ui(&mut self, ui: &mut egui::Ui, player: Option<&Player>, services: Option<&Services>, roster: &Roster) {
+        // Keys of the list are taken before the editor, so arrows do not move the caret and
+        // Enter does not send.
+        if self.mention_open {
+            let (up, down, enter, esc) = ui.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                )
+            });
+            let n = self.mention_rows.len();
+            if up {
+                self.mention.up(n);
+            }
+            if down {
+                self.mention.down(n);
+            }
+            if esc {
+                self.mention.dismiss(self.mention.at);
+                self.mention_open = false;
+            }
             if enter {
-                // Enter sends; the newline it typed is not part of the question.
+                self.insert_mention(roster);
+            }
+        }
+        let id = ui.id().with("ask");
+        if let Some(byte) = self.mention_caret.take() {
+            place_cursor(ui, id, &self.input, byte);
+        }
+        let editor = ui.horizontal(|ui| {
+            let running = self.running.is_some();
+            let edit = egui::TextEdit::multiline(&mut self.input).id(id).hint_text(t!("studio.ask_hint")).desired_rows(3).desired_width(ui.available_width() - 36.0);
+            // Disabled while an answer runs (the row stays; typing does not).
+            let out = ui.add_enabled_ui(!running, |ui| edit.show(ui)).inner;
+            let resp = &out.response;
+            let enter = resp.has_focus() && !self.mention_open && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+            if enter {
                 self.input = self.input.trim_end_matches(['\n', '\r']).to_string();
             }
             ui.vertical(|ui| {
@@ -736,8 +793,81 @@ impl Chat {
                     }
                 }
             });
+            (resp.response.rect, out.cursor_range)
         });
+        let (rect, cursor) = editor.inner;
+        self.sync_mentions(ui, roster, rect, cursor);
     }
+
+    /// Inserts the selected speaker in place of the `@` being typed.
+    fn insert_mention(&mut self, roster: &Roster) {
+        let Some(&row) = self.mention_rows.get(self.mention.selected) else { return };
+        let Some(who) = roster.speakers.get(row) else { return };
+        let (text, caret) = speakers::insert(&self.input, self.mention.at, &self.mention_query, &Roster::insertion(who));
+        self.input = text;
+        self.mention_caret = Some(caret);
+        // The inserted `@` sits at the same index; leave it closed until the next `@`.
+        self.mention.dismiss(self.mention.at);
+        self.mention_open = false;
+        self.mention_rows.clear();
+        self.mention_query.clear();
+    }
+
+    /// Follows the caret: `@` opens the list above the editor (an overlay, so the row stays put).
+    fn sync_mentions(&mut self, ui: &mut egui::Ui, roster: &Roster, rect: Rect, cursor: Option<egui::text::CCursorRange>) {
+        let byte = cursor.map(|r| chars_to_byte(&self.input, r.primary.index.0)).unwrap_or(self.input.len());
+        let query = speakers::mention_query(&self.input, byte);
+        let rows = query.as_ref().map(|q| speakers::matching(&roster.speakers, &q.query, |i| t!("studio.speaker", n = i + 1).into())).unwrap_or_default();
+        self.mention.update(query.as_ref(), rows.len());
+        self.mention_open = self.mention.is_open(query.as_ref(), rows.len());
+        self.mention_query = query.map(|q| q.query).unwrap_or_default();
+        self.mention_rows = rows;
+        if !self.mention_open {
+            return;
+        }
+        let p = theme::palette(ui);
+        let visible = self.mention_rows.len().min(6);
+        let h = visible as f32 * 26.0 + 8.0;
+        let pos = egui::pos2(rect.left(), rect.top() - h - 4.0);
+        let rows = self.mention_rows.clone();
+        let selected = self.mention.selected;
+        let mut pick = None;
+        egui::Area::new(ui.id().with("speaker-mentions")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+            egui::Frame::new().fill(p.card).stroke(egui::Stroke::new(1.0, p.border)).corner_radius(6).inner_margin(4.0).show(ui, |ui| {
+                ui.set_min_width(240.0);
+                egui::ScrollArea::vertical().max_height(6.0 * 26.0).show(ui, |ui| {
+                    for (i, &row) in rows.iter().enumerate() {
+                        let Some(who) = roster.speakers.get(row) else { continue };
+                        let (r, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(240.0), 26.0), egui::Sense::click());
+                        if i == selected || resp.hovered() {
+                            ui.painter().rect_filled(r, egui::CornerRadius::same(4), if i == selected { p.accent_soft } else { p.card_hover });
+                        }
+                        ui.painter().text(egui::pos2(r.left() + 8.0, r.center().y), egui::Align2::LEFT_CENTER, Roster::row_label(who), egui::FontId::proportional(13.0), p.text);
+                        if resp.clicked() {
+                            pick = Some(i);
+                        }
+                    }
+                });
+            });
+        });
+        if let Some(i) = pick {
+            self.mention.selected = i;
+            self.insert_mention(roster);
+        }
+    }
+}
+
+/// Puts the caret at `byte` in the chat editor (character index, as egui stores it).
+fn place_cursor(ui: &egui::Ui, id: egui::Id, text: &str, byte: usize) {
+    use egui::text::{CCursor, CCursorRange};
+    let chars = text.get(..byte.min(text.len())).map(|s| s.chars().count()).unwrap_or(0);
+    let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+    state.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(chars))));
+    state.store(ui.ctx(), id);
+}
+
+fn chars_to_byte(text: &str, chars: usize) -> usize {
+    text.char_indices().nth(chars).map(|(i, _)| i).unwrap_or(text.len())
 }
 
 /// What a chat is called on screen: its title, or «Новый чат» until the titles model has
@@ -803,13 +933,13 @@ fn chat_date(ms: i64) -> String {
 
 /// A message (the `n`-th of the chat); returns the time of a clicked citation. An answer is its
 /// timeline: the final one folds its steps and reasoning, a stopped one shows them as they were.
-fn message_ui(ui: &mut egui::Ui, n: usize, m: &ChatMessage, cache: &mut CommonMarkCache, bare_times: bool, p: theme::Palette) -> Option<String> {
+fn message_ui(ui: &mut egui::Ui, n: usize, m: &ChatMessage, bare_times: bool, roster: &Roster, p: theme::Palette) -> Option<String> {
     match m.author {
         Author::User => {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 egui::Frame::new().fill(p.accent_soft).corner_radius(10).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                     ui.set_max_width(ui.available_width() * 0.85);
-                    ui.add(egui::Label::new(RichText::new(&m.text).size(13.5)).wrap());
+                    mentions::show(ui, &m.text, roster, egui::FontId::proportional(13.5), p.text, false, p);
                 });
             });
             ui.add_space(timeline::GAP);
@@ -821,12 +951,12 @@ fn message_ui(ui: &mut egui::Ui, n: usize, m: &ChatMessage, cache: &mut CommonMa
             if timeline.is_empty() {
                 // A section, or an answer from before timelines: just the text.
                 if !m.text.is_empty() {
-                    CommonMarkViewer::new().show(ui, cache, &linkify(&m.text, bare_times));
-                    seek = timeline::take_seek(ui);
+                    seek = super::markdown::show(ui, &linkify(&m.text, bare_times), roster, p);
                 }
             } else {
                 let forced = m.details["forced"].as_bool() == Some(true);
-                seek = timeline::timeline_ui(ui, ("message", n), &timeline.entries, true, forced, cache, bare_times, p);
+                let steps: Vec<mediaa_agent::assistant::StepRecord> = serde_json::from_value(m.details["steps"].clone()).unwrap_or_default();
+                seek = timeline::timeline_ui(ui, ("message", n), &timeline.entries, &steps, true, forced, bare_times, roster, p);
             }
             if m.stopped() {
                 theme::hint(ui, t!("studio.stopped"));
@@ -858,14 +988,14 @@ mod tests {
 
     #[test]
     fn citations_become_seek_links() {
-        assert_eq!(linkify("В пятницу [1:05].", true), "В пятницу [`1:05`](seek:65).");
-        assert_eq!(linkify("[0:00–0:11] и [1:02:30]", true), "[`0:00–0:11`](seek:0) и [`1:02:30`](seek:3750)");
+        assert_eq!(linkify("В пятницу [1:05].", true), "В пятницу [1:05](seek:65).");
+        assert_eq!(linkify("[0:00–0:11] и [1:02:30]", true), "[0:00–0:11](seek:0) и [1:02:30](seek:3750)");
         assert_eq!(linkify("уже [1:05](seek:65), [см.] и [5]", true), "уже [1:05](seek:65), [см.] и [5]");
         assert_eq!(linkify("[незакрытая", true), "[незакрытая");
-        assert_eq!(linkify("в [#2 1:05] и [#10 0:00–0:30]", true), "в [`#2 1:05`](seek:2:65) и [`#10 0:00–0:30`](seek:10:0)");
-        assert_eq!(linkify("в моменте 0:00–0:11.", true), "в моменте [`0:00`](seek:0)–[`0:11`](seek:11).");
-        assert_eq!(linkify("в 1:02:30, не 3.14:15, не 123:45, не 12:5", true), "в [`1:02:30`](seek:3750), не 3.14:15, не 123:45, не 12:5");
-        assert_eq!(linkify("длится 26:39, см. [#2 1:05]", false), "длится 26:39, см. [`#2 1:05`](seek:2:65)", "a folder: no bare times");
+        assert_eq!(linkify("в [#2 1:05] и [#10 0:00–0:30]", true), "в [#2 1:05](seek:2:65) и [#10 0:00–0:30](seek:10:0)");
+        assert_eq!(linkify("в моменте 0:00–0:11.", true), "в моменте [0:00](seek:0)–[0:11](seek:11).");
+        assert_eq!(linkify("в 1:02:30, не 3.14:15, не 123:45, не 12:5", true), "в [1:02:30](seek:3750), не 3.14:15, не 123:45, не 12:5");
+        assert_eq!(linkify("длится 26:39, см. [#2 1:05]", false), "длится 26:39, см. [#2 1:05](seek:2:65)", "a folder: no bare times");
     }
 
     #[test]

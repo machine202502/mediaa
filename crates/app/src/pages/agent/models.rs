@@ -6,7 +6,7 @@
 //! download shows its progress, and a downloaded model can be deleted.
 
 use super::super::header;
-use super::engine_state::{download_bar, gb};
+use super::engine_state::gb;
 use crate::app::App;
 use crate::theme;
 use crossbeam_channel::Receiver;
@@ -149,8 +149,10 @@ pub struct ModelsUi {
     inspects: HashMap<ModelRole, Inspect>,
     downloads: Vec<Download>,
     deletes: Vec<Delete>,
-    /// The last download or delete error of a role.
+    /// The last delete error of a role (a download's failure is its [`Fetch`]).
     errors: HashMap<ModelRole, String>,
+    /// What each role's Download button is doing. Kept so a click is never silent.
+    fetches: HashMap<ModelRole, Fetch>,
     /// The model waiting for a delete confirmation: `(role, repository)`.
     confirm_delete: Option<(ModelRole, String)>,
 }
@@ -185,6 +187,13 @@ impl ModelsUi {
         self.statuses.remove(&role);
         self.errors.remove(&role);
         self.downloads.push(Download { role, progress, result: rx });
+    }
+
+    /// Forgets the download in the UI.
+    /// shortcut: `Engine::pull` has no cancel, so the pull keeps running until the engine finishes; upgrade when the engine can abort a pull.
+    fn stop_download(&mut self, role: ModelRole) {
+        self.downloads.retain(|d| d.role != role);
+        self.fetches.insert(role, Fetch::default());
     }
 
     fn start_delete(&mut self, role: ModelRole, spec: String, engine: Arc<dyn Engine>) {
@@ -248,20 +257,25 @@ impl ModelsUi {
                     let role = self.downloads[i].role;
                     self.downloads.remove(i);
                     self.statuses.remove(&role);
-                    self.errors.remove(&role);
+                    self.note(role, FetchInput::Thread(Ok(())));
                     refresh = true;
                 }
                 Ok(Err(e)) => {
                     let role = self.downloads[i].role;
                     self.downloads.remove(i);
                     self.statuses.remove(&role);
-                    self.errors.insert(role, t!("agent.download_failed", error = format!("{e:#}")).to_string());
+                    self.note(role, FetchInput::Thread(Err(t!("agent.download_failed", error = format!("{e:#}")).to_string())));
                 }
-                Err(crossbeam_channel::TryRecvError::Empty) => i += 1,
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    let role = self.downloads[i].role;
+                    let (done, total) = self.downloads[i].progress();
+                    self.note(role, FetchInput::Progress(done, total));
+                    i += 1;
+                }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     let role = self.downloads[i].role;
                     self.downloads.remove(i);
-                    self.errors.insert(role, t!("engine.no_answer").to_string());
+                    self.note(role, FetchInput::Thread(Err(t!("engine.no_answer").to_string())));
                 }
             }
         }
@@ -273,6 +287,7 @@ impl ModelsUi {
                     self.deletes.remove(i);
                     self.statuses.remove(&role);
                     self.errors.remove(&role);
+                    self.fetches.insert(role, Fetch::default());
                     refresh = true;
                 }
                 Ok(Err(e)) => {
@@ -289,10 +304,15 @@ impl ModelsUi {
             }
         }
 
-        if !self.downloads.is_empty() || !self.deletes.is_empty() || self.inspects.values().any(Inspect::busy) || self.run.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(100));
+        if !self.downloads.is_empty() || !self.deletes.is_empty() || self.inspects.values().any(Inspect::busy) || self.run.is_some() || self.fetches.values().any(|f| f.held.is_some()) {
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
         refresh
+    }
+
+    fn note(&mut self, role: ModelRole, input: FetchInput) {
+        let fetch = self.fetches.remove(&role).unwrap_or_default();
+        self.fetches.insert(role, fetch_next(fetch, input));
     }
 }
 
@@ -305,6 +325,119 @@ fn repo_id(repo: &str) -> String {
 fn is_downloaded<'a>(repo: &str, downloaded: impl IntoIterator<Item = &'a str>) -> bool {
     let id = repo_id(repo);
     downloaded.into_iter().any(|spec| spec == id)
+}
+
+/// How long «Скачивается…» stays up after a click, so an instant pull (the file is already
+/// on disk) is still visible before «Скачано» replaces it.
+const FETCH_SHOW_MS: u128 = 400;
+/// The download row: one gap, and the same slots in every state, so a click does not move them.
+const FETCH_GAP: f32 = 8.0;
+/// Text line, the gap under it, and the progress line (the queue's bar is 6 px). The line's
+/// room stays reserved when nothing is downloading.
+const FETCH_TEXT_H: f32 = 18.0;
+const FETCH_BAR_H: f32 = 6.0;
+const FETCH_ROW_H: f32 = FETCH_TEXT_H + 4.0 + FETCH_BAR_H;
+const FETCH_STATUS_W: f32 = 280.0;
+const FETCH_BTN_W: f32 = 180.0;
+
+/// What the Download row says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchState {
+    Idle,
+    Fetching { done: u64, total: u64 },
+    Saved,
+    Already,
+    Failed(String),
+}
+
+/// One role's download, plus a result held until «Скачивается…» has been on screen long enough.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fetch {
+    pub state: FetchState,
+    pub held: Option<Result<(), String>>,
+    /// Monotonic milliseconds when the fetching line started (`None` until the first frame).
+    pub started_ms: Option<u128>,
+}
+
+impl Default for Fetch {
+    fn default() -> Fetch {
+        Fetch { state: FetchState::Idle, held: None, started_ms: None }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchInput {
+    /// The user pressed Download. `offline` is the engine's error when it is not reachable.
+    Press { on_disk: bool, online: bool, offline: String },
+    Progress(u64, u64),
+    /// The pull thread finished.
+    Thread(Result<(), String>),
+    /// The engine's list says the model is already there, and nobody has pressed anything.
+    Listed,
+    /// Once per frame, before the row is drawn. `now_ms` is monotonic.
+    Frame { now_ms: u128 },
+}
+
+pub fn fetch_next(mut fetch: Fetch, input: FetchInput) -> Fetch {
+    match input {
+        FetchInput::Press { online: false, offline, .. } => {
+            fetch.held = None;
+            fetch.started_ms = None;
+            fetch.state = FetchState::Failed(offline);
+        }
+        FetchInput::Press { on_disk: true, .. } => {
+            fetch.held = None;
+            fetch.started_ms = None;
+            fetch.state = FetchState::Already;
+        }
+        FetchInput::Press { .. } => {
+            fetch.held = None;
+            fetch.started_ms = None;
+            fetch.state = FetchState::Fetching { done: 0, total: 0 };
+        }
+        FetchInput::Progress(done, total) => {
+            if matches!(fetch.state, FetchState::Fetching { .. }) {
+                fetch.state = FetchState::Fetching { done, total };
+            }
+        }
+        FetchInput::Thread(result) => {
+            if matches!(fetch.state, FetchState::Fetching { .. }) {
+                fetch.held = Some(result);
+            } else {
+                fetch.state = match result {
+                    Ok(()) => FetchState::Saved,
+                    Err(e) => FetchState::Failed(e),
+                };
+            }
+        }
+        FetchInput::Listed => {
+            if matches!(fetch.state, FetchState::Idle) {
+                fetch.state = FetchState::Already;
+            }
+        }
+        FetchInput::Frame { now_ms } => {
+            if matches!(fetch.state, FetchState::Fetching { .. }) && fetch.started_ms.is_none() {
+                fetch.started_ms = Some(now_ms);
+            }
+            if let Some(result) = fetch.held.clone() {
+                let shown = fetch.started_ms.is_some_and(|start| now_ms.saturating_sub(start) >= FETCH_SHOW_MS);
+                if shown {
+                    fetch.held = None;
+                    fetch.started_ms = None;
+                    fetch.state = match result {
+                        Ok(()) => FetchState::Saved,
+                        Err(e) => FetchState::Failed(e),
+                    };
+                }
+            }
+        }
+    }
+    fetch
+}
+
+fn mono_ms() -> u128 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -550,13 +683,12 @@ struct RoleRow<'a> {
     repo: &'a str,
     downloaded: bool,
     online: bool,
-    checking: bool,
 }
 
 /// The Hugging Face part of a role's card: what fits, what the engine found in the repository,
 /// and Download or Delete.
 fn repository_rows(app: &mut App, ui: &mut egui::Ui, row: RoleRow, engine: &Arc<dyn Engine>) {
-    let RoleRow { role, repo, downloaded, online, checking } = row;
+    let RoleRow { role, repo, downloaded, online } = row;
     let spec = repo.trim().to_string();
     theme::row(ui, "", |ui| theme::hint(ui, role_fit_hint(role)));
     let inspect = app.agent.models.inspects.get(&role);
@@ -593,32 +725,126 @@ fn repository_rows(app: &mut App, ui: &mut egui::Ui, row: RoleRow, engine: &Arc<
         });
     }
 
-    theme::row(ui, &t!("agent.model"), |ui| {
-        if let Some(download) = app.agent.models.downloading(role) {
-            let (fill, text) = download_bar(download.progress().0, download.progress().1);
-            ui.add(egui::ProgressBar::new(fill).text(text).desired_width(300.0));
-        } else if app.agent.models.deleting(role) {
-            ui.spinner();
-            theme::hint(ui, t!("agent.deleting"));
-        } else if downloaded {
-            theme::hint(ui, t!("agent.downloaded"));
-            if ui.add(theme::danger(ui, icon::TRASH, &t!("agent.delete_model"))).clicked() {
-                app.agent.models.confirm_delete = Some((role, repo_id(&spec)));
-            }
-        } else {
-            let button = ui
-                .add_enabled(online && !checking, theme::secondary(icon::DOWNLOAD_SIMPLE, &t!("agent.download")))
-                .on_disabled_hover_text(t!("engine.not_running"));
-            if button.clicked() {
+    let deleting = app.agent.models.deleting(role);
+    let mut fetch = app.agent.models.fetches.get(&role).cloned().unwrap_or_default();
+    fetch = fetch_next(fetch, FetchInput::Frame { now_ms: mono_ms() });
+    if downloaded && !deleting {
+        fetch = fetch_next(fetch, FetchInput::Listed);
+    }
+    let delete_error = app.agent.models.errors.get(&role).cloned();
+    let line = delete_error.clone().unwrap_or_else(|| fetch_line(&fetch.state, deleting));
+    let click = theme::row(ui, &t!("agent.model"), |ui| fetch_controls(ui, role, &line, &fetch.state, deleting, delete_error.is_some()));
+    let mut stopped = false;
+    match click {
+        FetchClick::Stop => stopped = true,
+        FetchClick::Delete => app.agent.models.confirm_delete = Some((role, repo_id(&spec))),
+        FetchClick::Download => {
+            let offline = app.agent.engine_state.error().unwrap_or(&t!("engine.not_running")).to_string();
+            fetch = fetch_next(fetch, FetchInput::Press { on_disk: downloaded, online, offline });
+            if matches!(fetch.state, FetchState::Fetching { .. }) {
                 let token = hf_token(&app.settings.agent);
                 app.agent.models.start_download(role, spec.clone(), engine.clone(), token, ui.ctx().clone());
+                ui.ctx().request_repaint();
             }
         }
-    });
-    if let Some(e) = app.agent.models.errors.get(&role) {
-        let p = theme::palette(ui);
-        ui.add(egui::Label::new(RichText::new(format!("{}  {e}", icon::WARNING)).color(p.danger)).wrap());
+        FetchClick::None => {}
     }
+    if stopped {
+        app.agent.models.stop_download(role);
+    } else {
+        app.agent.models.fetches.insert(role, fetch);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FetchClick {
+    None,
+    Download,
+    Stop,
+    Delete,
+}
+
+/// Status cell of a fixed width and the button column. The progress line is reserved in every
+/// state and painted only while downloading, so the row does not move.
+fn fetch_controls(ui: &mut egui::Ui, role: ModelRole, line: &str, state: &FetchState, deleting: bool, delete_error: bool) -> FetchClick {
+    let p = theme::palette(ui);
+    let width = FETCH_STATUS_W + FETCH_GAP + FETCH_BTN_W;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, FETCH_ROW_H), egui::Sense::hover());
+    let status = egui::Rect::from_min_size(rect.min, egui::vec2(FETCH_STATUS_W, FETCH_ROW_H));
+    let text_rect = egui::Rect::from_min_size(status.min, egui::vec2(FETCH_STATUS_W, FETCH_TEXT_H));
+    let color = if delete_error || matches!(state, FetchState::Failed(_)) {
+        p.danger
+    } else if matches!(state, FetchState::Saved | FetchState::Already) {
+        p.success
+    } else if deleting {
+        p.text_weak
+    } else {
+        p.text
+    };
+    let galley = egui::WidgetText::from(RichText::new(line).color(color)).into_galley(ui, Some(egui::TextWrapMode::Truncate), FETCH_STATUS_W, egui::TextStyle::Body);
+    ui.painter_at(text_rect).galley(egui::pos2(text_rect.left(), text_rect.center().y - galley.size().y / 2.0), galley, color);
+    if let FetchState::Fetching { done, total } = state {
+        let bar = egui::Rect::from_min_size(egui::pos2(status.left(), status.bottom() - FETCH_BAR_H), egui::vec2(FETCH_STATUS_W, FETCH_BAR_H));
+        let painter = ui.painter_at(bar);
+        painter.rect_filled(bar, egui::CornerRadius::same(3), p.border);
+        let fill = if *total == 0 { 0.0 } else { (*done as f64 / *total as f64).clamp(0.0, 1.0) as f32 };
+        if fill > 0.0 {
+            painter.rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(bar.width() * fill, bar.height())), egui::CornerRadius::same(3), p.accent);
+        }
+    }
+    let full = ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), egui::FontId::proportional(13.0), color).size().x);
+    if full > FETCH_STATUS_W || delete_error || matches!(state, FetchState::Failed(_)) {
+        let resp = ui.interact(status, ui.id().with(("model-status", role as u8)), egui::Sense::hover());
+        super::topics::text_tip(&resp, line, &super::mentions::Roster::default());
+    }
+    let fetching = matches!(state, FetchState::Fetching { .. });
+    let on_disk = !fetching && !deleting && matches!(state, FetchState::Saved | FetchState::Already);
+    let (glyph, label, kind) = if fetching {
+        (icon::STOP, t!("agent.stop").to_string(), FetchClick::Stop)
+    } else if on_disk || deleting {
+        (icon::TRASH, t!("agent.delete_model").to_string(), FetchClick::Delete)
+    } else {
+        (icon::DOWNLOAD_SIMPLE, t!("agent.download").to_string(), FetchClick::Download)
+    };
+    let button_rect = egui::Rect::from_min_size(egui::pos2(rect.right() - FETCH_BTN_W, rect.top()), egui::vec2(FETCH_BTN_W, FETCH_ROW_H));
+    let enabled = !deleting;
+    let clicked = ui
+        .scope_builder(egui::UiBuilder::new().max_rect(button_rect), |ui| {
+            let button = if kind == FetchClick::Delete {
+                theme::danger(ui, glyph, &label)
+            } else {
+                theme::secondary(glyph, &label)
+            };
+            ui.add_enabled(enabled, button.min_size(egui::vec2(FETCH_BTN_W, FETCH_ROW_H))).clicked()
+        })
+        .inner;
+    if clicked { kind } else { FetchClick::None }
+}
+
+/// One line for the status cell.
+pub fn fetch_line(state: &FetchState, deleting: bool) -> String {
+    if deleting {
+        return t!("agent.deleting").into();
+    }
+    match state {
+        FetchState::Fetching { done, total } => fetching_line(*done, *total),
+        FetchState::Saved => t!("agent.saved").into(),
+        FetchState::Already => t!("agent.already").into(),
+        FetchState::Failed(e) => e.clone(),
+        FetchState::Idle => t!("agent.not_downloaded").into(),
+    }
+}
+
+fn fetching_line(done: u64, total: u64) -> String {
+    if total == 0 {
+        return t!("agent.fetching").into();
+    }
+    let percent = ((done as f64 / total as f64) * 100.0).clamp(0.0, 100.0).round() as u64;
+    t!("agent.fetching_progress", percent = percent, done = mb(done), total = mb(total)).into()
+}
+
+fn mb(bytes: u64) -> u64 {
+    (bytes as f64 / 1_048_576.0).round() as u64
 }
 
 fn delete_dialog(app: &mut App, ctx: &egui::Context) {
@@ -626,7 +852,7 @@ fn delete_dialog(app: &mut App, ctx: &egui::Context) {
     let mut decision = None;
     let modal = egui::Modal::new(egui::Id::new("model-delete")).show(ctx, |ui| {
         ui.set_width(340.0);
-        ui.label(RichText::new(format!("{}  {}", icon::TRASH, t!("agent.model_delete_title"))).size(15.0).strong());
+        theme::popup_title(ui, &t!("agent.model_delete_title"));
         ui.label(t!("agent.model_delete_text", name = spec));
         ui.add_space(6.0);
         ui.horizontal(|ui| {
@@ -714,11 +940,20 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                             changed = true;
                         }
                     }
+                    let mut verify = app.settings.agent.verify_answers;
+                    let resp = ui.checkbox(&mut verify, t!("agent.verify_answers"));
+                    if resp.changed() {
+                        app.settings.agent.verify_answers = verify;
+                        changed = true;
+                    }
+                    if resp.hovered() {
+                        super::topics::text_tip(&resp, &t!("agent.verify_answers_hint"), &super::mentions::Roster::default());
+                    }
                 }
             });
             if let Some(ModelSource::HuggingFace { repo }) = source {
                 let downloaded = is_downloaded(&repo, downloaded.iter().map(String::as_str));
-                repository_rows(app, ui, RoleRow { role, repo: &repo, downloaded, online, checking: running }, &engine);
+                repository_rows(app, ui, RoleRow { role, repo: &repo, downloaded, online }, &engine);
             }
             // The check's answer; a download of this role hides it (the download is what the
             // role is doing then).
@@ -734,6 +969,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     if changed {
         // Results of an earlier check no longer apply to the changed choices.
         app.agent.models.statuses.clear();
+        app.agent.models.fetches.clear();
         app.settings_changed();
     }
     ui.add_space(8.0);
@@ -835,5 +1071,59 @@ mod tests {
         assert!(requests.is_empty(), "nothing is asked while the engine does not answer");
         inspect.tick("owner/repo", t0 + Duration::from_secs(6), true, |spec| channel_for(spec, &mut requests));
         assert_eq!(requests.len(), 1, "asked at once when the engine is back");
+    }
+
+    fn press(on_disk: bool, online: bool) -> FetchInput {
+        FetchInput::Press { on_disk, online, offline: "engine down".into() }
+    }
+
+    #[test]
+    fn a_download_says_what_it_is_doing() {
+        let idle = Fetch::default();
+        let fetching = fetch_next(idle.clone(), press(false, true));
+        assert_eq!(fetching.state, FetchState::Fetching { done: 0, total: 0 }, "a click shows the download at once");
+
+        let started = fetch_next(fetching, FetchInput::Frame { now_ms: 1_000 });
+        assert!(started.started_ms.is_some());
+        let moving = fetch_next(started.clone(), FetchInput::Progress(10, 100));
+        assert_eq!(moving.state, FetchState::Fetching { done: 10, total: 100 });
+
+        // The pull finished in the same moment, before the line has been readable.
+        let held = fetch_next(started.clone(), FetchInput::Thread(Ok(())));
+        assert!(matches!(held.state, FetchState::Fetching { .. }), "the result waits");
+        assert!(held.held.is_some());
+        let early = fetch_next(held.clone(), FetchInput::Frame { now_ms: 1_000 + FETCH_SHOW_MS - 1 });
+        assert!(matches!(early.state, FetchState::Fetching { .. }));
+        let saved = fetch_next(held, FetchInput::Frame { now_ms: 1_000 + FETCH_SHOW_MS });
+        assert_eq!(saved.state, FetchState::Saved);
+
+        let failed = fetch_next(started, FetchInput::Thread(Err("disk full".into())));
+        let failed = fetch_next(failed, FetchInput::Frame { now_ms: 1_000 + FETCH_SHOW_MS });
+        assert_eq!(failed.state, FetchState::Failed("disk full".into()));
+    }
+
+    #[test]
+    fn a_click_on_a_downloaded_or_unreachable_model_is_not_silent() {
+        assert_eq!(fetch_next(Fetch::default(), press(true, true)).state, FetchState::Already);
+        assert_eq!(fetch_next(Fetch::default(), press(false, false)).state, FetchState::Failed("engine down".into()));
+        assert_eq!(fetch_next(Fetch::default(), FetchInput::Listed).state, FetchState::Already);
+        // A message the user already sees is not wiped by the engine's list.
+        let failed = Fetch { state: FetchState::Failed("x".into()), ..Fetch::default() };
+        assert_eq!(fetch_next(failed, FetchInput::Listed).state, FetchState::Failed("x".into()));
+    }
+
+    #[test]
+    fn the_status_line_names_every_state_in_one_line() {
+        assert_eq!(fetch_line(&FetchState::Idle, false), t!("agent.not_downloaded").to_string());
+        assert_eq!(fetch_line(&FetchState::Saved, false), t!("agent.saved").to_string());
+        assert_eq!(fetch_line(&FetchState::Already, false), t!("agent.already").to_string());
+        assert_eq!(fetch_line(&FetchState::Idle, true), t!("agent.deleting").to_string());
+        assert_eq!(fetch_line(&FetchState::Failed("disk full".into()), false), "disk full");
+        assert_eq!(fetch_line(&FetchState::Fetching { done: 0, total: 0 }, false), t!("agent.fetching").to_string());
+        let total = 250 * 1024 * 1024;
+        let done = 112 * 1024 * 1024;
+        let line = fetch_line(&FetchState::Fetching { done, total }, false);
+        assert_eq!(line, t!("agent.fetching_progress", percent = 45, done = 112, total = 250).to_string());
+        assert!(!line.contains('\n'), "{line}");
     }
 }

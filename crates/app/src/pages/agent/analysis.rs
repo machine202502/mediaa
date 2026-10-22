@@ -8,7 +8,7 @@ use super::topics;
 use crate::theme::{self, Palette};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Margin, Rect, RichText, Sense, Stroke, StrokeKind};
 use egui_phosphor::regular as icon;
-use mediaa_agent::outline::{DETAILS_KIND, DETAIL_KIND, DIGEST_KIND};
+use mediaa_agent::outline::{DETAIL_KIND, DETAILS_KIND, DIGEST_KIND, MERGE_KIND, PLAN_KIND, TOPICS_KIND};
 use mediaa_agent::pipeline::{Readiness, Stage};
 use mediaa_core::agent::AnalysisOptions;
 use mediaa_core::queue::{self, KindStat, Task, TaskId, TaskStatus};
@@ -438,20 +438,70 @@ pub fn total_title(status: TaskStatus, total: Left) -> String {
 }
 
 /// The compact line over the topics: «Анализ: темы 3 из 7 · ≈ осталось 4 мин».
+/// A stage that is running (including one restarted after an error) wins over the parent's
+/// stored status, which another part of the program keeps up to date.
 pub fn compact_title(status: TaskStatus, rows: &[StageRow], total: Left) -> String {
+    if let Some(row) = rows.iter().find(|r| r.state == RowState::Running) {
+        return running_title(row, total);
+    }
     if status == TaskStatus::Failed {
-        let stage = rows.iter().find(|r| matches!(r.state, RowState::Failed(_))).map(|r| stage_name(r.stage).to_lowercase()).unwrap_or_default();
-        return t!("analysis.compact_failed", stage = stage).into();
+        return failed_compact(rows);
     }
     if status == TaskStatus::Paused {
         return total_title(status, total);
     }
     let Some(row) = current(rows) else { return total_title(status, total) };
+    running_title(row, total)
+}
+
+fn running_title(row: &StageRow, total: Left) -> String {
     let stage = stage_name(row.stage).to_lowercase();
     match row.count {
         Some((done, all)) => t!("analysis.compact_count", stage = stage, done = done, total = all, left = left_text(total)).into(),
         None => t!("analysis.compact", stage = stage, left = left_text(total)).into(),
     }
+}
+
+/// «Анализ: ошибка — индекс: нет модели». No bare dash when the stage or the reason is missing.
+fn failed_compact(rows: &[StageRow]) -> String {
+    let Some(row) = rows.iter().find(|r| matches!(r.state, RowState::Failed(_))) else {
+        return t!("analysis.total_failed").into();
+    };
+    let reason = match &row.state {
+        RowState::Failed(error) => short_reason(error),
+        _ => String::new(),
+    };
+    let stage = stage_name(row.stage).to_lowercase();
+    let text = match (stage.is_empty(), reason.is_empty()) {
+        (true, true) => return t!("analysis.total_failed").into(),
+        (false, true) => stage,
+        (true, false) => reason,
+        (false, false) => format!("{stage}: {reason}"),
+    };
+    t!("analysis.compact_failed", stage = text).into()
+}
+
+/// The first line of an error, cut so the collapsed row stays one line. The full text is in the details.
+pub fn short_reason(error: &str) -> String {
+    let line = error.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
+    const MAX: usize = 80;
+    if line.chars().count() <= MAX {
+        return line.to_string();
+    }
+    let short: String = line.chars().take(MAX).collect();
+    format!("{short}…")
+}
+
+/// A spinner in the analysis header: something is running, or the analysis itself is queued or waiting.
+pub fn shows_spinner(status: TaskStatus, rows: &[StageRow]) -> bool {
+    rows.iter().any(|r| r.state == RowState::Running) || matches!(status, TaskStatus::Running | TaskStatus::Queued | TaskStatus::Waiting)
+}
+
+/// Topics or the breakdown are being built right now (a restarted part counts).
+pub fn topics_running(tree: &[Task]) -> bool {
+    tree.iter().any(|task| {
+        task.status == TaskStatus::Running && matches!(task.kind.as_str(), TOPICS_KIND | PLAN_KIND | DIGEST_KIND | MERGE_KIND | DETAILS_KIND | DETAIL_KIND)
+    })
 }
 
 /// The right-hand text of a row: «идёт 1:23 · ≈ осталось 4 мин», the time a finished stage took,
@@ -547,10 +597,17 @@ pub struct CardView<'a> {
     pub failed: bool,
 }
 
+/// A click on a failed stage: resume it, or open its details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageHit {
+    Retry(TaskId),
+    Details(TaskId),
+}
+
 /// The progress card: a header row (the topics block's header geometry) and, when open, a row
 /// per stage. `fold` is `None` for a card that cannot be folded (no caret, always open), else
-/// the open flag a click on the header toggles. Returns the task whose «Повторить» was pressed.
-pub fn card(ui: &mut egui::Ui, view: &CardView, fold: Option<&mut bool>, p: Palette) -> Option<TaskId> {
+/// the open flag a click on the header toggles. Returns a click on a failed stage.
+pub fn card(ui: &mut egui::Ui, view: &CardView, fold: Option<&mut bool>, p: Palette) -> Option<StageHit> {
     let mut retry = None;
     let mut fold = fold;
     let open = fold.as_ref().is_none_or(|open| **open);
@@ -602,9 +659,9 @@ pub fn card(ui: &mut egui::Ui, view: &CardView, fold: Option<&mut bool>, p: Pale
     retry
 }
 
-/// One stage row; returns the task to resume when «Повторить» was pressed.
-fn row_ui(ui: &mut egui::Ui, row: &StageRow, p: Palette) -> Option<TaskId> {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), topics::HEADER_H), Sense::hover());
+/// One stage row. A failed one: «Повторить» resumes it, a click anywhere else opens its details.
+fn row_ui(ui: &mut egui::Ui, row: &StageRow, p: Palette) -> Option<StageHit> {
+    let (rect, row_resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), topics::HEADER_H), Sense::click());
     let g = row_geom(rect);
     let painter = ui.painter_at(rect);
     let (glyph, color) = row_icon(&row.state, p);
@@ -626,7 +683,7 @@ fn row_ui(ui: &mut egui::Ui, row: &StageRow, p: Palette) -> Option<TaskId> {
             ui.painter_at(area).galley(egui::pos2(area.left(), rect.center().y - galley.size().y / 2.0), galley, p.danger);
             if !error.trim().is_empty() {
                 // The full error in a tooltip.
-                topics::text_tip(&ui.interact(area, ui.id().with(("analysis-error", row.stage as usize)), Sense::hover()), error.trim());
+                topics::text_tip(&ui.interact(area, ui.id().with(("analysis-error", row.stage as usize)), Sense::hover()), error.trim(), &super::mentions::Roster::default());
             }
             let button = ui
                 .scope_builder(egui::UiBuilder::new().max_rect(g.time).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
@@ -634,7 +691,12 @@ fn row_ui(ui: &mut egui::Ui, row: &StageRow, p: Palette) -> Option<TaskId> {
                 })
                 .inner;
             if button.clicked() {
-                retry = row.task;
+                retry = row.task.map(StageHit::Retry);
+            } else if row_resp.clicked() {
+                retry = row.task.map(StageHit::Details);
+            }
+            if row.task.is_some() {
+                let _ = row_resp.on_hover_cursor(egui::CursorIcon::PointingHand);
             }
         }
         state => {
@@ -667,7 +729,7 @@ fn entry(ui: &mut egui::Ui, glyph: &str, label: &str, enabled: bool, why: Option
     ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), Align2::LEFT_CENTER, glyph, FontId::proportional(15.0), color);
     ui.painter().text(rect.left_center() + egui::vec2(36.0, 0.0), Align2::LEFT_CENTER, label, FontId::proportional(13.5), color);
     if let (false, Some(why)) = (enabled, why) {
-        topics::text_tip(&resp, &why.text());
+        topics::text_tip(&resp, &why.text(), &super::mentions::Roster::default());
     }
     enabled && resp.clicked()
 }
@@ -732,13 +794,14 @@ impl OptionsWindow {
         let mut outcome = Outcome::Open;
         let draft = &mut self.draft;
         let restart = self.restart;
-        egui::Window::new(t!("analysis.options_title"))
-            .id(id)
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
+        theme::with_compact_title(ctx, || {
+            egui::Window::new(t!("analysis.options_title"))
+                .id(id)
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
                 ui.set_width(340.0);
                 if restart {
                     ui.add(egui::Label::new(RichText::new(t!("analysis.options_restart_warn")).size(12.0).color(p.danger)).wrap());
@@ -777,6 +840,7 @@ impl OptionsWindow {
                     }
                 });
             });
+        });
         if !open {
             return Outcome::Cancel;
         }
@@ -808,13 +872,15 @@ impl ConfirmWindow {
         let mut outcome = Outcome::Open;
         let (stage, add) = (self.stage, self.add);
         let speakers = &mut self.speakers;
-        egui::Window::new(menu_label(stage, Some(if add { Offer::Add } else { Offer::Redo })).trim_end_matches('…').to_string())
-            .id(id)
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
+        let title = menu_label(stage, Some(if add { Offer::Add } else { Offer::Redo })).trim_end_matches('…').to_string();
+        theme::with_compact_title(ctx, || {
+            egui::Window::new(&title)
+                .id(id)
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(ctx, |ui| {
                 ui.set_width(340.0);
                 ui.add(egui::Label::new(RichText::new(confirm_text(plan, add)).size(13.0)).wrap());
                 if stage == Stage::Diarize {
@@ -835,6 +901,7 @@ impl ConfirmWindow {
                     }
                 });
             });
+        });
         if !open {
             return Outcome::Cancel;
         }
@@ -1166,5 +1233,62 @@ mod tests {
         for r in [narrow.name, narrow.bar, narrow.time] {
             assert!(r.width() >= 0.0, "{r:?}");
         }
+    }
+
+    #[test]
+    fn a_running_stage_leads_the_compact_line_and_an_empty_error_has_no_bare_dash() {
+        let running = StageRow {
+            stage: Stage::Topics,
+            state: RowState::Running,
+            progress: 0.4,
+            elapsed: Some(Duration::from_secs(10)),
+            left: Some(Duration::from_secs(240)),
+            count: Some((2, 5)),
+            task: Some(3),
+        };
+        let title = compact_title(TaskStatus::Failed, std::slice::from_ref(&running), Left::Minutes(4));
+        assert_eq!(title, compact_title(TaskStatus::Running, std::slice::from_ref(&running), Left::Minutes(4)));
+        assert!(shows_spinner(TaskStatus::Failed, std::slice::from_ref(&running)), "a restarted stage spins");
+
+        let failed = StageRow {
+            stage: Stage::Index,
+            state: RowState::Failed("  ".into()),
+            progress: 0.0,
+            elapsed: None,
+            left: None,
+            count: None,
+            task: Some(2),
+        };
+        let title = compact_title(TaskStatus::Failed, &[failed], Left::Unknown);
+        let bare = t!("analysis.compact_failed", stage = "").to_string();
+        assert_ne!(title, bare);
+        assert!(!title.trim_end().ends_with('—'), "{title}");
+        assert!(title.contains(&stage_name(Stage::Index).to_lowercase()), "{title}");
+
+        let explained = StageRow {
+            stage: Stage::Index,
+            state: RowState::Failed("нет модели".into()),
+            progress: 0.0,
+            elapsed: None,
+            left: None,
+            count: None,
+            task: Some(2),
+        };
+        let title = compact_title(TaskStatus::Failed, &[explained], Left::Unknown);
+        assert!(title.contains("нет модели") || title.contains(&stage_name(Stage::Index).to_lowercase()), "{title}");
+        assert_eq!(compact_title(TaskStatus::Failed, &[], Left::Unknown), t!("analysis.total_failed").to_string());
+        assert_eq!(short_reason("  \nboom\n"), "boom");
+        assert!(short_reason(&"x".repeat(200)).ends_with('…'));
+        assert!(!shows_spinner(TaskStatus::Failed, &[]));
+        assert!(shows_spinner(TaskStatus::Queued, &[]));
+    }
+
+    #[test]
+    fn topics_and_the_breakdown_count_as_running() {
+        let digest = task(5, DIGEST_KIND, TaskStatus::Running, Some(3));
+        assert!(topics_running(&[digest]));
+        assert!(!topics_running(&[task(2, "index", TaskStatus::Running, None)]));
+        assert!(!topics_running(&[task(6, DETAIL_KIND, TaskStatus::Waiting, None)]));
+        assert!(topics_running(&[task(7, DETAIL_KIND, TaskStatus::Running, None)]));
     }
 }

@@ -26,6 +26,7 @@ pub mod paths;
 pub mod screenshot;
 pub mod secrets;
 pub mod settings;
+pub mod speakers;
 pub mod source;
 pub mod thumb_cache;
 pub mod transcript;

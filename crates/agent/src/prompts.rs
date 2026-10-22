@@ -67,22 +67,22 @@ mod tests {
     #[test]
     fn scan() {
         let system = render("scan/system.j2", context! { json_only => false });
-        assert!(system.ends_with("an empty list is a fine answer."));
+        assert!(system.contains("an empty list is a fine answer."));
+        assert!(system.ends_with("Speakers are labels (@s1, @s2…): name a speaker in a fact only by the label."), "{system}");
         assert_eq!(render("scan/system.j2", context! { json_only => true }), format!("{system} Answer with the JSON object only."));
         insta::assert_snapshot!("scan_system", system);
-        let part = render("scan/part.j2", context! { instruction => "все сроки", number => 2, parts => 5, start => "5:00", end => "10:30", text => "[5:10] (Анна) Отчёт в пятницу." });
-        // Exactly what the code wrote before the move to templates.
-        assert_eq!(part, "Instruction: все сроки\n\nPart 2 of 5 (5:00 – 10:30):\n[5:10] (Анна) Отчёт в пятницу.\n\nReturn a JSON object {\"facts\": [{\"time\": \"m:ss\", \"text\": \"...\"}]}.");
+        let part = render("scan/part.j2", context! { instruction => "все сроки", number => 2, parts => 5, start => "5:00", end => "10:30", text => "[5:10] @s1: Отчёт в пятницу." });
+        assert_eq!(part, "Instruction: все сроки\n\nPart 2 of 5 (5:00 – 10:30):\n[5:10] @s1: Отчёт в пятницу.\n\nReturn a JSON object {\"facts\": [{\"time\": \"m:ss\", \"text\": \"...\"}]}.");
     }
 
     #[test]
     fn outline() {
         insta::assert_snapshot!("outline_system", render("outline/system.j2", ()));
-        let tail = "\n\nWrite a JSON object:\ntitle — 3 to 8 words naming the subject, specific to this conversation (not \"Discussion\" or \"Questions\");\nsummary — 1 to 3 sentences: what is discussed and what came of it;\ndecisions — what was decided (empty when nothing was decided);\nactions — who will do what, with names when they are said (empty when nothing);\nquestions — questions left open (empty when none);\ntopics — 1 to 5 short keywords;\nquotes — 0 to 3 key lines, copied word for word from the transcript above, each with the time of its line (empty when nothing stands out).";
+        let tail = "\n\nWrite a JSON object:\ntitle — 3 to 8 words naming the subject, specific to this conversation (not \"Discussion\" or \"Questions\");\nsummary — 1 to 3 sentences: what is discussed and what came of it;\ndecisions — what was decided (empty when nothing was decided);\nactions — who will do what (a speaker by the label) (empty when nothing);\nquestions — questions left open (empty when none);\ntopics — 1 to 5 short keywords;\nquotes — 0 to 3 key lines, copied word for word from the transcript above, each with the time of its line (empty when nothing stands out).";
         let part = |previous: Option<&str>, number, parts| {
             render("outline/part.j2", context! { number, parts, start => "20 мин", end => "40 мин", language => "Russian", previous, text => "[20:00] Анна: Сроки." })
         };
-        let lines = "one line per reply, \"[time] speaker: text\":\n[20:00] Анна: Сроки.";
+        let lines = "one line per reply, \"[time] @label: text\" (each speaker is a label: @s1, @s2…; write the label wherever you mean that speaker):\n[20:00] Анна: Сроки.";
         assert_eq!(
             part(None, 2, 3),
             format!("Part 2 of 3 of one topic of the recording (20 мин – 40 мин).\nWrite everything in Russian.\n\nTranscript (this part), {lines}{tail}")
@@ -139,7 +139,7 @@ mod tests {
         );
         insta::assert_snapshot!("outline_detail_window", window);
         assert!(window.starts_with("Part 2 of 3 of one topic of the recording (0:00 – 10:00).\nThe topic: Отчёт — Сроки.\nWrite everything in Russian.\n\n"), "{window}");
-        assert!(window.contains("\"[time] speaker: text\":\n[0:10] Анна: Сроки.\n\nList the concrete points"), "{window}");
+        assert!(window.contains("\"[time] @label: text\" (each speaker is a label: @s1, @s2…; write the label wherever you mean that speaker):\n[0:10] Анна: Сроки.\n\nList the concrete points"), "{window}");
 
         let short = render(
             "outline/detail.j2",
@@ -169,7 +169,11 @@ mod tests {
 
     #[test]
     fn agent_system_prompt() {
-        let card = render("agent/card_recording.j2", context! { title => "Планёрка", length => "27:10", minutes => 27.2, speakers => ["Анна", "Говорящий 2"], chapters => 5, position => "3:15" });
+        let topics = [
+            context! { number => 1, start => "0:00", end => "5:00", title => "Сроки", summary => "Когда сдавать." },
+            context! { number => 2, start => "5:00", end => "27:10", title => "Бюджет", summary => "Сколько." },
+        ];
+        let card = render("agent/card_recording.j2", context! { title => "Планёрка", length => "27:10", minutes => 27.2, speakers => ["@s1", "@s2"], topics, position => "3:15" });
         let plain = render("agent/system.j2", context! { kind => "recording", web => false, card, tools => tools(), facts => Vec::<String>::new(), summary => "" });
         insta::assert_snapshot!("agent_system_recording", plain);
         assert!(!plain.contains("web_search") && plain.contains("Cite the moments you rely on as [m:ss], with times"));
@@ -192,7 +196,7 @@ mod tests {
 
     #[test]
     fn recording_card_without_speakers_or_outline() {
-        let card = render("agent/card_recording.j2", context! { title => "Звонок", length => "1:02:03", minutes => 62.0, speakers => Vec::<String>::new(), chapters => 0, position => () });
+        let card = render("agent/card_recording.j2", context! { title => "Звонок", length => "1:02:03", minutes => 62.0, speakers => Vec::<String>::new(), topics => Vec::<String>::new(), position => () });
         assert_eq!(card, "Recording: «Звонок», 1:02:03 long (long).\nSpeakers were not told apart.\nNo outline yet: use search and read.\n");
     }
 
@@ -216,19 +220,22 @@ mod tests {
     #[test]
     fn recording_results_and_errors() {
         // Exactly what the code wrote before the move to templates.
-        let chapters = [context! { start => "0:00", end => "10:00", title => "Отчёт", summary => "Сроки." }, context! { start => "10:00", end => "20:00", title => "Бюджет", summary => "Цифры." }];
+        let chapters = [
+            context! { start => "0:00", end => "10:00", title => "Отчёт", summary => "Сроки.", sections => Vec::<String>::new() },
+            context! { start => "10:00", end => "20:00", title => "Бюджет", summary => "Цифры.", sections => Vec::<String>::new() },
+        ];
         assert_eq!(render("results/recording/outline.j2", context! { chapters }), "[0:00–10:00] Отчёт — Сроки.\n[10:00–20:00] Бюджет — Цифры.");
-        let hits = [context! { start => "5:00", end => "5:30", who => ["Дана", "Олег"], text => "Бюджет." }, context! { start => "6:00", end => "6:30", who => Vec::<String>::new(), text => "Ещё." }];
-        assert_eq!(render("results/recording/search.j2", context! { hits }), "[5:00–5:30] (Дана, Олег) Бюджет.\n\n[6:00–6:30] () Ещё.");
-        assert_eq!(render("results/recording/line.j2", context! { time => "0:10", speaker => "Дана", text => "Привет." }), "[0:10] Дана: Привет.");
+        let hits = [context! { start => "5:00", end => "5:30", who => ["@s1", "@s2"], text => "Бюджет." }, context! { start => "6:00", end => "6:30", who => Vec::<String>::new(), text => "Ещё." }];
+        assert_eq!(render("results/recording/search.j2", context! { hits }), "[5:00–5:30] (@s1, @s2) Бюджет.\n\n[6:00–6:30] () Ещё.");
+        assert_eq!(render("results/recording/line.j2", context! { time => "0:10", speaker => "@s1", text => "Привет." }), "[0:10] @s1: Привет.");
         assert_eq!(render("results/recording/line.j2", context! { time => "0:10", speaker => (), text => "Привет." }), "[0:10] Привет.");
-        let speakers = [context! { name => "Дана", talk => "0:07", replies => 2, first => "0:10" }, context! { name => "Олег", talk => "1:00", replies => 1, first => "2:00" }];
-        assert_eq!(render("results/recording/speakers.j2", context! { speakers }), "Дана: talks 0:07 in 2 replies, first at [0:10]\nОлег: talks 1:00 in 1 replies, first at [2:00]");
-        let found = [context! { time => "0:10", speaker => "Дана", context => "а б" }, context! { time => "0:20", speaker => (), context => "в г" }];
+        let speakers = [context! { name => "@s1", talk => "0:07", replies => 2, first => "0:10" }, context! { name => "@s2", talk => "1:00", replies => 1, first => "2:00" }];
+        assert_eq!(render("results/recording/speakers.j2", context! { speakers }), "@s1: talks 0:07 in 2 replies, first at [0:10]\n@s2: talks 1:00 in 1 replies, first at [2:00]");
+        let found = [context! { time => "0:10", speaker => "@s1", context => "а б" }, context! { time => "0:20", speaker => (), context => "в г" }];
         let mentions = |more| render("results/recording/mentions.j2", context! { query => "отчёт", count => 3, first => "0:10", last => "6:45", more, found => found.clone() });
-        assert_eq!(mentions(0), "«отчёт»: 3 mentions, first at [0:10], last at [6:45].\n[0:10] Дана: …а б…\n[0:20] …в г…");
-        assert_eq!(mentions(4), "«отчёт»: 3 mentions, first at [0:10], last at [6:45].\n[0:10] Дана: …а б…\n[0:20] …в г…\n… and 4 more");
-        assert_eq!(render("results/recording/named.j2", context! { done => [context! { speaker => "Говорящий 2", name => "Олег" }, context! { speaker => "Дана", name => "Анна" }] }), "Named: Говорящий 2 → Олег, Дана → Анна.");
+        assert_eq!(mentions(0), "«отчёт»: 3 mentions, first at [0:10], last at [6:45].\n[0:10] @s1: …а б…\n[0:20] …в г…");
+        assert_eq!(mentions(4), "«отчёт»: 3 mentions, first at [0:10], last at [6:45].\n[0:10] @s1: …а б…\n[0:20] …в г…\n… and 4 more");
+        assert_eq!(render("results/recording/named.j2", context! { done => [context! { speaker => "@s2", name => "Олег" }, context! { speaker => "@s1", name => "Анна" }] }), "Named: @s2 → Олег, @s1 → Анна.");
         assert_eq!(render("results/recording/no_outline.j2", ()), "No outline yet (it is being built). Use search and read.");
         assert_eq!(render("results/recording/nothing.j2", context! { query => "q" }), "Nothing found for «q». Try other words or read the outline.");
         assert_eq!(render("results/recording/silence.j2", context! { start => "2:00", end => "3:00" }), "Nobody speaks between [2:00] and [3:00].");
@@ -260,8 +267,8 @@ mod tests {
             context! { number => 3, title => "Новое", length => "1:00", transcribed => false, chapters => Vec::<String>::new() },
         ];
         assert_eq!(render("results/folder/recordings.j2", context! { items }), "#1 «Планёрка», 10:00. Chapters: Отчёт; Бюджет\n#2 «Созвон», 2:00\n#3 «Новое», 1:00 — not transcribed yet");
-        let hits = [context! { number => 2, start => "0:30", end => "0:40", title => "Созвон", who => ["Говорящий 2"], text => "Графики." }, context! { number => 1, start => "1:00", end => "1:10", title => "Планёрка", who => ["Дана"], text => "Отчёт." }];
-        assert_eq!(render("results/folder/search.j2", context! { hits }), "[#2 0:30–0:40] «Созвон» (Говорящий 2) Графики.\n\n[#1 1:00–1:10] «Планёрка» (Дана) Отчёт.");
+        let hits = [context! { number => 2, start => "0:30", end => "0:40", title => "Созвон", who => ["@s2#2"], text => "Графики." }, context! { number => 1, start => "1:00", end => "1:10", title => "Планёрка", who => ["@s1#1"], text => "Отчёт." }];
+        assert_eq!(render("results/folder/search.j2", context! { hits }), "[#2 0:30–0:40] «Созвон» (@s2#2) Графики.\n\n[#1 1:00–1:10] «Планёрка» (@s1#1) Отчёт.");
         assert_eq!(render("results/folder/mentions.j2", context! { parts => [context! { number => 1, text => "a" }, context! { number => 2, text => "b" }] }), "#1: a\n\n#2: b");
         assert_eq!(render("results/folder/nothing.j2", context! { query => "q" }), "Nothing found for «q» in the folder.");
         assert_eq!(render("results/folder/never_said.j2", ()), "Never said in any recording.");
@@ -312,7 +319,111 @@ mod tests {
         insta::assert_snapshot!("chat_title_system", render("chat/title_system.j2", ()));
         let user = render("chat/title.j2", context! { language => "Russian", question => "привет как дела" });
         insta::assert_snapshot!("chat_title", user);
-        assert!(user.starts_with("Write the title in Russian.\n\nExamples:\n"), "{user}");
-        assert!(user.ends_with("First message:\nпривет как дела\n\nTitle:"), "{user}");
+        assert!(user.starts_with("The first message of a chat:
+привет как дела
+
+Write its title in Russian:"), "{user}");
+        assert!(user.ends_with("Title:") && !user.contains("→"), "no example to copy: {user}");
+    }
+
+    #[test]
+    fn verify_prompt_carries_the_draft_and_its_evidence() {
+        insta::assert_snapshot!("agent_verify_system", render("agent/verify_system.j2", ()));
+        let full = render("agent/verify.j2", context! { question => "Когда?", draft => "В пятницу [0:10].", fragments => "[0:10] Дана: Отчёт в пятницу.", web => "https://example.org — закон" });
+        insta::assert_snapshot!("agent_verify", full);
+        assert!(full.starts_with("Question:
+Когда?
+
+Draft answer:
+В пятницу [0:10].
+
+What the recording says at the cited times:
+[0:10] Дана: Отчёт в пятницу.
+
+The web pages the draft cites:
+https://example.org — закон
+
+Check the draft"), "{full}");
+        let bare = render("agent/verify.j2", context! { question => "Q", draft => "D", fragments => "", web => "" });
+        assert!(bare.starts_with("Question:
+Q
+
+Draft answer:
+D
+
+Check the draft"), "{bare}");
+        assert!(bare.ends_with("Put nothing else into the answer text."), "{bare}");
+    }
+
+    /// The judge templates carry the question, the reference answer, the facts and the agent's
+    /// answer. The wording is a placeholder until the lead writes the rubric.
+    #[test]
+    fn judge_prompt_carries_the_case() {
+        let system = render("eval/judge_system.j2", ());
+        insta::assert_snapshot!("eval_judge_system", system);
+        assert!(system.starts_with("You grade an assistant's answer") && system.ends_with("naming what is missing or wrong."), "{system}");
+        let facts = ["Назаров", "три юриста"];
+        let user = render(
+            "eval/judge.j2",
+            context! { question => "Как зовут?", reference => "Антон Назаров.", facts, answer => "Его зовут Назаров [12:00]." },
+        );
+        insta::assert_snapshot!("eval_judge", user);
+        assert!(
+            user.starts_with("Question:\nКак зовут?\n")
+                && user.contains("Антон Назаров.")
+                && user.contains("- Назаров\n- три юриста\n")
+                && user.ends_with("Assistant's answer:\nЕго зовут Назаров [12:00]."),
+            "{user}"
+        );
+        let bare = render("eval/judge.j2", context! { question => "Q", reference => "R", facts => Vec::<&str>::new(), answer => "A" });
+        assert!(bare.contains("Question:\nQ\n") && bare.contains("Reference answer:\nR\n") && bare.contains("Assistant's answer:\nA") && !bare.contains("- "), "{bare}");
+    }
+
+    #[test]
+    fn topic_map_card_and_outline_topic_result() {
+        let topics = [
+            context! { number => 1, start => "0:00", end => "5:00", title => "Отчёт", summary => "Сроки." },
+            context! { number => 2, start => "5:00", end => "10:00", title => "Бюджет", summary => "Цифры." },
+        ];
+        let card = render(
+            "agent/card_recording.j2",
+            context! { title => "Планёрка", length => "10:00", minutes => 10.0, speakers => ["@s1"], topics, position => () },
+        );
+        assert_eq!(card, "Recording: «Планёрка», 10:00 long (medium).\nSpeakers: @s1.\nTopics (the map; outline with a topic number gives its breakdown):\n1. [0:00–5:00] Отчёт — Сроки.\n2. [5:00–10:00] Бюджет — Цифры.\n");
+        let chapters = [
+            context! { start => "0:00", end => "5:00", title => "Отчёт", summary => "Сроки.", sections => ["Советы", "Ошибки"] },
+            context! { start => "5:00", end => "10:00", title => "Бюджет", summary => "Цифры.", sections => Vec::<String>::new() },
+        ];
+        assert_eq!(
+            render("results/recording/outline.j2", context! { chapters }),
+            "[0:00–5:00] Отчёт — Сроки. (Советы; Ошибки)\n[5:00–10:00] Бюджет — Цифры."
+        );
+        let sections = [context! {
+            title => "Советы",
+            kind => "list",
+            items => [context! { time => "0:10", text => "Сдать в пятницу" }, context! { time => "", text => "Без времени" }],
+        }];
+        let quotes = [context! { time => "0:10", text => "В пятницу." }];
+        assert_eq!(
+            render(
+                "results/recording/topic.j2",
+                context! { number => 1, start => "0:00", end => "5:00", title => "Отчёт", summary => "Сроки.", sections, quotes },
+            ),
+            "Breakdown of topic\n1. [0:00–5:00] Отчёт — Сроки.\nСоветы (list)\n[0:10] Сдать в пятницу\nБез времени\n[0:10] В пятницу."
+        );
+        assert_eq!(
+            render("results/recording/topic_empty.j2", context! { number => 2, title => "Бюджет" }).trim_end(),
+            "Topic 2 «Бюджет» has no breakdown yet: use search and read within that topic."
+        );
+        assert_eq!(
+            render("errors/no_topic.j2", context! { topic => "9", count => 2 }).trim_end(),
+            "There is no topic 9: the recording has 2 topics, numbered from 1."
+        );
+        assert!(tool("outline").starts_with("The map of the recording:") && tool("outline").contains("With topic (a topic number)"));
+        let system = render(
+            "agent/system.j2",
+            context! { kind => "recording", web => false, card => "CARD", tools => Vec::<minijinja::Value>::new(), facts => Vec::<String>::new(), summary => "" },
+        );
+        assert!(system.contains("- Start from the topic map in the card. When the question belongs to one or more topics, first read their breakdown"), "{system}");
     }
 }

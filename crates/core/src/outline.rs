@@ -8,7 +8,7 @@ use crate::library::human_duration;
 use crate::transcript::{Reply, Transcript};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 /// Words of dialog per chapter window (~8–10 minutes of conversation).
 pub const WINDOW_WORDS: usize = 1200;
@@ -49,14 +49,6 @@ pub fn language(text: &str) -> &'static str {
         }
     }
     if cyrillic >= latin && cyrillic > 0 { "Russian" } else { "English" }
-}
-
-/// How a speaker without a name is called in `language`.
-pub fn unnamed_speaker(language: &str, speaker: u32) -> String {
-    match language {
-        "Russian" => format!("Говорящий {}", speaker + 1),
-        _ => format!("Speaker {}", speaker + 1),
-    }
 }
 
 /// What the model writes about a window.
@@ -132,24 +124,24 @@ pub struct Item {
     pub time: Option<f64>,
 }
 
-/// JSON Schema of [`Digest`] for constrained generation; bounded so a small model cannot run
-/// on (lists and texts have a maximum).
+/// JSON Schema of [`Digest`] for constrained generation. How many list entries is bounded;
+/// the texts are not: a `maxLength` cuts a word, and the prompts ask for the brevity.
 pub const DIGEST_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
-    "title": {"type": "string", "maxLength": 80},
-    "summary": {"type": "string", "maxLength": 400},
-    "decisions": {"type": "array", "items": {"type": "string", "maxLength": 160}, "maxItems": 5},
-    "actions": {"type": "array", "items": {"type": "string", "maxLength": 160}, "maxItems": 5},
-    "questions": {"type": "array", "items": {"type": "string", "maxLength": 160}, "maxItems": 5},
-    "topics": {"type": "array", "items": {"type": "string", "maxLength": 40}, "maxItems": 5},
+    "title": {"type": "string"},
+    "summary": {"type": "string"},
+    "decisions": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+    "actions": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+    "questions": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
+    "topics": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
     "quotes": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
           "time": {"type": "string", "maxLength": 16},
-          "text": {"type": "string", "maxLength": 200}
+          "text": {"type": "string"}
         },
         "required": ["time", "text"]
       },
@@ -159,19 +151,18 @@ pub const DIGEST_SCHEMA: &str = r#"{
   "required": ["title", "summary", "decisions", "actions", "questions", "topics"]
 }"#;
 
-/// Caps of [`sections_schema`]: sections in an answer, items in a section, and the characters
-/// of a title and of an item's text. The answer token limit is computed from them
-/// (`mediaa_agent::outline`), so a fully filled answer always fits.
+/// How many sections and items an answer may hold. The character counts are what a full answer
+/// is budgeted for (`mediaa_agent::outline`), not a limit: the schema does not cut a text.
 pub const SECTIONS_MAX: usize = 6;
 pub const SECTION_ITEMS_MAX: usize = 8;
 pub const SECTION_TITLE_CHARS: usize = 60;
 pub const SECTION_TEXT_CHARS: usize = 200;
-/// Caps of [`points_schema`]: points of one window and the characters of a point.
+/// How many points one window may hold, and the characters a point is budgeted for.
 pub const POINTS_MAX: usize = 15;
 pub const POINT_TEXT_CHARS: usize = 200;
 
 /// JSON Schema of the detailed breakdown of a topic (`Digest.sections`), for constrained
-/// generation; bounded like [`DIGEST_SCHEMA`].
+/// generation. Counts are bounded; the texts are not ([`DIGEST_SCHEMA`]).
 pub fn sections_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -182,7 +173,7 @@ pub fn sections_schema() -> serde_json::Value {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "title": {"type": "string", "maxLength": SECTION_TITLE_CHARS},
+                        "title": {"type": "string"},
                         "kind": {"type": "string", "enum": ["list", "steps", "text"]},
                         "items": {
                             "type": "array",
@@ -191,7 +182,7 @@ pub fn sections_schema() -> serde_json::Value {
                                 "type": "object",
                                 "properties": {
                                     "time": {"type": "string", "maxLength": 16},
-                                    "text": {"type": "string", "maxLength": SECTION_TEXT_CHARS}
+                                    "text": {"type": "string"}
                                 },
                                 "required": ["text"]
                             }
@@ -217,7 +208,7 @@ pub fn points_schema() -> serde_json::Value {
                     "type": "object",
                     "properties": {
                         "time": {"type": "string", "maxLength": 16},
-                        "text": {"type": "string", "maxLength": POINT_TEXT_CHARS}
+                        "text": {"type": "string"}
                     },
                     "required": ["time", "text"]
                 }
@@ -251,9 +242,9 @@ pub struct PlanTopic {
     pub end: f64,
 }
 
-/// The line of a reply in a prompt: `[mm:ss] Name: text` (or without a name).
-pub fn line(reply: &Reply, names: &BTreeMap<u32, String>, speaker_label: impl Fn(u32) -> String) -> String {
-    line_text(reply.start, reply.speaker, &reply.text(), names, speaker_label)
+/// The line of a reply in a prompt: `[mm:ss] @sN: text` (or without a speaker).
+pub fn line(reply: &Reply) -> String {
+    line_text(reply.start, reply.speaker, &reply.text())
 }
 
 /// One line of a detail prompt: a piece of a reply cut at a sentence end, at most
@@ -266,9 +257,9 @@ pub struct FineLine {
     pub text: String,
 }
 
-fn line_text(start: f64, speaker: Option<u32>, text: &str, names: &BTreeMap<u32, String>, speaker_label: impl Fn(u32) -> String) -> String {
+fn line_text(start: f64, speaker: Option<u32>, text: &str) -> String {
     match speaker {
-        Some(s) => format!("[{}] {}: {}", human_duration(start), names.get(&s).cloned().unwrap_or_else(|| speaker_label(s)), text),
+        Some(s) => format!("[{}] {}: {}", human_duration(start), crate::speakers::label(s), text),
         None => format!("[{}] {}", human_duration(start), text),
     }
 }
@@ -277,7 +268,7 @@ fn line_text(start: f64, speaker: Option<u32>, text: &str, names: &BTreeMap<u32,
 /// lasts at most [`FINE_LINE_SECONDS`] seconds or has at most [`FINE_LINE_WORDS`] words (a
 /// monologue of minutes becomes many lines, each with its own time). A new reply always starts a
 /// new line.
-pub fn fine_lines(replies: &[Reply], names: &BTreeMap<u32, String>, speaker_label: impl Fn(u32) -> String) -> Vec<FineLine> {
+pub fn fine_lines(replies: &[Reply]) -> Vec<FineLine> {
     let mut out: Vec<FineLine> = Vec::new();
     for reply in replies {
         let mut line: Vec<&crate::transcript::Word> = Vec::new();
@@ -293,24 +284,24 @@ pub fn fine_lines(replies: &[Reply], names: &BTreeMap<u32, String>, speaker_labe
             if end - start >= FINE_LINE_SECONDS || line.len() >= FINE_LINE_WORDS {
                 let cut = if sentence > 0 { sentence } else { line.len() };
                 let rest = line.split_off(cut);
-                push_fine_line(&mut out, reply.speaker, &line, names, &speaker_label);
+                push_fine_line(&mut out, reply.speaker, &line);
                 line = rest;
                 sentence = 0;
             }
         }
         if !line.is_empty() {
-            push_fine_line(&mut out, reply.speaker, &line, names, &speaker_label);
+            push_fine_line(&mut out, reply.speaker, &line);
         }
     }
     out
 }
 
-fn push_fine_line(out: &mut Vec<FineLine>, speaker: Option<u32>, words: &[&crate::transcript::Word], names: &BTreeMap<u32, String>, speaker_label: &impl Fn(u32) -> String) {
+fn push_fine_line(out: &mut Vec<FineLine>, speaker: Option<u32>, words: &[&crate::transcript::Word]) {
     let (Some(first), Some(last)) = (words.first(), words.last()) else {
         return;
     };
     let text = words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
-    out.push(FineLine { start: first.start, end: last.end, words: words.len(), text: line_text(first.start, speaker, &text, names, speaker_label) });
+    out.push(FineLine { start: first.start, end: last.end, words: words.len(), text: line_text(first.start, speaker, &text) });
 }
 
 /// Groups fine lines into windows of about `max_words` words (the lines themselves are never
@@ -336,13 +327,13 @@ pub fn windows_of_lines(lines: &[FineLine], max_words: usize) -> Vec<Window> {
 }
 
 /// Cuts the dialog into windows of about `max_words` words at reply ends (a longer reply is
-/// a window of its own). `names`: speaker names (else «Speaker N» from `speaker_label`).
-pub fn windows(replies: &[Reply], max_words: usize, names: &BTreeMap<u32, String>, speaker_label: impl Fn(u32) -> String) -> Vec<Window> {
+/// a window of its own). Speakers are the labels `@sN`.
+pub fn windows(replies: &[Reply], max_words: usize) -> Vec<Window> {
     let mut out: Vec<Window> = Vec::new();
     let mut words = 0;
     for r in replies {
         let n = r.words.len();
-        let line = line(r, names, &speaker_label);
+        let line = line(r);
         match out.last_mut() {
             Some(w) if words + n <= max_words => {
                 w.end = r.end;
@@ -665,48 +656,42 @@ mod tests {
         assert_eq!(language("Отчёт сдаём в пятницу, OK?"), "Russian");
         assert_eq!(language("The report is due on Friday"), "English");
         assert_eq!(language("1234"), "English");
-        assert_eq!(unnamed_speaker("Russian", 0), "Говорящий 1");
-        assert_eq!(unnamed_speaker("English", 2), "Speaker 3");
     }
 
     #[test]
     fn windows_at_reply_ends() {
         let replies = vec![reply(Some(0), 0.0, 50), reply(Some(1), 20.0, 40), reply(Some(0), 65.0, 30), reply(None, 90.0, 200)];
-        let names = BTreeMap::from([(0, "Дана".to_string())]);
-        let w = windows(&replies, 100, &names, |s| format!("Speaker {}", s + 1));
+        let w = windows(&replies, 100);
         assert_eq!(w.len(), 3, "{w:#?}");
         assert_eq!(w[0].text.lines().count(), 2);
-        assert!(w[0].text.starts_with("[00:00] Дана: w0 w1"));
-        assert!(w[0].text.lines().nth(1).unwrap().starts_with("[00:20] Speaker 2: "));
+        assert!(w[0].text.starts_with("[00:00] @s1: w0 w1"));
+        assert!(w[0].text.lines().nth(1).unwrap().starts_with("[00:20] @s2: "));
         assert_eq!((w[1].start, w[2].start), (65.0, 90.0));
         assert!(w[2].text.starts_with("[01:30] w0"), "a long reply alone, no speaker without diarization");
-        assert!(windows(&[], 100, &names, |s| s.to_string()).is_empty());
+        assert!(windows(&[], 100).is_empty());
     }
 
     #[test]
     fn a_long_monologue_is_cut_into_fine_lines() {
-        let names = BTreeMap::from([(0, "Анна".to_string())]);
-        let label = |s: u32| format!("Speaker {}", s + 1);
         // 100 words, half a second each, a sentence end every ten words: the 25-second limit cuts
         // at the sentence end of the fiftieth word, so the next line starts at 25 s.
-        let lines = fine_lines(&[monologue(100, 0.5, true)], &names, label);
+        let lines = fine_lines(&[monologue(100, 0.5, true)]);
         assert_eq!(lines.len(), 2, "{lines:#?}");
         assert_eq!(lines.iter().map(|l| l.words).collect::<Vec<_>>(), [50, 50]);
         assert_eq!((lines[0].start, lines[1].start), (0.0, 25.0));
-        assert!(lines[0].text.starts_with("[00:00] Анна: слово0 "), "{}", lines[0].text);
-        assert!(lines[1].text.starts_with("[00:25] Анна: слово50"), "{}", lines[1].text);
+        assert!(lines[0].text.starts_with("[00:00] @s1: слово0 "), "{}", lines[0].text);
+        assert!(lines[1].text.starts_with("[00:25] @s1: слово50"), "{}", lines[1].text);
         // Without a sentence end the word limit cuts the line.
-        let lines = fine_lines(&[monologue(100, 0.1, false)], &names, label);
+        let lines = fine_lines(&[monologue(100, 0.1, false)]);
         assert_eq!(lines.iter().map(|l| l.words).collect::<Vec<_>>(), [60, 40]);
         assert_eq!(lines[1].start, 6.0);
-        assert!(fine_lines(&[], &names, label).is_empty());
+        assert!(fine_lines(&[]).is_empty());
     }
 
     #[test]
     fn a_detail_item_gets_the_time_of_the_line_that_says_it() {
-        let names = BTreeMap::from([(0, "Анна".to_string())]);
         // Two lines: 0:00–0:24.9 and 0:25–0:49.9.
-        let lines = fine_lines(&[monologue(100, 0.5, true)], &names, |s| format!("Speaker {}", s + 1));
+        let lines = fine_lines(&[monologue(100, 0.5, true)]);
         assert_eq!(verified_detail_time(30.0, "слово55 слово56", &lines), Some(25.0), "the middle of the monologue");
         assert_eq!(verified_detail_time(70.0, "слово55 слово56", &lines), None, "too far from the line");
         assert_eq!(verified_detail_time(30.0, "погода на даче", &lines), None, "not said there");
@@ -821,5 +806,17 @@ mod tests {
         assert_eq!(schema["properties"]["sections"]["items"]["properties"]["items"]["maxItems"], SECTION_ITEMS_MAX);
         assert_eq!(points_schema()["required"], serde_json::json!(["points"]));
         assert_eq!(points_schema()["properties"]["points"]["maxItems"], POINTS_MAX);
+        // A text the model writes has no maxLength: that cut a word. A time is a clock, not prose.
+        let digest: serde_json::Value = serde_json::from_str(DIGEST_SCHEMA).unwrap();
+        for key in ["title", "summary"] {
+            assert!(digest["properties"][key].get("maxLength").is_none(), "{key}");
+        }
+        for key in ["decisions", "actions", "questions", "topics"] {
+            assert!(digest["properties"][key]["items"].get("maxLength").is_none(), "{key}");
+        }
+        assert!(digest["properties"]["quotes"]["items"]["properties"]["text"].get("maxLength").is_none());
+        assert!(schema["properties"]["sections"]["items"]["properties"]["title"].get("maxLength").is_none());
+        assert!(schema["properties"]["sections"]["items"]["properties"]["items"]["items"]["properties"]["text"].get("maxLength").is_none());
+        assert!(points_schema()["properties"]["points"]["items"]["properties"]["text"].get("maxLength").is_none());
     }
 }

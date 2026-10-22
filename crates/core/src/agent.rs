@@ -399,6 +399,14 @@ pub struct AgentSettings {
     /// Models that reason before they act (the «Thinking» switch); off for every model until
     /// the user turns it on.
     pub thinking: Vec<ModelSource>,
+    /// Every answer is checked against the moments and pages it cites. On until turned off
+    /// (a settings file that has no key keeps the check on).
+    #[serde(default = "answers_checked")]
+    pub verify_answers: bool,
+}
+
+fn answers_checked() -> bool {
+    true
 }
 
 /// Where the agent searches the web.
@@ -448,6 +456,7 @@ impl Default for AgentSettings {
             web: WebSettings::default(),
             analysis: AnalysisOptions::default(),
             thinking: Vec::new(),
+            verify_answers: true,
         }
     }
 }
@@ -544,6 +553,18 @@ mod tests {
         assert_eq!(back, a);
         a.set_thinking(&qwen, false);
         assert!(!a.thinking_on(&qwen));
+    }
+
+    #[test]
+    fn answers_are_checked_until_turned_off() {
+        assert!(AgentSettings::default().verify_answers);
+        let off = AgentSettings { verify_answers: false, ..AgentSettings::default() };
+        let back: AgentSettings = toml::from_str(&toml::to_string(&off).unwrap()).unwrap();
+        assert!(!back.verify_answers);
+        let text = toml::to_string(&AgentSettings::default()).unwrap();
+        let stripped = text.lines().filter(|line| !line.starts_with("verify_answers")).collect::<Vec<_>>().join("\n");
+        let missing: AgentSettings = toml::from_str(&stripped).unwrap();
+        assert!(missing.verify_answers, "a settings file from before the switch keeps the check on");
     }
 
     #[test]

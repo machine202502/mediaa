@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 const STEP_SEARCH: &str = r#"{"thought":"","action":"search","title":"Ищу отчёт","args":{"query":"отчёт"}}"#;
 const STEP_ANSWER: &str = r#"{"thought":"","action":"answer","answer":"В пятницу [0:10]."}"#;
+const STEP_CHECK: &str = r#"{"changed":true,"answer":"В пятницу [0:10]."}"#;
 
 fn nothing(_: &str, _: usize) -> anyhow::Result<Vec<mediaa_core::retrieval::Hit>> {
     Ok(vec![])
@@ -19,7 +20,7 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     let dir = tempfile::tempdir().unwrap();
     let ai = dir.path();
     let engine = FakeEngine::new();
-    engine.chat_answers(&[STEP_SEARCH, STEP_ANSWER]);
+    engine.chat_answers(&[STEP_SEARCH, STEP_ANSWER, STEP_CHECK]);
     let t = Transcript::open(ai, "rec").unwrap();
     let chat = t.create_chat("Сроки").unwrap();
     let input = json!({ "chat": chat, "question": "Когда отчёт?" });
@@ -32,7 +33,7 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
         ask(&scope, &slots, &settings, ai, "rec", &rec, &[], memory, "Когда отчёт?", &run.cancel, on_event)
     });
     assert_eq!(outcome, Outcome::Done);
-    assert_eq!(engine.chats().len(), 2, "one model call for each step");
+    assert_eq!(engine.chats().len(), 3, "the search, the draft and the check");
 
     // The queue: the answer, and under it every step of the model and every tool call.
     let q = Queue::open(ai).unwrap();
@@ -43,7 +44,7 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     let children = q.children(root.id).unwrap();
     assert_eq!(
         children.iter().map(|c| (c.kind.as_str(), c.status)).collect::<Vec<_>>(),
-        [("model-step", TaskStatus::Done), ("tool", TaskStatus::Done), ("model-step", TaskStatus::Done)]
+        [("model-step", TaskStatus::Done), ("tool", TaskStatus::Done), ("model-step", TaskStatus::Done), ("model-step", TaskStatus::Done)]
     );
     assert!(children.iter().all(|c| c.inline && c.scope.as_deref() == Some("rec")));
     // A model step: its call, tokens (from the answer) and model.
@@ -52,7 +53,11 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
         assert_eq!((step.stats.model_calls, step.stats.prompt_tokens, step.stats.completion_tokens), (1, 7, 3), "{}", step.title);
         assert_eq!(step.stats.models, [agent_model]);
     }
-    assert_eq!((children[0].title.as_str(), children[2].title.as_str()), ("1", "2"));
+    assert_eq!((children[0].title.as_str(), children[2].title.as_str(), children[3].title.as_str()), ("1", "2", "Проверка ответа"));
+    assert_eq!(children[3].stats.model_calls, 1);
+    let check = &engine.chats()[2];
+    assert!(check.json_schema.as_ref().is_some_and(|s| s.contains("changed")), "{:?}", check.json_schema);
+    assert!(check.texts.iter().any(|t| t.contains("Отчёт отправляем в пятницу.")), "{:?}", check.texts);
     // A tool: the title the model gave, what it was and what it cost (the query's embedding).
     let tool = &children[1];
     assert_eq!(tool.title, "Ищу отчёт");
@@ -78,6 +83,8 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
         live.timeline.entries,
         [
             StepEntry { title: "Ищу отчёт".into(), tool: "search".into(), status: "nothing".into() },
+            StepEntry { title: "Черновик ответа".into(), tool: "draft".into(), status: "found".into() },
+            StepEntry { title: "Проверка ответа".into(), tool: "verify".into(), status: "nothing".into() },
             Answer { text: "В пятницу [0:10].".into(), section: false },
         ]
     );
@@ -121,7 +128,7 @@ fn stop_ends_the_answer_at_once_and_what_comes_later_is_dropped() {
         let worker = s.spawn(|| {
             let (rec, mut memory) = (recording(), Memory::default());
             let tools = Tools::new(&rec, &nothing, 4000);
-            work(&run, &scope, ai, "rec", chat, &mut memory, |memory, on_event| answer(&Blocking, &tools, &scope, &[], memory, "Когда?", &run.cancel, None, on_event))
+            work(&run, &scope, ai, "rec", chat, &mut memory, |memory, on_event| answer(&Blocking, &tools, &scope, &[], memory, "Когда?", &run.cancel, None, false, on_event))
         });
         while run.live().timeline.is_empty() {
             std::thread::sleep(Duration::from_millis(5));

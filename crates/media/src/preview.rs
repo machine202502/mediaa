@@ -9,6 +9,7 @@ use mediaa_core::formats::{is_webp_path, MediaKind};
 use mediaa_core::Frame;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 /// Dimensions, duration and audio of any library file (images: dimensions only).
 pub fn details(path: &Path, kind: MediaKind) -> anyhow::Result<MediaInfo> {
@@ -170,8 +171,12 @@ fn decode_pcm(path: &Path, start: f64, graph: &str, cancel: Arc<AtomicBool>, mut
     let mut rest: Vec<u8> = Vec::new();
     let c = cancel.clone();
     let output = Output::new_by_write_callback(move |bytes: &[u8]| {
+        // Playback stopped (seek, speed change, another recording): drop the bytes and tell
+        // FFmpeg the write succeeded. Returning an error here would abort the muxer mid-write,
+        // which ez_ffmpeg logs as "Error muxing a packet"/"Error writing trailer"; the waiting
+        // thread aborts the job cleanly instead.
         if c.load(Ordering::Relaxed) {
-            return -1; // abort the job
+            return bytes.len() as i32;
         }
         rest.extend_from_slice(bytes);
         let whole = rest.len() / 4 * 4;
@@ -179,19 +184,29 @@ fn decode_pcm(path: &Path, start: f64, graph: &str, cancel: Arc<AtomicBool>, mut
         rest.drain(..whole);
         if !sink(&samples) {
             c.store(true, Ordering::Relaxed);
-            return -1;
         }
         bytes.len() as i32
     })
     .set_format("f32le")
     .set_audio_codec("pcm_f32le")
     .add_stream_map("[a]");
-    let job = FfmpegContext::builder().input(input).filter_desc(graph).output(output).build()?.start()?;
-    let res = job.wait();
-    if cancel.load(Ordering::Relaxed) {
-        return Ok(()); // stopped on purpose
+    let mut job = Some(FfmpegContext::builder().input(input).filter_desc(graph).output(output).build()?.start()?);
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            // Hard abort: the muxer exits without a trailer and nothing is logged as an error.
+            if let Some(job) = job.take() {
+                job.abort();
+            }
+            return Ok(()); // stopped on purpose
+        }
+        if job.as_ref().is_some_and(|job| job.is_ended()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
-    res.map_err(Into::into)
+    // Ended on its own: collect the result (a real failure is returned, not hidden).
+    let job = job.take().expect("the job ends only after `job` is taken");
+    job.wait().map_err(Into::into)
 }
 
 #[cfg(test)]

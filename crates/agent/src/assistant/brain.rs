@@ -84,6 +84,12 @@ pub trait Brain {
     fn step(&self, messages: &[Message], tools: &[ToolSpec], may_answer: bool, cancel: &AtomicBool, on_piece: &mut dyn FnMut(Piece)) -> anyhow::Result<Step>;
     /// A plain text answer to `messages` (summaries, sub-tasks).
     fn complete(&self, messages: &[Message], cancel: &AtomicBool) -> anyhow::Result<String>;
+    /// A JSON answer constrained by `schema`. The default ignores the grammar (a provider has
+    /// its own calls); [`EngineBrain`] sends it to the engine.
+    fn complete_json(&self, messages: &[Message], schema: &Value, cancel: &AtomicBool) -> anyhow::Result<String> {
+        let _ = schema;
+        self.complete(messages, cancel)
+    }
     /// Context window in tokens.
     fn context(&self) -> u32;
     /// Whether the model reasons before each step (its steps then have no `thought` field).
@@ -367,6 +373,18 @@ impl Brain for EngineBrain<'_> {
         Ok(self.engine.chat(&request, cancel, &mut |_| true)?.content.trim().to_string())
     }
 
+    fn complete_json(&self, messages: &[Message], schema: &Value, cancel: &AtomicBool) -> anyhow::Result<String> {
+        anyhow::ensure!(!cancel.load(std::sync::atomic::Ordering::Relaxed), "cancelled");
+        let request = ChatRequest { json_schema: Some(schema.clone()), ..self.request(messages, self.max_tokens) };
+        let content = if self.thinking {
+            let generated = self.engine.chat_thinking(&request, Thinking { budget: THINK_TOKENS }, cancel, &mut |_| true)?;
+            split_thinking(&generated.content).1
+        } else {
+            self.engine.chat(&request, cancel, &mut |_| true)?.content
+        };
+        Ok(content.trim().to_string())
+    }
+
     fn context(&self) -> u32 {
         self.n_ctx
     }
@@ -537,5 +555,20 @@ mod tests {
         assert_eq!(parse_step(r#" {"thought":"","action":"answer","answer":" Да. "} "#).unwrap(), Step::Answer { thought: String::new(), text: "Да.".into() });
         assert!(parse_step("не json").is_err());
         assert!(parse_step(r#"{"thought":"x"}"#).is_err());
+    }
+
+    #[test]
+    fn a_check_asks_for_json() {
+        let fake = mediaa_engine::testing::FakeEngine::new();
+        let schema = json!({"type":"object","properties":{"changed":{"type":"boolean"},"answer":{"type":"string"}},"required":["changed","answer"],"additionalProperties":false});
+        fake.chat_answers(&[r#"{"changed":false,"answer":"Да."}"#]);
+        let out = engine_brain(&fake, false).complete_json(&[Message::new(Role::User, "q")], &schema, &AtomicBool::new(false)).unwrap();
+        assert_eq!(out, r#"{"changed":false,"answer":"Да."}"#);
+        assert!(fake.chats()[0].json_schema.as_ref().unwrap().contains("\"changed\""));
+
+        fake.chat_answers(&["<think>\nсмотрю\n</think>\n\n{\"changed\":true,\"answer\":\"Нет.\"}"]);
+        let out = engine_brain(&fake, true).complete_json(&[Message::new(Role::User, "q")], &schema, &AtomicBool::new(false)).unwrap();
+        assert_eq!(out, r#"{"changed":true,"answer":"Нет."}"#);
+        assert_eq!(fake.chats()[1].thinking, Some(THINK_TOKENS));
     }
 }

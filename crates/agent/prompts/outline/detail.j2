@@ -12,7 +12,7 @@ The points said in the topic, in order ("time text"):
 {% for point in points %}{{ point.time }} {{ point.text }}
 {% endfor %}
 {% else %}
-Transcript of the topic, one line per sentence, "[time] speaker: text":
+Transcript of the topic, one line per sentence, "[time] @label: text" (each speaker is a label: @s1, @s2…; write the label wherever you mean that speaker):
 {{ text }}
 {% endif %}
 

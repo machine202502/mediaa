@@ -16,10 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Characters of the first message that name a chat when the model cannot.
 const FALLBACK_CHARS: usize = 48;
-/// The longest title the model may write (characters); a longer one is cut.
-const TITLE_CHARS: usize = 60;
-/// Tokens a title may take.
-const TITLE_TOKENS: u32 = 48;
+/// Tokens a title may take. A title is a few words; the rest is spare so the line finishes
+/// (the prompt asks for the brevity, nothing cuts the text).
+const TITLE_TOKENS: u32 = 128;
 /// Context window of the titles model: a title needs the first message only.
 const TITLE_CONTEXT: u32 = 2048;
 
@@ -55,17 +54,12 @@ pub fn clean_title(raw: &str) -> Option<String> {
     if line.is_empty() {
         return None;
     }
-    let title = if line.chars().count() > TITLE_CHARS {
-        let cut: String = line.chars().take(TITLE_CHARS).collect();
-        cut.rsplit_once(' ').map_or(cut.clone(), |(head, _)| head.to_string())
-    } else {
-        line.to_string()
-    };
-    Some(capitalised(&title))
+    Some(capitalised(line))
 }
 
 /// Asks the titles model for the title of a chat that begins with `question`.
-fn ask_model(scope: &Scope, settings: &AgentSettings, question: &str, cancel: &AtomicBool) -> anyhow::Result<Option<String>> {
+/// Returns the title and the text the model returned (the error quotes it when there is no title).
+fn ask_model(scope: &Scope, settings: &AgentSettings, question: &str, cancel: &AtomicBool) -> anyhow::Result<(Option<String>, String)> {
     let source = settings.models.get(ModelRole::Titles).as_ref().ok_or_else(|| anyhow::anyhow!("no model for titles chosen (Agent → Models)"))?;
     let model = crate::models::local_spec(source)?;
     let language = mediaa_core::outline::language(question);
@@ -81,10 +75,12 @@ fn ask_model(scope: &Scope, settings: &AgentSettings, question: &str, cancel: &A
         device: Some(settings.devices.get(ModelRole::Titles)),
         priority: Some(Priority::Interactive),
         hf_token: super::hf_token(settings),
+        // The titles model is small: thinking spends the whole budget and no title is written.
+        enable_thinking: false,
         ..ChatRequest::default()
     };
     let answer = scope.engine().chat(&request, cancel, &mut |_| true)?;
-    Ok(clean_title(&answer.content))
+    Ok((clean_title(&answer.content), answer.content))
 }
 
 /// Writes the title of chat `chat` (the store `store` in `ai_dir`), the task of `scope`: from
@@ -98,8 +94,8 @@ pub fn work(scope: &Scope, settings: &AgentSettings, ai_dir: &Path, store: &str,
         return None;
     }
     let (title, error) = match written {
-        Ok(Some(title)) => (title, None),
-        Ok(None) => (fallback_title(question), Some("the model wrote no title".to_string())),
+        Ok((Some(title), _)) => (title, None),
+        Ok((None, raw)) => (fallback_title(question), Some(format!("the model wrote no title: {raw:?}"))),
         Err(e) => (fallback_title(question), Some(format!("{e:#}"))),
     };
     let stored = Transcript::open(ai_dir, store).and_then(|t| t.set_chat_title(chat, &title));
@@ -126,7 +122,8 @@ mod tests {
         assert_eq!(clean_title(" \n "), None);
         assert_eq!(clean_title("«»"), None);
         let long = clean_title(&"слово ".repeat(30)).unwrap();
-        assert!(long.chars().count() <= TITLE_CHARS && !long.ends_with(' '), "{long}");
+        assert_eq!(long.split_whitespace().count(), 30, "a long title is not cut: {long}");
+        assert!(long.starts_with("Слово"), "{long}");
 
         assert_eq!(fallback_title("  когда   отчёт? "), "Когда отчёт?");
         let long = fallback_title("расскажи подробно, что решили про бюджет на следующий квартал и кто отвечает");
@@ -157,6 +154,8 @@ mod tests {
         let chats = engine.chats();
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0].model, "unsloth/Qwen3-0.6B-GGUF");
+        assert!(!chats[0].enable_thinking, "a title is a short service call: the model does not think");
+        assert_eq!(chats[0].max_tokens, TITLE_TOKENS);
         assert!(chats[0].texts[1].contains("Russian") && chats[0].texts[1].contains("првиет"), "{:?}", chats[0].texts);
         // The queue: a finished chat-title task with the call in its stats.
         let task = Queue::open(ai).unwrap().get(scope.task()).unwrap().unwrap();
@@ -177,7 +176,9 @@ mod tests {
         work(&scope, &AgentSettings::default(), ai, "rec", chat, "когда отчёт?", &AtomicBool::new(false));
         let t = Transcript::open(ai, "rec").unwrap();
         assert_eq!(t.chat_title(chat).unwrap().as_deref(), Some("Когда отчёт?"));
-        assert_eq!(Queue::open(ai).unwrap().get(scope.task()).unwrap().unwrap().status, TaskStatus::Failed);
+        let task = Queue::open(ai).unwrap().get(scope.task()).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.error.as_deref(), Some("the model wrote no title: \"  \"; the title is the first message"));
 
         // No titles model chosen: the same.
         let mut settings = AgentSettings::default();
@@ -198,5 +199,26 @@ mod tests {
         assert_eq!(work(&scope, &AgentSettings::default(), ai, "rec", chat, "привет", &cancel), None);
         assert_eq!(Transcript::open(ai, "rec").unwrap().chat_title(chat).unwrap().as_deref(), Some(""));
         assert_eq!(Queue::open(ai).unwrap().get(scope.task()).unwrap().unwrap().status, TaskStatus::Cancelled);
+    }
+
+    /// The titles model (Qwen3-0.6B) names three first messages, thinking off.
+    /// `MEDIAA_TEST_MODELS` is the models folder. `cargo test -p mediaa-agent titles_model_names_three_questions -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn titles_model_names_three_questions() {
+        let engine = crate::live::engine();
+        let settings = AgentSettings::default();
+        let dir = tempfile::tempdir().unwrap();
+        let questions = [
+            "привет",
+            "о чём ролик?",
+            "Расскажи подробно, как подтвердить опыт без трудовой книжки: какие документы собрать, что говорить работодателю и чем подтвердить проекты, если официального стажа нет",
+        ];
+        for question in questions {
+            let scope = Scope::begin(dir.path(), engine.clone(), "chat-title", &task_title(question), &json!({}), None).unwrap();
+            let (title, raw) = ask_model(&scope, &settings, question, &AtomicBool::new(false)).unwrap();
+            eprintln!("QUESTION: {question}\nRAW: {raw:?}\nTITLE: {title:?}");
+            assert!(title.as_ref().is_some_and(|t| !t.is_empty()), "no title for {question:?}, the model returned {raw:?}");
+        }
     }
 }
