@@ -94,7 +94,6 @@ pub enum ModelRole {
     /// Re-orders search hits by how well they answer the question (a cross-encoder).
     Reranker,
     Agent,
-    Subagent,
     /// Short titles for recordings, notes and chats.
     Titles,
     SpeechRecognition,
@@ -103,11 +102,10 @@ pub enum ModelRole {
 }
 
 impl ModelRole {
-    pub const ALL: [ModelRole; 8] = [
+    pub const ALL: [ModelRole; 7] = [
         ModelRole::Embedding,
         ModelRole::Reranker,
         ModelRole::Agent,
-        ModelRole::Subagent,
         ModelRole::Titles,
         ModelRole::SpeechRecognition,
         ModelRole::Diarization,
@@ -133,23 +131,24 @@ impl ModelRole {
             ModelRole::Titles => hf("unsloth/Qwen3-0.6B-GGUF"),
             // GigaAM v3 (Sber) with punctuation, sherpa-onnx layout (CTC, ~225 MB).
             ModelRole::SpeechRecognition => hf("csukuangfj/sherpa-onnx-nemo-ctc-punct-giga-am-v3-russian-2025-12-16"),
-            // Speaker embeddings (WeSpeaker ResNet34, VoxCeleb: many languages), one file of a
-            // repository with many; the segmentation model comes with it.
-            ModelRole::Diarization => hf("csukuangfj/speaker-embedding-models/wespeaker_en_voxceleb_resnet34_LM.onnx"),
-            // Sub-agent: the main agent's model unless set; speech synthesis: off.
-            ModelRole::Subagent | ModelRole::Speech => None,
+            // Speaker embeddings (3D-Speaker CAM++, Chinese and English), one file of a
+            // repository with many; the segmentation model comes with it. Measured best on
+            // `evals/data` and several times faster than ERes2NetV2; the table is in
+            // `workflow/dev-context.md`.
+            ModelRole::Diarization => hf("csukuangfj/speaker-embedding-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"),
+            // Speech synthesis: off.
+            ModelRole::Speech => None,
         }
     }
 }
 
-/// Model per role (`None`: unset — for the sub-agent, the main agent's model is used).
+/// Model per role (`None`: unset).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelChoices {
     pub embedding: Option<ModelSource>,
     pub reranker: Option<ModelSource>,
     pub agent: Option<ModelSource>,
-    pub subagent: Option<ModelSource>,
     pub titles: Option<ModelSource>,
     pub speech_recognition: Option<ModelSource>,
     pub diarization: Option<ModelSource>,
@@ -163,7 +162,6 @@ impl Default for ModelChoices {
             embedding: ModelRole::Embedding.default_source(),
             reranker: ModelRole::Reranker.default_source(),
             agent: ModelRole::Agent.default_source(),
-            subagent: None,
             titles: ModelRole::Titles.default_source(),
             speech_recognition: ModelRole::SpeechRecognition.default_source(),
             diarization: ModelRole::Diarization.default_source(),
@@ -178,7 +176,6 @@ impl ModelChoices {
             ModelRole::Embedding => &self.embedding,
             ModelRole::Reranker => &self.reranker,
             ModelRole::Agent => &self.agent,
-            ModelRole::Subagent => &self.subagent,
             ModelRole::Titles => &self.titles,
             ModelRole::SpeechRecognition => &self.speech_recognition,
             ModelRole::Diarization => &self.diarization,
@@ -191,7 +188,6 @@ impl ModelChoices {
             ModelRole::Embedding => &mut self.embedding,
             ModelRole::Reranker => &mut self.reranker,
             ModelRole::Agent => &mut self.agent,
-            ModelRole::Subagent => &mut self.subagent,
             ModelRole::Titles => &mut self.titles,
             ModelRole::SpeechRecognition => &mut self.speech_recognition,
             ModelRole::Diarization => &mut self.diarization,
@@ -199,13 +195,6 @@ impl ModelChoices {
         }
     }
 
-    /// The model actually used for `role` (the sub-agent falls back to the main agent's).
-    pub fn effective(&self, role: ModelRole) -> Option<&ModelSource> {
-        match (role, self.get(role)) {
-            (ModelRole::Subagent, None) => self.agent.as_ref(),
-            (_, m) => m.as_ref(),
-        }
-    }
 }
 
 /// Where a local model should run.
@@ -228,7 +217,6 @@ pub struct ModelDevices {
     pub embedding: Device,
     pub reranker: Device,
     pub agent: Device,
-    pub subagent: Device,
     pub titles: Device,
     pub speech_recognition: Device,
     pub diarization: Device,
@@ -241,7 +229,6 @@ impl ModelDevices {
             ModelRole::Embedding => self.embedding,
             ModelRole::Reranker => self.reranker,
             ModelRole::Agent => self.agent,
-            ModelRole::Subagent => self.subagent,
             ModelRole::Titles => self.titles,
             ModelRole::SpeechRecognition => self.speech_recognition,
             ModelRole::Diarization => self.diarization,
@@ -254,7 +241,6 @@ impl ModelDevices {
             ModelRole::Embedding => &mut self.embedding,
             ModelRole::Reranker => &mut self.reranker,
             ModelRole::Agent => &mut self.agent,
-            ModelRole::Subagent => &mut self.subagent,
             ModelRole::Titles => &mut self.titles,
             ModelRole::SpeechRecognition => &mut self.speech_recognition,
             ModelRole::Diarization => &mut self.diarization,
@@ -419,6 +405,11 @@ pub struct AgentSettings {
     /// (a settings file that has no key keeps the check on).
     #[serde(default = "answers_checked")]
     pub verify_answers: bool,
+    /// The code of the interface language («en», «ru»): every text the program has a model
+    /// write for the user (topics, breakdowns, chat titles, step phrases) follows it. The app
+    /// sets it from the interface language every frame; it is not saved with the settings.
+    #[serde(skip)]
+    pub ui_language: Option<String>,
 }
 
 fn answers_checked() -> bool {
@@ -473,6 +464,7 @@ impl Default for AgentSettings {
             analysis: AnalysisOptions::default(),
             thinking: Vec::new(),
             verify_answers: true,
+            ui_language: None,
         }
     }
 }
@@ -491,6 +483,15 @@ impl ModelSource {
 }
 
 impl AgentSettings {
+    /// The name of the interface language for the prompts that make a model write for the user
+    /// («Russian», «English»). No code (tools, tests) is English.
+    pub fn language_name(&self) -> &'static str {
+        match self.ui_language.as_deref() {
+            Some("ru") => "Russian",
+            _ => "English",
+        }
+    }
+
     /// Whether `model` reasons before it acts (and can).
     pub fn thinking_on(&self, model: &ModelSource) -> bool {
         model.supports_thinking() && self.thinking.contains(model)
@@ -521,12 +522,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_interface_language_names_the_language_of_the_prompts() {
+        let mut a = AgentSettings::default();
+        assert_eq!(a.language_name(), "English", "a tool that has no interface writes English");
+        a.ui_language = Some("ru".into());
+        assert_eq!(a.language_name(), "Russian");
+        a.ui_language = Some("xx".into());
+        assert_eq!(a.language_name(), "English", "an unknown code falls back to English");
+        // The language of the interface is the app's, not a saved setting.
+        a.ui_language = Some("ru".into());
+        let saved = serde_json::to_string(&a).unwrap();
+        assert!(!saved.contains("ui_language"), "{saved}");
+    }
+
+    #[test]
     fn defaults_cover_required_roles() {
         let m = ModelChoices::default();
         for role in ModelRole::ALL {
             assert!(m.get(role).is_some() || !role.required(), "{role:?}");
         }
-        assert_eq!(m.effective(ModelRole::Subagent), m.agent.as_ref(), "sub-agent follows the main agent");
         assert!(m.diarization.is_some(), "diarization is on out of the box");
         assert!(m.speech.is_none());
     }
@@ -539,7 +553,7 @@ mod tests {
         p.proxy = " socks5://127.0.0.1:1080 ".into();
         assert_eq!(p.api_url(), "http://host:8000/v1");
         assert_eq!(p.proxy(), Some("socks5://127.0.0.1:1080"));
-        a.models.subagent = Some(ModelSource::Provider { provider: p.id.clone(), model: "gpt-x".into() });
+        a.models.titles = Some(ModelSource::Provider { provider: p.id.clone(), model: "gpt-x".into() });
         a.models.speech = Some(ModelSource::Local { path: "/m/tts.onnx".into() });
         a.providers.push(p);
         a.providers.push(Provider::new(ProviderKind::OpenRouter, "OR"));

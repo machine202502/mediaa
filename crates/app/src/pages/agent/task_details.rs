@@ -96,6 +96,12 @@ pub struct Facts {
     pub cut: String,
     /// Why the watchdog interrupted the run (`detail.hang`), empty once the task has finished.
     pub hang: String,
+    /// The names a speaker-names run accepted, one per line.
+    pub names: String,
+    /// The evidence a speaker-names run kept, one report per line.
+    pub evidence: String,
+    /// How much of the recording a speaker-names run read.
+    pub read: String,
 }
 
 pub fn facts_of(task: &Task, stats: &Stats, now_ms: i64, locale: &str) -> Facts {
@@ -129,6 +135,73 @@ pub fn facts_of(task: &Task, stats: &Stats, now_ms: i64, locale: &str) -> Facts 
             .and_then(|value| serde_json::from_value::<mediaa_queue::Note>(value.clone()).ok())
             .map(|note| queue::note_text(Some(&note), locale))
             .unwrap_or_default(),
+        names: names_text(task.result.as_ref()),
+        evidence: evidence_text(task.result.as_ref(), locale),
+        read: read_text(task.result.as_ref(), locale),
+    }
+}
+
+/// The accepted names of a speaker-names result: «@s1 — Антон» per line.
+fn names_text(result: Option<&Value>) -> String {
+    let list = |key: &str| result.and_then(|r| r.get(key)).and_then(Value::as_array).cloned().unwrap_or_default();
+    list("names")
+        .iter()
+        .filter_map(|item| {
+            let speaker = item.get("speaker")?.as_str()?;
+            let name = item.get("name")?.as_str()?;
+            Some(format!("{speaker} — {name}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The evidence the run kept: «[0:05] @s1 — Антон (self, high): Меня зовут Антон.» per line.
+fn evidence_text(result: Option<&Value>, locale: &str) -> String {
+    let list = |key: &str| result.and_then(|r| r.get(key)).and_then(Value::as_array).cloned().unwrap_or_default();
+    list("evidence")
+        .iter()
+        .filter_map(|item| {
+            let speaker = item.get("speaker")?.as_str()?;
+            let name = item.get("name")?.as_str()?;
+            let how = how_text(item.get("how").and_then(Value::as_str).unwrap_or(""), locale);
+            let sure = sure_text(item.get("sure").and_then(Value::as_str).unwrap_or("high"), locale);
+            let time = item.get("time").and_then(Value::as_str).unwrap_or("");
+            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+            Some(format!("[{time}] {speaker} — {name} ({how}, {sure}): {text}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn how_text(how: &str, locale: &str) -> String {
+    match how {
+        "self" => t!("details.how_self", locale = locale).into(),
+        "addressed" => t!("details.how_addressed", locale = locale).into(),
+        "introduced" => t!("details.how_introduced", locale = locale).into(),
+        "nickname" => t!("details.how_nickname", locale = locale).into(),
+        other => other.to_string(),
+    }
+}
+
+fn sure_text(sure: &str, locale: &str) -> String {
+    match sure {
+        "low" => t!("details.sure_low", locale = locale).into(),
+        _ => t!("details.sure_high", locale = locale).into(),
+    }
+}
+
+/// «прочитано 12 из 27 мин», and whether the run stopped before the end.
+fn read_text(result: Option<&Value>, locale: &str) -> String {
+    let Some(result) = result else { return String::new() };
+    let (Some(read), Some(total)) = (result.get("read_secs").and_then(Value::as_f64), result.get("total_secs").and_then(Value::as_f64)) else {
+        return String::new();
+    };
+    let minutes = |secs: f64| format!("{}", (secs / 60.0).round() as i64);
+    let text: String = t!("details.read", locale = locale, read = minutes(read), total = minutes(total)).into();
+    if result.get("stopped_early").and_then(Value::as_bool) == Some(true) {
+        format!("{text} · {}", t!("details.read_early", locale = locale))
+    } else {
+        text
     }
 }
 
@@ -245,6 +318,11 @@ pub fn report_text(facts: &Facts, hint: &str, log: &str, locale: &str) -> String
     if !facts.hang.is_empty() {
         out.push(line("hang", &facts.hang));
     }
+    for (key, value) in [("read", &facts.read), ("names", &facts.names), ("evidence", &facts.evidence)] {
+        if !value.is_empty() {
+            out.push(format!("{}:\n{value}", field_label(key, locale)));
+        }
+    }
     if !hint.is_empty() {
         out.push(hint.to_string());
     }
@@ -270,6 +348,9 @@ fn field_label(key: &str, locale: &str) -> String {
         "tool" => t!("details.tool", locale = locale).into(),
         "cut" => t!("details.cut", locale = locale).into(),
         "hang" => t!("details.hang", locale = locale).into(),
+        "read" => t!("details.read_label", locale = locale).into(),
+        "names" => t!("details.names", locale = locale).into(),
+        "evidence" => t!("details.evidence", locale = locale).into(),
         "error" => t!("details.error", locale = locale).into(),
         "log" => t!("details.log", locale = locale).into(),
         _ => key.to_string(),
@@ -449,6 +530,15 @@ pub fn show(ctx: &egui::Context, task: &Task, stats: &Stats, now_ms: i64, log: &
                 }
                 if !facts.hang.is_empty() {
                     field(ui, &field_label("hang", &locale), &facts.hang);
+                }
+                if !facts.read.is_empty() {
+                    field(ui, &field_label("read", &locale), &facts.read);
+                }
+                if !facts.names.is_empty() {
+                    field(ui, &field_label("names", &locale), &facts.names);
+                }
+                if !facts.evidence.is_empty() {
+                    field(ui, &field_label("evidence", &locale), &facts.evidence);
                 }
                 if failed {
                     if !hint_line.is_empty() {
@@ -644,6 +734,35 @@ mod tests {
         assert_eq!(facts_of(&t, &t.stats, 5_000, "ru").cut, "something new");
         t.result = None;
         assert_eq!(facts_of(&t, &t.stats, 5_000, "ru").cut, "");
+    }
+
+    #[test]
+    fn a_speaker_names_run_lists_the_names_and_the_evidence() {
+        let mut t = task("");
+        t.kind = "speaker-names".into();
+        t.status = TaskStatus::Done;
+        t.result = Some(json!({
+            "names": [{ "speaker": "@s1", "name": "Антон", "score": 3.0 }],
+            "evidence": [{ "speaker": "@s1", "name": "Антон", "how": "self", "time": "0:05", "text": "Меня зовут Антон.", "sure": "high" }],
+            "read_secs": 720.0,
+            "total_secs": 1620.0,
+            "stopped_early": true,
+        }));
+        let facts = facts_of(&t, &t.stats, 5_000, "ru");
+        assert_eq!(facts.names, "@s1 — Антон");
+        assert!(facts.evidence.contains("[0:05]") && facts.evidence.contains("Меня зовут Антон."), "{}", facts.evidence);
+        assert!(facts.read.contains("12") && facts.read.contains("27"), "{}", facts.read);
+        let report = report_text(&facts, "", "", "ru");
+        assert!(report.contains(&facts.evidence) && report.contains(&facts.read), "{report}");
+        // The early stop is said in the window's language, or not at all.
+        t.result.as_mut().unwrap()["stopped_early"] = json!(false);
+        let en = facts_of(&t, &t.stats, 5_000, "en");
+        assert!(en.read.contains("12") && en.read.contains("27"), "{}", en.read);
+        assert!(!en.read.contains(&t!("details.read_early", locale = "en").to_string()), "{}", en.read);
+        // Every other task has no such fields.
+        let plain = task("");
+        let facts = facts_of(&plain, &plain.stats, 5_000, "ru");
+        assert!(facts.names.is_empty() && facts.evidence.is_empty() && facts.read.is_empty());
     }
 
     #[test]

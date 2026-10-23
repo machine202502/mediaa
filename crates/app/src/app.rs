@@ -877,7 +877,8 @@ impl eframe::App for App {
         self.poll_recorder(ctx);
         self.update_tray();
         let ai = mediaa_core::catalogs::ai_dir(&crate::pages::library::library_dir(&self.settings));
-        self.agent.tick(&ai, &self.settings.agent, ctx);
+        let language = crate::i18n::current();
+        self.agent.tick(&ai, &self.settings.agent, &language, ctx);
 
         if ctx.input(|i| i.viewport().close_requested()) && !self.quit_after_save {
             let busy = !self.recorder.is_idle();

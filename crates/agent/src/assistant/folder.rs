@@ -7,9 +7,12 @@ use crate::prompts;
 use super::brain::ToolSpec;
 use super::tools::{self, Outcome, Recording, Tools};
 use super::Toolbox;
+use crate::search::Options;
 use crate::tools::{format_time, parse_time};
 use mediaa_core::retrieval::Hit;
+use mediaa_core::speakers::Parsed;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// A recording close enough to a cited time when a reply is this near (seconds).
@@ -25,10 +28,11 @@ pub struct Item {
     pub path: PathBuf,
 }
 
-/// Searches across the folder: (query, how many) → hits with the index of their recording.
-pub type FolderSearch<'a> = dyn Fn(&str, usize) -> anyhow::Result<Vec<(usize, Hit)>> + 'a;
-/// Searches one recording: (index, query, how many) → hits.
-pub type ItemSearch<'a> = dyn Fn(usize, &str, usize) -> anyhow::Result<Vec<Hit>> + 'a;
+/// Searches across the folder: (query, what to favour or narrow down, how many) → hits with the
+/// index of their recording. Shared by the threads of one step, so it is `Sync`.
+pub type FolderSearch<'a> = dyn Fn(&str, Options, usize) -> anyhow::Result<Vec<(usize, Hit)>> + Sync + 'a;
+/// Searches one recording: (index, query, what to favour or narrow down, how many) → hits.
+pub type ItemSearch<'a> = dyn Fn(usize, &str, Options, usize) -> anyhow::Result<Vec<Hit>> + Sync + 'a;
 
 pub struct FolderTools<'a> {
     pub items: &'a [Item],
@@ -90,10 +94,37 @@ impl FolderTools<'_> {
     }
 
     fn one(&self, i: usize, tool: &str, args: &Value) -> anyhow::Result<Outcome> {
-        let search = |q: &str, n: usize| (self.search_one)(i, q, n);
+        let search = |q: &str, o: Options, n: usize| (self.search_one)(i, q, o, n);
         let out = Tools::new(&self.items[i].recording, &search, self.max_chars).run(tool, args)?;
         let text = mediaa_core::speakers::tag_recording(&tag_times(&out.text, i + 1), (i + 1) as u32);
         Ok(Outcome { text, seen: out.seen.map(|s| s.into_iter().map(|k| format!("{}:{k}", i + 1)).collect()) })
+    }
+
+    /// The speaker a `search` call asked for (`@s2#3` names its recording).
+    fn speaker_arg(&self, args: &Value) -> anyhow::Result<Option<Parsed>> {
+        let label = args["speaker"].as_str().unwrap_or_default().trim();
+        if label.is_empty() {
+            return Ok(None);
+        }
+        let parsed = mediaa_core::speakers::parse_label(label).ok_or_else(|| tools::error("no_speaker", minijinja::context! { label }))?;
+        let found = match parsed.recording {
+            Some(r) => r.checked_sub(1).and_then(|i| self.items.get(i as usize)).is_some_and(|it| tools::speaker_of(&it.recording, label).is_some()),
+            None => self.items.iter().any(|it| tools::speaker_of(&it.recording, label).is_some()),
+        };
+        anyhow::ensure!(found, tools::error("no_speaker", minijinja::context! { label }));
+        Ok(Some(parsed))
+    }
+
+    /// The part of the recordings a `search` call asked for.
+    fn span_arg(&self, args: &Value) -> anyhow::Result<Option<(f64, f64)>> {
+        let arg = |k: &str| args.get(k).and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string();
+        let (from, to) = (arg("from"), arg("to"));
+        if from.is_empty() && to.is_empty() {
+            return Ok(None);
+        }
+        let a = if from.is_empty() { 0.0 } else { parse_time(&from).ok_or_else(|| tools::error("not_a_time", minijinja::context! { value => &from }))? };
+        let b = if to.is_empty() { f64::MAX } else { parse_time(&to).ok_or_else(|| tools::error("not_a_time", minijinja::context! { value => &to }))? };
+        Ok(Some((a.min(b), a.max(b))))
     }
 }
 
@@ -110,7 +141,16 @@ impl Toolbox for FolderTools<'_> {
             ToolSpec {
                 name: "search",
                 description: prompts::tool("folder/search"),
-                params: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
+                params: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "speaker": {"type": "string"},
+                        "from": {"type": "string"},
+                        "to": {"type": "string"}
+                    },
+                    "required": ["query"]
+                }),
                 example: json!({"query": "<what to find>"}),
             },
         ];
@@ -146,18 +186,32 @@ impl Toolbox for FolderTools<'_> {
             "search" => {
                 let query = args["query"].as_str().unwrap_or_default().trim();
                 anyhow::ensure!(!query.is_empty(), tools::needs("search", "query"));
-                let hits = (self.search)(query, 8)?;
+                anyhow::ensure!(!tools::vague(query), tools::error("vague_query", minijinja::context! { query }));
+                let speaker = self.speaker_arg(args)?;
+                let span = self.span_arg(args)?;
+                let hits = (self.search)(query, Options { speaker, span }, 8)?;
                 if hits.is_empty() {
                     return Ok(Outcome { text: prompts::render("results/folder/nothing.j2", minijinja::context! { query }), seen: Some(vec![]) });
                 }
-                let shown: Vec<_> = hits
-                    .iter()
-                    .map(|(i, h)| {
-                        let r = &self.items[*i].recording;
-                        let who: Vec<String> = h.chunk.speakers.iter().map(|&s| mediaa_core::speakers::folder_label(s, (i + 1) as u32)).collect();
-                        minijinja::context! { number => i + 1, start => format_time(h.chunk.start), end => format_time(h.chunk.end), title => &r.title, who, text => &h.chunk.text }
-                    })
-                    .collect();
+                let mut shown = Vec::new();
+                // Hits of one recording are widened together, wherever the ranking put them:
+                // their fragments may overlap.
+                let mut order: Vec<usize> = Vec::new();
+                let mut groups: HashMap<usize, Vec<Hit>> = HashMap::new();
+                for (number, hit) in &hits {
+                    if !groups.contains_key(number) {
+                        order.push(*number);
+                    }
+                    groups.entry(*number).or_default().push(hit.clone());
+                }
+                for number in order {
+                    let group = groups.remove(&number).unwrap_or_default();
+                    let title = &self.items[number].recording.title;
+                    for f in tools::fragments(&self.items[number].recording, &group) {
+                        let who: Vec<String> = f.speakers.iter().map(|&s| mediaa_core::speakers::folder_label(s, (number + 1) as u32)).collect();
+                        shown.push(minijinja::context! { number => number + 1, start => format_time(f.start), end => format_time(f.end), title, who, text => &f.text });
+                    }
+                }
                 let text = prompts::render("results/folder/search.j2", minijinja::context! { hits => shown });
                 let seen = hits.iter().map(|(i, h)| format!("{}:at@{}", i + 1, h.chunk.start as i64)).collect();
                 Ok(Outcome { text: tools::bounded(text, self.max_chars, "plain"), seen: Some(seen) })
@@ -269,8 +323,8 @@ mod tests {
         let c = folder_citations("в [#1 0:10] и [#2 5:00–5:30], не [0:10]");
         assert_eq!(c.iter().map(|(_, n, t)| (*n, *t)).collect::<Vec<_>>(), [(1, 10.0), (2, 300.0)]);
         let items = items();
-        let none = |_: &str, _: usize| -> anyhow::Result<Vec<(usize, Hit)>> { Ok(vec![]) };
-        let one = |_: usize, _: &str, _: usize| -> anyhow::Result<Vec<Hit>> { Ok(vec![]) };
+        let none = |_: &str, _: Options, _: usize| -> anyhow::Result<Vec<(usize, Hit)>> { Ok(vec![]) };
+        let one = |_: usize, _: &str, _: Options, _: usize| -> anyhow::Result<Vec<Hit>> { Ok(vec![]) };
         let f = FolderTools { items: &items, search: &none, search_one: &one, max_chars: 4000, web: None };
         // #2 is two minutes long; #3 does not exist; a bare time names no recording.
         assert_eq!(f.bad_citations("[#1 5:00] [#2 5:00] [#3 0:10] [0:30] [#1 m:00]"), ["#2 5:00", "#3 0:10", "#1 m:00", "0:30"]);
@@ -281,12 +335,33 @@ mod tests {
     }
 
     #[test]
+    fn folder_search_options_are_checked_and_passed() {
+        let items = items();
+        let asked = std::sync::Mutex::new(Options::default());
+        let across = |_: &str, o: Options, _: usize| {
+            *asked.lock().unwrap() = o;
+            Ok(vec![])
+        };
+        let one = |_: usize, _: &str, _: Options, _: usize| -> anyhow::Result<Vec<Hit>> { Ok(vec![]) };
+        let f = FolderTools { items: &items, search: &across, search_one: &one, max_chars: 4000, web: None };
+        f.run("search", &json!({"query": "графики", "speaker": "@s2#2", "from": "0:30", "to": "1:00"})).unwrap();
+        assert_eq!(asked.lock().unwrap().speaker, Some(Parsed { index: 1, recording: Some(2) }));
+        assert_eq!(asked.lock().unwrap().span, Some((30.0, 60.0)));
+        f.run("search", &json!({"query": "графики", "speaker": "@s1"})).unwrap();
+        assert_eq!(asked.lock().unwrap().speaker, Some(Parsed { index: 0, recording: None }), "a label without a recording is that speaker everywhere");
+        let e = f.run("search", &json!({"query": "графики", "speaker": "@s1#9"})).unwrap_err().to_string();
+        assert!(e.contains("@s1#9"), "{e}");
+        let e = f.run("search", &json!({"query": "графики", "from": "вчера"})).unwrap_err().to_string();
+        assert!(e.contains("not a time"), "{e}");
+    }
+
+    #[test]
     fn tools_over_the_folder() {
         let items = items();
-        let across = |q: &str, _: usize| -> anyhow::Result<Vec<(usize, Hit)>> {
+        let across = |q: &str, _: Options, _: usize| -> anyhow::Result<Vec<(usize, Hit)>> {
             Ok(if q == "графики" { vec![(1, Hit { id: 1, chunk: Chunk { start: 30.0, end: 40.0, speakers: vec![1], text: "Графики будут к четвергу.".into() }, score: 1.0 })] } else { vec![] })
         };
-        let one = |_: usize, _: &str, _: usize| -> anyhow::Result<Vec<Hit>> { Ok(vec![]) };
+        let one = |_: usize, _: &str, _: Options, _: usize| -> anyhow::Result<Vec<Hit>> { Ok(vec![]) };
         let f = FolderTools { items: &items, search: &across, search_one: &one, max_chars: 4000, web: None };
         let names: Vec<&str> = f.specs().iter().map(|s| s.name).collect();
         assert_eq!(names, ["recordings", "search", "outline", "read", "mentions", "speakers", "calculator", "time"]);
@@ -295,7 +370,7 @@ mod tests {
         let list = f.run("recordings", &json!({})).unwrap().text;
         assert!(list.starts_with("#1 «Планёрка», 10:00. Chapters: Отчёт и бюджет\n#2 «Созвон», 2:00"), "{list}");
         let found = f.run("search", &json!({"query": "графики"})).unwrap();
-        assert!(found.text.starts_with("[#2 0:30–0:40] «Созвон» (@s2#2) Графики"), "{}", found.text);
+        assert!(found.text.starts_with("[#2 0:10–0:33] «Созвон» (@s1#2, @s2#2) Отчёт отправляем в пятницу. Графики будут к четвергу."), "{}", found.text);
         let read = f.run("read", &json!({"recording": 2, "from": "0:00", "to": "1:00"})).unwrap();
         assert!(read.text.starts_with("[#2 0:10] @s1#2: Отчёт"), "{}", read.text);
         assert_eq!(f.run("outline", &json!({"recording": "#1"})).unwrap().text.lines().next().unwrap(), "[#1 0:00–10:00] Отчёт и бюджет — Сроки отчёта, бюджет.");

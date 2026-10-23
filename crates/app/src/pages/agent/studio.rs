@@ -496,6 +496,8 @@ pub enum StudioAction {
     Analyse { path: PathBuf, from: Option<Stage>, options: AnalysisOptions, remember: bool },
     /// Cancel the running analysis of the recording.
     Stop(mediaa_queue::TaskId),
+    /// Queue the search for the speaker names of the recording.
+    FindNames(PathBuf),
     /// Continue a failed task.
     ResumeTask(mediaa_queue::TaskId),
     /// Open a recording at a time (a citation in a folder's chat).

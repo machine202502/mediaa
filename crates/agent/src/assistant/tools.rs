@@ -4,9 +4,11 @@
 
 use crate::prompts;
 use super::brain::ToolSpec;
+use crate::search::Options;
 use crate::tools::{between, calculate, format_time, parse_time};
 use mediaa_core::outline::{Chapter, SectionKind};
 use mediaa_core::retrieval::{stems, Hit};
+use mediaa_core::speakers::Parsed;
 use mediaa_core::transcript::Reply;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
@@ -51,7 +53,13 @@ impl Recording {
         let mut ids: Vec<u32> = self.replies.iter().filter_map(|r| r.speaker).collect();
         ids.sort_unstable();
         ids.dedup();
-        let speakers: Vec<String> = if self.diarized { ids.iter().map(|&s| self.speaker(s)).collect() } else { Vec::new() };
+        let speakers: Vec<_> = if self.diarized {
+            ids.iter()
+                .map(|&s| minijinja::context! { label => self.speaker(s), name => self.names.get(&s).filter(|n| !n.trim().is_empty()).cloned() })
+                .collect()
+        } else {
+            Vec::new()
+        };
         prompts::render(
             "agent/card_recording.j2",
             minijinja::context! {
@@ -85,7 +93,16 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "search",
             description: prompts::tool("search"),
-            params: json!({"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}),
+            params: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "speaker": {"type": "string"},
+                    "from": {"type": "string"},
+                    "to": {"type": "string"}
+                },
+                "required": ["query"]
+            }),
             example: json!({"query": "сроки сдачи отчёта"}),
         },
         ToolSpec {
@@ -158,8 +175,9 @@ fn line(rec: &Recording, r: &Reply) -> String {
     prompts::render("results/recording/line.j2", minijinja::context! { time => format_time(r.start), speaker => r.speaker.map(|s| rec.speaker(s)), text => r.text() })
 }
 
-/// The focused scan of a recording: instruction → what matches, with coverage.
-pub type Scanner<'a> = dyn Fn(&str) -> anyhow::Result<super::scan::Scan> + 'a;
+/// The focused scan of a recording: instruction → what matches, with coverage. Shared by the
+/// threads of one step, so it is `Sync`.
+pub type Scanner<'a> = dyn Fn(&str) -> anyhow::Result<super::scan::Scan> + Sync + 'a;
 
 fn section_kind(kind: SectionKind) -> &'static str {
     match kind {
@@ -185,32 +203,30 @@ fn topic_number(args: &Value, count: usize) -> anyhow::Result<Option<usize>> {
     }
 }
 
+/// Hybrid search over a recording: (query, what to favour or narrow down, how many) → hits.
+pub type Search<'a> = dyn Fn(&str, Options, usize) -> anyhow::Result<Vec<Hit>> + Sync + 'a;
+
 /// Runs the tools of a recording.
 pub struct Tools<'a> {
     pub recording: &'a Recording,
-    /// Hybrid search over the recording: (query, how many) → hits.
-    pub search: &'a dyn Fn(&str, usize) -> anyhow::Result<Vec<Hit>>,
+    pub search: &'a Search<'a>,
     /// Longest result (characters), from the model's context.
     pub max_chars: usize,
     /// The focused scan of the whole recording for an instruction, when the model can do it.
     pub scan: Option<&'a Scanner<'a>>,
     /// Gives a speaker a name (kept with the transcript).
     pub rename: Option<&'a Renamer<'a>>,
-    /// A bounded sub-task done by the sub-agent: (task, the text it works on) → its result.
-    pub delegate: Option<&'a Delegate<'a>>,
     /// The web, when the agent may use it.
     pub web: Option<&'a super::internet::Web<'a>>,
 }
 
 /// Names a speaker of the recording.
-pub type Renamer<'a> = dyn Fn(u32, &str) -> anyhow::Result<()> + 'a;
-/// Does a sub-task on a piece of the recording.
-pub type Delegate<'a> = dyn Fn(&str, &str) -> anyhow::Result<String> + 'a;
+pub type Renamer<'a> = dyn Fn(u32, &str) -> anyhow::Result<()> + Sync + 'a;
 
 impl<'a> Tools<'a> {
-    /// The tools of reading a recording (no scan, renaming or delegation).
-    pub fn new(recording: &'a Recording, search: &'a dyn Fn(&str, usize) -> anyhow::Result<Vec<Hit>>, max_chars: usize) -> Tools<'a> {
-        Tools { recording, search, max_chars, scan: None, rename: None, delegate: None, web: None }
+    /// The tools of reading a recording (no scan or renaming).
+    pub fn new(recording: &'a Recording, search: &'a Search<'a>, max_chars: usize) -> Tools<'a> {
+        Tools { recording, search, max_chars, scan: None, rename: None, web: None }
     }
 }
 
@@ -239,14 +255,6 @@ impl Tools<'_> {
                 description: prompts::tool("rename_speakers"),
                 params: json!({"type": "object", "properties": {"names": {"type": "array", "maxItems": 12, "items": {"type": "object", "properties": {"speaker": {"type": "string"}, "name": {"type": "string"}}, "required": ["speaker", "name"]}}}, "required": ["names"]}),
                 example: json!({"names": [{"speaker": "@s1", "name": "<the name>"}]}),
-            });
-        }
-        if self.delegate.is_some() {
-            s.push(ToolSpec {
-                name: "delegate",
-                description: prompts::tool("delegate"),
-                params: json!({"type": "object", "properties": {"task": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"}}, "required": ["task", "from", "to"]}),
-                example: json!({"task": "<what to do with this stretch>", "from": "40:00", "to": "55:00"}),
             });
         }
         s
@@ -298,15 +306,24 @@ impl Tools<'_> {
             "search" => {
                 let query = arg("query");
                 anyhow::ensure!(!query.is_empty(), needs("search", "query"));
-                let hits = (self.search)(&query, 6)?;
+                anyhow::ensure!(!vague(&query), error("vague_query", minijinja::context! { query }));
+                let speaker = match arg("speaker") {
+                    label if label.is_empty() => None,
+                    label => {
+                        let index = speaker_of(rec, &label).ok_or_else(|| error("no_speaker", minijinja::context! { label => &label }))?;
+                        Some(Parsed { index, recording: None })
+                    }
+                };
+                let span = span_of(rec, &arg("from"), &arg("to"))?;
+                let hits = (self.search)(&query, Options { speaker, span }, 6)?;
                 if hits.is_empty() {
                     return Ok(Outcome { text: prompts::render("results/recording/nothing.j2", minijinja::context! { query }), seen: Some(vec![]) });
                 }
-                let shown: Vec<_> = hits
-                    .iter()
-                    .map(|h| {
-                        let who: Vec<String> = h.chunk.speakers.iter().map(|&s| rec.speaker(s)).collect();
-                        minijinja::context! { start => format_time(h.chunk.start), end => format_time(h.chunk.end), who, text => &h.chunk.text }
+                let shown: Vec<_> = fragments(rec, &hits)
+                    .into_iter()
+                    .map(|f| {
+                        let who: Vec<String> = f.speakers.iter().map(|&s| rec.speaker(s)).collect();
+                        minijinja::context! { start => format_time(f.start), end => format_time(f.end), who, text => &f.text }
                     })
                     .collect();
                 let text = prompts::render("results/recording/search.j2", minijinja::context! { hits => shown });
@@ -350,15 +367,6 @@ impl Tools<'_> {
                 anyhow::ensure!(!done.is_empty(), needs("rename_speakers", "names"));
                 Ok(Outcome { text: prompts::render("results/recording/named.j2", minijinja::context! { done }), seen: None })
             }
-            "delegate" => {
-                let delegate = self.delegate.ok_or_else(|| error("no_helper", ()))?;
-                let task = arg("task");
-                anyhow::ensure!(!task.is_empty(), needs("delegate", "task"));
-                // The helper reads the stretch whole (bounded by its own context, not yours).
-                let stretch = Tools { max_chars: self.max_chars * 4, ..Tools::new(rec, self.search, self.max_chars) }.run("read", args)?;
-                let result = delegate(&task, &stretch.text)?;
-                Ok(Outcome { text: bounded(result, self.max_chars, "plain"), seen: None })
-            }
             "scan" => {
                 let instruction = arg("instruction");
                 anyhow::ensure!(!instruction.is_empty(), needs("scan", "instruction"));
@@ -399,6 +407,154 @@ impl Tools<'_> {
 const MENTIONS_LISTED: usize = 15;
 /// Words of context on each side of a mention.
 const MENTION_CONTEXT: usize = 6;
+/// A hit shorter than this many characters is shown with the replies around it.
+const SHORT_HIT: usize = 80;
+
+/// Words that say nothing about what to look for: pronouns, articles, auxiliaries.
+const EMPTY_WORDS: &[&str] = &[
+    "она", "он", "они", "оно", "это", "этот", "эта", "эти", "тот", "та", "те", "того", "то", "тех", "тем", "такой", "такая", "такое", "такие",
+    "его", "ее", "их", "ему", "ей", "им", "ими", "меня", "тебя", "нас", "вас", "себя", "себе", "собой", "весь", "все", "который", "которая",
+    "которое", "которые", "которого", "которую", "которых", "что", "кто", "чей", "чья", "чье", "чьи", "там", "тут", "тогда", "так", "поэтому",
+    "же", "ли", "бы", "и", "а", "но", "или", "да", "нет", "не", "ни", "на", "в", "во", "с", "со", "к", "ко", "о", "об", "обо", "от", "до",
+    "по", "за", "из", "у", "для", "при", "про", "без", "через", "над", "под", "между", "чем", "кем", "ком", "когда", "где", "куда", "откуда",
+    "почему", "зачем", "как", "сколько", "сказал", "сказала", "сказали", "сказать", "говорит", "говорил", "говорила", "говорили", "говорить",
+    "she", "he", "it", "they", "them", "their", "his", "her", "hers", "this", "that", "these", "those", "what", "who", "whom", "whose", "which",
+    "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "at", "about", "with", "for", "from", "is", "was", "were", "be", "been",
+    "being", "do", "does", "did", "there", "here", "then", "so", "say", "says", "said", "tell", "tells", "told", "mention", "mentions",
+    "mentioned", "talk", "talks", "talked", "discuss", "discusses", "discussed", "me", "my", "you", "your", "we", "us", "our", "i",
+];
+
+/// Whether a query is made only of such words («что она сказала»): it names nothing to look for.
+pub(super) fn vague(query: &str) -> bool {
+    let words: Vec<String> = query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase().replace('ё', "е"))
+        .collect();
+    !words.is_empty() && words.iter().all(|w| EMPTY_WORDS.contains(&w.as_str()))
+}
+
+/// The span `from`/`to` name (both may be empty: the whole recording).
+fn span_of(rec: &Recording, from: &str, to: &str) -> anyhow::Result<Option<(f64, f64)>> {
+    if from.is_empty() && to.is_empty() {
+        return Ok(None);
+    }
+    let a = if from.is_empty() { 0.0 } else { parse_time(from).ok_or_else(|| error("not_a_time", minijinja::context! { value => from }))? };
+    let b = if to.is_empty() { rec.duration } else { parse_time(to).ok_or_else(|| error("not_a_time", minijinja::context! { value => to }))? };
+    let (a, b) = (a.min(b), a.max(b));
+    anyhow::ensure!(a <= rec.duration, error("recording_length", minijinja::context! { length => format_time(rec.duration) }));
+    Ok(Some((a, b)))
+}
+
+/// One place in the recording a search result shows.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Fragment {
+    pub start: f64,
+    pub end: f64,
+    pub speakers: Vec<u32>,
+    pub text: String,
+}
+
+/// A place before merging; `replies` is the range it widens to, when it does.
+struct Piece {
+    start: f64,
+    end: f64,
+    speakers: Vec<u32>,
+    text: String,
+    replies: Option<(usize, usize)>,
+}
+
+/// Speakers (in order) and text of the replies `first..=last`.
+fn reply_text(rec: &Recording, first: usize, last: usize) -> (Vec<u32>, String) {
+    let mut speakers = Vec::new();
+    let mut text = String::new();
+    for r in &rec.replies[first..=last] {
+        if let Some(s) = r.speaker {
+            if !speakers.contains(&s) {
+                speakers.push(s);
+            }
+        }
+        let t = r.text();
+        if t.is_empty() {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(&t);
+    }
+    (speakers, text)
+}
+
+/// The places of `hits`: a short hit takes the reply before and after it (one wider fragment),
+/// overlapping places become one; `hits` stay the unit of `seen`.
+pub(super) fn fragments(rec: &Recording, hits: &[Hit]) -> Vec<Fragment> {
+    let touches = |r: &Reply, h: &Hit| r.end >= h.chunk.start && r.start <= h.chunk.end;
+    let mut pieces: Vec<Piece> = Vec::new();
+    for h in hits {
+        let short = h.chunk.text.chars().count() < SHORT_HIT;
+        let first = rec.replies.iter().position(|r| touches(r, h));
+        match (short, first) {
+            (true, Some(first)) => {
+                let last = rec.replies.iter().rposition(|r| touches(r, h)).unwrap_or(first);
+                let first = first.saturating_sub(1);
+                let last = (last + 1).min(rec.replies.len() - 1);
+                let (speakers, text) = reply_text(rec, first, last);
+                pieces.push(Piece { start: rec.replies[first].start, end: rec.replies[last].end, speakers, text, replies: Some((first, last)) });
+            }
+            _ => pieces.push(Piece { start: h.chunk.start, end: h.chunk.end, speakers: h.chunk.speakers.clone(), text: h.chunk.text.clone(), replies: None }),
+        }
+    }
+    pieces.sort_by(|a, b| a.start.total_cmp(&b.start));
+    let mut out: Vec<Piece> = Vec::new();
+    for p in pieces {
+        let Some(cur) = out.last_mut().filter(|cur| p.start <= cur.end) else {
+            out.push(p);
+            continue;
+        };
+        cur.end = cur.end.max(p.end);
+        match (cur.replies, p.replies) {
+            (Some(a), Some(b)) => {
+                let (first, last) = (a.0.min(b.0), a.1.max(b.1));
+                let (speakers, text) = reply_text(rec, first, last);
+                cur.start = cur.start.min(p.start);
+                cur.speakers = speakers;
+                cur.text = text;
+                cur.replies = Some((first, last));
+            }
+            _ => {
+                // One place is widened to replies, the other may be a plain chunk of them: the
+                // merged place is rebuilt from every reply the union touches, so no word repeats.
+                let (start, end) = (cur.start.min(p.start), cur.end.max(p.end));
+                let first = rec.replies.iter().position(|r| r.end >= start && r.start <= end);
+                let last = rec.replies.iter().rposition(|r| r.end >= start && r.start <= end);
+                if let (Some(first), Some(last)) = (first, last) {
+                    let (speakers, text) = reply_text(rec, first, last);
+                    cur.start = rec.replies[first].start;
+                    cur.end = rec.replies[last].end;
+                    cur.speakers = speakers;
+                    cur.text = text;
+                    cur.replies = Some((first, last));
+                    continue;
+                }
+                for s in p.speakers {
+                    if !cur.speakers.contains(&s) {
+                        cur.speakers.push(s);
+                    }
+                }
+                cur.end = end;
+                if !p.text.is_empty() && !cur.text.contains(&p.text) {
+                    if !cur.text.is_empty() {
+                        cur.text.push(' ');
+                    }
+                    cur.text.push_str(&p.text);
+                }
+                cur.replies = None;
+            }
+        }
+    }
+    out.into_iter().map(|p| Fragment { start: p.start, end: p.end, speakers: p.speakers, text: p.text }).collect()
+}
 
 /// Whether a word's stem matches a query stem (equal, or one begins the other when long).
 fn same_stem(word: &str, query: &str) -> bool {
@@ -477,7 +633,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn no_search(_: &str, _: usize) -> anyhow::Result<Vec<Hit>> {
+    fn no_search(_: &str, _: Options, _: usize) -> anyhow::Result<Vec<Hit>> {
         Ok(vec![])
     }
 
@@ -485,7 +641,7 @@ pub(crate) mod tests {
     fn card_tells_what_is_there() {
         let card = recording().card();
         assert!(card.contains("«Планёрка», 10:00 long (medium)"), "{card}");
-        assert!(card.contains("Speakers: @s1, @s2."));
+        assert!(card.contains("Speakers: @s1 (the user calls them Дана), @s2."), "{card}");
         assert!(card.contains("1. [0:00–10:00] Отчёт и бюджет — Сроки отчёта, бюджет."));
         assert!(!card.contains("Outline:"));
         assert!(card.contains("at [0:42]"));
@@ -494,14 +650,14 @@ pub(crate) mod tests {
     #[test]
     fn tools_answer_from_the_recording() {
         let rec = recording();
-        let found = |q: &str, _: usize| -> anyhow::Result<Vec<Hit>> {
+        let found = |q: &str, _: Options, _: usize| -> anyhow::Result<Vec<Hit>> {
             Ok(if q.contains("бюджет") { vec![Hit { id: 1, chunk: Chunk { start: 300.0, end: 330.0, speakers: vec![0], text: "Бюджет на квартал утвердили.".into() }, score: 1.0 }] } else { vec![] })
         };
         let tools = Tools::new(&rec, &found, 2000);
         let out = tools.run("outline", &json!({})).unwrap();
         assert!(out.text.contains("[0:00–10:00] Отчёт и бюджет — Сроки отчёта, бюджет."));
         let out = tools.run("search", &json!({"query": "бюджет"})).unwrap();
-        assert!(out.text.starts_with("[5:00–5:30] (@s1) Бюджет"), "{}", out.text);
+        assert!(out.text.starts_with("[0:30–5:03] (@s2, @s1) Графики будут к четвергу. Бюджет на квартал утвердили."), "{}", out.text);
         assert_eq!(out.seen, Some(vec!["at@300".into()]));
         assert!(tools.run("search", &json!({"query": "погода"})).unwrap().text.starts_with("Nothing found"));
         assert!(tools.run("search", &json!({})).is_err());
@@ -515,6 +671,76 @@ pub(crate) mod tests {
         assert_eq!(tools.run("calculator", &json!({"expression": "2+2*2"})).unwrap().text, "6");
         assert_eq!(tools.run("time", &json!({"from": "0:10", "to": "5:00"})).unwrap().text, "4:50 (290 seconds)");
         assert!(tools.run("dance", &json!({})).is_err());
+    }
+
+    #[test]
+    fn a_short_hit_takes_the_replies_around_it() {
+        let rec = recording();
+        let one = |start: f64, end: f64, text: &str| Hit { id: 1, chunk: Chunk { start, end, speakers: vec![0], text: text.into() }, score: 1.0 };
+        let out = fragments(&rec, &[one(300.0, 330.0, "Бюджет.")]);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!((out[0].start, out[0].end), (30.0, 303.8));
+        assert_eq!(out[0].speakers, [1, 0]);
+        assert_eq!(out[0].text, "Графики будут к четвергу. Бюджет на квартал утвердили.");
+
+        let long = "слово ".repeat(20);
+        let out = fragments(&rec, &[one(100.0, 120.0, &long)]);
+        assert_eq!((out[0].start, out[0].end), (100.0, 120.0), "a long hit stays as it is");
+        assert_eq!(out[0].text, long);
+    }
+
+    #[test]
+    fn overlapping_fragments_become_one() {
+        let rec = recording();
+        let one = |start: f64, end: f64, text: &str| Hit { id: 1, chunk: Chunk { start, end, speakers: vec![0], text: text.into() }, score: 1.0 };
+        let out = fragments(&rec, &[one(10.0, 13.4, "Да."), one(30.0, 33.4, "Да.")]);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert_eq!((out[0].start, out[0].end), (10.0, 303.8));
+        assert_eq!(out[0].speakers, [0, 1]);
+        assert!(out[0].text.starts_with("Отчёт отправляем в пятницу. Графики будут к четвергу.") && out[0].text.ends_with("Бюджет на квартал утвердили."), "{}", out[0].text);
+    }
+
+    #[test]
+    fn a_vague_query_is_refused() {
+        let rec = recording();
+        // A call seen from another thread must be safe: the search is `Sync`.
+        let called = std::sync::Mutex::new(false);
+        let search = |_: &str, _: Options, _: usize| {
+            *called.lock().unwrap() = true;
+            Ok(vec![])
+        };
+        let tools = Tools::new(&rec, &search, 4000);
+        for q in ["она", "и это", "what about it"] {
+            let e = tools.run("search", &json!({ "query": q })).unwrap_err().to_string();
+            assert!(e.contains("does not say what to look for"), "{q}: {e}");
+        }
+        assert!(!*called.lock().unwrap(), "a vague query never reaches the index");
+        tools.run("search", &json!({ "query": "что решили по бюджету" })).unwrap();
+        assert!(*called.lock().unwrap());
+    }
+
+    #[test]
+    fn search_options_reach_the_index_and_bad_ones_are_refused() {
+        let rec = recording();
+        let asked = std::sync::Mutex::new(Options::default());
+        let search = |_: &str, o: Options, _: usize| {
+            *asked.lock().unwrap() = o;
+            Ok(vec![])
+        };
+        let tools = Tools::new(&rec, &search, 4000);
+        tools.run("search", &json!({ "query": "бюджет", "speaker": "@s2", "from": "0:30", "to": "5:00" })).unwrap();
+        assert_eq!(asked.lock().unwrap().speaker, Some(Parsed { index: 1, recording: None }));
+        assert_eq!(asked.lock().unwrap().span, Some((30.0, 300.0)));
+
+        tools.run("search", &json!({ "query": "бюджет", "from": "5:00", "to": "0:30" })).unwrap();
+        assert_eq!(asked.lock().unwrap().span, Some((30.0, 300.0)), "from and to swap");
+
+        let e = tools.run("search", &json!({ "query": "бюджет", "from": "20:00", "to": "21:00" })).unwrap_err().to_string();
+        assert!(e.contains("only 10:00"), "{e}");
+        let e = tools.run("search", &json!({ "query": "бюджет", "speaker": "@s5" })).unwrap_err().to_string();
+        assert!(e.contains("@s5"), "{e}");
+        let e = tools.run("search", &json!({ "query": "бюджет", "from": "вчера" })).unwrap_err().to_string();
+        assert!(e.contains("not a time"), "{e}");
     }
 
     #[test]
@@ -589,33 +815,25 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn speakers_get_names_and_stretches_go_to_the_helper() {
+    fn speakers_get_names() {
         let rec = recording();
         assert_eq!(speaker_of(&rec, "@s1"), Some(0));
         assert_eq!(speaker_of(&rec, "s2"), Some(1));
         assert_eq!(speaker_of(&rec, "@s2#3"), Some(1), "the recording number is ignored on one recording");
         assert_eq!(speaker_of(&rec, "Дана"), None, "a name is not a label");
         assert_eq!(speaker_of(&rec, "@s9"), None, "no such speaker");
-        let named = std::cell::RefCell::new(Vec::new());
+        let named = std::sync::Mutex::new(Vec::new());
         let rename = |s: u32, n: &str| {
-            named.borrow_mut().push((s, n.to_string()));
+            named.lock().unwrap().push((s, n.to_string()));
             Ok(())
         };
-        let seen = std::cell::RefCell::new(String::new());
-        let delegate = |task: &str, text: &str| {
-            *seen.borrow_mut() = format!("{task}|{text}");
-            Ok("Итог: про пятницу [0:10].".to_string())
-        };
-        let tools = Tools { rename: Some(&rename), delegate: Some(&delegate), ..Tools::new(&rec, &no_search, 4000) };
+        let tools = Tools { rename: Some(&rename), ..Tools::new(&rec, &no_search, 4000) };
         let names: Vec<&str> = tools.specs().iter().map(|s| s.name).collect();
-        assert!(names.contains(&"rename_speakers") && names.contains(&"delegate") && !names.contains(&"scan"));
+        assert!(names.contains(&"rename_speakers") && !names.contains(&"scan"));
         let out = tools.run("rename_speakers", &json!({"names": [{"speaker": "@s2", "name": " Олег "}]})).unwrap();
         assert_eq!(out.text, "Named: @s2 → Олег.");
-        assert_eq!(*named.borrow(), [(1, "Олег".to_string())]);
+        assert_eq!(*named.lock().unwrap(), [(1, "Олег".to_string())]);
         assert!(tools.run("rename_speakers", &json!({"names": [{"speaker": "@s9", "name": "X"}]})).is_err());
-        let out = tools.run("delegate", &json!({"task": "перескажи", "from": "0:00", "to": "1:00"})).unwrap();
-        assert_eq!(out.text, "Итог: про пятницу [0:10].");
-        assert!(seen.borrow().starts_with("перескажи|[0:10] @s1: Отчёт"), "{}", seen.borrow());
         // Without diarization there is nobody to name.
         let plain = Recording { diarized: false, ..recording() };
         let tools = Tools { rename: Some(&rename), ..Tools::new(&plain, &no_search, 4000) };

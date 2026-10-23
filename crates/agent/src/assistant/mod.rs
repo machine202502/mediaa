@@ -1,6 +1,7 @@
 //! The agent: answers questions about a recording with tools, one step at a time (plan → act →
 //! observe), reliable down to small local models:
-//! * every step is structured (a tool call or the answer), never free text to parse;
+//! * every step is structured (a list of up to three tool calls to make at once, or the answer),
+//!   never free text to parse; the calls of one step run in parallel and are counted in order;
 //! * a call repeated with the same arguments is not run again (fingerprints), a result that only
 //!   shows what was already seen counts as «nothing new», and several steps without anything new
 //!   — or the step limit — make the agent answer with what it has;
@@ -22,7 +23,7 @@ pub mod step_title;
 pub mod title;
 pub mod tools;
 
-pub use brain::{Brain, EngineBrain, Message, Piece, Role, Step, ToolSpec};
+pub use brain::{Brain, Call, EngineBrain, Message, Piece, Role, Step, ToolSpec};
 pub use memory::Memory;
 pub use provider::ProviderBrain;
 pub use tools::{Recording, Tools};
@@ -33,7 +34,7 @@ use crate::tools::{format_time, parse_time};
 use serde::{Deserialize, Serialize};
 use crate::scope::Scope;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -54,6 +55,12 @@ const VERIFY_TITLE: &str = "Проверка ответа";
 const VERIFY_TOOL: &str = "verify";
 /// Share of the context the prompt may fill before old results are shortened.
 const PROMPT_SHARE: f32 = 0.6;
+/// Share of the context kept free for the answer: the prompt never takes more than the rest.
+const ANSWER_SHARE: f32 = 0.2;
+/// Characters a token is estimated to take (the same estimate as [`compact`]).
+const CHARS_PER_TOKEN: usize = 3;
+/// How often the numbers under the status line are sent again while the model writes.
+const METRICS_EVERY: Duration = Duration::from_millis(300);
 /// Longest answer after sections were sent (longer: only its first paragraph is kept).
 const CLOSING_CHARS: usize = 400;
 /// Longest section sent with `say` (characters; ≈ a third of the step's tokens in Russian).
@@ -127,14 +134,32 @@ pub enum Event {
     AnswerDiscarded,
     /// A section of a long answer, sent before the rest.
     Say(String),
+    /// A correction of the user is taken: it goes into the context after the step that ran.
+    SteerTaken { text: String },
     /// The scan of the whole recording has read `done` of `total` parts.
     Scanning { done: usize, total: usize },
+    /// The context fill and the speed of the running answer (not progress: it does not end the
+    /// waiting of the model).
+    Metrics(Metrics),
     /// The answer is complete.
     Done,
     /// The answer was stopped by the user.
     Stopped,
     /// The answer failed.
     Failed(String),
+}
+
+/// The numbers under the status line of a running answer: how much of the model's context the
+/// answer takes and how fast a local model writes.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Metrics {
+    /// Tokens of the context taken now (estimated: the prompt, and what was written so far).
+    pub context_tokens: u32,
+    /// The context window of the model, tokens.
+    pub context: u32,
+    /// Tokens a second a local model writes in the current (or last) step; `None` for a
+    /// provider's model.
+    pub speed: Option<f64>,
 }
 
 /// An earlier question and its answer in the chat.
@@ -152,8 +177,9 @@ pub struct Answer {
     pub forced: bool,
 }
 
-/// What the agent works with: one recording, or the recordings of a folder.
-pub trait Toolbox {
+/// What the agent works with: one recording, or the recordings of a folder. The calls of one
+/// step run at once in threads of their own: the toolbox is shared, so it is `Sync`.
+pub trait Toolbox: Sync {
     fn specs(&self) -> Vec<ToolSpec>;
     fn run(&self, tool: &str, args: &Value) -> anyhow::Result<tools::Outcome>;
     /// What the questions are about, for the prompts: `recording` or `folder`.
@@ -276,15 +302,24 @@ pub fn fingerprint(tool: &str, args: &Value) -> String {
 /// How a tool result (`prompts/results/step.j2`) starts.
 const RESULT: &str = "Result of step ";
 
+/// Tokens `messages` are estimated to take (≈ [`CHARS_PER_TOKEN`] characters a token).
+pub fn estimate_tokens(messages: &[Message]) -> usize {
+    messages.iter().map(|m| m.content.chars().count()).sum::<usize>() / CHARS_PER_TOKEN
+}
+
 /// Shortens the oldest tool results while the prompt is over its share of `context` tokens
 /// (≈ 3 characters a token); the last two results stay whole.
 pub fn compact(messages: &mut [Message], context: u32) {
-    let limit = (context as f32 * PROMPT_SHARE) as usize * 3;
+    compact_to(messages, (context as f32 * PROMPT_SHARE) as usize);
+}
+
+/// [`compact`] down to `limit` tokens.
+fn compact_to(messages: &mut [Message], limit: usize) {
     let results: Vec<usize> = messages.iter().enumerate().filter(|(_, m)| m.role == Role::User && m.content.starts_with(RESULT)).map(|(i, _)| i).collect();
     let keep = results.len().saturating_sub(2);
     for &i in &results[..keep] {
         let total: usize = messages.iter().map(|m| m.content.chars().count()).sum();
-        if total <= limit {
+        if total <= limit * CHARS_PER_TOKEN {
             break;
         }
         let m = &mut messages[i];
@@ -295,13 +330,68 @@ pub fn compact(messages: &mut [Message], context: u32) {
     }
 }
 
+/// A text of `keep` characters: its head and its tail, the cut marked in between (the template
+/// `results/cut/plain.j2`). A text no longer than `keep` stays whole.
+fn cut_middle(text: &str, keep: usize) -> String {
+    let chars = text.chars().count();
+    if chars <= keep {
+        return text.to_string();
+    }
+    let marker = format!("\n… {}\n", prompts::render("results/cut/plain.j2", ()));
+    let body = keep.saturating_sub(marker.chars().count());
+    if body < 2 {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(body / 2).collect();
+    let tail: String = text.chars().skip(chars - (body - body / 2)).collect();
+    format!("{head}{marker}{tail}")
+}
+
+/// Shortest piece of a message kept when the prompt has to fit: enough to stay meaningful.
+const MIN_KEEP_CHARS: usize = 200;
+
+/// Leaves at least [`ANSWER_SHARE`] of `context` free for the answer: compacts the oldest tool
+/// results first ([`compact`]), then cuts the longest messages in the middle (head and tail
+/// kept, a marker between). The system prompt (the first message) is cut only when the rest has
+/// nothing left to give.
+pub fn make_room(messages: &mut [Message], context: u32) {
+    let budget = (context as f32 * (1.0 - ANSWER_SHARE)) as usize;
+    if estimate_tokens(messages) <= budget {
+        return;
+    }
+    compact(messages, context);
+    compact_to(messages, budget);
+    fn longest(messages: &[Message], skip: usize) -> Option<(usize, usize)> {
+        messages.iter().enumerate().skip(skip).map(|(i, m)| (i, m.content.chars().count())).max_by_key(|(_, chars)| *chars)
+    }
+    loop {
+        let total = estimate_tokens(messages);
+        if total <= budget {
+            return;
+        }
+        // The longest message loses what is over the budget, or as much as it can spare.
+        let Some((i, chars)) = longest(messages, 1).filter(|&(_, chars)| chars > MIN_KEEP_CHARS).or_else(|| longest(messages, 0)) else {
+            return;
+        };
+        let keep = chars.saturating_sub((total - budget) * CHARS_PER_TOKEN).max(MIN_KEEP_CHARS);
+        if keep >= chars {
+            // Everything left is short: there is nothing more to take.
+            return;
+        }
+        messages[i].content = cut_middle(&messages[i].content, keep);
+    }
+}
+
 /// A step as the model wrote it (keys in the grammar's order). A model that reasons before the
 /// step (`thinking`) writes no `thought` field: the grammar has none.
 fn step_json(step: &Step, thinking: bool) -> String {
     let q = |v: &str| Value::String(v.to_string()).to_string();
     let thought = |t: &str| if thinking { String::new() } else { format!(r#""thought":{},"#, q(t)) };
     match step {
-        Step::Tool { thought: t, tool, args } => format!(r#"{{{}"action":{},"args":{args}}}"#, thought(t), q(tool)),
+        Step::Tool { thought: t, calls } => {
+            let calls: Vec<String> = calls.iter().map(|c| format!(r#"{{"action":{},"args":{}}}"#, q(&c.tool), c.args)).collect();
+            format!(r#"{{{}"calls":[{}]}}"#, thought(t), calls.join(","))
+        }
         Step::Answer { thought: t, text } => format!(r#"{{{}"action":"{}","answer":{}}}"#, thought(t), brain::ANSWER, q(text)),
     }
 }
@@ -389,22 +479,22 @@ pub fn ask(
     cancel: &AtomicBool,
     on_event: &mut (dyn FnMut(&Event) + Send),
 ) -> anyhow::Result<Answer> {
-    use mediaa_core::agent::ModelSource;
     let engine = scope.engine();
     let engine = engine.as_ref();
-    let find = |q: &str, n: usize| crate::search::search(engine, slots, settings, ai_dir, file_id, q, n, true).map(|(h, _)| h);
+    let find = |q: &str, o: crate::search::Options, n: usize| {
+        crate::search::search_with(engine, slots, settings, ai_dir, file_id, q, n, o, true).map(|(h, _)| h)
+    };
     // Events come from the loop and from a running scan (its progress), never at once.
     let events = Mutex::new(on_event);
-    let transcript = mediaa_core::transcript::Transcript::open(ai_dir, file_id).ok();
+    // The calls of one step run in threads, so each opens its own connection (WAL: readers and
+    // the short cache writes do not wait for each other).
     let scan_with = |extract: &dyn scan::Extract, instruction: &str| {
+        let transcript = mediaa_core::transcript::Transcript::open(ai_dir, file_id).ok();
         scan::scan(extract, recording, transcript.as_ref(), instruction, cancel, &mut |done, total| (events.lock().expect("event sink"))(&Event::Scanning { done, total }))
     };
-    let rename = |speaker: u32, name: &str| transcript.as_ref().ok_or_else(|| anyhow::anyhow!("no transcript"))?.rename_speaker(speaker, name);
-    // The sub-agent: a provider's model when one is chosen; otherwise the agent's own model
-    // (loading a second local model next to it would compete for the same memory).
-    let sub = match &settings.models.subagent {
-        Some(ModelSource::Provider { provider, model }) => Some(provider_brain(scope, slots, settings, provider, model, false)?),
-        _ => None,
+    let rename = |speaker: u32, name: &str| {
+        let transcript = mediaa_core::transcript::Transcript::open(ai_dir, file_id).map_err(|e| anyhow::anyhow!("no transcript: {e:#}"))?;
+        transcript.rename_speaker(speaker, name)
     };
     let mut events_out = |e: &Event| (events.lock().expect("event sink"))(e);
     let (web_search, web_read) = web_calls(slots, settings, cancel);
@@ -412,18 +502,10 @@ pub fn ask(
     let waiter = Waiter { reason: &*wait, grace: WAIT_GRACE };
     let (history, question) = for_model(&tools::whos(recording, None), history, question);
     let run = |brain: &dyn Brain, extract: &dyn scan::Extract| {
-        let helper: &dyn Brain = sub.as_ref().map_or(brain, |s| s as &dyn Brain);
-        let delegate = |task: &str, text: &str| {
-            let messages = [
-                Message::new(Role::System, prompts::render("delegate_system.j2", ())),
-                Message::new(Role::User, prompts::render("delegate_task.j2", minijinja::context! { task, text })),
-            ];
-            helper.complete(&messages, cancel)
-        };
         let scanner = |instruction: &str| scan_with(extract, instruction);
         let max_chars = (brain.context() as usize) * 3 / 4;
         let web = settings.web.enabled.then(|| internet::Web::new(&*web_search, &*web_read, max_chars / 3));
-        let tools = Tools { scan: Some(&scanner), rename: Some(&rename), delegate: Some(&delegate), web: web.as_ref(), ..Tools::new(recording, &find, max_chars) };
+        let tools = Tools { scan: Some(&scanner), rename: Some(&rename), web: web.as_ref(), ..Tools::new(recording, &find, max_chars) };
         answer(brain, &tools, scope, &history, memory, &question, cancel, Some(&waiter), settings.verify_answers, &mut events_out)
     };
     with_brain(scope, slots, settings, run)
@@ -478,7 +560,7 @@ fn with_brain<R>(
             let device = settings.devices.get(ModelRole::Agent);
             let hf_token = hf_token(settings);
             let engine = scope.engine();
-            let brain = EngineBrain { engine: engine.as_ref(), model: model.clone(), n_ctx, device, priority: Priority::Interactive, max_tokens: STEP_TOKENS, hf_token: hf_token.clone(), thinking };
+            let brain = EngineBrain { engine: engine.as_ref(), model: model.clone(), n_ctx, device, priority: Priority::Interactive, max_tokens: STEP_TOKENS, hf_token: hf_token.clone(), thinking, speed: std::sync::Mutex::new(None) };
             let extract = scan::EngineExtract { engine: engine.as_ref(), model, n_ctx, device, priority: Priority::Background, hf_token };
             f(&brain, &extract)
         }
@@ -507,11 +589,13 @@ pub fn ask_folder(
     let engine = scope.engine();
     let engine = engine.as_ref();
     let sources: Vec<crate::search::Source> = items.iter().map(|it| crate::search::Source { id: it.file_id.clone(), path: it.path.clone() }).collect();
-    let across = |q: &str, n: usize| {
-        let (hits, _) = crate::search::search_files(engine, slots, settings, ai_dir, &sources, q, n, true)?;
+    let across = |q: &str, o: crate::search::Options, n: usize| {
+        let (hits, _) = crate::search::search_files_with(engine, slots, settings, ai_dir, &sources, q, n, o, true)?;
         Ok(hits.into_iter().filter_map(|h| items.iter().position(|it| it.path == h.path).map(|i| (i, h.hit))).collect())
     };
-    let one = |i: usize, q: &str, n: usize| crate::search::search(engine, slots, settings, ai_dir, &items[i].file_id, q, n, true).map(|(h, _)| h);
+    let one = |i: usize, q: &str, o: crate::search::Options, n: usize| {
+        crate::search::search_with(engine, slots, settings, ai_dir, &items[i].file_id, q, n, o, true).map(|(h, _)| h)
+    };
     let (web_search, web_read) = web_calls(slots, settings, cancel);
     let wait = waiter(scope, slots, settings);
     let waiter = Waiter { reason: &*wait, grace: WAIT_GRACE };
@@ -537,22 +621,24 @@ pub fn answer_step(
     history: &[Turn],
     session: &mut Session,
     question: &str,
+    steers: &[String],
     cancel: &AtomicBool,
     on_event: &mut (dyn FnMut(&Event) + Send),
 ) -> anyhow::Result<Advance> {
-    use mediaa_core::agent::ModelSource;
     let engine = scope.engine();
     let engine = engine.as_ref();
-    let find = |q: &str, n: usize| crate::search::search(engine, slots, settings, ai_dir, file_id, q, n, true).map(|(h, _)| h);
+    let find = |q: &str, o: crate::search::Options, n: usize| {
+        crate::search::search_with(engine, slots, settings, ai_dir, file_id, q, n, o, true).map(|(h, _)| h)
+    };
     let events = Mutex::new(on_event);
-    let transcript = mediaa_core::transcript::Transcript::open(ai_dir, file_id).ok();
+    // Each call of a step opens its own connection: the calls run in threads (see `ask`).
     let scan_with = |extract: &dyn scan::Extract, instruction: &str| {
+        let transcript = mediaa_core::transcript::Transcript::open(ai_dir, file_id).ok();
         scan::scan(extract, recording, transcript.as_ref(), instruction, cancel, &mut |done, total| (events.lock().expect("event sink"))(&Event::Scanning { done, total }))
     };
-    let rename = |speaker: u32, name: &str| transcript.as_ref().ok_or_else(|| anyhow::anyhow!("no transcript"))?.rename_speaker(speaker, name);
-    let sub = match &settings.models.subagent {
-        Some(ModelSource::Provider { provider, model }) => Some(provider_brain(scope, slots, settings, provider, model, false)?),
-        _ => None,
+    let rename = |speaker: u32, name: &str| {
+        let transcript = mediaa_core::transcript::Transcript::open(ai_dir, file_id).map_err(|e| anyhow::anyhow!("no transcript: {e:#}"))?;
+        transcript.rename_speaker(speaker, name)
     };
     let (web_search, web_read) = web_calls(slots, settings, cancel);
     let wait = waiter(scope, slots, settings);
@@ -560,19 +646,11 @@ pub fn answer_step(
     let (history, question) = for_model(&tools::whos(recording, None), history, question);
     let emit = |e: &Event| (events.lock().expect("event sink"))(e);
     let run = |brain: &dyn Brain, extract: &dyn scan::Extract| {
-        let helper: &dyn Brain = sub.as_ref().map_or(brain, |s| s as &dyn Brain);
-        let delegate = |task: &str, text: &str| {
-            let messages = [
-                Message::new(Role::System, prompts::render("delegate_system.j2", ())),
-                Message::new(Role::User, prompts::render("delegate_task.j2", minijinja::context! { task, text })),
-            ];
-            helper.complete(&messages, cancel)
-        };
         let scanner = |instruction: &str| scan_with(extract, instruction);
         let max_chars = (brain.context() as usize) * 3 / 4;
         let web = settings.web.enabled.then(|| internet::Web::new(&*web_search, &*web_read, max_chars / 3));
-        let tools = Tools { scan: Some(&scanner), rename: Some(&rename), delegate: Some(&delegate), web: web.as_ref(), ..Tools::new(recording, &find, max_chars) };
-        advance(brain, &tools, scope, session, &history, &question, cancel, Some(&waiter), settings.verify_answers, &emit)
+        let tools = Tools { scan: Some(&scanner), rename: Some(&rename), web: web.as_ref(), ..Tools::new(recording, &find, max_chars) };
+        advance(brain, &tools, scope, session, &history, &question, steers, cancel, Some(&waiter), settings.verify_answers, &emit)
     };
     with_brain(scope, slots, settings, run)
 }
@@ -588,17 +666,20 @@ pub fn answer_step_folder(
     history: &[Turn],
     session: &mut Session,
     question: &str,
+    steers: &[String],
     cancel: &AtomicBool,
     on_event: &mut (dyn FnMut(&Event) + Send),
 ) -> anyhow::Result<Advance> {
     let engine = scope.engine();
     let engine = engine.as_ref();
     let sources: Vec<crate::search::Source> = items.iter().map(|it| crate::search::Source { id: it.file_id.clone(), path: it.path.clone() }).collect();
-    let across = |q: &str, n: usize| {
-        let (hits, _) = crate::search::search_files(engine, slots, settings, ai_dir, &sources, q, n, true)?;
+    let across = |q: &str, o: crate::search::Options, n: usize| {
+        let (hits, _) = crate::search::search_files_with(engine, slots, settings, ai_dir, &sources, q, n, o, true)?;
         Ok(hits.into_iter().filter_map(|h| items.iter().position(|it| it.path == h.path).map(|i| (i, h.hit))).collect())
     };
-    let one = |i: usize, q: &str, n: usize| crate::search::search(engine, slots, settings, ai_dir, &items[i].file_id, q, n, true).map(|(h, _)| h);
+    let one = |i: usize, q: &str, o: crate::search::Options, n: usize| {
+        crate::search::search_with(engine, slots, settings, ai_dir, &items[i].file_id, q, n, o, true).map(|(h, _)| h)
+    };
     let events = Mutex::new(on_event);
     let (web_search, web_read) = web_calls(slots, settings, cancel);
     let wait = waiter(scope, slots, settings);
@@ -610,7 +691,7 @@ pub fn answer_step_folder(
         let max_chars = (brain.context() as usize) * 3 / 4;
         let web = settings.web.enabled.then(|| internet::Web::new(&*web_search, &*web_read, max_chars / 3));
         let tools = folder::FolderTools { items, search: &across, search_one: &one, max_chars, web: web.as_ref() };
-        advance(brain, &tools, scope, session, &history, &question, cancel, Some(&waiter), settings.verify_answers, &emit)
+        advance(brain, &tools, scope, session, &history, &question, steers, cancel, Some(&waiter), settings.verify_answers, &emit)
     })
 }
 
@@ -673,6 +754,12 @@ fn chat_tool(tool: &str, args: &Value, toolbox: &dyn Toolbox, memory: &mut Memor
         }
         _ => return toolbox.web().and_then(|w| w.run(tool, args)),
     })
+}
+
+/// The tools of the conversation itself (`remember`, `plan`, `say`): they change the chat, so
+/// the calls of a step run them in order, not in the threads.
+fn is_chat(tool: &str) -> bool {
+    matches!(tool, "remember" | "plan" | "say")
 }
 
 /// The tool arguments as they are kept in the queue: short.
@@ -941,6 +1028,9 @@ pub struct Session {
     pub store: String,
     #[serde(default)]
     pub chat: i64,
+    /// How many corrections of the user the answer has taken (their messages are in the chat).
+    #[serde(default)]
+    pub steers_taken: usize,
 }
 
 impl Session {
@@ -963,6 +1053,7 @@ impl Session {
             titles: false,
             store: String::new(),
             chat: 0,
+            steers_taken: 0,
         }
     }
 }
@@ -998,7 +1089,7 @@ pub fn answer(
     let mut session = Session::new(memory.clone());
     let result = (|| {
         loop {
-            match advance(brain, tools, scope, &mut session, history, question, cancel, waiter, verify, &emit)? {
+            match advance(brain, tools, scope, &mut session, history, question, &[], cancel, waiter, verify, &emit)? {
                 Advance::More => {}
                 Advance::Done(answer) => return Ok(answer),
             }
@@ -1009,6 +1100,9 @@ pub fn answer(
 }
 
 /// One step of [`answer`]. A queue chunk calls this once and checkpoints `session`.
+///
+/// `steers` are corrections the user sent while the previous step ran: they join the context
+/// after that step, in the order they were sent.
 #[allow(clippy::too_many_arguments)]
 pub fn advance(
     brain: &dyn Brain,
@@ -1017,6 +1111,7 @@ pub fn advance(
     session: &mut Session,
     history: &[Turn],
     question: &str,
+    steers: &[String],
     cancel: &AtomicBool,
     waiter: Option<&Waiter>,
     verify: bool,
@@ -1042,6 +1137,14 @@ pub fn advance(
         messages.push(Message::new(Role::User, question.to_string()));
         session.messages = messages;
     }
+    // Corrections sent while the previous step ran: after it, together and in the order sent.
+    if !steers.is_empty() {
+        for text in steers {
+            session.messages.push(Message::new(Role::User, prompts::render("nudges/steer.j2", minijinja::context! { text })));
+            emit(&Event::SteerTaken { text: text.clone() });
+        }
+        session.steers_taken += steers.len();
+    }
     if session.n >= MAX_STEPS + 4 {
         anyhow::bail!("the model did not answer in {} steps", MAX_STEPS + 4);
     }
@@ -1058,13 +1161,18 @@ pub fn advance(
         session.told_to_answer = true;
         session.messages.push(Message::new(Role::User, prompts::render("nudges/answer_now.j2", ())));
     }
-    compact(&mut session.messages, brain.context());
+    let context = brain.context();
+    // Room for the answer: the prompt and the tool results never take more than the rest.
+    make_room(&mut session.messages, context);
+    emit(&Event::Metrics(Metrics { context_tokens: estimate_tokens(&session.messages) as u32, context, speed: brain.speed() }));
     // Small models jump to conclusions: the first step always looks into the recording.
     let mut drafted = false;
+    let mut streamed = 0usize;
     let model_step = begin_child(scope, "model-step", &(n + 1).to_string(), &json!({ "step": n + 1 }));
     scope.focus(model_step.as_ref().map(Scope::task));
     let step = {
         let (started, finished) = (AtomicBool::new(false), AtomicBool::new(false));
+        let mut last_metrics = Instant::now();
         std::thread::scope(|s| {
             if let Some(w) = waiter {
                 s.spawn(|| watch(w, &started, &finished, &emit));
@@ -1072,17 +1180,28 @@ pub fn advance(
             let step = brain.step(&session.messages, if must_answer { &[] } else { &specs }, !session.steps.is_empty(), cancel, &mut |piece| {
                 started.store(true, Ordering::Relaxed);
                 match piece {
-                    Piece::Thinking(text) => emit(&Event::Thinking(text.to_string())),
+                    Piece::Thinking(text) => {
+                        streamed += text.chars().count();
+                        emit(&Event::Thinking(text.to_string()));
+                    }
                     Piece::Answer(text) => {
                         drafted = true;
+                        streamed += text.chars().count();
                         emit(&Event::AnswerText(text.to_string()));
                     }
+                }
+                // The numbers under the status line follow the writing as it goes.
+                if last_metrics.elapsed() >= METRICS_EVERY {
+                    last_metrics = Instant::now();
+                    let taken = estimate_tokens(&session.messages) + streamed / CHARS_PER_TOKEN;
+                    emit(&Event::Metrics(Metrics { context_tokens: taken as u32, context, speed: brain.speed() }));
                 }
             });
             finished.store(true, Ordering::Relaxed);
             step
         })
     };
+    emit(&Event::Metrics(Metrics { context_tokens: (estimate_tokens(&session.messages) + streamed / CHARS_PER_TOKEN) as u32, context, speed: brain.speed() }));
     scope.focus(None);
     if let Some(child) = &model_step {
         match &step {
@@ -1111,60 +1230,123 @@ pub fn advance(
     }
     session.messages.push(Message::new(Role::Assistant, step_json(&step, brain.thinking())));
     match step {
-        Step::Tool { tool, args, .. } => {
-            let fp = fingerprint(&tool, &args);
-            let no = session.steps.len() + 1;
-            let index = session.steps.len();
-            let title = step_title::caption(&tool, step_title::is_topic(&args), session.ui_english);
-            let purpose = tools.specs().into_iter().find(|s| s.name == tool).map(|s| s.description.lines().next().unwrap_or("").trim().to_string()).unwrap_or_default();
-            step_title::enqueue(scope, session, index, question, &tool, &purpose, &args);
-            emit(&Event::StepStarted { title: title.clone(), tool: tool.clone() });
-            let child = begin_child(scope, "tool", &title, &json!({ "tool": &title, "args": args }));
-            scope.focus(child.as_ref().map(Scope::task));
-            let repeated = session.done.get(&fp).copied();
-            let (status, text) = match repeated {
-                Some(prev) => (StepStatus::Repeated, prompts::render("results/repeated.j2", minijinja::context! { step => prev })),
-                None => {
-                    let mut known: HashSet<String> = session.known.iter().cloned().collect();
-                    let outcome = match chat_tool(&tool, &args, tools, &mut session.memory, &mut |e| emit(e)).unwrap_or_else(|| tools.run(&tool, &args)) {
+        Step::Tool { calls, .. } => {
+            // The calls are planned, shown and counted in the order the model wrote them; the
+            // recording tools run at once (a call needing another's result is a step of its own).
+            struct Planned {
+                fp: String,
+                no: usize,
+                title: String,
+                tool: String,
+                args: Value,
+                /// The step that made the same call before (this step's earlier call included).
+                repeated: Option<usize>,
+                child: Option<Scope>,
+            }
+            let mut plans: Vec<Planned> = Vec::new();
+            let mut in_step: HashMap<String, usize> = HashMap::new();
+            // Each call is a step of its own: the step limit leaves room for this many.
+            let room = MAX_STEPS.saturating_sub(session.steps.len()).max(1);
+            if calls.len() > room {
+                log::warn!("{} calls in one step, the limit leaves room for {room}", calls.len());
+            }
+            for call in calls.iter().take(room) {
+                let fp = fingerprint(&call.tool, &call.args);
+                let no = session.steps.len() + plans.len() + 1;
+                let index = session.steps.len() + plans.len();
+                let title = step_title::caption(&call.tool, step_title::is_topic(&call.args), session.ui_english);
+                let purpose = tools.specs().into_iter().find(|s| s.name == call.tool).map(|s| s.description.lines().next().unwrap_or("").trim().to_string()).unwrap_or_default();
+                step_title::enqueue(scope, session, index, question, &call.tool, &purpose, &call.args);
+                emit(&Event::StepStarted { title: title.clone(), tool: call.tool.clone() });
+                let child = begin_child(scope, "tool", &title, &json!({ "tool": &title, "args": &call.args }));
+                // The same call twice in one step: the second is not run.
+                let repeated = session.done.get(&fp).copied().or_else(|| in_step.get(&fp).copied());
+                in_step.entry(fp.clone()).or_insert(no);
+                plans.push(Planned { fp, no, title, tool: call.tool.clone(), args: call.args.clone(), repeated, child });
+            }
+            // Each call runs in a thread of its own, counting its model calls (a scan) in its
+            // own task; the chat tools (they change the chat itself) run after them, in the
+            // order of the list.
+            let mut outcomes: Vec<Option<anyhow::Result<tools::Outcome>>> = plans.iter().map(|_| None).collect();
+            std::thread::scope(|s| {
+                let mut threads = Vec::new();
+                for (i, plan) in plans.iter().enumerate() {
+                    if plan.repeated.is_some() || is_chat(&plan.tool) {
+                        continue;
+                    }
+                    let child = plan.child.as_ref();
+                    threads.push((i, s.spawn(move || {
+                        if let Some(child) = child {
+                            scope.focus(Some(child.task()));
+                        }
+                        // The web tools are the conversation's too, but they need no memory: they
+                        // run here, with the recording tools.
+                        let outcome = match tools.web() {
+                            Some(web) => web.run(&plan.tool, &plan.args).unwrap_or_else(|| tools.run(&plan.tool, &plan.args)),
+                            None => tools.run(&plan.tool, &plan.args),
+                        };
+                        scope.focus(None);
+                        outcome
+                    })));
+                }
+                for (i, thread) in threads {
+                    let outcome = thread.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+                    outcomes[i] = Some(outcome);
+                }
+            });
+            for (i, plan) in plans.iter().enumerate() {
+                if plan.repeated.is_none() && is_chat(&plan.tool) && outcomes[i].is_none() {
+                    let outcome = chat_tool(&plan.tool, &plan.args, tools, &mut session.memory, &mut |e| emit(e)).unwrap_or_else(|| tools.run(&plan.tool, &plan.args));
+                    outcomes[i] = Some(outcome);
+                }
+            }
+            // The results are read in the order of the list, whatever finished first; the
+            // novelty of each goes on the same set, so a second call showing the same is not new.
+            let mut known: HashSet<String> = session.known.iter().cloned().collect();
+            let mut results: Vec<(StepStatus, String)> = Vec::new();
+            for (i, plan) in plans.iter().enumerate() {
+                let (status, text) = match plan.repeated {
+                    Some(prev) => (StepStatus::Repeated, prompts::render("results/repeated.j2", minijinja::context! { step => prev })),
+                    None => match outcomes[i].as_ref().expect("every call of the step was run") {
                         Ok(out) => {
                             let new = out.seen.as_ref().is_none_or(|s| tools::adds(&mut known, s));
                             if new {
-                                (StepStatus::Found, out.text)
+                                (StepStatus::Found, out.text.clone())
                             } else if out.seen.as_ref().is_some_and(Vec::is_empty) {
-                                (StepStatus::Nothing, out.text)
+                                (StepStatus::Nothing, out.text.clone())
                             } else {
                                 (StepStatus::Nothing, prompts::render("results/nothing_new.j2", ()))
                             }
                         }
                         Err(e) => (StepStatus::Failed, format!("Error: {e:#}")),
-                    };
-                    session.known = known.into_iter().collect();
-                    session.known.sort();
-                    outcome
+                    },
+                };
+                if let Some(child) = &plan.child {
+                    child.set_detail(&json!({ "tool": &plan.title, "args": short_args(&plan.args), "result_chars": text.chars().count() }));
+                    match status {
+                        StepStatus::Failed => child.fail(&text),
+                        _ => child.finish(&json!({ "status": status.as_str() })),
+                    }
                 }
-            };
-            scope.focus(None);
-            if let Some(child) = &child {
-                child.set_detail(&json!({ "tool": &title, "args": short_args(&args), "result_chars": text.chars().count() }));
-                match status {
-                    StepStatus::Failed => child.fail(&text),
-                    _ => child.finish(&json!({ "status": status.as_str() })),
-                }
+                results.push((status, text));
             }
-            // A stop: what the tool brought is dropped.
+            // A stop: what the tools brought is dropped.
             running()?;
-            session.done.entry(fp).or_insert(no);
-            // A repeat means the model is going round in circles: it counts double.
-            session.stall = match status {
-                StepStatus::Found => 0,
-                StepStatus::Repeated => session.stall + 2,
-                _ => session.stall + 1,
-            };
-            session.messages.push(Message::new(Role::User, prompts::render("results/step.j2", minijinja::context! { step => no, tool => &tool, text => &text })));
-            let record = StepRecord { title, tool, args, result: text, status };
-            emit(&Event::Step(record.clone()));
-            session.steps.push(record);
+            session.known = known.into_iter().collect();
+            session.known.sort();
+            for (plan, (status, text)) in plans.iter().zip(results) {
+                session.done.entry(plan.fp.clone()).or_insert(plan.no);
+                // A repeat means the model is going round in circles: it counts double.
+                session.stall = match status {
+                    StepStatus::Found => 0,
+                    StepStatus::Repeated => session.stall + 2,
+                    _ => session.stall + 1,
+                };
+                session.messages.push(Message::new(Role::User, prompts::render("results/step.j2", minijinja::context! { step => plan.no, tool => &plan.tool, text => &text })));
+                let record = StepRecord { title: plan.title.clone(), tool: plan.tool.clone(), args: plan.args.clone(), result: text, status };
+                emit(&Event::Step(record.clone()));
+                session.steps.push(record);
+            }
             Ok(Advance::More)
         }
         Step::Answer { text, .. } => {
@@ -1283,14 +1465,18 @@ mod tests {
     }
 
     fn call(tool: &str, args: Value) -> Step {
-        Step::Tool { thought: String::new(), tool: tool.into(), args }
+        Step::Tool { thought: String::new(), calls: vec![Call { tool: tool.into(), args }] }
+    }
+
+    fn batch(list: &[(&str, Value)]) -> Step {
+        Step::Tool { thought: String::new(), calls: list.iter().map(|(tool, args)| Call { tool: (*tool).into(), args: args.clone() }).collect() }
     }
 
     fn say(text: &str) -> Step {
         Step::Answer { thought: String::new(), text: text.into() }
     }
 
-    fn search(q: &str, _: usize) -> anyhow::Result<Vec<Hit>> {
+    fn search(q: &str, _: crate::search::Options, _: usize) -> anyhow::Result<Vec<Hit>> {
         Ok(if q.contains("отчёт") { vec![Hit { id: 1, chunk: Chunk { start: 10.0, end: 15.0, speakers: vec![0], text: "Отчёт отправляем в пятницу.".into() }, score: 1.0 }] } else { vec![] })
     }
 
@@ -1306,11 +1492,13 @@ mod tests {
 
     #[test]
     fn a_thinking_models_step_has_no_thought_in_the_history() {
-        let tool = Step::Tool { thought: String::new(), tool: "search".into(), args: json!({"q": "x"}) };
+        let tool = Step::Tool { thought: String::new(), calls: vec![Call { tool: "search".into(), args: json!({"q": "x"}) }] };
+        let two = batch(&[("search", json!({"q": "x"})), ("read", json!({"from": 0}))]);
         let answer = Step::Answer { thought: "думаю".into(), text: "Да.".into() };
-        assert_eq!(step_json(&tool, true), r#"{"action":"search","args":{"q":"x"}}"#);
+        assert_eq!(step_json(&tool, true), r#"{"calls":[{"action":"search","args":{"q":"x"}}]}"#);
+        assert_eq!(step_json(&two, true), r#"{"calls":[{"action":"search","args":{"q":"x"}},{"action":"read","args":{"from":0}}]}"#);
         assert_eq!(step_json(&answer, true), r#"{"action":"answer","answer":"Да."}"#);
-        assert_eq!(step_json(&tool, false), r#"{"thought":"","action":"search","args":{"q":"x"}}"#);
+        assert_eq!(step_json(&tool, false), r#"{"thought":"","calls":[{"action":"search","args":{"q":"x"}}]}"#);
         assert!(serde_json::from_str::<Value>(&step_json(&answer, false)).is_ok());
     }
 
@@ -1322,9 +1510,10 @@ mod tests {
         assert!(!a.forced);
         assert_eq!(a.steps.len(), 1);
         assert_eq!(a.steps[0].status, StepStatus::Found);
-        // The step begins and ends, then the answer streams in pieces.
-        assert!(matches!(&events[0], Event::StepStarted { title, tool } if title == "Поиск" && tool == "search"));
-        assert!(matches!(&events[1], Event::Step(s) if s.status == StepStatus::Found));
+        // The step begins and ends, then the answer streams in pieces (the numbers aside).
+        let story: Vec<&Event> = events.iter().filter(|e| !matches!(e, Event::Metrics(_))).collect();
+        assert!(matches!(story[0], Event::StepStarted { title, tool } if title == "Поиск" && tool == "search"));
+        assert!(matches!(story[1], Event::Step(s) if s.status == StepStatus::Found));
         let draft: String = events.iter().filter_map(|e| if let Event::AnswerText(t) = e { Some(t.as_str()) } else { None }).collect();
         assert_eq!(draft, "В пятницу [0:10].");
         assert!(!events.contains(&Event::AnswerDiscarded));
@@ -1334,7 +1523,7 @@ mod tests {
         assert!(first[0].content.contains("«Планёрка»") && first[0].content.contains("- search: "));
         assert_eq!((first[1].content.as_str(), first[2].content.as_str(), first[3].content.as_str()), ("Привет", "Здравствуйте", "Когда отчёт?"));
         let (second, _) = &brain.seen.borrow()[1];
-        assert!(second.last().unwrap().content.starts_with("Result of step 1 (search):\n[0:10–0:15] (@s1) Отчёт"));
+        assert!(second.last().unwrap().content.starts_with("Result of step 1 (search):\n[0:10–0:33] (@s1, @s2) Отчёт отправляем в пятницу."));
     }
 
     /// What an event is, in a word (consecutive pieces of one kind are one).
@@ -1347,17 +1536,69 @@ mod tests {
             Event::AnswerText(_) => "text".into(),
             Event::AnswerDiscarded => "discard".into(),
             Event::Say(_) => "say".into(),
+            Event::SteerTaken { .. } => "steer".into(),
             Event::Scanning { .. } => "scan".into(),
+            Event::Metrics(_) => "metrics".into(),
             Event::Done => "done".into(),
             Event::Stopped => "stopped".into(),
             Event::Failed(_) => "failed".into(),
         }
     }
 
+    /// The story the events tell: the numbers are a side channel, not a step.
     fn tags(events: &[Event]) -> Vec<String> {
-        let mut out: Vec<String> = events.iter().map(tag).collect();
+        let mut out: Vec<String> = events.iter().filter(|e| !matches!(e, Event::Metrics(_))).map(tag).collect();
         out.dedup();
         out
+    }
+
+    #[test]
+    fn corrections_of_the_user_are_taken_after_the_step_that_ran() {
+        use chat::Live;
+        use mediaa_core::chat::TimelineEntry;
+        let brain = Scripted::new(vec![call("search", json!({"query": "отчёт"})), call("search", json!({"query": "погода"})), say("Учёл уточнения.")]);
+        let rec = recording();
+        let tools = Tools::new(&rec, &search, 4000);
+        let (_dir, scope) = test_scope();
+        let history = [Turn { question: "Привет".into(), answer: "Здравствуйте".into() }];
+        let mut session = Session::new(Memory::default());
+        let events = Mutex::new(Vec::new());
+        let emit = |e: &Event| events.lock().expect("event sink").push(e.clone());
+        let cancel = AtomicBool::new(false);
+        // The first step knows nothing of them: they came while it ran.
+        let first = advance(&brain, &tools, &scope, &mut session, &history, "Когда отчёт?", &[], &cancel, None, false, &emit).unwrap();
+        assert!(matches!(first, Advance::More));
+        assert!(brain.seen.borrow()[0].0.iter().all(|m| !m.content.contains("Ещё про бюджет.")));
+        // The next step sees both, together and in the order sent, after the result of the first.
+        let steers = ["Ещё про бюджет.".to_string(), "И про сроки.".to_string()];
+        let next = advance(&brain, &tools, &scope, &mut session, &history, "Когда отчёт?", &steers, &cancel, None, false, &emit).unwrap();
+        assert!(matches!(next, Advance::More));
+        let seen = brain.seen.borrow();
+        let texts: Vec<&str> = seen[1].0.iter().map(|m| m.content.as_str()).collect();
+        let at = texts.iter().rposition(|t| t.starts_with("Result of step 1 (search):")).unwrap();
+        assert_eq!(
+            &texts[at + 1..],
+            [
+                "The user added while you were working: «Ещё про бюджет.». Take it into account from now on; if it changes what is asked, follow the new request.",
+                "The user added while you were working: «И про сроки.». Take it into account from now on; if it changes what is asked, follow the new request.",
+            ]
+        );
+        assert_eq!(session.steers_taken, 2);
+        drop(seen);
+        // The timeline keeps both where they were taken: right after the step that ran.
+        let mut live = Live::new();
+        for e in events.lock().unwrap().iter() {
+            live.apply(e);
+        }
+        let taken: Vec<&str> = live
+            .timeline
+            .entries
+            .iter()
+            .filter_map(|e| if let TimelineEntry::Steer { text } = e { Some(text.as_str()) } else { None })
+            .collect();
+        assert_eq!(taken, ["Ещё про бюджет.", "И про сроки."]);
+        let at = live.timeline.entries.iter().position(|e| matches!(e, TimelineEntry::Step { .. })).unwrap();
+        assert!(matches!(&live.timeline.entries[at + 1], TimelineEntry::Steer { text } if text == "Ещё про бюджет."));
     }
 
     #[test]
@@ -1448,7 +1689,8 @@ mod tests {
         // second step answers at once.
         assert_eq!(tags(&events)[..3], ["wait", "start:outline", "step:outline"]);
         assert_eq!(events.iter().filter(|e| matches!(e, Event::Waiting { .. })).count(), 2, "once for each step that was silent for long: {:?}", tags(&events));
-        assert_eq!(events[0], Event::Waiting { reason: WaitReason::Loading { model: "owner/model".into() } });
+        let first = events.iter().find(|e| !matches!(e, Event::Metrics(_))).unwrap();
+        assert_eq!(first, &Event::Waiting { reason: WaitReason::Loading { model: "owner/model".into() } });
 
         // No reason (the model is loaded and busy writing): no waiting.
         let none = || None;
@@ -1642,6 +1884,97 @@ mod tests {
         let brain = Scripted::new(script);
         let (a, _) = run(&brain, "Посчитай");
         assert_eq!(a.steps.len(), MAX_STEPS);
+        assert!(a.forced);
+    }
+
+    /// Tools that get through only while another call of their step is inside: the first call
+    /// of a batch waits for the second (a step run one call at a time times out), and the first
+    /// one written finishes last. `state` is (inside, most inside at once).
+    struct Together {
+        state: Mutex<(usize, usize)>,
+        cv: std::sync::Condvar,
+    }
+
+    impl Toolbox for Together {
+        fn specs(&self) -> Vec<ToolSpec> {
+            ["slow", "fast"].map(|name| ToolSpec { name, description: String::new(), params: json!({"type": "object", "properties": {}, "required": []}), example: json!({}) }).to_vec()
+        }
+        fn run(&self, tool: &str, _: &Value) -> anyhow::Result<tools::Outcome> {
+            let mut state = self.state.lock().expect("state");
+            state.0 += 1;
+            state.1 = state.1.max(state.0);
+            self.cv.notify_all();
+            let until = Instant::now() + Duration::from_secs(2);
+            while state.1 < 2 {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                state = self.cv.wait_timeout(state, left).expect("state").0;
+            }
+            state.0 -= 1;
+            drop(state);
+            if tool == "slow" {
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            Ok(tools::Outcome { text: format!("{tool} done"), seen: Some(vec![tool.to_string()]) })
+        }
+        fn kind(&self) -> &'static str {
+            "recording"
+        }
+        fn card(&self) -> String {
+            String::new()
+        }
+        fn bad_citations(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn calls_of_one_step_run_at_once_and_come_back_in_their_order() {
+        let brain = Scripted::new(vec![batch(&[("slow", json!({})), ("fast", json!({}))]), say("Готово [0:10].")]);
+        let tools = Together { state: Mutex::new((0, 0)), cv: std::sync::Condvar::new() };
+        let mut events = Vec::new();
+        let (_dir, scope) = test_scope();
+        let a = answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Что?", &AtomicBool::new(false), None, false, &mut |e| events.push(e.clone())).unwrap();
+        assert_eq!(*tools.state.lock().unwrap(), (0, 2), "both calls were inside at once");
+        // The first call finished last, yet the results follow the list.
+        assert_eq!(a.steps.iter().map(|s| (s.tool.as_str(), s.result.as_str())).collect::<Vec<_>>(), [("slow", "slow done"), ("fast", "fast done")]);
+        // Both are shown as steps of their own, begun together and ended in the list's order.
+        let story: Vec<String> = events.iter().filter(|e| !matches!(e, Event::Metrics(_))).map(tag).collect();
+        assert_eq!(story, ["start:slow", "start:fast", "step:slow", "step:fast", "text", "text"]);
+    }
+
+    #[test]
+    fn the_same_call_twice_in_one_step_runs_once() {
+        let searched = std::sync::atomic::AtomicUsize::new(0);
+        let counted = |q: &str, o: crate::search::Options, n: usize| {
+            searched.fetch_add(1, Ordering::Relaxed);
+            search(q, o, n)
+        };
+        let rec = recording();
+        let tools = Tools::new(&rec, &counted, 4000);
+        let brain = Scripted::new(vec![
+            batch(&[("search", json!({"query": "отчёт"})), ("search", json!({"query": "отчёт"}))]),
+            say("В пятницу [0:10]."),
+        ]);
+        let mut events = Vec::new();
+        let (_dir, scope) = test_scope();
+        let a = answer(&brain, &tools, &scope, &[], &mut Memory::default(), "Когда отчёт?", &AtomicBool::new(false), None, false, &mut |e| events.push(e.clone())).unwrap();
+        assert_eq!(searched.load(Ordering::Relaxed), 1, "the second copy of the call is not run");
+        assert_eq!(a.steps.iter().map(|s| s.status).collect::<Vec<_>>(), [StepStatus::Found, StepStatus::Repeated]);
+        assert!(a.steps[1].result.starts_with("Already done at step 1"), "{}", a.steps[1].result);
+    }
+
+    #[test]
+    fn every_call_of_a_step_counts_as_a_step_of_its_own() {
+        let three = |n: usize| {
+            let expression = |k: usize| json!({ "expression": format!("{n}+{k}") });
+            batch(&[("calculator", expression(1)), ("calculator", expression(2)), ("calculator", expression(3))])
+        };
+        let brain = Scripted::new(vec![three(1), three(2), three(3), say("Готово.")]);
+        let (a, _) = run(&brain, "Посчитай");
+        assert_eq!(a.steps.len(), MAX_STEPS, "the last batch has room for the rest of the limit only");
         assert!(a.forced);
     }
 
@@ -1993,5 +2326,64 @@ mod tests {
         roomy[1] = Message::new(Role::User, format!("{RESULT}1 (search):\n{long}"));
         compact(&mut roomy, 100_000);
         assert!(!roomy[1].content.contains("shortened"), "only when needed");
+    }
+
+    #[test]
+    fn a_long_result_is_cut_in_the_middle_and_a_fifth_of_the_context_stays_free() {
+        // A tiny context: 1000 tokens ≈ 3000 characters; the prompt may take 800 tokens.
+        let mut m = vec![Message::new(Role::System, "s".repeat(600)), Message::new(Role::User, format!("{RESULT}1 (search):\n{}", "x".repeat(12_000)))];
+        make_room(&mut m, 1000);
+        assert!(estimate_tokens(&m) <= 800, "{} tokens", estimate_tokens(&m));
+        let cut = &m[1].content;
+        assert!(cut.contains("(cut)"), "the cut is marked: {cut:.80}");
+        assert!(cut.starts_with(&format!("{RESULT}1 (search):\nxx")), "the head stays");
+        assert!(cut.ends_with('x'), "the tail stays: {cut:.80}");
+        // Nothing to do under the budget.
+        let mut small = vec![Message::new(Role::System, "system"), Message::new(Role::User, "question")];
+        let before = small.clone();
+        make_room(&mut small, 1000);
+        assert_eq!(small, before);
+    }
+
+    /// A tool that always brings a huge result.
+    struct Huge;
+
+    impl Toolbox for Huge {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec { name: "search", description: String::new(), params: json!({"type": "object", "properties": {}, "required": []}), example: json!({}) }]
+        }
+        fn run(&self, _: &str, _: &Value) -> anyhow::Result<tools::Outcome> {
+            Ok(tools::Outcome { text: "x".repeat(20_000), seen: None })
+        }
+        fn kind(&self) -> &'static str {
+            "recording"
+        }
+        fn card(&self) -> String {
+            String::new()
+        }
+        fn bad_citations(&self, _: &str) -> Vec<String> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn every_step_starts_with_room_for_the_answer() {
+        // 2000 tokens is 6000 characters: the prompt never takes more than 4800 of them.
+        let brain = Scripted { context: 2000, ..Scripted::new(vec![call("search", json!({})), call("search", json!({})), say("Готово.")]) };
+        let (_dir, scope) = test_scope();
+        let mut events = Vec::new();
+        answer(&brain, &Huge, &scope, &[], &mut Memory::default(), "Что сказано?", &AtomicBool::new(false), None, false, &mut |e| events.push(e.clone())).unwrap();
+        let seen = brain.seen.borrow();
+        assert_eq!(seen.len(), 3, "two tools and the answer");
+        for (messages, _) in seen.iter() {
+            assert!(estimate_tokens(messages) <= 1600, "the answer has less than a fifth of the context: {} tokens", estimate_tokens(messages));
+        }
+        // The huge result of the first step was cut in the middle before the second one.
+        assert!(seen[1].0.iter().any(|m| m.content.contains("(cut)")), "the result was cut");
+        // The numbers are reported with every step.
+        let metrics: Vec<Metrics> = events.iter().filter_map(|e| if let Event::Metrics(m) = e { Some(*m) } else { None }).collect();
+        assert!(!metrics.is_empty());
+        assert!(metrics.iter().all(|m| m.context == 2000));
+        assert!(metrics.iter().any(|m| m.context_tokens > 0));
     }
 }

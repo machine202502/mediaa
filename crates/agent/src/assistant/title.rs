@@ -62,7 +62,9 @@ pub fn clean_title(raw: &str) -> Option<String> {
 fn ask_model(scope: &Scope, settings: &AgentSettings, question: &str, cancel: &AtomicBool) -> anyhow::Result<(Option<String>, String)> {
     let source = settings.models.get(ModelRole::Titles).as_ref().ok_or_else(|| anyhow::anyhow!("no model for titles chosen (Agent → Models)"))?;
     let model = crate::models::local_spec(source)?;
-    let language = mediaa_core::outline::language(question);
+    // A title is seen by the user, not by the recording: it follows the interface language,
+    // even when the first message is in another language.
+    let language = settings.language_name();
     let request = ChatRequest {
         model,
         messages: vec![
@@ -156,7 +158,8 @@ mod tests {
         assert_eq!(chats[0].model, "unsloth/Qwen3-0.6B-GGUF");
         assert!(!chats[0].enable_thinking, "a title is a short service call: the model does not think");
         assert_eq!(chats[0].max_tokens, TITLE_TOKENS);
-        assert!(chats[0].texts[1].contains("Russian") && chats[0].texts[1].contains("првиет"), "{:?}", chats[0].texts);
+        // The question is Russian, the interface is English: the title follows the interface.
+        assert!(chats[0].texts[1].contains("Write its title in English") && chats[0].texts[1].contains("првиет"), "{:?}", chats[0].texts);
         // The queue: a finished chat-title task with the call in its stats.
         let task = scope.store().get(scope.task()).unwrap().unwrap();
         assert_eq!((task.kind.as_str(), task.status, task.inline), ("chat-title", TaskStatus::Done, true));
@@ -164,6 +167,26 @@ mod tests {
         assert_eq!(task.result.as_ref().unwrap()["title"], "Приветствие");
         // Once: a second title does not replace the first.
         assert!(!t.set_chat_title(chat, "Другое").unwrap());
+    }
+
+    /// The title is written for the user, so the interface language decides it, not the
+    /// language of the first message.
+    #[test]
+    fn the_title_follows_the_interface_language() {
+        let dir = tempfile::tempdir().unwrap();
+        let ai = dir.path();
+        for (code, language) in [(None, "English"), (Some("en"), "English"), (Some("ru"), "Russian")] {
+            let engine = FakeEngine::new();
+            engine.chat_answers(&["«Приветствие»."]);
+            let settings = AgentSettings { ui_language: code.map(str::to_string), ..AgentSettings::default() };
+            let (scope, chat) = start(ai, &engine, "првиет");
+            let title = work(&scope, &settings, ai, "rec", chat, "првиет", &AtomicBool::new(false));
+            assert_eq!(title.as_deref(), Some("Приветствие"));
+            let chats = engine.chats();
+            assert_eq!(chats.len(), 1);
+            let asked = format!("Write its title in {language}");
+            assert!(chats[0].texts[1].contains(&asked), "{code:?}: {:?}", chats[0].texts);
+        }
     }
 
     #[test]

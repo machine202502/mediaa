@@ -10,9 +10,9 @@
 //! do not), like the real engine.
 
 use crate::engine::{
-    inspect_files, role_name, Budget, ChatAnswer, ChatRequest, DiarizeRequest, EmbedKind, EmbeddingsRequest, Engine, EngineError, Gpu, Health,
+    inspect_files, role_name, Budget, ChatAnswer, ChatRequest, Diarization, DiarizeRequest, EmbedKind, EmbeddingsRequest, Engine, EngineError, Gpu, Health,
     LoadedModel, ModelCheck, ModelFile, ModelFormat, ModelInfo, ModelInspect, Pool, ProgressCallback, RerankRequest, RerankResult, SpeechSegment,
-    Status, Thinking, Used, Usage, VadSession, WaitingModel, DEFAULT_CHAT_N_CTX,
+    Status, Thinking, Used, Usage, VadSession, Voice, WaitingModel, DEFAULT_CHAT_N_CTX,
 };
 use crate::speech::{Phrase, Turn, Word};
 use mediaa_core::agent::ModelRole;
@@ -61,6 +61,7 @@ pub struct RecordedDiarize {
     pub embedding: String,
     pub samples: usize,
     pub speakers: Option<u32>,
+    pub merge_threshold: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -389,17 +390,20 @@ impl Engine for FakeEngine {
         Ok(Phrase { start: offset, end, words: vec![Word { text: "привет".into(), start: offset, end: offset + 0.5 }] })
     }
 
-    fn diarize(&self, request: &DiarizeRequest, samples: &[f32]) -> Result<Vec<Turn>, EngineError> {
+    fn diarize(&self, request: &DiarizeRequest, samples: &[f32]) -> Result<Diarization, EngineError> {
         self.inner.diarizes.lock().unwrap().push(RecordedDiarize {
             segmentation: request.segmentation.clone(),
             embedding: request.embedding.clone(),
             samples: samples.len(),
             speakers: request.speakers,
+            merge_threshold: request.merge_threshold,
         });
         if request.embedding.trim() == "fails/model" {
             return Err(EngineError::internal("diarization failed"));
         }
-        Ok(vec![Turn { start: 0.0, end: 1.5, speaker: 0 }, Turn { start: 1.5, end: 3.0, speaker: 1 }])
+        let turns = vec![Turn { start: 0.0, end: 1.5, speaker: 0 }, Turn { start: 1.5, end: 3.0, speaker: 1 }];
+        let voices = vec![Voice { embedding: vec![1.0, 0.0], seconds: 1.5 }, Voice { embedding: vec![0.0, 1.0], seconds: 1.5 }];
+        Ok(Diarization { turns, voices })
     }
 
     fn models(&self) -> Result<Vec<ModelInfo>, EngineError> {

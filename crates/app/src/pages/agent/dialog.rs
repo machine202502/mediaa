@@ -20,7 +20,7 @@ use mediaa_core::retrieval::Hit;
 use mediaa_core::library::human_duration;
 use mediaa_core::outline::Chapter;
 use mediaa_queue::{estimate_tree, KindStat, Status as TaskStatus, Task, TaskId};
-use mediaa_core::transcript::{self, Reply, Transcript};
+use mediaa_core::transcript::{self, NameSource, Reply, SpeakerName, Transcript};
 use rust_i18n::t;
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -122,6 +122,15 @@ pub fn speaker_facts(replies: &[Reply]) -> Vec<SpeakerFact> {
     map.into_iter().map(|(id, (spoken, first))| SpeakerFact { id, spoken, first }).collect()
 }
 
+/// What shows an automatically found name: «[0:05] Меня зовут Антон.», one line per report.
+/// `None` for a name the user typed or a name without evidence.
+pub fn auto_evidence(info: &SpeakerName) -> Option<String> {
+    if info.source != NameSource::Auto || info.evidence.is_empty() {
+        return None;
+    }
+    Some(info.evidence.iter().map(|e| format!("[{}] {}", analysis::clock(Duration::from_secs_f64(e.start.max(0.0))), e.text)).collect::<Vec<_>>().join("\n"))
+}
+
 /// Saved names after the dialog: an empty field removes the name, the others replace theirs.
 pub fn apply_names(current: &BTreeMap<u32, String>, draft: &[(u32, String)]) -> BTreeMap<u32, String> {
     let mut names = current.clone();
@@ -189,6 +198,10 @@ pub struct Dialog {
     replies: Vec<Reply>,
     chapters: Vec<Chapter>,
     names: BTreeMap<u32, String>,
+    /// Where each name came from and what shows it (the names dialog shows the automatic ones).
+    name_info: BTreeMap<u32, SpeakerName>,
+    /// The latest search for the speaker names, finished or not.
+    names_task: Option<Task>,
     task: Option<Task>,
     read: Option<Instant>,
     /// Speaker being named and the name typed so far.
@@ -236,6 +249,8 @@ impl Dialog {
             replies: Vec::new(),
             chapters: Vec::new(),
             names: BTreeMap::new(),
+            name_info: BTreeMap::new(),
+            names_task: None,
             task: None,
             read: None,
             naming: None,
@@ -310,6 +325,7 @@ impl Dialog {
                     let tasks: Vec<Task> = snap.tasks.into_iter().map(|view| view.task).collect();
                     self.task = task_of(&tasks, &id).cloned();
                     self.tree = self.task.as_ref().map(|task| analysis::descendants(&tasks, task.id)).unwrap_or_default();
+                    self.names_task = mediaa_agent::names::latest(&tasks, &id).cloned();
                 }
                 Err(e) => log::warn!("queue: {e:#}"),
             }
@@ -327,14 +343,15 @@ impl Dialog {
             self.transcript = Transcript::open(&self.ai_dir, id).map_err(|e| log::warn!("transcript: {e:#}")).ok();
         }
         if let Some(t) = &self.transcript {
-            match (t.dialog(), t.speaker_names()) {
-                (Ok(r), Ok(n)) => {
+            match (t.dialog(), t.speaker_names(), t.speaker_entries()) {
+                (Ok(r), Ok(n), Ok(info)) => {
                     self.replies = r;
                     self.names = n;
+                    self.name_info = info;
                     // The topics exist for the interface only when they are all ready.
                     self.chapters = if self.ready.topics { t.chapters().unwrap_or_default() } else { Vec::new() };
                 }
-                (Err(e), _) | (_, Err(e)) => log::warn!("transcript: {e:#}"),
+                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => log::warn!("transcript: {e:#}"),
             }
         }
     }
@@ -369,12 +386,12 @@ impl Dialog {
             chrome.maximized = !chrome.maximized;
         }
         // What the analysis settings and models allow.
-        let (defaults, model) = services
+        let (defaults, model, names_model) = services
             .map(|s| {
                 let agent = s.settings.read().expect("settings lock");
-                (agent.analysis, agent.models.diarization.is_some())
+                (agent.analysis, agent.models.diarization.is_some(), mediaa_agent::names::model(&agent).is_some())
             })
-            .unwrap_or((AnalysisOptions::default(), false));
+            .unwrap_or((AnalysisOptions::default(), false, false));
         let av = analysis::availability(&self.ready, self.task.as_ref().map(|t| t.status));
         if !av.topics {
             // The topics are being rebuilt (or not there yet): no breakdown to read.
@@ -389,7 +406,7 @@ impl Dialog {
         player.set_links(chrome.sync);
         if self.task.is_some() || av.pane == Pane::Replies {
             let rows = if self.active() { self.analysis_rows().map(|(_, rows, _)| rows).unwrap_or_default() } else { Vec::new() };
-            let items = analysis::menu(&self.ready, &rows, self.active(), model);
+            let items = analysis::menu(&self.ready, &rows, self.active(), model, self.names_task.as_ref(), names_model);
             let command = ui
                 .scope_builder(egui::UiBuilder::new().max_rect(menu), |ui| {
                     ui.centered_and_justified(|ui| {
@@ -402,6 +419,8 @@ impl Dialog {
                 .inner;
             match command {
                 Some(Command::Stop) => action = self.task.as_ref().map(|t| StudioAction::Stop(t.id)),
+                Some(Command::StopNames) => action = self.names_task.as_ref().map(|t| StudioAction::Stop(t.id)),
+                Some(Command::Names) => action = Some(StudioAction::FindNames(self.path.clone())),
                 Some(Command::Analyse) => self.options = Some(OptionsWindow::new(true, &defaults, model)),
                 Some(Command::Stage(stage)) => {
                     let add = analysis::offer(stage, &self.ready, model) == Offer::Add;
@@ -856,6 +875,11 @@ impl Dialog {
                                 save = true;
                             }
                             ui.label(RichText::new(t!("studio.names_meta", spoken = human_duration(spoken), first = human_duration(first_at))).size(11.5).color(p.text_weak));
+                            // A name the program found: say so, and show what the recording shows.
+                            if let Some(evidence) = self.name_info.get(&id).and_then(auto_evidence) {
+                                let mark = ui.label(RichText::new(t!("studio.names_auto")).size(11.0).color(p.success));
+                                studio::tip(&mark, &evidence);
+                            }
                         });
                     }
                     if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
@@ -966,9 +990,22 @@ fn reply_text(ui: &mut egui::Ui, reply: &Reply, now: Option<f64>, seekable: bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaa_core::transcript::Word;
+    use mediaa_core::transcript::{NameEvidence, Word};
     use serde_json::json;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn an_automatic_name_says_what_shows_it() {
+        let auto = SpeakerName {
+            name: "Антон".into(),
+            source: NameSource::Auto,
+            evidence: vec![NameEvidence { start: 5.0, text: "Меня зовут Антон.".into(), how: "self".into() }],
+        };
+        assert_eq!(auto_evidence(&auto).unwrap(), "[0:05] Меня зовут Антон.");
+        // The user's own name is not marked, and a name without evidence has nothing to show.
+        assert!(auto_evidence(&SpeakerName { source: NameSource::Manual, ..auto.clone() }).is_none());
+        assert!(auto_evidence(&SpeakerName { evidence: Vec::new(), ..auto }).is_none());
+    }
 
     fn word(text: &str, start: f64) -> Word {
         Word { text: text.into(), start, end: start + 0.3 }

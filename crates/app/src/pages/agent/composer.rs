@@ -1,13 +1,16 @@
 //! The chat input as text plus indivisible chips (a speaker mention, a quoted reply).
 //!
 //! The editor shows names and clocks. What is stored and sent keeps `@s1` and the quote token,
-//! so a rename only changes the chips. A mention is created only by [`Field::insert_mention`];
-//! typing `@` and a name leaves plain text.
+//! so a rename only changes the chips. A mention is created by [`Field::insert_mention`] or, on
+//! send, by [`Field::name_mentions`]; typing `@` and a name leaves plain text.
 
 use eframe::egui;
 use mediaa_agent::assistant::quote;
 use mediaa_agent::tools::{format_time, parse_time};
-use mediaa_core::speakers::{self, Query};
+use mediaa_core::speakers::{self, Query, Who};
+use std::collections::HashMap;
+
+use super::mentions::Roster;
 
 const PREVIEW: usize = 32;
 
@@ -231,6 +234,57 @@ impl Field {
         self.splice(at, end, &insert, at, at + body.len(), Kind::Mention { label: label.to_string() });
     }
 
+    /// Turns a word equal to a speaker's current name into that speaker's mention, as if it were
+    /// chosen from the `@` list. A name that two speakers share stays text.
+    pub fn name_mentions(&mut self, roster: &Roster) {
+        let mut names: HashMap<String, Option<&Who>> = HashMap::new();
+        for who in &roster.speakers {
+            let name = who.name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            names.entry(key(name)).and_modify(|w| *w = None).or_insert(Some(who));
+        }
+        let mut found = Vec::new();
+        for (lo, hi) in self.plain_segments() {
+            for (at, word) in words(&self.text[lo..hi]) {
+                let start = lo + at;
+                if self.text[..start].ends_with('@') {
+                    continue;
+                }
+                let Some(Some(who)) = names.get(&key(word)) else { continue };
+                found.push((start, start + word.len(), *who));
+            }
+        }
+        for (from, to, who) in found.into_iter().rev() {
+            let label = match who.recording {
+                Some(recording) => speakers::folder_label(who.index, recording),
+                None => speakers::label(who.index),
+            };
+            let shown = Roster::row_label(who);
+            let insert = format!("@{shown}");
+            self.splice(from, to, &insert, from, from + insert.len(), Kind::Mention { label });
+        }
+    }
+
+    /// The ranges of the text that are not chips.
+    fn plain_segments(&self) -> Vec<(usize, usize)> {
+        let mut chips: Vec<(usize, usize)> = self.chips.iter().filter(|c| c.start < c.end && c.end <= self.text.len()).map(|c| (c.start, c.end)).collect();
+        chips.sort_unstable();
+        let mut out = Vec::new();
+        let mut at = 0;
+        for (start, end) in chips {
+            if start > at {
+                out.push((at, start));
+            }
+            at = at.max(end);
+        }
+        if at < self.text.len() {
+            out.push((at, self.text.len()));
+        }
+        out
+    }
+
     /// Inserts a quote chip at `at` (a caret). A space separates it from the text before it.
     pub fn insert_quote(&mut self, at: usize, quote: &Quote) {
         let at = floor(self.text.len().min(at), &self.text);
@@ -312,6 +366,28 @@ fn preview(text: &str) -> String {
     let count = flat.chars().count();
     let body: String = flat.chars().take(PREVIEW).collect();
     if count > PREVIEW { format!("«{body}…»") } else { format!("«{body}»") }
+}
+
+/// A name as the matcher compares it: case and ё/е do not matter.
+fn key(name: &str) -> String {
+    name.to_lowercase().replace('ё', "е")
+}
+
+/// The words of `text` with the byte offsets where they start, from `text`.
+fn words(text: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, ch) in text.char_indices() {
+        if ch.is_alphanumeric() || ch == '_' {
+            start.get_or_insert(i);
+        } else if let Some(s) = start.take() {
+            out.push((s, &text[s..i]));
+        }
+    }
+    if let Some(s) = start {
+        out.push((s, &text[s..]));
+    }
+    out
 }
 
 fn floor(at: usize, text: &str) -> usize {
@@ -672,5 +748,55 @@ mod tests {
         assert!(parts.iter().any(|p| matches!(p, Piece::Clock { seek, .. } if *seek == 100.0)));
         assert!(parts.iter().any(|p| matches!(p, Piece::Mention(s) if s == "@Говорящий 2")));
         assert!(parts.iter().any(|p| matches!(p, Piece::Text(s) if s.contains("@нет"))));
+    }
+
+    fn roster(speakers: &[(u32, Option<u32>, &str)]) -> Roster {
+        Roster {
+            speakers: speakers.iter().map(|&(index, recording, name)| Who { index, recording, name: name.to_string(), title: "Планёрка".to_string() }).collect(),
+        }
+    }
+
+    #[test]
+    fn a_word_equal_to_a_name_becomes_a_mention() {
+        let one = roster(&[(0, None, "Анна")]);
+        let mut field = Field::default();
+        field.set_plain("Анна, что решили?");
+        field.name_mentions(&one);
+        assert_eq!(field.text, "@Анна, что решили?");
+        assert_eq!(field.to_message(), "@s1, что решили?");
+        assert_eq!(field.chips.len(), 1);
+        field.name_mentions(&one);
+        assert_eq!(field.chips.len(), 1, "a mention is not converted twice");
+
+        field.set_plain("анна и Анна");
+        field.name_mentions(&one);
+        assert_eq!(field.to_message(), "@s1 и @s1", "case does not matter");
+
+        field.set_plain("Анне и Аннами");
+        field.name_mentions(&one);
+        assert!(field.chips.is_empty(), "an inflected form is not a name");
+        assert_eq!(field.to_message(), "Анне и Аннами");
+
+        field.set_plain("@Анна, привет");
+        field.name_mentions(&one);
+        assert!(field.chips.is_empty(), "an @word stays text");
+    }
+
+    #[test]
+    fn a_name_two_speakers_share_stays_text() {
+        let mut field = Field::default();
+        field.set_plain("Анна, что решили?");
+        field.name_mentions(&roster(&[(0, None, "Анна"), (1, None, "Анна")]));
+        assert!(field.chips.is_empty());
+        assert_eq!(field.to_message(), "Анна, что решили?");
+    }
+
+    #[test]
+    fn a_folder_name_mentions_its_recording() {
+        let mut field = Field::default();
+        field.set_plain("Анна, что решили?");
+        field.name_mentions(&roster(&[(0, Some(2), "Анна")]));
+        assert_eq!(field.text, "@Анна (Планёрка), что решили?");
+        assert_eq!(field.to_message(), "@s1#2, что решили?");
     }
 }

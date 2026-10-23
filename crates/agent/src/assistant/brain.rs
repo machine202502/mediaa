@@ -1,7 +1,7 @@
-//! The model behind the agent. Each turn the model returns one step: a tool call or the
-//! answer. Local models write it as JSON constrained by a grammar built from the tools' schemas
-//! (small models never emit a broken call); providers use native tool calls
-//! (`super::provider`).
+//! The model behind the agent. Each turn the model returns one step: a list of tool calls to
+//! make at once, or the answer. Local models write it as JSON constrained by a grammar built
+//! from the tools' schemas (small models never emit a broken call); providers use native tool
+//! calls (`super::provider`).
 
 use mediaa_engine::llm::{split_thinking, Part, ThinkSplitter};
 use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Device, Engine, Priority, Thinking};
@@ -61,10 +61,21 @@ pub struct ToolSpec {
     pub example: Value,
 }
 
-/// One step of the model.
+/// One tool call of a step.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Call {
+    pub tool: String,
+    pub args: Value,
+}
+
+/// Most tool calls of one step (each is a step of its own for the limits).
+pub const MAX_CALLS: usize = 3;
+
+/// One step of the model: calls to make at once (they must not need each other's results), or
+/// the answer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
-    Tool { thought: String, tool: String, args: Value },
+    Tool { thought: String, calls: Vec<Call> },
     Answer { thought: String, text: String },
 }
 
@@ -93,6 +104,11 @@ pub trait Brain {
     }
     /// Context window in tokens.
     fn context(&self) -> u32;
+    /// Tokens a second the model writes now (a local model; `None` for a provider's): the speed
+    /// of the step being written, kept after it ends.
+    fn speed(&self) -> Option<f64> {
+        None
+    }
     /// Whether the model reasons before each step (its steps then have no `thought` field).
     fn thinking(&self) -> bool {
         false
@@ -109,25 +125,31 @@ pub const THINK_TOKENS: u32 = 2048;
 /// Longest private reasoning before a step (characters).
 const THOUGHT_CHARS: u32 = 600;
 
-/// JSON Schema of a step: one of the tool calls, or (when `may_answer` or without tools) the
-/// answer. A model that thinks first (`thinking`) has reasoned before the JSON: the `thought`
-/// field would only repeat it, so it is left out of the grammar.
+/// JSON Schema of a step: a list of tool calls (up to [`MAX_CALLS`]), or (when `may_answer` or
+/// without tools) the answer. A model that thinks first (`thinking`) has reasoned before the
+/// JSON: the `thought` field would only repeat it, so it is left out of the grammar.
 pub fn step_schema(tools: &[ToolSpec], may_answer: bool, thinking: bool) -> Value {
     let thought = json!({"type": "string", "maxLength": THOUGHT_CHARS});
-    let option = |mut properties: Value, mut required: Vec<&str>| {
+    // One JSON object with these properties; `thought` comes first unless the model thinks.
+    let object = |mut properties: Value, mut required: Vec<&str>| {
         if !thinking {
             properties["thought"] = thought.clone();
             required.insert(0, "thought");
         }
         json!({"type": "object", "properties": properties, "required": required})
     };
-    let mut options: Vec<Value> = tools
-        .iter()
-        .map(|t| option(json!({"action": {"const": t.name}, "args": t.params}), vec!["action", "args"]))
-        .collect();
+    let mut options: Vec<Value> = Vec::new();
     if may_answer || tools.is_empty() {
         // First: models lean towards the first option once they have what they need.
-        options.insert(0, option(json!({"action": {"const": ANSWER}, "answer": {"type": "string"}}), vec!["action", "answer"]));
+        options.push(object(json!({"action": {"const": ANSWER}, "answer": {"type": "string"}}), vec!["action", "answer"]));
+    }
+    if !tools.is_empty() {
+        let mut calls: Vec<Value> = tools
+            .iter()
+            .map(|t| json!({"type": "object", "properties": {"action": {"const": t.name}, "args": t.params}, "required": ["action", "args"]}))
+            .collect();
+        let call = if calls.len() == 1 { calls.remove(0) } else { json!({ "oneOf": calls }) };
+        options.push(object(json!({"calls": {"type": "array", "minItems": 1, "maxItems": MAX_CALLS, "items": call}}), vec!["calls"]));
     }
     if options.len() == 1 {
         return options.remove(0);
@@ -144,9 +166,25 @@ pub fn parse_step(text: &str) -> anyhow::Result<Step> {
     if action == ANSWER {
         return Ok(Step::Answer { thought: s("thought"), text: s("answer") });
     }
+    if let Some(items) = o.get("calls").and_then(Value::as_array) {
+        let mut calls: Vec<Call> = items
+            .iter()
+            .filter_map(|item| {
+                let tool = item.get("action").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+                (!tool.is_empty()).then(|| Call { tool, args: item.get("args").cloned().unwrap_or(Value::Object(Map::new())) })
+            })
+            .collect();
+        anyhow::ensure!(!calls.is_empty(), "the step calls no tool: {text}");
+        if calls.len() > MAX_CALLS {
+            log::warn!("the model wrote {} calls in one step; only the first {MAX_CALLS} are kept", calls.len());
+            calls.truncate(MAX_CALLS);
+        }
+        return Ok(Step::Tool { thought: s("thought"), calls });
+    }
+    // One call written as the object itself (models imitate older steps).
     anyhow::ensure!(!action.is_empty(), "the step has no action: {text}");
     let tool = action;
-    Ok(Step::Tool { thought: s("thought"), tool, args: o.get("args").cloned().unwrap_or(Value::Object(Map::new())) })
+    Ok(Step::Tool { thought: s("thought"), calls: vec![Call { tool, args: o.get("args").cloned().unwrap_or(Value::Object(Map::new())) }] })
 }
 
 /// Streams the text of the `answer` field out of a step's JSON while it is being written:
@@ -297,6 +335,9 @@ pub struct EngineBrain<'a> {
     pub hf_token: Option<String>,
     /// The model reasons before every step (the «Thinking» switch).
     pub thinking: bool,
+    /// Tokens a second of the step being written, measured from its stream (`None` before the
+    /// first token).
+    pub(crate) speed: std::sync::Mutex<Option<f64>>,
 }
 
 impl EngineBrain<'_> {
@@ -315,15 +356,33 @@ impl EngineBrain<'_> {
     }
 }
 
+impl EngineBrain<'_> {
+    /// Tokens a second from `tokens` written since the first one (`since`): the speed is only
+    /// measured over a span long enough to mean something.
+    fn measure_speed(&self, tokens: u32, since: Option<std::time::Instant>) {
+        let Some(since) = since else { return };
+        let secs = since.elapsed().as_secs_f64();
+        if secs >= 0.15 && tokens > 1 {
+            *self.speed.lock().expect("speed lock") = Some(f64::from(tokens) / secs);
+        }
+    }
+}
+
 impl Brain for EngineBrain<'_> {
     fn step(&self, messages: &[Message], tools: &[ToolSpec], may_answer: bool, cancel: &AtomicBool, on_piece: &mut dyn FnMut(Piece)) -> anyhow::Result<Step> {
         let request = ChatRequest { json_schema: Some(step_schema(tools, may_answer, self.thinking)), no_repeats: true, ..self.request(messages, self.max_tokens) };
         let mut stream = AnswerStream::default();
         let mut answer = String::new();
         let mut looped = None;
+        // The stream is measured for the speed: a local model writes about a token a part.
+        let mut tokens = 0u32;
+        let mut first: Option<std::time::Instant> = None;
         // A part of what the model writes: reasoning is passed on; of the step's JSON only the
         // text of the answer is (never the JSON of a tool call).
         let mut handle = |part: Part| -> bool {
+            tokens += 1;
+            let at = *first.get_or_insert_with(std::time::Instant::now);
+            self.measure_speed(tokens, Some(at));
             match part {
                 Part::Thinking(text) => {
                     on_piece(Piece::Thinking(&text));
@@ -344,17 +403,22 @@ impl Brain for EngineBrain<'_> {
                 }
             }
         };
-        let content = if self.thinking {
+        let (content, usage) = if self.thinking {
             let mut splitter = ThinkSplitter::default();
             let generated = self.engine.chat_thinking(&request, Thinking { budget: THINK_TOKENS }, cancel, &mut |piece| splitter.push(piece).into_iter().all(&mut handle))?;
             splitter.finish().into_iter().for_each(|part| {
                 handle(part);
             });
             // The reasoning is not part of the step.
-            split_thinking(&generated.content).1
+            (split_thinking(&generated.content).1, generated.usage)
         } else {
-            self.engine.chat(&request, cancel, &mut |piece| handle(Part::Text(piece.to_string())))?.content
+            let generated = self.engine.chat(&request, cancel, &mut |piece| handle(Part::Text(piece.to_string())))?;
+            (generated.content, generated.usage)
         };
+        // The exact number of tokens, if the engine reported it, over the same span.
+        if let Some(usage) = usage {
+            self.measure_speed(usage.completion_tokens, first);
+        }
         match (parse_step(&content), looped) {
             (Ok(step), None) => Ok(step),
             // Stopped in a loop, or cut off at the token limit: the answer written so far.
@@ -390,6 +454,10 @@ impl Brain for EngineBrain<'_> {
         self.n_ctx
     }
 
+    fn speed(&self) -> Option<f64> {
+        *self.speed.lock().expect("speed lock")
+    }
+
     fn thinking(&self) -> bool {
         self.thinking
     }
@@ -407,16 +475,38 @@ mod tests {
     fn schema_is_a_choice_of_calls_and_the_answer() {
         let s = step_schema(&[spec("search"), spec("read")], true, false);
         let options = s["oneOf"].as_array().unwrap();
-        assert_eq!(options.len(), 3);
-        assert_eq!(options[1]["properties"]["action"]["const"], "search");
-        assert!(options[1]["properties"].get("title").is_none(), "the step has no title field");
-        assert_eq!(options[1]["required"], json!(["thought", "action", "args"]));
+        assert_eq!(options.len(), 2);
         assert!(options[0]["properties"]["answer"].is_object(), "the answer first");
+        let calls = &options[1]["properties"]["calls"];
+        assert_eq!(calls["minItems"], 1);
+        assert_eq!(calls["maxItems"], 3);
+        let items = calls["items"]["oneOf"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["properties"]["action"]["const"], "search");
+        assert!(items[0]["properties"].get("title").is_none(), "a call has no title field");
+        assert_eq!(items[0]["required"], json!(["action", "args"]));
+        assert_eq!(options[1]["required"], json!(["thought", "calls"]));
         // Without tools: the answer only.
         assert_eq!(step_schema(&[], false, false)["required"], json!(["thought", "action", "answer"]));
-        // Before anything was looked up: calls only.
-        assert_eq!(step_schema(&[spec("search"), spec("read")], false, false)["oneOf"].as_array().unwrap().len(), 2);
-        assert_eq!(step_schema(&[spec("search")], false, false)["properties"]["action"]["const"], "search");
+        // Before anything was looked up: calls only, one tool: the call itself.
+        let calls = &step_schema(&[spec("search"), spec("read")], false, false)["properties"]["calls"];
+        assert_eq!(calls["items"]["oneOf"].as_array().unwrap().len(), 2);
+        assert_eq!(step_schema(&[spec("search")], false, false)["properties"]["calls"]["items"]["properties"]["action"]["const"], "search");
+    }
+
+    #[test]
+    fn the_engine_turns_the_schema_of_a_step_with_calls_into_a_grammar() {
+        // Every shape of the step: with and without tools, with the answer offered or not, with
+        // and without the thought — a list of calls is a schema llama.cpp accepts.
+        for tools in [vec![], vec![spec("search")], vec![spec("search"), spec("read"), spec("say")]] {
+            for may_answer in [true, false] {
+                for thinking in [true, false] {
+                    let schema = step_schema(&tools, may_answer, thinking);
+                    mediaa_engine::llm::check_schema(&schema.to_string())
+                        .unwrap_or_else(|e| panic!("{schema}\n{e:#}"));
+                }
+            }
+        }
     }
 
     #[test]
@@ -488,7 +578,7 @@ mod tests {
     }
 
     fn engine_brain(engine: &mediaa_engine::testing::FakeEngine, thinking: bool) -> EngineBrain<'_> {
-        EngineBrain { engine, model: "owner/model".into(), n_ctx: 4096, device: Device::Auto, priority: Priority::Interactive, max_tokens: 256, hf_token: None, thinking }
+        EngineBrain { engine, model: "owner/model".into(), n_ctx: 4096, device: Device::Auto, priority: Priority::Interactive, max_tokens: 256, hf_token: None, thinking, speed: std::sync::Mutex::new(None) }
     }
 
     /// The pieces a step reports, as (reasoning?, text).
@@ -514,7 +604,7 @@ mod tests {
             fake.chat_deltas(&deltas_of(call, size).iter().map(String::as_str).collect::<Vec<_>>());
             let (pieces, step) = pieces_of(&engine_brain(&fake, false), &[spec("search")]);
             assert!(pieces.is_empty(), "pieces of {size}: {pieces:?}");
-            assert!(matches!(step.unwrap(), Step::Tool { tool, .. } if tool == "search"));
+            assert!(matches!(step.unwrap(), Step::Tool { calls, .. } if calls[0].tool == "search"));
         }
         // With reasoning in front of it too: only the reasoning is shown.
         let thinking = format!("<think>\nнадо искать\n</think>\n\n{call}");
@@ -522,7 +612,7 @@ mod tests {
         let (pieces, step) = pieces_of(&engine_brain(&fake, true), &[spec("search")]);
         assert!(pieces.iter().all(|(reasoning, _)| *reasoning), "{pieces:?}");
         assert_eq!(pieces.iter().map(|(_, t)| t.as_str()).collect::<String>(), "\nнадо искать\n");
-        assert!(matches!(step.unwrap(), Step::Tool { tool, .. } if tool == "search"));
+        assert!(matches!(step.unwrap(), Step::Tool { calls, .. } if calls[0].tool == "search"));
     }
 
     #[test]
@@ -554,10 +644,22 @@ mod tests {
     #[test]
     fn steps_parse() {
         let t = parse_step(r#"{"thought":"ищу","action":"search","title":"Ищу бюджет","args":{"q":"бюджет"}}"#).unwrap();
-        assert_eq!(t, Step::Tool { thought: "ищу".into(), tool: "search".into(), args: json!({"q": "бюджет"}) }, "a leftover title is ignored");
+        assert_eq!(t, Step::Tool { thought: "ищу".into(), calls: vec![Call { tool: "search".into(), args: json!({"q": "бюджет"}) }] }, "a leftover title is ignored");
         assert_eq!(parse_step(r#" {"thought":"","action":"answer","answer":" Да. "} "#).unwrap(), Step::Answer { thought: String::new(), text: "Да.".into() });
         assert!(parse_step("не json").is_err());
         assert!(parse_step(r#"{"thought":"x"}"#).is_err());
+        // Calls to make at once, in the order written.
+        let t = parse_step(r#"{"thought":"","calls":[{"action":"search","args":{"q":"a"}},{"action":"read","args":{"from":"0:00","to":"1:00"}}]}"#).unwrap();
+        let Step::Tool { calls, .. } = t else { panic!("not a step") };
+        assert_eq!(calls, [Call { tool: "search".into(), args: json!({"q": "a"}) }, Call { tool: "read".into(), args: json!({"from": "0:00", "to": "1:00"}) }]);
+        // More than allowed: the first three are kept.
+        let many = r#"{"calls":[{"action":"a","args":{}},{"action":"b","args":{}},{"action":"c","args":{}},{"action":"d","args":{}}]}"#;
+        assert_eq!(parse_step(many).unwrap(), Step::Tool { thought: String::new(), calls: ["a", "b", "c"].map(|t| Call { tool: t.into(), args: json!({}) }).to_vec() });
+        // Nothing to call.
+        assert!(parse_step(r#"{"calls":[]}"#).is_err());
+        assert!(parse_step(r#"{"calls":[{"args":{}}]}"#).is_err());
+        // A lone call without `args`: no arguments.
+        assert_eq!(parse_step(r#"{"action":"speakers"}"#).unwrap(), Step::Tool { thought: String::new(), calls: vec![Call { tool: "speakers".into(), args: json!({}) }] });
     }
 
     #[test]

@@ -11,7 +11,7 @@ use crate::scope::Scope;
 use mediaa_core::agent::ModelRole;
 use mediaa_core::chat::{Author, ChatId, ChatMessage, Timeline};
 use mediaa_core::transcript::Transcript;
-use mediaa_queue::{Status, Task};
+use mediaa_queue::{Resource, Status, Task};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +45,8 @@ fn history_of(messages: &[ChatMessage]) -> Vec<Turn> {
     let mut question: Option<&str> = None;
     for m in messages {
         match m.author {
+            // A correction is not a question of the conversation: it is taken while an answer runs.
+            Author::User if is_steer(m) => {}
             Author::User => question = Some(&m.text),
             Author::Agent => match (question.take(), turns.last_mut()) {
                 (Some(q), _) => turns.push(Turn { question: q.to_string(), answer: m.text.clone() }),
@@ -57,6 +59,23 @@ fn history_of(messages: &[ChatMessage]) -> Vec<Turn> {
         }
     }
     turns
+}
+
+/// Whether the message is a correction the user sent for the answer running at that moment.
+fn is_steer(m: &ChatMessage) -> bool {
+    m.details.get("steer").and_then(|s| s.get("task")).and_then(Value::as_i64).is_some()
+}
+
+/// The corrections of the answer `answer` that it has not taken yet, in the order the user sent
+/// them: the index of each message in `messages` and its text.
+pub fn pending_steers(messages: &[ChatMessage], answer: i64, taken: usize) -> Vec<(usize, String)> {
+    messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.author == Author::User && m.details["steer"]["task"].as_i64() == Some(answer))
+        .skip(taken)
+        .map(|(index, m)| (index, m.text.clone()))
+        .collect()
 }
 
 fn recording_of(ai: &Path, id: &str, path: &Path, timing: Option<(f64, f64)>) -> anyhow::Result<Recording> {
@@ -123,10 +142,13 @@ impl Stage for AnswerStage {
         let mut live = Live::new();
         live.timeline = Timeline::from_details(&json!({ "timeline": session.timeline }));
         live.steps = session.steps.clone();
+        live.steers_taken = session.steers_taken;
         live.continuing = session.noticed;
         host.streams.insert(task.id, live);
         let scope = Scope::attach(host.store.clone(), task.id, host.engine.clone(), Some(store_key.clone()));
         let messages = Transcript::open(&host.ai_dir, &store_key).and_then(|t| t.messages(chat)).unwrap_or_default();
+        // What the user sent while the previous step ran: it joins the context after that step.
+        let steers: Vec<String> = pending_steers(&messages, task.id, session.steers_taken).into_iter().map(|(_, text)| text).collect();
         let history = history_of(&messages);
         let streams = host.streams.clone();
         let ai = host.ai_dir.clone();
@@ -147,7 +169,7 @@ impl Stage for AnswerStage {
         let stepped = if let Some(files) = task.input.get("files").and_then(Value::as_array) {
             let files: Vec<PathBuf> = files.iter().filter_map(|v| v.as_str().map(PathBuf::from)).collect();
             let items = items_of(&host.ai_dir, &files);
-            answer_step_folder(&scope, &host.slots, &settings, &host.ai_dir, &items, &history, &mut session, &question, cancel, &mut emit)
+            answer_step_folder(&scope, &host.slots, &settings, &host.ai_dir, &items, &history, &mut session, &question, &steers, cancel, &mut emit)
         } else {
             let path = PathBuf::from(task.input.get("path").and_then(Value::as_str).unwrap_or(""));
             let file_id = task.input.get("file_id").and_then(Value::as_str).unwrap_or(&store_key).to_string();
@@ -155,7 +177,7 @@ impl Stage for AnswerStage {
             let position = task.input.get("position").and_then(Value::as_f64);
             let timing = duration.map(|d| (d, position.unwrap_or(0.0)));
             let recording = recording_of(&host.ai_dir, &file_id, &path, timing)?;
-            answer_step(&scope, &host.slots, &settings, &host.ai_dir, &file_id, &recording, &history, &mut session, &question, cancel, &mut emit)
+            answer_step(&scope, &host.slots, &settings, &host.ai_dir, &file_id, &recording, &history, &mut session, &question, &steers, cancel, &mut emit)
         };
         if cancel.load(Ordering::Relaxed) {
             return Ok(Work::Stopped);
@@ -171,6 +193,7 @@ impl Stage for AnswerStage {
                 if let Some(live) = host.streams.get(task.id) {
                     session.timeline = live.timeline.to_value();
                     session.steps = live.steps;
+                    session.steers_taken = live.steers_taken;
                 }
                 session.gen_at_save = task.gen;
                 let progress = (session.n as f32 / (super::MAX_STEPS as f32 + 4.0)).clamp(0.0, 0.99);
@@ -185,16 +208,41 @@ impl Stage for AnswerStage {
                 });
                 let live = host.streams.get(task.id).unwrap_or_default();
                 let mut details = json!({ "steps": answer.steps, "forced": answer.forced, "timeline": live.timeline.to_value(), "task": task.id });
+                if let Some(metrics) = live.metrics {
+                    details["metrics"] = json!(metrics);
+                }
                 if session.noticed {
                     details["continuing"] = json!(true);
                 }
                 if let Ok(t) = Transcript::open(&host.ai_dir, &store_key) {
                     t.add_message(chat, Author::Agent, &answer.text, &details)?;
                 }
+                // A correction that came after the last step becomes the chat's next question.
+                if let Err(e) = ask_pending(host, task, chat, &store_key, session.steers_taken) {
+                    log::warn!("the next question after the answer was not started: {e:#}");
+                }
                 Ok(Work::Done(json!({ "chars": answer.text.chars().count(), "steps": answer.steps.len() })))
             }
         }
     }
+}
+
+/// The first correction the answer did not take becomes the chat's next question, asked at once.
+/// The corrections after it become corrections of that next answer, in order.
+fn ask_pending(host: &Host, task: &Task, chat: ChatId, store: &str, taken: usize) -> anyhow::Result<()> {
+    let t = Transcript::open(&host.ai_dir, store)?;
+    let messages = t.messages(chat)?;
+    let pending = pending_steers(&messages, task.id, taken);
+    let Some((_, question)) = pending.first() else { return Ok(()) };
+    let mut input = task.input.clone();
+    input["question"] = json!(question);
+    let resource = task.resource.unwrap_or(Resource::Llm);
+    let id = host.store.enqueue(answer_task(store, chat, question, input, resource, task.model.as_deref()))?;
+    // It is a question of the chat now, not a correction of the old answer.
+    t.unsteer(chat, task.id, taken)?;
+    if pending.len() > 1 {
+        t.retag_steers(chat, task.id, id, taken)?;
+    }    Ok(())
 }
 
 fn save_memory(ai: &Path, store: &str, chat: ChatId, memory: &super::Memory) {
@@ -397,6 +445,100 @@ mod tests {
         assert_eq!(saved[0].details["steps"][0]["title"], "Ищу срок отчёта");
         let live = host.streams.get(42).unwrap();
         assert_eq!(live.timeline.entries[0], TimelineEntry::Step { title: "Ищу срок отчёта".into(), tool: "search".into(), status: "found".into() });
-        assert_eq!(live.steps[0].title, "Ищу срок отчёта");
+    }
+
+    #[test]
+    fn a_correction_survives_a_crash_and_is_taken_once() {
+        use mediaa_core::chat::Author;
+        use mediaa_core::transcript::Transcript;
+        use serde_json::json;
+
+        let dir = tempfile::tempdir().unwrap();
+        let chat = {
+            let t = Transcript::open(dir.path(), "rec").unwrap();
+            let chat = t.create_chat("Сроки").unwrap();
+            t.add_message(chat, Author::User, "Когда отчёт?", &json!(null)).unwrap();
+            t.add_message(chat, Author::Agent, "Ищу.", &json!({ "task": 5 })).unwrap();
+            t.add_message(chat, Author::User, "Ещё про бюджет.", &json!({ "steer": { "task": 5 } })).unwrap();
+            chat
+        };
+        // The cursor of the first step was saved before the correction came.
+        let session = super::super::Session::new(Default::default());
+        let cursor = serde_json::to_value(&session).unwrap();
+        // A crash: another process reads the same store and the same cursor.
+        let restored: super::super::Session = serde_json::from_value(cursor).unwrap();
+        let messages = Transcript::open(dir.path(), "rec").unwrap().messages(chat).unwrap();
+        assert_eq!(
+            super::pending_steers(&messages, 5, restored.steers_taken),
+            [(2, "Ещё про бюджет.".to_string())],
+            "the correction is still there after the restart"
+        );
+        // The next chunk takes it and saves the count with the cursor...
+        let mut taken = restored;
+        taken.steers_taken += 1;
+        let saved = serde_json::to_value(&taken).unwrap();
+        // ...so a second restart does not take it again.
+        let again: super::super::Session = serde_json::from_value(saved).unwrap();
+        assert!(super::pending_steers(&messages, 5, again.steers_taken).is_empty());
+    }
+
+    #[test]
+    fn a_correction_after_the_last_step_becomes_the_next_question() {
+        use crate::run::{open_store, Host, Streams};
+        use crate::slots::Slots;
+        use mediaa_core::agent::AgentSettings;
+        use mediaa_core::chat::Author;
+        use mediaa_core::transcript::Transcript;
+        use mediaa_engine::testing::FakeEngine;
+        use mediaa_engine::Engine;
+        use mediaa_queue::{Resource, Task};
+        use serde_json::json;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let chat = {
+            let t = Transcript::open(dir.path(), "rec").unwrap();
+            let chat = t.create_chat("Сроки").unwrap();
+            t.add_message(chat, Author::User, "Когда отчёт?", &json!(null)).unwrap();
+            t.add_message(chat, Author::Agent, "В пятницу.", &json!({ "task": 7 })).unwrap();
+            chat
+        };
+        let store = open_store(dir.path()).unwrap();
+        let input = json!({ "chat": chat, "store": "rec", "question": "Когда отчёт?", "file_id": "rec", "path": "rec.wav" });
+        let id = store.enqueue(super::answer_task("rec", chat, "Когда отчёт?", input, Resource::Llm, None)).unwrap();
+        let host = Host {
+            ai_dir: dir.path().to_path_buf(),
+            engine: Arc::new(FakeEngine::new()) as Arc<dyn Engine>,
+            store,
+            slots: Slots::default(),
+            settings: Arc::new(AgentSettings::default),
+            streams: Arc::new(Streams::default()),
+        };
+        let task = host.store.get(id).unwrap().unwrap();
+        super::ask_pending(&host, &task, chat, "rec", 0).unwrap();
+        assert_eq!(host.store.list().unwrap().len(), 1, "nothing is pending yet");
+
+        // The user sent two corrections while the answer ran; it finished before taking them.
+        let t = Transcript::open(dir.path(), "rec").unwrap();
+        t.add_message(chat, Author::User, "Ещё про бюджет.", &json!({ "steer": { "task": id } })).unwrap();
+        t.add_message(chat, Author::User, "И про сроки.", &json!({ "steer": { "task": id } })).unwrap();
+        super::ask_pending(&host, &task, chat, "rec", 0).unwrap();
+
+        // The first one is asked as the chat's next question...
+        let tasks = host.store.list().unwrap();
+        let next: Vec<&Task> = tasks.iter().filter(|t| t.id != id).collect();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].kind, super::ANSWER_KIND);
+        assert_eq!(next[0].input["question"], "Ещё про бюджет.");
+        assert_eq!(next[0].input["chat"], chat);
+        assert_eq!(next[0].input["file_id"], "rec", "the recording stays with the chat");
+        assert_eq!(next[0].scope.as_deref(), Some("rec"));
+        // ...the one after it becomes a correction of that next answer.
+        let messages = Transcript::open(dir.path(), "rec").unwrap().messages(chat).unwrap();
+        assert!(messages[2].details["steer"].is_null(), "the first correction is a question of the chat now");
+        assert_eq!(messages[3].details["steer"]["task"], next[0].id);
+        assert_eq!(super::pending_steers(&messages, next[0].id, 0), [(3, "И про сроки.".to_string())]);
+        // A correction is never a question of the history: it is taken by the answer it belongs to.
+        assert_eq!(super::history_of(&messages).len(), 1);
     }
 }

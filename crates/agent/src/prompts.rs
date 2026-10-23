@@ -43,7 +43,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "undefined")]
     fn a_missing_value_is_an_error() {
-        render("delegate_task.j2", context! { task => "t" });
+        render("results/step.j2", context! { step => 1 });
     }
 
     #[test]
@@ -51,6 +51,16 @@ mod tests {
         insta::assert_snapshot!("answer_now", render("nudges/answer_now.j2", ()));
         insta::assert_snapshot!("cut_off", render("nudges/cut_off.j2", ()));
         insta::assert_snapshot!("bad_citations", render("nudges/bad_citations.j2", context! { bad => ["[42:00]", "[1:02:03]"], kind => "recording" }));
+    }
+
+    #[test]
+    fn steer() {
+        let text = "Ещё добавь про бюджет.";
+        assert_eq!(
+            render("nudges/steer.j2", context! { text }),
+            "The user added while you were working: «Ещё добавь про бюджет.». Take it into account from now on; if it changes what is asked, follow the new request."
+        );
+        insta::assert_snapshot!("steer", render("nudges/steer.j2", context! { text }));
     }
 
     #[test]
@@ -68,7 +78,7 @@ mod tests {
     fn scan() {
         let system = render("scan/system.j2", context! { json_only => false });
         assert!(system.contains("an empty list is a fine answer."));
-        assert!(system.ends_with("Speakers are labels (@s1, @s2…): name a speaker in a fact only by the label."), "{system}");
+        assert!(system.ends_with("Speakers are labels (@s1, @s2…): name a speaker in a fact only by the label. Report what is said as it is: no opinions, warnings or moral comments of your own."), "{system}");
         assert_eq!(render("scan/system.j2", context! { json_only => true }), format!("{system} Answer with the JSON object only."));
         insta::assert_snapshot!("scan_system", system);
         let part = render("scan/part.j2", context! { instruction => "все сроки", number => 2, parts => 5, start => "5:00", end => "10:30", text => "[5:10] @s1: Отчёт в пятницу." });
@@ -182,7 +192,7 @@ mod tests {
             context! { number => 1, start => "0:00", end => "5:00", title => "Сроки", summary => "Когда сдавать." },
             context! { number => 2, start => "5:00", end => "27:10", title => "Бюджет", summary => "Сколько." },
         ];
-        let card = render("agent/card_recording.j2", context! { title => "Планёрка", length => "27:10", minutes => 27.2, speakers => ["@s1", "@s2"], topics, position => "3:15" });
+        let card = render("agent/card_recording.j2", context! { title => "Планёрка", length => "27:10", minutes => 27.2, speakers => [context! { label => "@s1", name => () }, context! { label => "@s2", name => () }], topics, position => "3:15" });
         let plain = render("agent/system.j2", context! { kind => "recording", web => false, card, tools => tools(), facts => Vec::<String>::new(), summary => "" });
         insta::assert_snapshot!("agent_system_recording", plain);
         assert!(!plain.contains("web_search") && plain.contains("Cite the moments you rely on as [m:ss], with times"));
@@ -213,10 +223,32 @@ mod tests {
     }
 
     #[test]
+    fn recording_card_tells_the_names_the_user_uses() {
+        let speakers = [
+            context! { label => "@s1", name => "Дана" },
+            context! { label => "@s2", name => () },
+            context! { label => "@s3", name => "Пётр" },
+        ];
+        let card = render("agent/card_recording.j2", context! { title => "Звонок", length => "5:00", minutes => 5.0, speakers, topics => Vec::<String>::new(), position => () });
+        assert_eq!(
+            card,
+            "Recording: «Звонок», 5:00 long (short).\nSpeakers: @s1 (the user calls them Дана), @s2, @s3 (the user calls them Пётр).\nNo outline yet: use search and read.\n"
+        );
+        insta::assert_snapshot!("recording_card_names", card);
+    }
+
+    #[test]
     fn results() {
         assert_eq!(render("results/plan.j2", context! { items => [context! { text => "найти", done => true }, context! { text => "написать", done => false }] }), "Plan:\n[x] найти\n[ ] написать");
         assert_eq!(render("results/remember.j2", context! { new => false }), "Already remembered (or empty).");
-        assert!(render("results/say_uncited.j2", context! { kind => "folder" }).contains("as [#2 12:30]"));
+        assert_eq!(
+            render("results/say_uncited.j2", context! { kind => "recording" }),
+            "a section must cite the moments it is based on, as [m:ss]: read that part of the recording first"
+        );
+        assert_eq!(
+            render("results/say_uncited.j2", context! { kind => "folder" }),
+            "a section must cite the moments it is based on, as [#2 12:30] (the recording's number, then the time): read that part of the recording first"
+        );
         assert!(render("results/step.j2", context! { step => 3, tool => "search", text => "x" }).starts_with("Result of step 3 (search):\nx"));
         let hits = [context! { title => "ТК РФ", url => "https://example.org", snippet => "Статья 66.1" }];
         assert_eq!(render("results/web_search.j2", context! { hits }), "- ТК РФ — https://example.org\n  Статья 66.1\nCite pages as [title](address).\n");
@@ -224,7 +256,7 @@ mod tests {
         let page = |empty| render("results/web_page.j2", context! { title => "T", url => "u", text => "текст", empty });
         assert_eq!(page(false), "T — u\n\nтекст");
         assert_eq!(page(true), "T — u\n\nтекст\n\n(Almost no text: the site loads it with a script. Read another address.)");
-        for name in ["outline", "search", "read", "mentions", "speakers", "calculator", "time", "scan", "rename_speakers", "delegate", "remember", "plan", "say", "web_search", "web_read", "folder/recordings", "folder/search"] {
+        for name in ["outline", "search", "read", "mentions", "speakers", "calculator", "time", "scan", "rename_speakers", "remember", "plan", "say", "web_search", "web_read", "folder/recordings", "folder/search"] {
             assert!(!tool(name).is_empty(), "{name}");
         }
     }
@@ -258,7 +290,7 @@ mod tests {
         for (name, text) in [("chapters", "(more chapters: read by time)"), ("search", "(cut; read a range for the rest)"), ("plain", "(cut)"), ("scan", "(cut; ask a narrower instruction)")] {
             assert_eq!(render(&format!("results/cut/{name}.j2"), ()), text);
         }
-        for (what, text) in [("query", "search needs a query"), ("names", "search needs names"), ("task", "search needs a task"), ("instruction", "search needs an instruction"), ("word", "search needs a word"), ("address", "search needs an address")] {
+        for (what, text) in [("query", "search needs a query"), ("names", "search needs names"), ("instruction", "search needs an instruction"), ("word", "search needs a word"), ("address", "search needs an address")] {
             assert_eq!(render(&format!("errors/needs_{what}.j2"), context! { tool => "search" }), text);
         }
         assert_eq!(render("errors/no_tool.j2", context! { tool => "dance" }), "there is no tool «dance»");
@@ -266,8 +298,11 @@ mod tests {
         assert_eq!(render("errors/recording_length.j2", context! { length => "10:00" }), "the recording is only 10:00 long");
         assert_eq!(render("errors/empty_name.j2", context! { label => "X" }), "an empty name for «X»");
         assert_eq!(render("errors/no_speaker.j2", context! { label => "X" }), "there is no speaker «X»");
+        assert_eq!(
+            render("errors/vague_query.j2", context! { query => "она" }),
+            "The query «она» does not say what to look for. Write who and what is meant, as words that are said in the recording."
+        );
         assert_eq!(render("errors/cannot_rename.j2", ()), "speakers cannot be named here");
-        assert_eq!(render("errors/no_helper.j2", ()), "there is no helper");
         assert_eq!(render("errors/no_scan.j2", ()), "the scan is not available");
     }
 
@@ -316,12 +351,6 @@ mod tests {
         assert_eq!(render("errors/not_a_clock_time.j2", context! { time => "x" }), "\"x\" is not a time (use 5:59, 1:02:30 or seconds)");
         assert!(crate::tools::between("x", "1:00").unwrap_err().to_string().contains("\"x\" is not a time"));
         assert!(crate::tools::calculate("").unwrap_err().to_string().contains("empty expression"));
-    }
-
-    #[test]
-    fn delegate() {
-        insta::assert_snapshot!("delegate_system", render("delegate_system.j2", ()));
-        insta::assert_snapshot!("delegate_task", render("delegate_task.j2", context! { task => "Кратко перескажи", text => "[0:10] (Анна) Отчёт в пятницу." }));
     }
 
     #[test]
@@ -415,7 +444,7 @@ Check the draft"), "{bare}");
         ];
         let card = render(
             "agent/card_recording.j2",
-            context! { title => "Планёрка", length => "10:00", minutes => 10.0, speakers => ["@s1"], topics, position => () },
+            context! { title => "Планёрка", length => "10:00", minutes => 10.0, speakers => [context! { label => "@s1", name => () }], topics, position => () },
         );
         assert_eq!(card, "Recording: «Планёрка», 10:00 long (medium).\nSpeakers: @s1.\nTopics (the map; outline with a topic number gives its breakdown):\n1. [0:00–5:00] Отчёт — Сроки.\n2. [5:00–10:00] Бюджет — Цифры.\n");
         let chapters = [
@@ -453,5 +482,46 @@ Check the draft"), "{bare}");
             context! { kind => "recording", web => false, card => "CARD", tools => Vec::<minijinja::Value>::new(), facts => Vec::<String>::new(), summary => "" },
         );
         assert!(system.contains("- Start from the topic map in the card. When the question belongs to one or more topics, first read their breakdown"), "{system}");
+    }
+
+    #[test]
+    fn speaker_names() {
+        let system = "You find out the names of the speakers of a recording from what is said in it. You read a part of the transcript, one reply per line as \"[time] @label: text\", and report every place where it shows who a speaker is: a speaker introduces themself; someone addresses a speaker by name and that speaker answers; someone introduces a speaker or gives them the floor and that speaker then talks; a speaker gives their own nickname or username (their channel or account) or is called by it. Report only what the text shows. A person who is only talked about is not evidence, and neither is a name or nickname a speaker reads out from someone else (a comment, a message). Write a name in the alphabet of the language spoken in the recording, the way people would write it: the basic form (nominative case), with a capital letter; keep a nickname or username as it is written.";
+        assert_eq!(render("speakers/names_system.j2", ()), system);
+        insta::assert_snapshot!("speaker_names_system", render("speakers/names_system.j2", ()));
+        let lines = || vec!["[0:05] @s1: Меня зовут Антон.".to_string(), "[0:12] @s2: Привет, Антон.".to_string()];
+        let tail = "List the evidence of who is who in this part. For each item give the speaker label, the name, how the text shows it (self: the speaker names themself; addressed: someone calls the speaker by name and the speaker answers; introduced: someone introduces the speaker or gives them the floor; nickname: a nickname or username of the speaker), the time of the line that shows it, and how sure you are (high or low). Give at most 5 items, the clearest ones, and only about the speakers listed above. If this part shows nothing, give an empty list.";
+        let none = render(
+            "speakers/names.j2",
+            context! { start => "0:00", end => "4:00", speakers => ["@s1", "@s2"], known => Vec::<minijinja::Value>::new(), lines => lines() },
+        );
+        assert_eq!(
+            none,
+            format!("Part of the recording 0:00 – 4:00. Speakers in it: @s1, @s2.\nTranscript:\n[0:05] @s1: Меня зовут Антон.\n[0:12] @s2: Привет, Антон.\n{tail}")
+        );
+        insta::assert_snapshot!("speaker_names", none);
+        let known = [context! { label => "@s1", name => "Антон" }, context! { label => "@s2", name => "Антон Петров" }];
+        let some = render(
+            "speakers/names.j2",
+            context! { start => "0:00", end => "4:00", speakers => ["@s1", "@s2"], known => known, lines => lines() },
+        );
+        assert!(
+            some.starts_with("Part of the recording 0:00 – 4:00. Speakers in it: @s1, @s2.\nNames found so far (they may be wrong): @s1 — Антон; @s2 — Антон Петров.\nTranscript:\n"),
+            "{some}"
+        );
+        assert!(some.ends_with(tail), "{some}");
+        insta::assert_snapshot!("speaker_names_known", some);
+        // One speaker is listed without a comma.
+        let one = render(
+            "speakers/names.j2",
+            context! { start => "0:00", end => "4:00", speakers => ["@s1"], known => Vec::<minijinja::Value>::new(), lines => lines() },
+        );
+        assert!(one.starts_with("Part of the recording 0:00 – 4:00. Speakers in it: @s1.\n"), "{one}");
+        // No lines: the transcript block is empty, the question stays.
+        let empty = render(
+            "speakers/names.j2",
+            context! { start => "0:00", end => "4:00", speakers => ["@s1"], known => Vec::<minijinja::Value>::new(), lines => Vec::<String>::new() },
+        );
+        assert_eq!(empty, format!("Part of the recording 0:00 – 4:00. Speakers in it: @s1.\nTranscript:\n{tail}"));
     }
 }

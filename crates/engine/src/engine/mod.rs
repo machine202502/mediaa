@@ -19,7 +19,7 @@ use crate::embed::{Embedder, Reranker};
 use crate::llm::{Generate, LocalModel};
 use crate::runtime::{self, Runtime, Use};
 use crate::scheduler::Wait;
-use crate::speech::{self, Phrase, Turn};
+use crate::speech::{self, Phrase};
 use crate::{hub, local};
 use mediaa_core::agent::{ModelRole, ModelSource, Provider, ProviderKind, WorkKind};
 use std::collections::HashSet;
@@ -63,8 +63,8 @@ pub trait Engine: Send + Sync + 'static {
     fn vad_open(&self, model: &str, offset: f64, hf_token: Option<&str>) -> Result<Box<dyn VadSession>, EngineError>;
     /// Recognises one piece of speech that starts `offset` seconds into the recording.
     fn recognize(&self, model: &str, offset: f64, samples: &[f32], hf_token: Option<&str>) -> Result<Phrase, EngineError>;
-    /// Who speaks when in the whole recording.
-    fn diarize(&self, request: &DiarizeRequest, samples: &[f32]) -> Result<Vec<Turn>, EngineError>;
+    /// Who speaks when in the whole recording, with the mean voice of each speaker.
+    fn diarize(&self, request: &DiarizeRequest, samples: &[f32]) -> Result<Diarization, EngineError>;
     /// The models downloaded to the engine's models folder.
     fn models(&self) -> Result<Vec<ModelInfo>, EngineError>;
     /// What a model spec is, without downloading it: files, format, roles it fits and problems.
@@ -191,7 +191,7 @@ impl Engine for LocalEngine {
             .waiting
             .iter()
             .map(|(id, _, wait)| match wait {
-                Wait::Memory { key, .. } => WaitingModel { id: *id, model: Some(strip_context(key)), reason: "memory".into(), progress: None },
+                Wait::Memory { name, .. } => WaitingModel { id: *id, model: Some(name.clone()), reason: "memory".into(), progress: None },
                 Wait::Slot(_) => WaitingModel { id: *id, model: None, reason: "slot".into(), progress: None },
                 Wait::Turn => WaitingModel { id: *id, model: None, reason: "turn".into(), progress: None },
             })
@@ -207,7 +207,7 @@ impl Engine for LocalEngine {
                 .loaded
                 .iter()
                 .map(|m| LoadedModel {
-                    model: strip_context(&m.key),
+                    model: m.name.clone(),
                     pool: match m.pool {
                         crate::scheduler::Pool::Gpu => Pool::Gpu,
                         crate::scheduler::Pool::Cpu => Pool::Cpu,
@@ -310,11 +310,16 @@ impl Engine for LocalEngine {
         recognizer.recognize(samples, offset).map_err(EngineError::classify)
     }
 
-    fn diarize(&self, request: &DiarizeRequest, samples: &[f32]) -> Result<Vec<Turn>, EngineError> {
+    fn diarize(&self, request: &DiarizeRequest, samples: &[f32]) -> Result<Diarization, EngineError> {
         let speakers = validate::speakers(request.speakers)?;
         let segmentation = self.source_path(&types::parse_spec(&request.segmentation)?, request.hf_token.as_deref())?;
         let embedding = self.source_path(&types::parse_spec(&request.embedding)?, request.hf_token.as_deref())?;
-        speech::diarize(&segmentation, &embedding, samples, speakers).map_err(EngineError::classify)
+        let found = speech::diarize(&segmentation, &embedding, samples, speakers, request.clustering_threshold)
+            .map_err(EngineError::classify)?;
+        let Some(threshold) = request.merge_threshold else { return Ok(found) };
+        let min_seconds = request.min_speaker_seconds.unwrap_or(speech::MIN_SPEAKER_SECONDS);
+        let (turns, voices) = speech::merge_voices(&found.turns, &found.voices, threshold, min_seconds);
+        Ok(Diarization { turns, voices })
     }
 
     fn models(&self) -> Result<Vec<ModelInfo>, EngineError> {
@@ -411,7 +416,7 @@ impl Engine for LocalEngine {
             }
             // Speech synthesis has no runtime yet: the files on disk are all there is to check.
             ModelRole::Speech => Ok(()),
-            ModelRole::Agent | ModelRole::Subagent | ModelRole::Titles => {
+            ModelRole::Agent | ModelRole::Titles => {
                 let gguf = gguf.ok_or_else(no_gguf).map_err(|e| EngineError::model_unsupported(format!("{e:#}")))?;
                 LocalModel::load(&gguf, false, 256).and_then(|model| {
                     let cancel = AtomicBool::new(false);
@@ -507,11 +512,6 @@ fn gigabytes(bytes: u64) -> f32 {
     (bytes as f64 / (1024.0 * 1024.0 * 1024.0)) as f32
 }
 
-/// The scheduler keys a model by `path#n_ctx`; the status shows the file.
-fn strip_context(key: &str) -> String {
-    key.rsplit_once('#').map_or_else(|| key.to_string(), |(path, _)| path.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,8 +521,6 @@ mod tests {
         let budget = to_budget(Budget { gpu_bytes: 2 << 30, ram_bytes: 512 << 20, keep_alive: DEFAULT_KEEP_ALIVE });
         assert_eq!(budget.gpu_memory_gb, 2.0);
         assert_eq!(budget.ram_memory_gb, 0.5);
-        assert_eq!(strip_context("/m/qwen.gguf#8192"), "/m/qwen.gguf");
-        assert_eq!(strip_context("no-context"), "no-context");
     }
 
     #[test]

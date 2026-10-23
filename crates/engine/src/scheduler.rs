@@ -41,6 +41,9 @@ pub enum Pool {
 pub struct ModelNeed {
     /// Identifies the model file (same key: same loaded instance, whatever the context).
     pub key: String,
+    /// The model as the caller asks for it (a Hugging Face `owner/repo` or a file path): what
+    /// [`Status::loaded`] shows, so a caller recognizes its own model by the name it knows.
+    pub name: String,
     /// Memory it takes once loaded at `n_ctx` (weights + working memory).
     pub bytes: u64,
     pub device: Device,
@@ -63,7 +66,7 @@ pub enum Wait {
     /// All slots of its kind of work are taken.
     Slot(WorkKind),
     /// Its model does not fit the free memory.
-    Memory { key: String, bytes: u64 },
+    Memory { key: String, name: String, bytes: u64 },
     /// An earlier job is waiting for memory first.
     Turn,
 }
@@ -71,6 +74,8 @@ pub enum Wait {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedModel {
     pub key: String,
+    /// The name the model was asked for by ([`ModelNeed::name`]).
+    pub name: String,
     pub pool: Pool,
     pub bytes: u64,
     pub leases: u32,
@@ -86,6 +91,8 @@ pub struct LoadedModel {
 /// using it: a lease that is given back by force (a stuck call) must not free its slot twice.
 struct Resident {
     key: String,
+    /// The name the model was first asked for by; a later caller of the same file keeps it.
+    name: String,
     pool: Pool,
     bytes: u64,
     leases: u32,
@@ -332,7 +339,7 @@ impl State {
     }
 
     fn wait_memory(&mut self, index: usize, need: &ModelNeed, blocked: &mut Vec<Pool>) -> Option<Result<Grant, String>> {
-        self.line[index].reason = Some(Wait::Memory { key: need.key.clone(), bytes: need.bytes });
+        self.line[index].reason = Some(Wait::Memory { key: need.key.clone(), name: need.name.clone(), bytes: need.bytes });
         blocked.extend(need.pools());
         None
     }
@@ -353,7 +360,7 @@ impl State {
             return self.move_pool(need, n_ctx, bytes, unload);
         }
         let Some(pool) = self.place(need, bytes, unload) else { return false };
-        self.loaded.push(Resident { key: need.key.clone(), pool, bytes, leases: 1, holders: HashMap::new(), n_ctx, idle_since: None });
+        self.loaded.push(Resident { key: need.key.clone(), name: need.name.clone(), pool, bytes, leases: 1, holders: HashMap::new(), n_ctx, idle_since: None });
         true
     }
 
@@ -363,7 +370,7 @@ impl State {
         let old = self.loaded.remove(at);
         if let Some(pool) = self.place(need, bytes, unload) {
             unload.push((old.key.clone(), old.pool));
-            self.loaded.push(Resident { key: old.key, pool, bytes, leases: 1, holders: HashMap::new(), n_ctx, idle_since: None });
+            self.loaded.push(Resident { key: old.key, name: old.name, pool, bytes, leases: 1, holders: HashMap::new(), n_ctx, idle_since: None });
             true
         } else {
             self.loaded.insert(at.min(self.loaded.len()), old);
@@ -426,7 +433,7 @@ impl State {
                 .map(|model| {
                     let idle = model.idle_since.map(|since| now.saturating_duration_since(since)).unwrap_or(Duration::ZERO);
                     let unloads_in = (model.leases == 0).then(|| self.keep_alive.saturating_sub(idle));
-                    LoadedModel { key: model.key.clone(), pool: model.pool, bytes: model.bytes, leases: model.leases, n_ctx: model.n_ctx, idle, unloads_in }
+                    LoadedModel { key: model.key.clone(), name: model.name.clone(), pool: model.pool, bytes: model.bytes, leases: model.leases, n_ctx: model.n_ctx, idle, unloads_in }
                 })
                 .collect(),
             running: WorkKind::ALL.iter().map(|kind| (*kind, self.running.get(kind).copied().unwrap_or(0))).collect(),
@@ -765,11 +772,11 @@ mod tests {
     }
 
     fn model(key: &str, gb: u64, device: Device) -> Option<ModelNeed> {
-        Some(ModelNeed { key: key.into(), bytes: gb * GB, device, n_ctx: 0 })
+        Some(ModelNeed { key: key.into(), name: key.into(), bytes: gb * GB, device, n_ctx: 0 })
     }
 
     fn model_ctx(key: &str, gb: u64, n_ctx: u32) -> Option<ModelNeed> {
-        Some(ModelNeed { key: key.into(), bytes: gb * GB, device: Device::Gpu, n_ctx })
+        Some(ModelNeed { key: key.into(), name: key.into(), bytes: gb * GB, device: Device::Gpu, n_ctx })
     }
 
     fn take(t: &mut Ticket) -> Lease {
@@ -806,7 +813,7 @@ mod tests {
         let la = take(&mut a);
         let mut b = s.request(WorkKind::Transcription, model("asr", 4, Device::Gpu), false);
         assert!(b.try_take().is_none());
-        assert_eq!(b.waiting_for(), Some(Wait::Memory { key: "asr".into(), bytes: 4 * GB }));
+        assert_eq!(b.waiting_for(), Some(Wait::Memory { key: "asr".into(), name: "asr".into(), bytes: 4 * GB }));
         drop(la);
         assert_eq!(*unloaded.lock().unwrap(), ["big"], "no one needs it: unloaded at once");
         let lb = take(&mut b);

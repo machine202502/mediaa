@@ -6,16 +6,16 @@ use super::brain::ToolSpec;
 use super::tools::Outcome;
 use crate::web::{Page, WebHit};
 use serde_json::{json, Value};
-use std::cell::RefCell;
 use std::collections::HashSet;
+use std::sync::Mutex;
 
 /// Results of a web search.
 const HITS: usize = 6;
 /// A page with less text (characters) is a script's loader, not the page.
 const EMPTY_PAGE: usize = 200;
 
-pub type WebSearch<'a> = dyn Fn(&str, usize) -> anyhow::Result<Vec<WebHit>> + 'a;
-pub type WebRead<'a> = dyn Fn(&str, usize) -> anyhow::Result<Page> + 'a;
+pub type WebSearch<'a> = dyn Fn(&str, usize) -> anyhow::Result<Vec<WebHit>> + Sync + 'a;
+pub type WebRead<'a> = dyn Fn(&str, usize) -> anyhow::Result<Page> + Sync + 'a;
 
 /// Web search and page reading, with the addresses the agent has been shown.
 pub struct Web<'a> {
@@ -23,12 +23,13 @@ pub struct Web<'a> {
     pub read: &'a WebRead<'a>,
     /// Longest page text (characters): a page must leave room for what was found in the recordings.
     pub max_chars: usize,
-    seen: RefCell<HashSet<String>>,
+    /// Shared by the threads of one step (its calls run at once).
+    seen: Mutex<HashSet<String>>,
 }
 
 impl<'a> Web<'a> {
     pub fn new(search: &'a WebSearch<'a>, read: &'a WebRead<'a>, max_chars: usize) -> Web<'a> {
-        Web { search, read, max_chars, seen: RefCell::default() }
+        Web { search, read, max_chars, seen: Mutex::default() }
     }
 
     pub fn specs() -> Vec<ToolSpec> {
@@ -61,7 +62,7 @@ impl<'a> Web<'a> {
     fn search(&self, query: &str) -> anyhow::Result<Outcome> {
         anyhow::ensure!(!query.is_empty(), super::tools::needs("web_search", "query"));
         let hits = (self.search)(query, HITS)?;
-        self.seen.borrow_mut().extend(hits.iter().map(|h| h.url.clone()));
+        self.seen.lock().expect("web links lock").extend(hits.iter().map(|h| h.url.clone()));
         let text = prompts::render("results/web_search.j2", minijinja::context! { hits => &hits });
         Ok(Outcome { text, seen: Some(hits.into_iter().map(|h| h.url).collect()) })
     }
@@ -69,9 +70,10 @@ impl<'a> Web<'a> {
     fn read(&self, url: &str) -> anyhow::Result<Outcome> {
         anyhow::ensure!(!url.is_empty(), super::tools::needs("web_read", "address"));
         let page = (self.read)(url, self.max_chars)?;
-        let mut seen = self.seen.borrow_mut();
+        let mut seen = self.seen.lock().expect("web links lock");
         seen.insert(url.to_string());
         seen.insert(page.url.clone());
+        drop(seen);
         // Some sites only send a script that loads the page: nothing to read there.
         let empty = page.text.chars().count() < EMPTY_PAGE;
         let text = prompts::render("results/web_page.j2", minijinja::context! { title => &page.title, url => &page.url, text => &page.text, empty });
@@ -81,7 +83,7 @@ impl<'a> Web<'a> {
     /// `text` with links to pages the agent was not shown turned into their plain text.
     pub fn known_links(&self, text: &str) -> String {
         static LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\[([^\]]*)\]\((https?://[^)\s]+)\)").expect("regex"));
-        let seen = self.seen.borrow();
+        let seen = self.seen.lock().expect("web links lock");
         LINK.replace_all(text, |c: &regex::Captures| if seen.contains(&c[2]) { c[0].to_string() } else { c[1].to_string() }).into_owned()
     }
 }

@@ -14,7 +14,9 @@ How to be the lead (model, limits, commits, notifications): [workflow/lead.md](w
 
 ## Documents (they reference each other)
 
-- [workflow/todos.md](workflow/todos.md): every task and idea we may do; the user picks what to take.
+- [workflow/todos.md](workflow/todos.md): only what is left to do — open tasks and ideas; the user picks what to take.
+  A taken item is marked «взято в работу» with its batch; a postponed one stays with
+  «Отложено (date): reason» (the user may come back to it).
 - [workflow/done.md](workflow/done.md): finished tasks and rejected ideas; do not redo them. A task
   that is finished or rejected is removed from todos.md and recorded here.
 - [workflow/dev-context.md](workflow/dev-context.md): reference for working on the project (build,
@@ -23,14 +25,16 @@ How to be the lead (model, limits, commits, notifications): [workflow/lead.md](w
   which notification tool) live there, not here.
 - [workflow/process.md](workflow/process.md): what is in progress now, **only as tables** — one
   table per batch of work, batches one after another (newest last), columns «Шаг | Что |
-  Исполнитель | Состояние | Лог»; no prose blocks, no closed tasks. Every line of work is a row:
+  Исполнитель | Состояние | Лог»; no prose blocks. It is a growing log: nothing is ever removed,
+  finished batches stay (their rows say «готово», the commit is a row), new ones are appended at the
+  end; only the limits table at the top is updated in place. Every line of work is a row:
   subagent runs, the lead's own steps (design, prompt texts, reviews, live checks) and questions
   waiting for the user. The lead updates it whenever work starts or finishes. Format and the
   limits table: [workflow/lead.md](workflow/lead.md).
 - **Closing a task is part of the task, never an offer.** When a task is finished, before
   reporting it or committing: record it in done.md under «Сделано» (rejected ideas go under
   «Отклонено»), remove it from todos.md, mark its rows done in process.md. After the commit, add
-  the hash to its done.md entry and remove the finished batch tables from process.md.
+  the hash to its done.md entry and a «Коммит» row with the hash to its batch in process.md.
 - [workflow/agent.md](workflow/agent.md): the agent's architecture and phases.
 - [workflow/engine.md](workflow/engine.md), [workflow/topics.md](workflow/topics.md), [workflow/pipeline.md](workflow/pipeline.md): designs (contracts) of larger tasks.
 

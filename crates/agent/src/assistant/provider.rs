@@ -1,10 +1,10 @@
-//! A provider's model as the agent's brain: native OpenAI tool calls (`tools`, `tool_choice`),
-//! streamed (the answer shows as it is written), arguments checked as JSON with one corrective
-//! retry; a reply that is a step written as text (models imitate the history) is accepted too.
-//! Each request takes a «provider calls» slot of the budget and is counted in the task that
-//! runs it (tokens from the response's usage).
+//! A provider's model as the agent's brain: native OpenAI tool calls (`tools`, `tool_choice`,
+//! several calls at once), streamed (the answer shows as it is written), arguments checked as
+//! JSON with one corrective retry; a reply that is a step written as text (models imitate the
+//! history) is accepted too. Each request takes a «provider calls» slot of the budget and is
+//! counted in the task that runs it (tokens from the response's usage).
 
-use super::brain::{parse_step, AnswerStream, Brain, Message, Piece, Role, Step, ToolSpec};
+use super::brain::{parse_step, AnswerStream, Brain, Call, Message, Piece, Role, Step, ToolSpec, MAX_CALLS};
 use crate::providers::chat_completion_stream;
 use crate::scope::Scope;
 use crate::slots::Slots;
@@ -44,17 +44,20 @@ pub fn request(model: &str, messages: &[Message], tools: &[ToolSpec], may_answer
             .collect();
         body["tools"] = Value::Array(specs);
         body["tool_choice"] = json!(if may_answer { "auto" } else { "required" });
+        // Several calls in one answer are the step's list of calls.
+        body["parallel_tool_calls"] = json!(true);
     }
     body
 }
 
-/// A streamed response put together: the text, the first tool call; the text is passed on as
-/// the answer while no call has begun (a step written as JSON text streams its `answer` only).
+/// A streamed response put together: the text, the tool calls by their index; the text is
+/// passed on as the answer while no call has begun (a step written as JSON text streams its
+/// `answer` only).
 #[derive(Default)]
 struct Collected {
     content: String,
-    tool: String,
-    arguments: String,
+    /// The calls of the answer, by the index the provider gave them (its order).
+    calls: std::collections::BTreeMap<u64, (String, String)>,
     json_text: Option<AnswerStream>,
     prompt_tokens: u64,
     completion_tokens: u64,
@@ -73,14 +76,15 @@ impl Collected {
             on_piece(Piece::Thinking(thought));
         }
         if let Some(calls) = delta["tool_calls"].as_array() {
-            for c in calls.iter().filter(|c| c["index"].as_u64().unwrap_or(0) == 0) {
-                self.tool.push_str(c["function"]["name"].as_str().unwrap_or_default());
-                self.arguments.push_str(c["function"]["arguments"].as_str().unwrap_or_default());
+            for c in calls {
+                let call = self.calls.entry(c["index"].as_u64().unwrap_or(0)).or_default();
+                call.0.push_str(c["function"]["name"].as_str().unwrap_or_default());
+                call.1.push_str(c["function"]["arguments"].as_str().unwrap_or_default());
             }
         }
         let Some(piece) = delta["content"].as_str() else { return };
         self.content.push_str(piece);
-        if !self.tool.is_empty() {
+        if !self.calls.is_empty() {
             return;
         }
         if self.json_text.is_none() && self.content.trim_start().starts_with('{') {
@@ -105,8 +109,9 @@ impl Collected {
     /// The response as a non-streamed one.
     fn response(&self) -> Value {
         let mut message = json!({"content": self.content});
-        if !self.tool.is_empty() {
-            message["tool_calls"] = json!([{"function": {"name": self.tool, "arguments": self.arguments}}]);
+        if !self.calls.is_empty() {
+            let calls: Vec<Value> = self.calls.values().map(|(name, arguments)| json!({"function": {"name": name, "arguments": arguments}})).collect();
+            message["tool_calls"] = Value::Array(calls);
         }
         json!({"choices": [{"message": message}]})
     }
@@ -117,15 +122,23 @@ pub fn read_response(body: &Value) -> anyhow::Result<Step> {
     let msg = &body["choices"][0]["message"];
     anyhow::ensure!(msg.is_object(), "no message in the answer: {body}");
     let content = msg["content"].as_str().unwrap_or_default().trim().to_string();
-    if let Some(call) = msg["tool_calls"].as_array().and_then(|c| c.first()) {
-        let tool = call["function"]["name"].as_str().unwrap_or_default().to_string();
-        let raw = call["function"]["arguments"].as_str().unwrap_or("{}");
-        let mut args: Value = serde_json::from_str(raw).map_err(|e| anyhow::anyhow!(crate::prompts::render("errors/arguments_not_json.j2", minijinja::context! { tool => &tool, error => e.to_string(), raw })))?;
-        // A model may still send the old title argument. It is not a tool argument.
-        if let Some(obj) = args.as_object_mut() {
-            obj.remove("title");
+    if let Some(items) = msg["tool_calls"].as_array().filter(|c| !c.is_empty()) {
+        let mut calls: Vec<Call> = Vec::new();
+        for item in items {
+            let tool = item["function"]["name"].as_str().unwrap_or_default().to_string();
+            let raw = item["function"]["arguments"].as_str().unwrap_or("{}");
+            let mut args: Value = serde_json::from_str(raw).map_err(|e| anyhow::anyhow!(crate::prompts::render("errors/arguments_not_json.j2", minijinja::context! { tool => &tool, error => e.to_string(), raw })))?;
+            // A model may still send the old title argument. It is not a tool argument.
+            if let Some(obj) = args.as_object_mut() {
+                obj.remove("title");
+            }
+            calls.push(Call { tool, args });
         }
-        return Ok(Step::Tool { thought: content, tool, args });
+        if calls.len() > MAX_CALLS {
+            log::warn!("the model wrote {} calls in one step; only the first {MAX_CALLS} are kept", calls.len());
+            calls.truncate(MAX_CALLS);
+        }
+        return Ok(Step::Tool { thought: content, calls });
     }
     // A step written as text (the history shows steps as JSON), else a plain answer.
     if content.starts_with('{') {
@@ -212,6 +225,7 @@ mod tests {
     fn requests_carry_tools_and_the_choice() {
         let body = request("m", &[Message::new(Role::User, "q")], &[spec()], false, 100, None);
         assert_eq!(body["tool_choice"], "required");
+        assert_eq!(body["parallel_tool_calls"], true, "several calls in one answer are asked for");
         let f = &body["tools"][0]["function"];
         assert_eq!(f["name"], "search");
         assert_eq!(f["parameters"]["required"], json!(["query"]));
@@ -219,19 +233,31 @@ mod tests {
         assert_eq!(body["messages"][0], json!({"role": "user", "content": "q"}));
         assert_eq!(request("m", &[], &[spec()], true, 100, None)["tool_choice"], "auto");
         assert!(request("m", &[], &[], true, 100, None).get("tools").is_none());
+        assert!(request("m", &[], &[], true, 100, None).get("parallel_tool_calls").is_none(), "no tools: nothing to call");
     }
 
     #[test]
     fn responses_become_steps() {
         let call = json!({"choices": [{"message": {"content": null, "tool_calls": [{"function": {"name": "search", "arguments": "{\"query\":\"бюджет\",\"title\":\"Ищу бюджет\"}"}}]}}]});
-        assert_eq!(read_response(&call).unwrap(), Step::Tool { thought: String::new(), tool: "search".into(), args: json!({"query": "бюджет"}) });
+        assert_eq!(read_response(&call).unwrap(), Step::Tool { thought: String::new(), calls: vec![Call { tool: "search".into(), args: json!({"query": "бюджет"}) }] });
         let text = json!({"choices": [{"message": {"content": "Ответ [1:00]."}}]});
         assert_eq!(read_response(&text).unwrap(), Step::Answer { thought: String::new(), text: "Ответ [1:00].".into() });
         let as_text = json!({"choices": [{"message": {"content": "{\"thought\":\"\",\"action\":\"read\",\"title\":\"Читаю\",\"args\":{\"from\":\"1:00\",\"to\":\"2:00\"}}"}}]});
-        assert!(matches!(read_response(&as_text).unwrap(), Step::Tool { tool, .. } if tool == "read"));
+        assert!(matches!(read_response(&as_text).unwrap(), Step::Tool { calls, .. } if calls[0].tool == "read"));
         let bad = json!({"choices": [{"message": {"tool_calls": [{"function": {"name": "search", "arguments": "{query:"}}]}}]});
         assert!(read_response(&bad).unwrap_err().to_string().contains("not JSON"));
         assert!(read_response(&json!({"error": "x"})).is_err());
+        // Calls to make at once, in the order of the response.
+        let two = json!({"choices": [{"message": {"tool_calls": [
+            {"function": {"name": "search", "arguments": "{\"query\":\"бюджет\"}"}},
+            {"function": {"name": "read", "arguments": "{\"from\":\"0:00\",\"to\":\"1:00\"}"}}
+        ]}}]});
+        let Step::Tool { calls, .. } = read_response(&two).unwrap() else { panic!("not a step") };
+        assert_eq!(calls, [Call { tool: "search".into(), args: json!({"query": "бюджет"}) }, Call { tool: "read".into(), args: json!({"from": "0:00", "to": "1:00"}) }]);
+        // More than allowed: the first three.
+        let many = json!({"choices": [{"message": {"tool_calls": (0..4).map(|i| json!({"function": {"name": format!("t{i}"), "arguments": "{}"}})).collect::<Vec<_>>()}}]});
+        let Step::Tool { calls, .. } = read_response(&many).unwrap() else { panic!("not a step") };
+        assert_eq!(calls.len(), MAX_CALLS);
     }
 
     /// An SSE server answering request n with the events of `script[n]` (chunk deltas).
@@ -272,6 +298,42 @@ mod tests {
     }
 
     #[test]
+    fn several_calls_stream_in_one_answer_in_their_order() {
+        // The calls come interleaved, by index, their arguments in pieces; the text before them
+        // is shown as the answer, the text after they begin is not.
+        let (url, _) = sse_server(vec![vec![
+            json!({"content": "Ищу."}),
+            json!({"tool_calls": [{"index": 1, "function": {"name": "read", "arguments": "{\"from\":\"0:00\","}}]}),
+            json!({"tool_calls": [{"index": 0, "function": {"name": "search", "arguments": "{\"query\":\"бюд"}}]}),
+            json!({"tool_calls": [{"index": 1, "function": {"arguments": "\"to\":\"1:00\"}"}}]}),
+            json!({"tool_calls": [{"index": 0, "function": {"arguments": "жет\"}"}}]}),
+            json!({"content": " не ответ"}),
+        ]]);
+        let dir = tempfile::tempdir().unwrap();
+        let (b, ..) = brain(url, dir.path());
+        let mut shown = String::new();
+        let step = b
+            .step(&[Message::new(Role::User, "q")], &[spec()], false, &AtomicBool::new(false), &mut |p| {
+                if let Piece::Answer(t) = p {
+                    shown.push_str(t)
+                }
+            })
+            .unwrap();
+        assert_eq!(
+            step,
+            Step::Tool {
+                thought: "Ищу. не ответ".into(),
+                calls: vec![
+                    Call { tool: "search".into(), args: json!({"query": "бюджет"}) },
+                    Call { tool: "read".into(), args: json!({"from": "0:00", "to": "1:00"}) },
+                ],
+            },
+            "the calls in the order of their indexes"
+        );
+        assert_eq!(shown, "Ищу.", "only the text before the calls is shown as the answer");
+    }
+
+    #[test]
     fn streams_answers_and_retries_a_malformed_call_once() {
         let (url, bodies) = sse_server(vec![
             // A malformed call, then a good one in two pieces.
@@ -293,7 +355,7 @@ mod tests {
             })
             .unwrap()
         };
-        assert_eq!(step(false), Step::Tool { thought: String::new(), tool: "search".into(), args: json!({"query": "бюджет"}) });
+        assert_eq!(step(false), Step::Tool { thought: String::new(), calls: vec![Call { tool: "search".into(), args: json!({"query": "бюджет"}) }] });
         assert_eq!(step(true), Step::Answer { thought: String::new(), text: "Да, [1:00].".into() });
         assert_eq!(step(true), Step::Answer { thought: String::new(), text: "Нет.".into() });
         assert_eq!(shown, "Да, [1:00].Нет.", "answers streamed, calls not");

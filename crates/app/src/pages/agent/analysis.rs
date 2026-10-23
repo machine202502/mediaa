@@ -25,6 +25,8 @@ pub enum Why {
     NeedsIndex,
     NeedsTopics,
     Busy,
+    NoSpeakers,
+    NoNamesModel,
 }
 
 impl Why {
@@ -35,6 +37,8 @@ impl Why {
             Why::NeedsIndex => t!("analysis.why_index"),
             Why::NeedsTopics => t!("analysis.why_topics"),
             Why::Busy => t!("analysis.why_busy"),
+            Why::NoSpeakers => t!("analysis.why_speakers"),
+            Why::NoNamesModel => t!("analysis.why_names_model"),
         }
         .into()
     }
@@ -81,6 +85,10 @@ pub enum Command {
     Stage(Stage),
     /// Cancel the running analysis.
     Stop,
+    /// Find the names of the speakers from what is said in the recording.
+    Names,
+    /// Stop the running search for the names.
+    StopNames,
 }
 
 /// How a stage of the running analysis is shown in the menu, instead of «Добавить» / «Заново».
@@ -95,6 +103,29 @@ pub enum Live {
     Cancelled,
 }
 
+/// The state of the running search for the speaker names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamesLive {
+    /// Queued or waiting on the model.
+    Queued,
+    /// Running, with the part of the recording read so far.
+    Running { percent: u8 },
+    Paused,
+}
+
+impl NamesLive {
+    /// The state of the names task of the recording (`None`: no run that could be shown).
+    pub fn of(task: Option<&Task>) -> Option<NamesLive> {
+        let task = task?;
+        match task.status {
+            TaskStatus::Queued | TaskStatus::Waiting => Some(NamesLive::Queued),
+            TaskStatus::Running | TaskStatus::Stopping => Some(NamesLive::Running { percent: percent(task.progress) }),
+            TaskStatus::Paused => Some(NamesLive::Paused),
+            TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuItem {
     pub command: Command,
@@ -102,6 +133,8 @@ pub struct MenuItem {
     pub offer: Option<Offer>,
     /// For a stage that is in the running analysis and not finished.
     pub live: Option<Live>,
+    /// The state of the running names search (the names item only).
+    pub names: Option<NamesLive>,
     pub enabled: bool,
     pub why: Option<Why>,
 }
@@ -124,16 +157,19 @@ fn percent(progress: f32) -> u8 {
 /// The menu. `rows` are the stages of the running analysis (empty when nothing is running):
 /// a stage that is in it and not finished is «в очереди» / «идёт», and «Добавить» is only a
 /// stage that is neither in the data nor in that analysis. While it runs only «Stop» is usable.
-pub fn menu(ready: &Readiness, rows: &[StageRow], active: bool, diarization_model: bool) -> Vec<MenuItem> {
+/// `names` is the latest names task of the recording (finished or not) and `names_model` says
+/// whether its model is chosen: an unfinished run shows its state and «Остановить» instead of a
+/// second start.
+pub fn menu(ready: &Readiness, rows: &[StageRow], active: bool, diarization_model: bool, names: Option<&Task>, names_model: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
     if active {
-        items.push(MenuItem { command: Command::Stop, offer: None, live: None, enabled: true, why: None });
+        items.push(MenuItem { command: Command::Stop, offer: None, live: None, names: None, enabled: true, why: None });
     }
     let busy = active.then_some(Why::Busy);
-    items.push(MenuItem { command: Command::Analyse, offer: None, live: None, enabled: !active, why: busy });
+    items.push(MenuItem { command: Command::Analyse, offer: None, live: None, names: None, enabled: !active, why: busy });
     for stage in Stage::ALL {
         if let Some(live) = rows.iter().find(|row| row.stage == stage).and_then(live_of) {
-            items.push(MenuItem { command: Command::Stage(stage), offer: None, live: Some(live), enabled: false, why: None });
+            items.push(MenuItem { command: Command::Stage(stage), offer: None, live: Some(live), names: None, enabled: false, why: None });
             continue;
         }
         let offer = offer(stage, ready, diarization_model);
@@ -141,7 +177,25 @@ pub fn menu(ready: &Readiness, rows: &[StageRow], active: bool, diarization_mode
             Offer::Unavailable(why) => Some(why),
             _ => None,
         });
-        items.push(MenuItem { command: Command::Stage(stage), offer: Some(offer), live: None, enabled: why.is_none(), why });
+        items.push(MenuItem { command: Command::Stage(stage), offer: Some(offer), live: None, names: None, enabled: why.is_none(), why });
+    }
+    match NamesLive::of(names) {
+        Some(live) => {
+            items.push(MenuItem { command: Command::Names, offer: None, live: None, names: Some(live), enabled: false, why: None });
+            items.push(MenuItem { command: Command::StopNames, offer: None, live: None, names: None, enabled: true, why: None });
+        }
+        None => {
+            let why = if !ready.replies {
+                Some(Why::NoReplies)
+            } else if !ready.speakers {
+                Some(Why::NoSpeakers)
+            } else if !names_model {
+                Some(Why::NoNamesModel)
+            } else {
+                busy
+            };
+            items.push(MenuItem { command: Command::Names, offer: None, live: None, names: None, enabled: why.is_none(), why });
+        }
     }
     items
 }
@@ -812,6 +866,15 @@ pub fn live_label(stage: Stage, live: Live) -> String {
     }
 }
 
+/// The state of the running names search: «Имена говорящих: идёт 40 %».
+pub fn names_label(live: NamesLive) -> String {
+    match live {
+        NamesLive::Queued => t!("analysis.menu_names_queued").into(),
+        NamesLive::Running { percent } => t!("analysis.menu_names_running", progress = format!("{percent}%")).into(),
+        NamesLive::Paused => t!("analysis.menu_names_paused").into(),
+    }
+}
+
 /// The popup of the «⋯» button; returns the chosen command.
 pub fn menu_popup(button: &egui::Response, items: &[MenuItem], p: Palette) -> Option<Command> {
     egui::Popup::menu(button)
@@ -822,6 +885,18 @@ pub fn menu_popup(button: &egui::Response, items: &[MenuItem], p: Palette) -> Op
             for item in items {
                 let (glyph, label) = match item.command {
                     Command::Stop => (icon::STOP, t!("analysis.menu_stop").to_string()),
+                    Command::StopNames => (icon::STOP, t!("analysis.menu_stop_names").to_string()),
+                    Command::Names => match item.names {
+                        Some(live) => {
+                            let glyph = match live {
+                                NamesLive::Queued => icon::CLOCK,
+                                NamesLive::Running { .. } => icon::CIRCLE_NOTCH,
+                                NamesLive::Paused => icon::PAUSE_CIRCLE,
+                            };
+                            (glyph, names_label(live))
+                        }
+                        None => (icon::USER, t!("analysis.menu_names").to_string()),
+                    },
                     Command::Analyse => (icon::ARROWS_CLOCKWISE, t!("analysis.menu_analyse").to_string()),
                     Command::Stage(stage) => {
                         let glyph = match item.live {
@@ -1023,23 +1098,63 @@ mod tests {
 
     #[test]
     fn while_an_analysis_runs_only_stop_is_usable() {
-        let items = menu(&ALL, &[], true, true);
+        let items = menu(&ALL, &[], true, true, None, true);
         assert_eq!(items[0].command, Command::Stop);
         assert!(items[0].enabled);
-        assert!(items[1..].iter().all(|i| !i.enabled && i.why == Some(Why::Busy) && i.live.is_none()), "{items:?}");
-        assert_eq!(items.len(), 1 + 1 + Stage::ALL.len());
-        let idle = menu(&ALL, &[], false, true);
+        assert!(items[1..].iter().all(|i| !i.enabled), "{items:?}");
+        assert!(items[1..items.len() - 1].iter().all(|i| i.why == Some(Why::Busy) && i.live.is_none()), "{items:?}");
+        assert_eq!(items.len(), 1 + 1 + Stage::ALL.len() + 1);
+        let idle = menu(&ALL, &[], false, true, None, true);
         assert!(idle.iter().all(|i| i.command != Command::Stop));
         assert!(idle.iter().all(|i| i.enabled && i.live.is_none()));
         assert_eq!(idle[0].command, Command::Analyse);
-        let stages: Vec<Command> = idle.iter().skip(1).map(|i| i.command).collect();
+        let stages: Vec<Command> = idle.iter().skip(1).take(Stage::ALL.len()).map(|i| i.command).collect();
         assert_eq!(stages, Stage::ALL.map(Command::Stage));
+        assert_eq!(idle.last().unwrap().command, Command::Names);
         // An entry the data does not allow keeps its reason.
-        let bare = menu(&ready(true, false, false, false, false), &[], false, true);
+        let bare = menu(&ready(true, false, false, false, false), &[], false, true, None, true);
         let topics = bare.iter().find(|i| i.command == Command::Stage(Stage::Topics)).unwrap();
         assert!(!topics.enabled);
         assert_eq!(topics.why, Some(Why::NeedsIndex));
         assert_eq!(topics.offer, Some(Offer::Unavailable(Why::NeedsIndex)));
+    }
+
+    #[test]
+    fn the_names_item_follows_the_run() {
+        // Without speakers the item says why it cannot start.
+        let bare = menu(&ready(true, false, true, true, true), &[], false, true, None, true);
+        let names = bare.last().unwrap();
+        assert_eq!((names.command, names.enabled, names.why), (Command::Names, false, Some(Why::NoSpeakers)));
+        // Without the analysis model too.
+        let no_model = menu(&ALL, &[], false, true, None, false);
+        assert_eq!((no_model.last().unwrap().enabled, no_model.last().unwrap().why), (false, Some(Why::NoNamesModel)));
+        // Idle: the item starts a run.
+        let idle = menu(&ALL, &[], false, true, None, true);
+        assert_eq!((idle.last().unwrap().command, idle.last().unwrap().enabled, idle.last().unwrap().why), (Command::Names, true, None));
+        // Running: the item shows the progress and a stop row follows; there is no second start.
+        let mut running = task(5, "speaker-names", TaskStatus::Running, None);
+        running.progress = 0.4;
+        let items = menu(&ALL, &[], false, true, Some(&running), true);
+        let names = &items[items.len() - 2];
+        assert_eq!((names.command, names.enabled, names.names), (Command::Names, false, Some(NamesLive::Running { percent: 40 })));
+        assert!(names_label(NamesLive::Running { percent: 40 }).contains("40"));
+        assert_ne!(names_label(NamesLive::Queued), names_label(NamesLive::Paused));
+        let stop = items.last().unwrap();
+        assert_eq!((stop.command, stop.enabled), (Command::StopNames, true));
+        // Queued and paused runs are shown too.
+        for (status, live) in [(TaskStatus::Queued, NamesLive::Queued), (TaskStatus::Paused, NamesLive::Paused)] {
+            let t = task(6, "speaker-names", status, None);
+            let items = menu(&ALL, &[], false, true, Some(&t), true);
+            let names = items.iter().find(|i| i.command == Command::Names).unwrap();
+            assert_eq!(names.names, Some(live), "{status:?}");
+        }
+        // A finished run leaves the item ready to start again.
+        for status in [TaskStatus::Done, TaskStatus::Failed, TaskStatus::Cancelled] {
+            let t = task(7, "speaker-names", status, None);
+            let items = menu(&ALL, &[], false, true, Some(&t), true);
+            assert!(items.last().unwrap().enabled && items.last().unwrap().names.is_none(), "{status:?}");
+            assert!(items.iter().all(|i| i.command != Command::StopNames), "{status:?}");
+        }
     }
 
     fn stage_item(items: &[MenuItem], stage: Stage) -> &MenuItem {
@@ -1059,7 +1174,7 @@ mod tests {
         let tree = descendants(&flat, 1);
         assert!(tree.iter().any(|item| item.id == 2) && tree.iter().all(|item| item.id != 9), "only this analysis");
         let rows = super::rows(&analysis, &tree, &[], &ready(true, false, false, false, false), 0);
-        let items = menu(&ready(true, false, false, false, false), &rows, true, true);
+        let items = menu(&ready(true, false, false, false, false), &rows, true, true, None, true);
         assert!(items[0].command == Command::Stop && items[0].enabled);
         assert!(!stage_item(&items, Stage::Transcribe).enabled && stage_item(&items, Stage::Transcribe).live.is_none());
         assert_eq!(stage_item(&items, Stage::Transcribe).offer, Some(Offer::Redo), "the replies are already there");
@@ -1083,7 +1198,7 @@ mod tests {
             row(Stage::Topics, RowState::Failed("no model".into())),
             row(Stage::Details, RowState::Cancelled),
         ];
-        let items = menu(&bare_ready(), &rows, true, true);
+        let items = menu(&bare_ready(), &rows, true, true, None, true);
         assert_eq!(stage_item(&items, Stage::Diarize).live, Some(Live::Paused));
         assert_eq!(stage_item(&items, Stage::Topics).live, Some(Live::Failed));
         assert_eq!(stage_item(&items, Stage::Details).live, Some(Live::Cancelled));

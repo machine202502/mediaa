@@ -349,6 +349,7 @@ pub fn register_stages(
         Arc::new(crate::transcribe::Transcribe::new(ai_dir, settings.clone())),
         Arc::new(crate::diarize::Diarize::new(ai_dir, settings.clone())),
         Arc::new(crate::index::Index::new(ai_dir, settings.clone())),
+        Arc::new(crate::names::SpeakerNames::new(ai_dir, settings.clone())),
     ];
     stages.extend(crate::outline::stages(ai_dir, settings));
     stages.extend(crate::assistant::queued::stages());

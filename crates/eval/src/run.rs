@@ -272,7 +272,10 @@ fn ask_turn(
         &spec.question,
         &cancel,
         &mut |event| {
-            events.push(event_json(turn, event));
+            // The numbers under the chat's status line are for its interface, not for an eval.
+            if !matches!(event, Event::Metrics(_)) {
+                events.push(event_json(turn, event));
+            }
         },
     );
     let stats = read_stats(&ctx.queue_dir, scope.task()).unwrap_or_else(|e| {
@@ -401,9 +404,16 @@ fn event_json(turn: usize, event: &Event) -> Value {
         Event::AnswerText(text) => json!({"event": "answer_text", "text": text}),
         Event::AnswerDiscarded => json!({"event": "answer_discarded"}),
         Event::Say(text) => json!({"event": "say", "text": text}),
+        Event::SteerTaken { text } => json!({"event": "steer_taken", "text": text}),
         Event::Scanning { done, total } => {
             json!({"event": "scanning", "done": done, "total": total})
         }
+        Event::Metrics(metrics) => json!({
+            "event": "metrics",
+            "context_tokens": metrics.context_tokens,
+            "context": metrics.context,
+            "speed": metrics.speed
+        }),
         Event::Done => json!({"event": "done"}),
         Event::Stopped => json!({"event": "stopped"}),
         Event::Failed(error) => json!({"event": "failed", "error": error}),

@@ -68,8 +68,9 @@ impl Scan {
     }
 }
 
-/// Reads one part against the instruction: (time as written, fact) pairs.
-pub trait Extract {
+/// Reads one part against the instruction: (time as written, fact) pairs. The calls of one step
+/// run at once, each in its own thread: the extractor is shared, so it is `Sync`.
+pub trait Extract: Sync {
     fn extract(&self, instruction: &str, part: &Window, i: usize, n: usize, cancel: &AtomicBool) -> anyhow::Result<Vec<(String, String)>>;
 }
 
@@ -214,16 +215,16 @@ pub fn scan(extract: &dyn Extract, recording: &Recording, transcript: Option<&Tr
 mod tests {
     use super::super::tools::tests::recording;
     use super::*;
-    use std::cell::Cell;
+    use std::sync::atomic::AtomicUsize;
 
     /// Finds «отчёт» in a part; fails on the part starting at 5:00.
     struct Fake {
-        calls: Cell<usize>,
+        calls: AtomicUsize,
     }
 
     impl Extract for Fake {
         fn extract(&self, _: &str, part: &Window, _: usize, _: usize, _: &AtomicBool) -> anyhow::Result<Vec<(String, String)>> {
-            self.calls.set(self.calls.get() + 1);
+            self.calls.fetch_add(1, Ordering::Relaxed);
             anyhow::ensure!(part.start < 299.0, "the model broke");
             Ok(if part.text.contains("Отчёт") { vec![("0:10".into(), "Отчёт в пятницу".into()), ("59:00".into(), "Ещё раз про отчёт".into())] } else { vec![] })
         }
@@ -239,7 +240,7 @@ mod tests {
         }).collect();
         let dir = tempfile::tempdir().unwrap();
         let t = Transcript::open(dir.path(), "f").unwrap();
-        let fake = Fake { calls: Cell::new(0) };
+        let fake = Fake { calls: AtomicUsize::new(0) };
         let mut seen = Vec::new();
         let s = scan(&fake, &rec, Some(&t), "все сроки", &AtomicBool::new(false), &mut |d, n| seen.push((d, n))).unwrap();
         assert_eq!(seen, [(1, 3), (2, 3), (3, 3)]);
@@ -253,9 +254,9 @@ mod tests {
         rec.replies.truncate(2);
         let s = scan(&fake, &rec, Some(&t), "Все  СРОКИ", &AtomicBool::new(false), &mut |_, _| {}).unwrap();
         assert!(s.failed.is_empty());
-        let calls = fake.calls.get();
+        let calls = fake.calls.load(Ordering::Relaxed);
         let again = scan(&fake, &rec, Some(&t), "все сроки", &AtomicBool::new(false), &mut |_, _| {}).unwrap();
-        assert_eq!((again, fake.calls.get()), (s, calls), "from the cache, no model calls");
+        assert_eq!((again, fake.calls.load(Ordering::Relaxed)), (s, calls), "from the cache, no model calls");
         assert!(scan(&fake, &rec, None, "x", &AtomicBool::new(true), &mut |_, _| {}).is_err(), "stopped");
     }
 

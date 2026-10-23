@@ -9,10 +9,22 @@ use sherpa_onnx::{
     OfflineTransducerModelConfig, SileroVadModelConfig, SpeakerEmbeddingExtractorConfig, VadModelConfig, VoiceActivityDetector,
 };
 pub use mediaa_core::transcript::{Phrase, Turn, Word};
+use crate::engine::{Diarization, Voice};
 use std::path::{Path, PathBuf};
 
 /// Sample rate every model here takes (mono).
 pub const SAMPLE_RATE: u32 = 16_000;
+/// Cut height of the diarization clustering when the request does not say. A larger value cuts
+/// the dendrogram higher and gives fewer speakers. Measured on `evals/data` with the CAM++ voice
+/// model: 0.4 over-splits enough that merging by voice can bring the clones back, while 0.5 and
+/// 0.6 merge two of the three voices of `pikhoya-1`. The table is in `workflow/dev-context.md`.
+pub const DEFAULT_CLUSTERING_THRESHOLD: f32 = 0.4;
+/// Cosine similarity above which two found speakers are merged by their mean voice. The measured
+/// value: 0.70–0.75 merge the three real voices of `pikhoya-1` into one, 0.85 leaves fragments of
+/// `librivox-mix-1` as speakers of their own (7 of 4); 0.80 is right on both.
+pub const DEFAULT_MERGE_THRESHOLD: f32 = 0.80;
+/// A speaker with less speech than this is moved to the nearest voice by similarity.
+pub const MIN_SPEAKER_SECONDS: f64 = 2.0;
 /// Voice activity model, downloaded with the speech recognition model.
 pub const VAD_MODEL: &str = "csukuangfj/vad/silero_vad.onnx";
 /// Speaker segmentation model, downloaded with the diarization (speaker embedding) model.
@@ -193,8 +205,15 @@ impl Vad {
 }
 
 /// Who speaks when in `samples` (a whole recording, 16 kHz mono). `speakers`: how many there
-/// are when known.
-pub fn diarize(segmentation: &Path, embedding: &Path, samples: &[f32], speakers: Option<u32>) -> anyhow::Result<Vec<Turn>> {
+/// are when known (the clustering threshold is then ignored). Returns the found clusters and the
+/// mean voice of each; merging them is [`merge_voices`].
+pub fn diarize(
+    segmentation: &Path,
+    embedding: &Path,
+    samples: &[f32],
+    speakers: Option<u32>,
+    clustering_threshold: Option<f32>,
+) -> anyhow::Result<Diarization> {
     let config = OfflineSpeakerDiarizationConfig {
         segmentation: OfflineSpeakerSegmentationModelConfig {
             pyannote: OfflineSpeakerSegmentationPyannoteModelConfig { model: Some(path_str(segmentation)?), ..Default::default() },
@@ -203,7 +222,11 @@ pub fn diarize(segmentation: &Path, embedding: &Path, samples: &[f32], speakers:
             ..Default::default()
         },
         embedding: SpeakerEmbeddingExtractorConfig { model: Some(path_str(embedding)?), num_threads: threads(), ..Default::default() },
-        clustering: FastClusteringConfig { num_clusters: speakers.map_or(-1, |n| n as i32), ..Default::default() },
+        clustering: FastClusteringConfig {
+            num_clusters: speakers.map_or(-1, |n| n as i32),
+            threshold: clustering_threshold.unwrap_or(DEFAULT_CLUSTERING_THRESHOLD),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let at = std::time::Instant::now();
@@ -217,11 +240,250 @@ pub fn diarize(segmentation: &Path, embedding: &Path, samples: &[f32], speakers:
     let result = d.process(samples).ok_or_else(|| anyhow::anyhow!("diarization failed"))?;
     mediaa_core::pulse::beat();
     log::info!("diarize: segmentation, embeddings and clustering took {:.1} s", at.elapsed().as_secs_f32());
-    Ok(result
+    let mut turns: Vec<Turn> = result
         .sort_by_start_time()
         .into_iter()
         .map(|s| Turn { start: f64::from(s.start), end: f64::from(s.end), speaker: s.speaker.max(0) as u32 })
-        .collect())
+        .collect();
+    let speakers = compact(&mut turns);
+    let at = std::time::Instant::now();
+    let voices = voices(embedding, samples, &turns, speakers)?;
+    log::info!("diarize: the voices of {speakers} speakers took {:.1} s", at.elapsed().as_secs_f32());
+    Ok(Diarization { turns, voices })
+}
+
+/// Renumbers the found speakers to `0..k` in the order they first talk and returns `k`. The
+/// clustering itself numbers its speakers with gaps (it may find 12 ids for 7 speakers), while
+/// [`Voice`] is indexed by `Turn::speaker`.
+fn compact(turns: &mut [Turn]) -> usize {
+    let mut ids = std::collections::HashMap::new();
+    for turn in turns {
+        let next = ids.len() as u32;
+        turn.speaker = *ids.entry(turn.speaker).or_insert(next);
+    }
+    ids.len()
+}
+
+/// How much of a speaker's speech is taken for their voice. More does not improve the mean and
+/// a long monologue would only make the extractor slow.
+const VOICE_SECONDS: f64 = 30.0;
+/// The most of one turn taken for the voice: a speaker is not represented by one long stretch.
+const VOICE_TURN_SECONDS: f64 = 10.0;
+
+/// The mean voice of each of `count` speakers: one embedding over up to [`VOICE_SECONDS`] of
+/// their speech (the start of each turn, up to [`VOICE_TURN_SECONDS`] of it). `seconds` is all
+/// their speech, not only what the embedding saw.
+fn voices(embedding: &Path, samples: &[f32], turns: &[Turn], count: usize) -> anyhow::Result<Vec<Voice>> {
+    let mut voices = vec![Voice { embedding: Vec::new(), seconds: 0.0 }; count];
+    if count == 0 {
+        return Ok(voices);
+    }
+    let mut audio = vec![Vec::<f32>::new(); count];
+    for turn in turns {
+        let length = (turn.end - turn.start).max(0.0);
+        voices[turn.speaker as usize].seconds += length;
+        let taken = audio[turn.speaker as usize].len() as f64 / f64::from(SAMPLE_RATE);
+        if taken >= VOICE_SECONDS {
+            continue;
+        }
+        let low = (turn.start * f64::from(SAMPLE_RATE)).round().clamp(0.0, samples.len() as f64) as usize;
+        let high = (turn.end * f64::from(SAMPLE_RATE)).round().clamp(0.0, samples.len() as f64) as usize;
+        let limit = low + (VOICE_TURN_SECONDS.min(VOICE_SECONDS - taken) * f64::from(SAMPLE_RATE)) as usize;
+        audio[turn.speaker as usize].extend_from_slice(&samples[low..high.max(low).min(limit)]);
+    }
+    let config = SpeakerEmbeddingExtractorConfig { model: Some(path_str(embedding)?), num_threads: threads(), ..Default::default() };
+    let extractor = sherpa_onnx::SpeakerEmbeddingExtractor::create(&config)
+        .ok_or_else(|| anyhow::anyhow!("{}: the speaker model does not load", embedding.display()))?;
+    for (voice, audio) in voices.iter_mut().zip(&audio) {
+        if audio.is_empty() {
+            continue;
+        }
+        let Some(stream) = extractor.create_stream() else { continue };
+        stream.accept_waveform(SAMPLE_RATE as i32, audio);
+        mediaa_core::pulse::beat();
+        if !extractor.is_ready(&stream) {
+            continue;
+        }
+        voice.embedding = extractor.compute(&stream).and_then(|v| unit(&v)).unwrap_or_default();
+        mediaa_core::pulse::beat();
+    }
+    Ok(voices)
+}
+
+/// A unit-length copy of `vector`, or `None` for an empty or zero one.
+fn unit(vector: &[f32]) -> Option<Vec<f32>> {
+    let norm = vector.iter().map(|v| f64::from(*v) * f64::from(*v)).sum::<f64>().sqrt();
+    (norm > 1e-8).then(|| vector.iter().map(|v| (*v as f64 / norm) as f32).collect())
+}
+
+fn cosine(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return -1.0;
+    }
+    left.iter().zip(right).map(|(a, b)| a * b).sum()
+}
+
+/// One speaker while merging: the mean voice, how long they talk and the original cluster ids
+/// they stand for.
+struct Cluster {
+    embedding: Option<Vec<f32>>,
+    seconds: f64,
+    members: Vec<usize>,
+}
+
+impl Cluster {
+    fn new(index: usize, voice: &Voice) -> Cluster {
+        Cluster { embedding: unit(&voice.embedding), seconds: voice.seconds, members: vec![index] }
+    }
+
+    fn merge(&mut self, other: Cluster) {
+        let weight = self.seconds.max(0.0);
+        let other_weight = other.seconds.max(0.0);
+        if let (Some(mine), Some(theirs)) = (&self.embedding, &other.embedding) {
+            let total = weight + other_weight;
+            if total > 0.0 {
+                let mixed: Vec<f32> = mine
+                    .iter()
+                    .zip(theirs)
+                    .map(|(a, b)| ((f64::from(*a) * weight + f64::from(*b) * other_weight) / total) as f32)
+                    .collect();
+                self.embedding = unit(&mixed);
+            }
+        }
+        self.seconds += other.seconds;
+        self.members.extend(other.members);
+    }
+}
+
+/// Merges the found speakers by voice: clusters whose mean voices are closer than `threshold`
+/// (cosine similarity) become one, then a speaker with less than `min_seconds` of speech goes to
+/// the nearest other voice. Turns are renumbered from 0 in the order the speakers first talk.
+pub fn merge_voices(turns: &[Turn], voices: &[Voice], threshold: f32, min_seconds: f64) -> (Vec<Turn>, Vec<Voice>) {
+    merge(turns, voices, &[], Some(threshold), Some(min_seconds), None)
+}
+
+/// [`merge_voices`], with the pairs in `links` merged first whatever their voices say: the caller
+/// already knows they are one speaker. Chunked diarization uses this for two speakers who talk at
+/// once in the overlap of neighbouring chunks — they are the same person there.
+pub fn merge_voices_linked(turns: &[Turn], voices: &[Voice], links: &[(usize, usize)], threshold: f32, min_seconds: f64) -> (Vec<Turn>, Vec<Voice>) {
+    merge(turns, voices, links, Some(threshold), Some(min_seconds), None)
+}
+
+/// Merges the closest mean voices until `count` speakers remain, whatever their similarity: the
+/// caller knows how many people speak.
+pub fn merge_voices_to(turns: &[Turn], voices: &[Voice], count: usize) -> (Vec<Turn>, Vec<Voice>) {
+    merge(turns, voices, &[], None, None, Some(count))
+}
+
+/// [`merge_voices`] with the knobs of the variants above: `links` are merged first, then pairs
+/// closer than `threshold` (when given), then speakers shorter than `min_seconds` (when given),
+/// then the closest pairs until `target` speakers are left (when given).
+fn merge(
+    turns: &[Turn],
+    voices: &[Voice],
+    links: &[(usize, usize)],
+    threshold: Option<f32>,
+    min_seconds: Option<f64>,
+    target: Option<usize>,
+) -> (Vec<Turn>, Vec<Voice>) {
+    let mut clusters: Vec<Cluster> = voices.iter().enumerate().map(|(index, voice)| Cluster::new(index, voice)).collect();
+    // The clustering numbers its speakers arbitrarily; merging must not depend on that numbering.
+    // Order the clusters by when they first talk, and merge in that order.
+    let first_talk = |cluster: &Cluster| {
+        cluster
+            .members
+            .iter()
+            .filter_map(|&index| turns.iter().filter(|turn| turn.speaker as usize == index).map(|turn| turn.start).reduce(f64::min))
+            .reduce(f64::min)
+            .unwrap_or(f64::INFINITY)
+    };
+    clusters.sort_by(|left, right| first_talk(left).total_cmp(&first_talk(right)));
+    // Pairs the caller knows are one speaker (the same person talking in the overlap of two
+    // chunks), whatever their mean voices say.
+    for &(a, b) in links {
+        let left = clusters.iter().position(|cluster| cluster.members.contains(&a));
+        let right = clusters.iter().position(|cluster| cluster.members.contains(&b));
+        let (Some(left), Some(right)) = (left, right) else { continue };
+        if left == right {
+            continue;
+        }
+        let other = clusters.remove(right.max(left));
+        clusters[right.min(left)].merge(other);
+    }
+    // Strongest similarity first, until no pair is close enough.
+    if let Some(threshold) = threshold {
+        loop {
+            let mut best: Option<(f32, usize, usize)> = None;
+            for left in 0..clusters.len() {
+                for right in left + 1..clusters.len() {
+                    let (Some(a), Some(b)) = (&clusters[left].embedding, &clusters[right].embedding) else { continue };
+                    let score = cosine(a, b);
+                    if score >= threshold && best.is_none_or(|(best, _, _)| score > best) {
+                        best = Some((score, left, right));
+                    }
+                }
+            }
+            let Some((_, left, right)) = best else { break };
+            let other = clusters.remove(right);
+            clusters[left].merge(other);
+        }
+    }
+    // A speaker with too little speech has no reliable voice of their own: give them to the
+    // nearest one that has.
+    if let Some(min_seconds) = min_seconds {
+        while clusters.len() > 1 {
+            let smallest = (0..clusters.len())
+                .filter(|&index| clusters[index].seconds < min_seconds && clusters[index].embedding.is_some())
+                .min_by(|&a, &b| clusters[a].seconds.total_cmp(&clusters[b].seconds));
+            let Some(smallest) = smallest else { break };
+            let embedding = clusters[smallest].embedding.clone().expect("filtered by having one");
+            let nearest = (0..clusters.len())
+                .filter(|&index| index != smallest)
+                .filter_map(|index| clusters[index].embedding.as_ref().map(|other| (cosine(&embedding, other), index)))
+                .max_by(|a, b| a.0.total_cmp(&b.0));
+            let Some((_, nearest)) = nearest else { break };
+            let other = clusters.remove(smallest);
+            let target = if smallest < nearest { nearest - 1 } else { nearest };
+            clusters[target].merge(other);
+        }
+    }
+    // A known number of speakers: the closest voices are one person more than the threshold
+    // would say.
+    if let Some(target) = target {
+        while clusters.len() > target {
+            let mut best: Option<(f32, usize, usize)> = None;
+            for left in 0..clusters.len() {
+                for right in left + 1..clusters.len() {
+                    let (Some(a), Some(b)) = (&clusters[left].embedding, &clusters[right].embedding) else { continue };
+                    let score = cosine(a, b);
+                    if best.is_none_or(|(best, _, _)| score > best) {
+                        best = Some((score, left, right));
+                    }
+                }
+            }
+            let Some((_, left, right)) = best else { break };
+            let other = clusters.remove(right);
+            clusters[left].merge(other);
+        }
+    }
+    // Renumber in the order the speakers first talk; each turn gets its cluster's new id.
+    let mut order: Vec<usize> = (0..clusters.len()).collect();
+    let first = |index: usize| turns.iter().filter(|t| clusters[index].members.contains(&(t.speaker as usize))).map(|t| t.start).fold(f64::INFINITY, f64::min);
+    order.sort_by(|&a, &b| first(a).total_cmp(&first(b)));
+    let mut ids = vec![0u32; clusters.len()];
+    for (new, &old) in order.iter().enumerate() {
+        ids[old] = new as u32;
+    }
+    let name = |speaker: u32| {
+        let cluster = clusters.iter().position(|c| c.members.contains(&(speaker as usize)));
+        cluster.map_or(speaker, |cluster| ids[cluster])
+    };
+    let turns = turns.iter().map(|turn| Turn { speaker: name(turn.speaker), ..*turn }).collect::<Vec<_>>();
+    let voices = order
+        .iter()
+        .map(|&index| Voice { embedding: clusters[index].embedding.clone().unwrap_or_default(), seconds: clusters[index].seconds })
+        .collect();
+    (turns, voices)
 }
 
 /// Checks that a speaker embedding model loads.
@@ -325,12 +587,154 @@ mod tests {
         }
         let wave = sherpa_onnx::Wave::read(wav.to_str().unwrap()).unwrap();
         assert_eq!(wave.sample_rate(), SAMPLE_RATE as i32);
-        let turns = diarize(&segmentation, &embedding, wave.samples(), None).unwrap();
+        let turns = diarize(&segmentation, &embedding, wave.samples(), None, None).unwrap();
         eprintln!("{turns:?}");
-        let speakers: std::collections::BTreeSet<u32> = turns.iter().map(|t| t.speaker).collect();
+        let speakers: std::collections::BTreeSet<u32> = turns.turns.iter().map(|t| t.speaker).collect();
         assert_eq!(speakers.len(), 2, "{turns:?}");
-        let known = diarize(&segmentation, &embedding, wave.samples(), Some(2)).unwrap();
-        assert_eq!(known.iter().map(|t| t.speaker).collect::<std::collections::BTreeSet<_>>().len(), 2);
+        assert_eq!(turns.voices.len(), 2, "one voice per found speaker: {turns:?}");
+        let known = diarize(&segmentation, &embedding, wave.samples(), Some(2), None).unwrap();
+        assert_eq!(known.turns.iter().map(|t| t.speaker).collect::<std::collections::BTreeSet<_>>().len(), 2);
+    }
+
+    #[test]
+    fn voices_merge_by_cosine_and_short_speakers_go_to_the_nearest() {
+        // Three clusters: 0 and 1 are the same voice (cosine 0.98), 2 is another (0.1 and 0.15),
+        // and 2 talks for half a second, so even at a threshold above every similarity it joins
+        // the nearest voice.
+        let (a, b, c) = (unit(&[1.0, 0.0, 0.0]).unwrap(), unit(&[0.98, 0.2, 0.0]).unwrap(), unit(&[0.2, 0.0, 0.98]).unwrap());
+        assert!(cosine(&a, &b) > 0.97);
+        assert!(cosine(&a, &c) < 0.25);
+        let voices = vec![
+            Voice { embedding: a.clone(), seconds: 6.0 },
+            Voice { embedding: b.clone(), seconds: 4.0 },
+            Voice { embedding: c.clone(), seconds: 0.5 },
+        ];
+        let turns = vec![
+            Turn { start: 0.0, end: 6.0, speaker: 0 },
+            Turn { start: 6.0, end: 10.0, speaker: 1 },
+            Turn { start: 10.0, end: 10.5, speaker: 2 },
+        ];
+        // At 0.9 the first two merge; the short third has no voice of its own and joins the
+        // nearest, which is 0.
+        let (merged, found) = merge_voices(&turns, &voices, 0.9, 2.0);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(merged.iter().all(|turn| turn.speaker == 0));
+        assert!((found[0].seconds - 10.5).abs() < 1e-9);
+
+        // Above every similarity the clusters stay apart, but the short one still joins.
+        let (merged, found) = merge_voices(&turns, &voices, 0.999, 2.0);
+        assert_eq!(found.len(), 2, "0 and 1 stay apart; the short 2 has no voice of its own: {found:?}");
+        assert_eq!(merged.iter().map(|turn| turn.speaker).collect::<Vec<_>>(), [0, 1, 0]);
+        assert!((merged[2].start - 10.0).abs() < 1e-9, "the turn of the short speaker is kept: {merged:?}");
+
+        // With no minimum a short speaker of its own stays, and ids follow the first turn.
+        let (merged, found) = merge_voices(&turns, &voices, 0.999, 0.0);
+        assert_eq!(found.len(), 3);
+        assert_eq!(merged.iter().map(|turn| turn.speaker).collect::<Vec<_>>(), [0, 1, 2]);
+        assert!(found[2].seconds < 1.0);
+    }
+
+    #[test]
+    fn merging_renumbers_the_speakers_in_the_order_they_talk() {
+        // Cluster 1 talks first, cluster 0 later; after merging, the first voice is 0.
+        let voices = vec![
+            Voice { embedding: vec![1.0, 0.0], seconds: 5.0 },
+            Voice { embedding: vec![0.0, 1.0], seconds: 5.0 },
+        ];
+        let turns = vec![Turn { start: 1.0, end: 6.0, speaker: 1 }, Turn { start: 6.0, end: 11.0, speaker: 0 }];
+        let (merged, found) = merge_voices(&turns, &voices, 0.99, 0.0);
+        assert_eq!(merged.iter().map(|turn| turn.speaker).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].embedding, vec![0.0, 1.0]);
+        // Without merging the same order still holds.
+        let (merged, _) = merge_voices(&turns, &voices, 0.5, 0.0);
+        assert_eq!(merged.iter().map(|turn| turn.speaker).collect::<Vec<_>>(), [0, 1]);
+    }
+
+    #[test]
+    fn the_gaps_of_the_clustering_numbering_are_closed_in_the_order_speakers_talk() {
+        // The clustering returns ids with gaps: 9, 4 and 11 are three speakers.
+        let mut turns = vec![
+            Turn { start: 0.0, end: 1.0, speaker: 9 },
+            Turn { start: 1.0, end: 2.0, speaker: 4 },
+            Turn { start: 2.0, end: 3.0, speaker: 11 },
+            Turn { start: 3.0, end: 4.0, speaker: 9 },
+        ];
+        assert_eq!(compact(&mut turns), 3);
+        assert_eq!(turns.iter().map(|turn| turn.speaker).collect::<Vec<_>>(), [0, 1, 2, 0]);
+        // Every turn has a voice: merging with them keeps the three speakers, none a phantom.
+        let voices = vec![
+            Voice { embedding: vec![1.0, 0.0], seconds: 2.0 },
+            Voice { embedding: vec![0.0, 1.0], seconds: 1.0 },
+            Voice { embedding: vec![0.5, 0.5], seconds: 1.0 },
+        ];
+        let (merged, found) = merge_voices(&turns, &voices, 0.99, 0.0);
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert_eq!(merged.iter().map(|turn| turn.speaker).collect::<Vec<_>>(), [0, 1, 2, 0]);
+    }
+
+    #[test]
+    fn merging_does_not_depend_on_how_the_clustering_numbered_the_speakers() {
+        // Two voices are one speaker (cosine 0.97), the third is another. The clustering may
+        // number them any way it likes; the merged result must be the same.
+        let (a, b, c) = (unit(&[1.0, 0.0, 0.0]).unwrap(), unit(&[0.97, 0.24, 0.0]).unwrap(), unit(&[0.0, 0.0, 1.0]).unwrap());
+        let turns = vec![
+            Turn { start: 0.0, end: 2.0, speaker: 0 },
+            Turn { start: 2.0, end: 4.0, speaker: 1 },
+            Turn { start: 4.0, end: 6.0, speaker: 2 },
+            Turn { start: 6.0, end: 8.0, speaker: 1 },
+        ];
+        let voices = vec![Voice { embedding: a, seconds: 2.0 }, Voice { embedding: b, seconds: 4.0 }, Voice { embedding: c, seconds: 2.0 }];
+        let (merged, found) = merge_voices(&turns, &voices, 0.9, 2.0);
+        assert_eq!(merged.iter().map(|turn| turn.speaker).collect::<Vec<_>>(), [0, 0, 1, 0], "{merged:?}");
+        assert_eq!(found.len(), 2);
+        // The same speakers, numbered 0↔2.
+        let swapped = turns.iter().map(|turn| Turn { speaker: [2, 1, 0][turn.speaker as usize], ..*turn }).collect::<Vec<_>>();
+        let swapped_voices = vec![voices[2].clone(), voices[1].clone(), voices[0].clone()];
+        let (also, also_found) = merge_voices(&swapped, &swapped_voices, 0.9, 2.0);
+        assert_eq!(also, merged);
+        assert_eq!(also_found.len(), found.len());
+        for (left, right) in found.iter().zip(&also_found) {
+            assert!((left.seconds - right.seconds).abs() < 1e-9);
+            assert!(left.embedding.iter().zip(&right.embedding).all(|(l, r)| (l - r).abs() < 1e-6));
+        }
+    }
+
+    #[test]
+    fn linked_voices_merge_whatever_their_cosine_says() {
+        // The caller knows the two are one person (they talk at once in the overlap of two
+        // chunks), though their mean voices are as far apart as they can be.
+        let turns = vec![Turn { start: 0.0, end: 5.0, speaker: 0 }, Turn { start: 5.0, end: 10.0, speaker: 1 }];
+        let voices = vec![Voice { embedding: vec![1.0, 0.0], seconds: 5.0 }, Voice { embedding: vec![0.0, 1.0], seconds: 5.0 }];
+        let (merged, found) = merge_voices_linked(&turns, &voices, &[(0, 1)], 0.8, 0.0);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(merged.iter().all(|turn| turn.speaker == 0), "{merged:?}");
+        assert!((found[0].seconds - 10.0).abs() < 1e-9);
+        // A link to an index that does not exist is ignored.
+        let (_, found) = merge_voices_linked(&turns, &voices, &[(7, 9)], 0.8, 0.0);
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn merging_to_a_known_count_takes_the_closest_voices_first() {
+        // a and b are nearly the same voice (cosine 0.994), c is another (about 0 and 0.1).
+        let (a, b, c) = (unit(&[1.0, 0.0]).unwrap(), unit(&[0.9, 0.1]).unwrap(), unit(&[0.0, 1.0]).unwrap());
+        let voices = vec![Voice { embedding: a, seconds: 2.0 }, Voice { embedding: b, seconds: 2.0 }, Voice { embedding: c, seconds: 4.0 }];
+        let turns = vec![
+            Turn { start: 0.0, end: 2.0, speaker: 0 },
+            Turn { start: 2.0, end: 4.0, speaker: 1 },
+            Turn { start: 4.0, end: 8.0, speaker: 2 },
+        ];
+        let (merged, found) = merge_voices_to(&turns, &voices, 2);
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(merged.iter().map(|turn| turn.speaker).collect::<Vec<_>>(), [0, 0, 1], "a and b are one speaker");
+        assert!((found[0].seconds - 4.0).abs() < 1e-9 && (found[1].seconds - 4.0).abs() < 1e-9);
+
+        // A count at or above the number of voices keeps them all.
+        let (_, found) = merge_voices_to(&turns, &voices, 3);
+        assert_eq!(found.len(), 3);
+        let (_, found) = merge_voices_to(&turns, &voices, 9);
+        assert_eq!(found.len(), 3);
     }
 
     #[test]

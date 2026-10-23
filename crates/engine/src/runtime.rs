@@ -7,6 +7,7 @@ use crate::embed::{Embedder, Reranker};
 use crate::hub;
 use crate::llm::{estimate_bytes, LocalModel};
 use crate::scheduler::{Lease, ModelNeed, Pool, Scheduler};
+use anyhow::Context;
 use mediaa_core::agent::{Budget, Device, ModelSource, WorkKind};
 use mediaa_core::pulse;
 use std::any::Any;
@@ -86,6 +87,20 @@ pub fn gguf_path(models_root: &Path, source: &ModelSource) -> anyhow::Result<Pat
     Ok(place.join(pick))
 }
 
+/// The name a model is known by outside the runtime: `owner/repo` for a Hugging Face one, the
+/// absolute path for a local one. [`Runtime::with_model`] reports it in the scheduler status, so
+/// a caller recognizes its model by the same name it asked for it with.
+pub fn source_name(source: &ModelSource) -> anyhow::Result<String> {
+    Ok(match source {
+        ModelSource::HuggingFace { repo } => repo.trim().to_string(),
+        ModelSource::Local { path } => std::path::absolute(path)
+            .with_context(|| format!("the path of a model: {}", path.display()))?
+            .display()
+            .to_string(),
+        ModelSource::Provider { .. } => anyhow::bail!("a provider's model does not run locally"),
+    })
+}
+
 /// How a job wants a model run.
 #[derive(Debug, Clone, Copy)]
 pub struct Use {
@@ -146,7 +161,7 @@ impl Runtime {
         let Use { kind, device, n_ctx, interactive } = how;
         let path = gguf_path(&self.models_root, source)?;
         let key = path.display().to_string();
-        let need = ModelNeed { key: key.clone(), bytes: estimate_bytes(&path, n_ctx)?, device, n_ctx };
+        let need = ModelNeed { key: key.clone(), name: source_name(source)?, bytes: estimate_bytes(&path, n_ctx)?, device, n_ctx };
         let lease = self.scheduler.request(kind, Some(need), interactive).wait(cancel)?;
         // The queue's watchdog reads from the pulse which model a call that never returns was
         // using, and unloads it before the task tries again.
@@ -437,6 +452,29 @@ mod tests {
     fn assert_same(model: &FakeModel, lease: &Lease) -> u32 {
         assert_eq!(model.n_ctx, lease.n_ctx());
         model.n_ctx
+    }
+
+    /// The status names a model the way the caller asked for it, not by its file: the agent
+    /// compares that name with the settings' spec to tell "loading" from "running".
+    #[test]
+    fn a_resident_is_reported_by_the_name_the_caller_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("owner--repo");
+        std::fs::create_dir(&repo).unwrap();
+        let file = repo.join("m-Q4_K_M.gguf");
+        std::fs::write(&file, b"x").unwrap();
+        std::fs::write(repo.join(".mediaa-complete"), b"owner/repo").unwrap();
+        let source = ModelSource::HuggingFace { repo: "owner/repo".into() };
+        let rt = runtime(dir.path());
+        let ctx = |n_ctx| use_model(&rt, &source, n_ctx, |model, lease| Ok(assert_same(model, lease))).unwrap();
+        assert_eq!(ctx(32), 32);
+        // A second step of the same chat asks again: same load, same name.
+        assert_eq!(ctx(32), 32);
+        assert_eq!(script(&file).loads.load(Ordering::SeqCst), 1, "one load for two calls");
+        let status = rt.scheduler().status();
+        assert_eq!(status.loaded.len(), 1);
+        assert_eq!(status.loaded[0].name, "owner/repo");
+        assert_eq!(status.loaded[0].key, file.display().to_string(), "the key stays the file");
     }
 
     #[test]

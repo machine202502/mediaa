@@ -441,7 +441,7 @@ fn mono_ms() -> u128 {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Choice {
-    /// Optional roles: unset (the sub-agent then uses the main agent's model).
+    /// Optional roles: unset (not used).
     Unset,
     HuggingFace,
     Local,
@@ -453,7 +453,6 @@ fn role_title(r: ModelRole) -> String {
         ModelRole::Embedding => t!("agent.role_embedding"),
         ModelRole::Reranker => t!("agent.role_reranker"),
         ModelRole::Agent => t!("agent.role_agent"),
-        ModelRole::Subagent => t!("agent.role_subagent"),
         ModelRole::Titles => t!("agent.role_titles"),
         ModelRole::SpeechRecognition => t!("agent.role_speech_rec"),
         ModelRole::Diarization => t!("agent.role_diarization"),
@@ -467,7 +466,6 @@ fn role_hint(r: ModelRole) -> String {
         ModelRole::Embedding => t!("agent.hint_embedding"),
         ModelRole::Reranker => t!("agent.hint_reranker"),
         ModelRole::Agent => t!("agent.hint_agent"),
-        ModelRole::Subagent => t!("agent.hint_subagent"),
         ModelRole::Titles => t!("agent.hint_titles"),
         ModelRole::SpeechRecognition => t!("agent.hint_speech_rec"),
         ModelRole::Diarization => t!("agent.hint_diarization"),
@@ -482,7 +480,6 @@ fn role_fit_hint(r: ModelRole) -> String {
         ModelRole::Embedding => t!("agent.fit_embedding"),
         ModelRole::Reranker => t!("agent.fit_reranker"),
         ModelRole::Agent => t!("agent.fit_agent"),
-        ModelRole::Subagent => t!("agent.fit_agent"),
         ModelRole::Titles => t!("agent.fit_titles"),
         ModelRole::SpeechRecognition => t!("agent.fit_speech_rec"),
         ModelRole::Diarization => t!("agent.fit_diarization"),
@@ -496,7 +493,6 @@ fn role_icon(r: ModelRole) -> &'static str {
         ModelRole::Embedding => icon::MAGNIFYING_GLASS,
         ModelRole::Reranker => icon::SORT_DESCENDING,
         ModelRole::Agent => icon::SPARKLE,
-        ModelRole::Subagent => icon::USERS_THREE,
         ModelRole::Titles => icon::TEXT_T,
         ModelRole::SpeechRecognition => icon::MICROPHONE,
         ModelRole::Diarization => icon::USER_SWITCH,
@@ -516,7 +512,6 @@ fn status_line(ui: &mut egui::Ui, s: &Status) {
                 Ready::Ran { bytes } => t!("agent.ready_ran", size = human_size(*bytes)).to_string(),
                 Ready::Provider => t!("agent.ready_provider").into(),
                 Ready::NotUsed => t!("agent.ready_unused").into(),
-                Ready::SameAsAgent => t!("agent.ready_same").into(),
             };
             ui.label(RichText::new(format!("{}  {text}", icon::CHECK_CIRCLE)).color(p.success));
         }
@@ -558,7 +553,7 @@ fn source_editor(app: &mut App, ui: &mut egui::Ui, role: ModelRole) -> bool {
             (Choice::Provider, format!("{}  {}", icon::PLUGS_CONNECTED, t!("agent.source_provider"))),
         ];
         if !role.required() {
-            let unset = if role == ModelRole::Subagent { t!("agent.same_as_agent") } else { t!("agent.not_used") };
+            let unset = t!("agent.not_used");
             opts.insert(0, (Choice::Unset, unset.into()));
         }
         theme::segmented(ui, &mut choice, &opts);

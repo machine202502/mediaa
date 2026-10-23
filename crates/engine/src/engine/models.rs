@@ -16,7 +16,6 @@ pub fn role_name(role: ModelRole) -> &'static str {
         ModelRole::Embedding => "embedding",
         ModelRole::Reranker => "reranker",
         ModelRole::Agent => "agent",
-        ModelRole::Subagent => "subagent",
         ModelRole::Titles => "titles",
         ModelRole::SpeechRecognition => "speech_recognition",
         ModelRole::Diarization => "diarization",
@@ -60,7 +59,7 @@ pub fn role_fitness(files: &[ModelFile]) -> (Vec<String>, Vec<String>) {
     let mut roles: Vec<String> = Vec::new();
     let mut problems = Vec::new();
     match format {
-        ModelFormat::Gguf => roles.extend(["agent", "subagent", "titles", "embedding", "reranker"].map(str::to_string)),
+        ModelFormat::Gguf => roles.extend(["agent", "titles", "embedding", "reranker"].map(str::to_string)),
         ModelFormat::SherpaOnnx => roles.push("speech_recognition".to_string()),
         ModelFormat::Onnx => roles.push("diarization".to_string()),
         ModelFormat::Other => {}
@@ -204,7 +203,7 @@ mod tests {
     #[test]
     fn roles_follow_the_format_and_problems_say_why_not() {
         let (roles, problems) = role_fitness(&files(&[("model-Q4_K_M.gguf", 100)]));
-        assert_eq!(roles, ["agent", "subagent", "titles", "embedding", "reranker"]);
+        assert_eq!(roles, ["agent", "titles", "embedding", "reranker"]);
         assert!(!problems.iter().any(|problem| problem.starts_with("no GGUF")), "llama.cpp roles fit");
         assert!(problems.iter().any(|problem| problem.contains("speech recognition")));
 

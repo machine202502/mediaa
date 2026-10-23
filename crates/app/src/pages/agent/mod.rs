@@ -56,6 +56,15 @@ fn pool_key(budget: &Budget) -> (u32, u32, u32, u32, u64) {
     )
 }
 
+/// The settings the stages see: the app's settings with the code of the interface language,
+/// which the texts the models write for the user follow. The stages have no other way to learn
+/// it, and it is not saved with the settings.
+fn with_language(agent: &AgentSettings, language: &str) -> AgentSettings {
+    let mut wanted = agent.clone();
+    wanted.ui_language = Some(language.to_string());
+    wanted
+}
+
 pub struct AgentUi {
     pub catalogs: catalogs::CatalogsUi,
     pub providers: providers::ProvidersUi,
@@ -94,8 +103,10 @@ impl AgentUi {
 
     /// Keeps the engine's budget, the slots of model work and the queue worker on the library's
     /// `.ai` folder and the current settings (called every frame; cheap when nothing changed).
-    /// Also asks the engine for its state in the background (one poller for every page).
-    pub fn tick(&mut self, ai_dir: &Path, agent: &AgentSettings, ctx: &egui::Context) {
+    /// `language` is the interface language's code: the texts the models write for the user
+    /// follow it. Also asks the engine for its state in the background (one poller for every
+    /// page).
+    pub fn tick(&mut self, ai_dir: &Path, agent: &AgentSettings, language: &str, ctx: &egui::Context) {
         self.engine_state.tick(&self.engine, ctx);
         self.slots.set_budget(agent.budget.clone());
         let budget: mediaa_engine::Budget = agent.budget.clone().into();
@@ -104,12 +115,13 @@ impl AgentUi {
             self.engine.set_budget(budget);
             self.engine_budget = budget;
         }
+        let wanted = with_language(agent, language);
         let pools = pool_key(&agent.budget);
         if let Some(hosted) = &self.hosted {
             if hosted.dir == ai_dir && hosted.pools == pools {
-                let stale = *hosted.settings.read().expect("settings lock") != *agent;
+                let stale = *hosted.settings.read().expect("settings lock") != wanted;
                 if stale {
-                    *hosted.settings.write().expect("settings lock") = agent.clone();
+                    *hosted.settings.write().expect("settings lock") = wanted;
                 }
                 return;
             }
@@ -117,7 +129,7 @@ impl AgentUi {
         // A new library, or new pool sizes: a host of its own. Recover continues runs the
         // previous process left in the file.
         self.hosted = None;
-        let settings = Arc::new(RwLock::new(agent.clone()));
+        let settings = Arc::new(RwLock::new(wanted));
         let s = settings.clone();
         let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || s.read().expect("settings lock").clone());
         let slots = self.slots.clone();
@@ -165,5 +177,20 @@ impl AgentUi {
             streams: hosted.streams.clone(),
             feed: hosted.feed.clone(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_stages_get_the_interface_language_with_the_settings() {
+        let agent = AgentSettings { verify_answers: false, ..AgentSettings::default() };
+        let wanted = with_language(&agent, "ru");
+        assert_eq!(wanted.ui_language.as_deref(), Some("ru"));
+        assert_eq!(wanted.language_name(), "Russian");
+        assert!(!wanted.verify_answers, "the rest of the settings is kept");
+        assert!(agent.ui_language.is_none(), "the saved settings are not touched");
     }
 }

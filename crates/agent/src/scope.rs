@@ -4,16 +4,18 @@
 //! the engine (status, downloading and checking models) are not task work and go around it.
 
 use mediaa_core::agent::ModelRole;
-use mediaa_engine::speech::{Phrase, Turn};
+use mediaa_engine::speech::Phrase;
 use mediaa_engine::{
-    Budget as EngineBudget, ChatAnswer, ChatRequest, DiarizeRequest, EmbeddingsRequest, Engine, EngineError, Health, ModelCheck, ModelInfo, ModelInspect,
-    ProgressCallback, RerankRequest, RerankResult, Status, Thinking, VadSession,
+    Budget as EngineBudget, ChatAnswer, ChatRequest, Diarization, DiarizeRequest, EmbeddingsRequest, Engine, EngineError, Health, ModelCheck, ModelInfo,
+    ModelInspect, ProgressCallback, RerankRequest, RerankResult, Status, Thinking, VadSession,
 };
 use mediaa_queue::{Stats, Status as TaskStatus, Store, TaskId};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
+use std::thread::ThreadId;
 use std::time::Instant;
 
 /// A task as the queue page names it: its kind and its title (the data part, see `Task::title`).
@@ -31,13 +33,14 @@ pub struct Scope {
     engine: Arc<dyn Engine>,
     key: Option<String>,
     /// The task that model calls are counted in while it is set (a step or a tool of an answer
-    /// that is run by this scope); otherwise the scope's own. Clones share it.
-    focus: Arc<Mutex<Option<TaskId>>>,
+    /// that is run by this scope); otherwise the scope's own. It is per thread: calls of one step
+    /// run in threads of their own, each focused on its own child. Clones share it.
+    focus: Arc<Mutex<HashMap<ThreadId, TaskId>>>,
 }
 
 impl Scope {
     pub fn attach(store: Arc<dyn Store>, task: TaskId, engine: Arc<dyn Engine>, key: Option<String>) -> Scope {
-        Scope { store, task, engine, key, focus: Arc::new(Mutex::new(None)) }
+        Scope { store, task, engine, key, focus: Arc::new(Mutex::new(HashMap::new())) }
     }
 
     /// Starts an inline task that the caller runs itself and returns its scope.
@@ -58,14 +61,22 @@ impl Scope {
         &self.store
     }
 
-    /// From now on the model calls of this scope (and of its clones) are counted in `task`, a
-    /// child that this caller runs (`None`: in the scope's own task again).
+    /// From now on the model calls of this thread of the scope (and of its clones) are counted in
+    /// `task`, a child that this thread runs (`None`: in the scope's own task again).
     pub fn focus(&self, task: Option<TaskId>) {
-        *self.focus.lock().expect("scope focus lock") = task;
+        let mut focus = self.focus.lock().expect("scope focus lock");
+        match task {
+            Some(task) => {
+                focus.insert(std::thread::current().id(), task);
+            }
+            None => {
+                focus.remove(&std::thread::current().id());
+            }
+        }
     }
 
     fn accounted(&self) -> TaskId {
-        self.focus.lock().expect("scope focus lock").unwrap_or(self.task)
+        self.focus.lock().expect("scope focus lock").get(&std::thread::current().id()).copied().unwrap_or(self.task)
     }
 
     /// Counts one model call that did not go through [`Scope::engine`] (a provider's).
@@ -139,7 +150,7 @@ impl Scope {
             task: id,
             engine: self.engine.clone(),
             key: self.key.clone(),
-            focus: Arc::new(Mutex::new(None)),
+            focus: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -237,7 +248,7 @@ impl Engine for ScopedEngine {
         result
     }
 
-    fn diarize(&self, request: &DiarizeRequest, samples: &[f32]) -> Result<Vec<Turn>, EngineError> {
+    fn diarize(&self, request: &DiarizeRequest, samples: &[f32]) -> Result<Diarization, EngineError> {
         let started = Instant::now();
         let result = self.scope.engine.diarize(request, samples);
         self.scope.add_stats(&[&request.segmentation, &request.embedding], started, 0, 0);
@@ -299,7 +310,13 @@ mod tests {
         engine.recognize("owner/asr", 0.0, &[0.0; 16], None).unwrap();
         engine
             .diarize(
-                &DiarizeRequest { segmentation: "owner/seg.onnx".into(), embedding: "owner/spk.onnx".into(), speakers: None, hf_token: None },
+                &DiarizeRequest {
+                    segmentation: "owner/seg.onnx".into(),
+                    embedding: "owner/spk.onnx".into(),
+                    speakers: None,
+                    hf_token: None,
+                    ..DiarizeRequest::default()
+                },
                 &[0.0; 16],
             )
             .unwrap();
@@ -345,6 +362,35 @@ mod tests {
         assert_eq!(t.scope.as_deref(), Some("rec-7"));
         assert_eq!(t.kind, "tool");
         assert_eq!(t.status, TaskStatus::Running);
+    }
+
+    #[test]
+    fn threads_of_one_scope_focus_their_own_tasks() {
+        // Steps of one answer run at once in threads of their own: each counts its model calls
+        // in its own child, not in whichever focus was set last.
+        let dir = tempfile::tempdir().unwrap();
+        let store = opened(dir.path());
+        let parent = task(store.as_ref(), "answer", None);
+        let scope = Scope::attach(store.clone(), parent, Arc::new(FakeEngine::new()), None);
+        let children: Vec<TaskId> = (0..2).map(|_| scope.inline_child("tool", "search", &json!({})).unwrap().task()).collect();
+        let engine = scope.engine();
+        let cancel = AtomicBool::new(false);
+        let cancel = &cancel;
+        std::thread::scope(|s| {
+            for &child in &children {
+                let (engine, scope) = (engine.clone(), scope.clone());
+                s.spawn(move || {
+                    scope.focus(Some(child));
+                    let request = ChatRequest { model: "owner/model".into(), messages: vec![ChatMessage::user("hi")], ..ChatRequest::default() };
+                    engine.chat(&request, cancel, &mut |_| true).unwrap();
+                    scope.focus(None);
+                });
+            }
+        });
+        for child in children {
+            assert_eq!(store.get(child).unwrap().unwrap().stats.model_calls, 1);
+        }
+        assert_eq!(store.get(parent).unwrap().unwrap().stats.model_calls, 0, "the parent runs nothing itself");
     }
 
     #[test]

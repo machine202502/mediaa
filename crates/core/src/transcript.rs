@@ -60,6 +60,35 @@ impl Reply {
     }
 }
 
+/// Where a speaker's name came from: the user (the automatic search never changes it) or the
+/// `speaker-names` task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NameSource {
+    Manual,
+    Auto,
+}
+
+/// A line that shows who a speaker is, as the `speaker-names` task checked it. Kept for the
+/// names dialog and the task's details.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NameEvidence {
+    /// The time of the line.
+    pub start: f64,
+    /// The text of the line.
+    pub text: String,
+    /// How it shows it: `self`, `addressed`, `introduced` or `nickname`.
+    pub how: String,
+}
+
+/// A speaker's name with where it came from and what shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpeakerName {
+    pub name: String,
+    pub source: NameSource,
+    pub evidence: Vec<NameEvidence>,
+}
+
 /// Pauses longer than this start a new reply even when the speaker is the same.
 const REPLY_GAP: f64 = 1.5;
 /// Replies longer than this are split at the next pause between phrases.
@@ -131,7 +160,7 @@ pub fn db_path(ai_dir: &Path, id: &str) -> PathBuf {
     ai_dir.join("media").join(format!("{id}.db"))
 }
 
-const SCHEMA: i64 = 4;
+const SCHEMA: i64 = 5;
 
 pub struct Transcript {
     pub(crate) db: Connection,
@@ -171,14 +200,14 @@ impl Transcript {
                  CREATE TABLE phrases (start REAL NOT NULL, end_ REAL NOT NULL, words TEXT NOT NULL);
                  CREATE INDEX phrases_start ON phrases (start);
                  CREATE TABLE replies (start REAL NOT NULL, end_ REAL NOT NULL, speaker INTEGER, words TEXT NOT NULL);
-                 CREATE TABLE speakers (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+                 CREATE TABLE speakers (id INTEGER PRIMARY KEY, name TEXT NOT NULL, source TEXT NOT NULL, evidence TEXT NOT NULL);
                  CREATE TABLE chunks (id INTEGER PRIMARY KEY, start REAL NOT NULL, end_ REAL NOT NULL, speakers TEXT NOT NULL, text TEXT NOT NULL, embedding BLOB);
                  CREATE VIRTUAL TABLE chunks_fts USING fts5(stems, content='', contentless_delete=1, tokenize='unicode61 remove_diacritics 2');
                  CREATE TABLE chapters (idx INTEGER PRIMARY KEY, start REAL NOT NULL, end_ REAL NOT NULL, data TEXT NOT NULL);
                  CREATE TABLE chats (id INTEGER PRIMARY KEY, title TEXT NOT NULL, created_ms INTEGER NOT NULL);
                  CREATE TABLE messages (id INTEGER PRIMARY KEY, chat INTEGER NOT NULL REFERENCES chats(id) ON DELETE CASCADE, role TEXT NOT NULL, text TEXT NOT NULL, details TEXT NOT NULL, created_ms INTEGER NOT NULL);
                  CREATE INDEX messages_chat ON messages (chat, id);
-                 PRAGMA user_version = 4;",
+                 PRAGMA user_version = 5;",
             )?;
         }
         Ok(Transcript { db })
@@ -263,12 +292,56 @@ impl Transcript {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Names a speaker; an empty name removes it.
+    /// Names given to speakers, with where each came from and the evidence of an automatic one.
+    pub fn speaker_entries(&self) -> anyhow::Result<BTreeMap<u32, SpeakerName>> {
+        let mut q = self.db.prepare("SELECT id, name, source, evidence FROM speakers")?;
+        let rows = q.query_map([], |r| {
+            let source: String = r.get(2)?;
+            let evidence: String = r.get(3)?;
+            Ok((
+                r.get(0)?,
+                SpeakerName {
+                    name: r.get(1)?,
+                    source: if source == "auto" { NameSource::Auto } else { NameSource::Manual },
+                    evidence: serde_json::from_str(&evidence).unwrap_or_default(),
+                },
+            ))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Names a speaker; an empty name removes it. The name is the user's, so the automatic search
+    /// never replaces it.
     pub fn rename_speaker(&self, speaker: u32, name: &str) -> anyhow::Result<()> {
         match name.trim() {
             "" => self.db.execute("DELETE FROM speakers WHERE id = ?1", [speaker])?,
-            name => self.db.execute("INSERT OR REPLACE INTO speakers (id, name) VALUES (?1, ?2)", params![speaker, name])?,
+            name => self.db.execute(
+                "INSERT OR REPLACE INTO speakers (id, name, source, evidence) VALUES (?1, ?2, 'manual', '[]')",
+                params![speaker, name],
+            )?,
         };
+        Ok(())
+    }
+
+    /// Writes a name found by the `speaker-names` task: only for a speaker the user has not named,
+    /// replacing an earlier automatic name. Returns whether it was written.
+    pub fn set_auto_name(&self, speaker: u32, name: &str, evidence: &[NameEvidence]) -> anyhow::Result<bool> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Ok(false);
+        }
+        let evidence = serde_json::to_string(evidence)?;
+        let written = self.db.execute(
+            "INSERT INTO speakers (id, name, source, evidence) VALUES (?1, ?2, 'auto', ?3)
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, evidence = excluded.evidence WHERE speakers.source = 'auto'",
+            params![speaker, name, evidence],
+        )?;
+        Ok(written > 0)
+    }
+
+    /// Forgets the names the `speaker-names` task gave (a new run replaces them); the user's stay.
+    pub fn clear_auto_names(&self) -> anyhow::Result<()> {
+        self.db.execute("DELETE FROM speakers WHERE source = 'auto'", [])?;
         Ok(())
     }
 
@@ -391,5 +464,40 @@ mod tests {
         drop(c);
         let t = Transcript::open(dir.path(), "f").unwrap();
         assert!(t.phrases().unwrap().is_empty() && t.chunks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_automatic_name_never_replaces_the_users() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = Transcript::open(dir.path(), "f").unwrap();
+        let evidence = [NameEvidence { start: 12.0, text: "Меня зовут Антон.".into(), how: "self".into() }];
+        assert!(t.set_auto_name(0, " Антон ", &evidence).unwrap());
+        let entries = t.speaker_entries().unwrap();
+        assert_eq!(entries[&0].name, "Антон");
+        assert_eq!(entries[&0].source, NameSource::Auto);
+        assert_eq!(entries[&0].evidence, evidence);
+        assert_eq!(t.speaker_names().unwrap()[&0], "Антон");
+
+        // The user's name wins, and the evidence of the old automatic one goes.
+        t.rename_speaker(0, "Антоша").unwrap();
+        assert!(!t.set_auto_name(0, "Антон", &evidence).unwrap());
+        let entries = t.speaker_entries().unwrap();
+        assert_eq!((entries[&0].name.as_str(), entries[&0].source), ("Антоша", NameSource::Manual));
+        assert!(entries[&0].evidence.is_empty());
+
+        // A new automatic name replaces an earlier automatic one.
+        t.rename_speaker(0, "").unwrap();
+        t.set_auto_name(0, "Антон", &evidence).unwrap();
+        t.set_auto_name(0, "Антон Петров", &[]).unwrap();
+        assert_eq!(t.speaker_names().unwrap()[&0], "Антон Петров");
+
+        // Clearing the automatic names keeps the user's.
+        t.rename_speaker(1, "Дана").unwrap();
+        t.clear_auto_names().unwrap();
+        assert_eq!(t.speaker_names().unwrap(), BTreeMap::from([(1, "Дана".to_string())]));
+
+        // An empty automatic name is not written.
+        assert!(!t.set_auto_name(2, "   ", &[]).unwrap());
+        assert!(!t.speaker_names().unwrap().contains_key(&2));
     }
 }

@@ -11,7 +11,7 @@ const STEP_SEARCH: &str = r#"{"thought":"","action":"search","title":"Ищу о�
 const STEP_ANSWER: &str = r#"{"thought":"","action":"answer","answer":"В пятницу [0:10]."}"#;
 const STEP_CHECK: &str = r#"{"changed":true,"answer":"В пятницу [0:10]."}"#;
 
-fn nothing(_: &str, _: usize) -> anyhow::Result<Vec<mediaa_core::retrieval::Hit>> {
+fn nothing(_: &str, _: crate::search::Options, _: usize) -> anyhow::Result<Vec<mediaa_core::retrieval::Hit>> {
     Ok(vec![])
 }
 
@@ -254,6 +254,10 @@ fn the_pane_state_follows_events() {
     let mut live = Live::new();
     live.apply(&Event::Waiting { reason: WaitReason::Loading { model: "m".into() } });
     assert!(live.waiting.is_some());
+    let metrics = Metrics { context_tokens: 6100, context: 8000, speed: Some(12.4) };
+    live.apply(&Event::Metrics(metrics));
+    assert_eq!(live.metrics, Some(metrics), "the numbers of the running answer");
+    assert!(live.waiting.is_some(), "the numbers do not end the waiting");
     live.apply(&Event::Thinking("Думаю".into()));
     assert_eq!(live.waiting, None, "any other event ends the waiting");
     live.apply(&Event::Scanning { done: 1, total: 3 });
@@ -268,4 +272,5 @@ fn the_pane_state_follows_events() {
         live.timeline.entries.iter().any(|e| matches!(e, mediaa_core::chat::TimelineEntry::Step { status, .. } if status == "stopped")),
         "a step that never ended is marked"
     );
+    assert_eq!(live.details(false, false)["metrics"], json!(metrics), "the numbers stay in the saved answer");
 }

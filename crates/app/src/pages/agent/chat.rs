@@ -132,6 +132,19 @@ enum Jump {
     Open(PathBuf, f64),
 }
 
+/// What a message sent now becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sent {
+    /// Nothing of this chat runs: a question of its own.
+    Question,
+    /// This answer of the chat runs: a correction it takes after the current step.
+    Correction(i64),
+}
+
+fn sent_as(running: Option<i64>) -> Sent {
+    running.map_or(Sent::Question, Sent::Correction)
+}
+
 /// What a chat talks about.
 enum Scope {
     /// One recording; its chats are kept with its transcript.
@@ -280,11 +293,19 @@ impl Chat {
         }
     }
 
-    /// Sends the typed question: stored at once, answered by a queue task.
-    fn send(&mut self, services: &Services, player: Option<&Player>) {
+    /// Sends the typed message: while an answer of this chat runs it is a correction of that
+    /// answer, otherwise a new question stored at once and answered by a queue task.
+    fn send(&mut self, services: &Services, player: Option<&Player>, roster: &Roster) {
+        self.draft.name_mentions(roster);
         let question = self.draft.to_message().trim().to_string();
         let Some(t) = self.transcript() else { return };
-        if question.is_empty() || self.blocks_input(Some(services)) {
+        if question.is_empty() {
+            return;
+        }
+        if let Sent::Correction(answer) = sent_as(self.running_answer_id(services)) {
+            if let Some(chat) = self.current {
+                self.steer(&t, chat, answer, &question);
+            }
             return;
         }
         let new_chat = self.current.is_none();
@@ -456,11 +477,25 @@ impl Chat {
         self.refresh(true);
     }
 
-    fn blocks_input(&self, services: Option<&Services>) -> bool {
-        let Some(services) = services else { return false };
-        let Some(chat) = self.current else { return false };
-        let Ok(tasks) = services.sched.store().list() else { return false };
-        queued::running_answer(&tasks, &self.store_key(), chat).is_some()
+    /// Stores a correction of the running answer: it is kept with the chat, survives a restart
+    /// and the answer takes it after the step that runs now.
+    fn steer(&mut self, t: &Transcript, chat: ChatId, answer: i64, text: &str) {
+        let details = serde_json::json!({ "steer": { "task": answer } });
+        match t.add_message(chat, Author::User, text, &details) {
+            Ok(()) => {
+                self.draft = Field::default();
+                self.error = None;
+                self.refresh(true);
+            }
+            Err(e) => self.error = Some(format!("{e:#}")),
+        }
+    }
+
+    /// The answer of this chat that is not finished yet (running or waiting for a turn).
+    fn running_answer_id(&self, services: &Services) -> Option<i64> {
+        let chat = self.current?;
+        let tasks = services.sched.store().list().ok()?;
+        queued::running_answer(&tasks, &self.store_key(), chat).map(|task| task.id)
     }
 
     fn busy_tabs(&self, services: Option<&Services>) -> Vec<ChatId> {
@@ -474,7 +509,8 @@ impl Chat {
             .collect()
     }
 
-    fn live_now(&self, services: Option<&Services>) -> Option<Live> {
+    /// The live answer of this chat with its task id (the corrections sent now belong to it).
+    fn live_now(&self, services: Option<&Services>) -> Option<(i64, Live)> {
         let services = services?;
         let chat = self.current?;
         let tasks = services.sched.store().list().ok()?;
@@ -484,7 +520,7 @@ impl Chat {
         }
         let id = task.id;
         let live = services.streams.get(id)?;
-        (!live.closed()).then_some(with_live_phrases(live, &tasks, id))
+        (!live.closed()).then(|| (id, with_live_phrases(live, &tasks, id)))
     }
 
     /// The cursor of an answer that is waiting in a fresh process, so the continuation line can
@@ -545,7 +581,7 @@ impl Chat {
             if let (false, Some(s), Ok(q)) = (self.dev_asked, services, std::env::var("MEDIAA_DEV_ASK")) {
                 self.dev_asked = true;
                 self.draft.set_plain(&q);
-                self.send(s, player.as_deref());
+                self.send(s, player.as_deref(), &roster);
             }
             self.chats_bar(ui, &roster, services);
             let input_h = 86.0;
@@ -553,6 +589,12 @@ impl Chat {
             let live = self.live_now(services);
             let parked = self.parked_answer(services);
             let tasks = services.and_then(|s| s.sched.store().list().ok());
+            // Sent while the answer runs and not taken yet: under «думаю…», not in the list.
+            let pending = match (&live, self.current) {
+                (Some((answer, live)), Some(_)) => queued::pending_steers(&self.messages, *answer, live.steers_taken),
+                _ => Vec::new(),
+            };
+            let pending_texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
             let list = Rect::from_min_max(ui.cursor().min, egui::pos2(ui.max_rect().max.x, ui.max_rect().max.y - input_h));
             let mut typed_seek = None;
             ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
@@ -564,7 +606,7 @@ impl Chat {
                     }
                     let hidden = timeline::hidden_sections(&self.messages, live.is_some());
                     for (n, m) in self.messages.iter().enumerate() {
-                        if hidden[n] {
+                        if hidden[n] || pending.iter().any(|(index, _)| *index == n) {
                             continue;
                         }
                         let overlaid = tasks.as_ref().map(|tasks| with_phrases(m, tasks));
@@ -576,11 +618,11 @@ impl Chat {
                     if let Some(line) = self.waiting_line(services) {
                         theme::hint(ui, line);
                     }
-                    if let Some(live) = &live {
+                    if let Some((_, live)) = &live {
                         if live.continuing {
                             theme::hint(ui, t!("studio.continuing"));
                         }
-                        if let Some(t) = timeline::live_ui(ui, live, bare, &roster, p) {
+                        if let Some(t) = timeline::live_ui(ui, live, bare, &roster, p, &pending_texts) {
                             seek = Some(t);
                         }
                     } else if let Some(parked) = &parked {
@@ -837,12 +879,12 @@ impl Chat {
         let saved = self.draft.text.clone();
         let saved_chips = self.draft.chips.clone();
         let editor = ui.horizontal(|ui| {
-            let running = self.blocks_input(services);
+            let running = services.and_then(|s| self.running_answer_id(s)).is_some();
             let out = {
                 let edit = egui::TextEdit::multiline(&mut self.draft.text).id(id).hint_text(t!("studio.ask_hint")).desired_rows(3).desired_width(ui.available_width() - 36.0);
                 let edit = edit.layouter(&mut layouter);
-                // Disabled while this chat's answer is unfinished (the row stays; typing does not).
-                ui.add_enabled_ui(!running, |ui| edit.show(ui)).inner
+                // Enabled while an answer runs too: a message sent then is a correction of it.
+                edit.show(ui)
             };
             let resp = &out.response;
             let enter = resp.has_focus() && !self.mention_open && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
@@ -876,20 +918,23 @@ impl Chat {
                 }
                 resp.clicked().then_some(hit).flatten()
             });
-            ui.vertical(|ui| {
+            let clicked_send = ui.vertical(|ui| {
                 if running {
-                    if theme::icon_button(ui, icon::STOP, &t!("studio.stop")).clicked() {
-                        if let Some(s) = services {
-                            self.stop(s);
-                        }
-                    }
-                } else if (theme::icon_button(ui, icon::PAPER_PLANE_RIGHT, &t!("studio.send")).clicked() || enter) && !self.draft.to_message().trim().is_empty() {
-                    match services {
-                        Some(s) => self.send(s, player),
-                        None => self.error = Some(t!("studio.agent_not_ready").into()),
-                    }
+                    theme::icon_button(ui, icon::STOP, &t!("studio.stop")).clicked()
+                } else {
+                    theme::icon_button(ui, icon::PAPER_PLANE_RIGHT, &t!("studio.send")).clicked()
                 }
-            });
+            }).inner;
+            if running && clicked_send {
+                if let Some(s) = services {
+                    self.stop(s);
+                }
+            } else if (clicked_send || enter) && !self.draft.to_message().trim().is_empty() {
+                match services {
+                    Some(s) => self.send(s, player, roster),
+                    None => self.error = Some(t!("studio.agent_not_ready").into()),
+                }
+            }
             (resp.response.rect, out.cursor_range, seek)
         });
         let (rect, cursor, seek) = editor.inner;
@@ -1256,6 +1301,11 @@ fn message_ui(ui: &mut egui::Ui, n: usize, m: &ChatMessage, bare_times: bool, ro
                 let forced = m.details["forced"].as_bool() == Some(true);
                 let steps: Vec<mediaa_agent::assistant::StepRecord> = serde_json::from_value(m.details["steps"].clone()).unwrap_or_default();
                 seek = timeline::timeline_ui(ui, ("message", n), &timeline.entries, &steps, true, forced, bare_times, roster, p);
+                // The numbers of the finished answer stay in its details.
+                let metrics: Option<mediaa_agent::assistant::Metrics> = serde_json::from_value(m.details["metrics"].clone()).ok();
+                if let Some(metrics) = metrics {
+                    timeline::metrics_ui(ui, Some(&metrics), p);
+                }
             }
             if m.details["continuing"].as_bool() == Some(true) {
                 theme::hint(ui, t!("studio.continuing"));
@@ -1349,6 +1399,26 @@ mod tests {
         let tabs = tab_list(&chats, &open, Some(7), "Новый чат", &[]);
         assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), [Some(5), Some(9), Some(7)]);
         assert!(tabs[2].active && tabs[..2].iter().all(|t| !t.active));
+    }
+
+    #[test]
+    fn a_message_sent_while_the_answer_runs_is_a_correction_of_it() {
+        // The input stays enabled while an answer runs; what is sent then corrects that answer.
+        assert_eq!(sent_as(None), Sent::Question);
+        assert_eq!(sent_as(Some(7)), Sent::Correction(7));
+    }
+
+    #[test]
+    fn corrections_wait_under_the_answer_until_taken() {
+        let steer = |task: i64, text: &str| ChatMessage { author: Author::User, text: text.into(), details: serde_json::json!({ "steer": { "task": task } }) };
+        let plain = ChatMessage { author: Author::User, text: "Когда отчёт?".into(), details: serde_json::Value::Null };
+        let messages = [plain, steer(7, "Ещё про бюджет."), steer(7, "И про сроки."), steer(9, "Другое.")];
+        let pending = |answer, taken| queued::pending_steers(&messages, answer, taken);
+        assert_eq!(pending(7, 0), [(1, "Ещё про бюджет.".to_string()), (2, "И про сроки.".to_string())], "both under «думаю…», in order");
+        // Taken ones leave the list and the hint; a correction of another answer is not this one's.
+        assert_eq!(pending(7, 1).iter().map(|(index, _)| *index).collect::<Vec<_>>(), [2]);
+        assert!(pending(7, 2).is_empty());
+        assert_eq!(pending(9, 0).len(), 1);
     }
 
     #[test]

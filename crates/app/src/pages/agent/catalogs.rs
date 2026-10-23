@@ -620,6 +620,7 @@ enum TabCmd {
     Analyse { path: PathBuf, from: Option<Stage>, options: AnalysisOptions, remember: bool },
     Stop(TaskId),
     ResumeTask(TaskId),
+    FindNames(PathBuf),
 }
 
 /// The width of every tab in the dock: short titles are padded, long ones are cut.
@@ -755,6 +756,7 @@ impl TabViewer for Tabs<'_> {
                 Some(StudioAction::Reveal(p)) => self.cmds.push(TabCmd::Reveal(p)),
                 Some(StudioAction::Analyse { path, from, options, remember }) => self.cmds.push(TabCmd::Analyse { path, from, options, remember }),
                 Some(StudioAction::Stop(id)) => self.cmds.push(TabCmd::Stop(id)),
+                Some(StudioAction::FindNames(p)) => self.cmds.push(TabCmd::FindNames(p)),
                 Some(StudioAction::ResumeTask(id)) => self.cmds.push(TabCmd::ResumeTask(id)),
                 None => {}
             },
@@ -905,6 +907,17 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
                 match app.agent.services() {
                     Some(s) => {
                         if let Err(e) = s.sched.resume(id) {
+                            app.error(format!("{e:#}"));
+                        }
+                    }
+                    None => app.error(t!("studio.agent_not_ready").to_string()),
+                }
+            }
+            TabCmd::FindNames(path) => {
+                let ai = ai_dir(&library_dir(&app.settings));
+                match app.agent.services() {
+                    Some(s) => {
+                        if let Err(e) = mediaa_agent::names::enqueue(&s.sched, &ai, &path, &app.settings.agent) {
                             app.error(format!("{e:#}"));
                         }
                     }

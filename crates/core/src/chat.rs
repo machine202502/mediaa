@@ -76,6 +76,8 @@ pub enum TimelineEntry {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         section: bool,
     },
+    /// A correction of the user taken into account in the middle of the answer.
+    Steer { text: String },
 }
 
 /// The steps, reasoning and parts of the answer of one question, in order: a timeline growing
@@ -119,9 +121,14 @@ impl Timeline {
         true
     }
 
-    /// The last tool call is over.
+    /// A tool call is over. The calls of one step run at once and their results are shown in
+    /// order: the first one still running (in the order they began) is the one that ends, and
+    /// only when none is running, the last one.
     pub fn finish_step(&mut self, status: &str) {
-        if let Some(TimelineEntry::Step { status: s, .. }) = self.entries.iter_mut().rev().find(|e| matches!(e, TimelineEntry::Step { .. })) {
+        let running = self.entries.iter().position(|e| matches!(e, TimelineEntry::Step { status, .. } if status == STEP_RUNNING));
+        let last = self.entries.iter().rposition(|e| matches!(e, TimelineEntry::Step { .. }));
+        let Some(i) = running.or(last) else { return };
+        if let TimelineEntry::Step { status: s, .. } = &mut self.entries[i] {
             *s = status.to_string();
         }
     }
@@ -147,6 +154,11 @@ impl Timeline {
     pub fn section(&mut self, text: &str) {
         self.discard_answer();
         self.entries.push(TimelineEntry::Answer { text: text.to_string(), section: true });
+    }
+
+    /// The answer takes a correction of the user from here on.
+    pub fn steer(&mut self, text: &str) {
+        self.entries.push(TimelineEntry::Steer { text: text.to_string() });
     }
 
     /// The text streamed last was not the answer after all: it is taken back.
@@ -322,6 +334,61 @@ impl Transcript {
         }
         Ok(false)
     }
+
+    /// The correction that is asked as the chat's next question stops being a correction of the
+    /// answer `from`: the first `skip` corrections of that answer are left alone. Returns whether
+    /// one was found.
+    pub fn unsteer(&self, chat: ChatId, from: i64, mut skip: usize) -> anyhow::Result<bool> {
+        let rows = {
+            let mut q = self.db.prepare("SELECT id, details FROM messages WHERE chat = ?1 AND role = 'user' ORDER BY id")?;
+            let mapped = q.query_map([chat], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        for (id, raw) in rows {
+            let mut details: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+            if details["steer"]["task"].as_i64() != Some(from) {
+                continue;
+            }
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            if let Some(obj) = details.as_object_mut() {
+                obj.remove("steer");
+            }
+            self.db.execute("UPDATE messages SET details = ?1 WHERE id = ?2", params![details.to_string(), id])?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Points the corrections the user sent for the answer `from` at the answer `to`, so that the
+    /// next answer takes them: the first `skip` of them were taken by `from` and are left as they
+    /// are. Returns how many moved.
+    pub fn retag_steers(&self, chat: ChatId, from: i64, to: i64, mut skip: usize) -> anyhow::Result<usize> {
+        let rows = {
+            let mut q = self.db.prepare("SELECT id, details FROM messages WHERE chat = ?1 AND role = 'user' ORDER BY id")?;
+            let mapped = q.query_map([chat], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        let mut moved = 0;
+        for (id, raw) in rows {
+            let mut details: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+            if details["steer"]["task"].as_i64() != Some(from) {
+                continue;
+            }
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            if let Some(steer) = details.get_mut("steer").and_then(|s| s.as_object_mut()) {
+                steer.insert("task".to_string(), serde_json::json!(to));
+            }
+            self.db.execute("UPDATE messages SET details = ?1 WHERE id = ?2", params![details.to_string(), id])?;
+            moved += 1;
+        }
+        Ok(moved)
+    }
 }
 
 #[cfg(test)]
@@ -399,6 +466,30 @@ mod tests {
         assert_eq!(messages[0].timeline(), tl, "the saved details give the same timeline");
         assert!(messages[0].stopped() && !messages[1].stopped());
         assert!(messages[1].timeline().is_empty(), "an answer from before timelines has none");
+    }
+
+    #[test]
+    fn sibling_steps_of_one_call_batch_end_in_their_own_order() {
+        // The calls of one step begin together and are shown as siblings; their results come
+        // back in the order of the list, so each ends the first call still running.
+        let mut tl = Timeline::default();
+        tl.step("Поиск", "search", STEP_RUNNING);
+        tl.step("Чтение записи", "read", STEP_RUNNING);
+        assert_eq!(tl.draft(), "");
+        tl.finish_step("found");
+        tl.finish_step("nothing");
+        assert_eq!(
+            tl.entries,
+            [
+                TimelineEntry::Step { title: "Поиск".into(), tool: "search".into(), status: "found".into() },
+                TimelineEntry::Step { title: "Чтение записи".into(), tool: "read".into(), status: "nothing".into() },
+            ]
+        );
+        // A step of its own, then a result with nothing running: the last step is marked.
+        tl.step("Спикеры", "speakers", STEP_RUNNING);
+        tl.finish_step("found");
+        tl.finish_step("failed");
+        assert_eq!(tl.entries.last(), Some(&TimelineEntry::Step { title: "Спикеры".into(), tool: "speakers".into(), status: "failed".into() }));
     }
 
     #[test]
@@ -499,5 +590,42 @@ mod tests {
         assert_eq!(t.open_chats().unwrap(), [b]);
         assert!(t.archived_chats().unwrap().is_empty());
         assert_eq!(t.chats().unwrap().iter().map(|x| x.id).collect::<Vec<_>>(), [b]);
+    }
+
+    #[test]
+    fn a_timeline_keeps_where_a_correction_was_taken() {
+        let mut tl = Timeline::default();
+        tl.thinking("Сначала сроки.");
+        tl.step("Поиск", "search", "found");
+        tl.steer("Ещё добавь про бюджет.");
+        tl.answer("Готово.");
+        assert_eq!(tl.to_value()[2], json!({"kind": "steer", "text": "Ещё добавь про бюджет."}));
+        assert_eq!(Timeline::from_details(&json!({"timeline": tl.to_value()})), tl);
+    }
+
+    #[test]
+    fn corrections_move_to_the_next_answer_after_the_taken_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = Transcript::open(dir.path(), "f").unwrap();
+        let chat = t.create_chat("Сроки").unwrap();
+        let steer = |task: i64| json!({"steer": {"task": task}});
+        t.add_message(chat, Author::User, "Когда отчёт?", &serde_json::Value::Null).unwrap();
+        t.add_message(chat, Author::User, "Первое", &steer(7)).unwrap();
+        t.add_message(chat, Author::User, "Второе", &steer(7)).unwrap();
+        t.add_message(chat, Author::User, "Третье", &steer(7)).unwrap();
+        // The first was taken; the next one becomes the next question; the rest follow it.
+        assert_eq!(t.retag_steers(chat, 7, 9, 2).unwrap(), 1);
+        let tasks: Vec<i64> = t.messages(chat).unwrap().iter().filter_map(|m| m.details["steer"]["task"].as_i64()).collect();
+        assert_eq!(tasks, [7, 7, 9]);
+        // Nothing else is touched: the plain question, and the corrections left behind.
+        assert_eq!(t.retag_steers(chat, 7, 11, 0).unwrap(), 2);
+        let messages = t.messages(chat).unwrap();
+        assert_eq!(messages[0].details, serde_json::Value::Null);
+        assert_eq!(messages[2].details["steer"]["task"], 11);
+        // The correction asked as the next question is a question of the chat now.
+        assert!(t.unsteer(chat, 11, 0).unwrap());
+        let messages = t.messages(chat).unwrap();
+        assert!(messages[1].details.get("steer").is_none());
+        assert_eq!(messages[2].details["steer"]["task"], 11);
     }
 }

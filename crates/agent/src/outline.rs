@@ -172,9 +172,11 @@ pub struct TopicInput {
     pub topic: usize,
 }
 
-/// The request for window `i` of `n` (of one topic).
-pub fn prompt(window: &Window, i: usize, n: usize, previous: Option<&str>) -> String {
-    let (start, end, language) = (human_duration(window.start), human_duration(window.end), outline::language(&window.text));
+/// The request for window `i` of `n` (of one topic). `language` is the interface language
+/// ([`AgentSettings::language_name`]): the digest is written for the user, not for the
+/// transcription.
+pub fn prompt(window: &Window, i: usize, n: usize, previous: Option<&str>, language: &str) -> String {
+    let (start, end) = (human_duration(window.start), human_duration(window.end));
     prompts::render("outline/part.j2", minijinja::context! { number => i + 1, parts => n, start, end, language, previous, text => &window.text })
 }
 
@@ -486,14 +488,14 @@ fn ask(engine: &dyn Engine, model: &str, device: Device, hf_token: Option<&str>,
 
 /// Asks the engine's `model` for the digest of a window.
 #[allow(clippy::too_many_arguments)]
-pub fn digest(engine: &dyn Engine, model: &str, device: Device, hf_token: Option<&str>, window: &Window, i: usize, n: usize, previous: Option<&str>, cancel: &AtomicBool) -> anyhow::Result<Digest> {
+pub fn digest(engine: &dyn Engine, model: &str, device: Device, hf_token: Option<&str>, window: &Window, i: usize, n: usize, previous: Option<&str>, language: &str, cancel: &AtomicBool) -> anyhow::Result<Digest> {
     ask(
         engine,
         model,
         device,
         hf_token,
         prompts::render("outline/system.j2", ()),
-        prompt(window, i, n, previous),
+        prompt(window, i, n, previous, language),
         serde_json::from_str(DIGEST_SCHEMA)?,
         digest_tokens(),
         cancel,
@@ -537,8 +539,8 @@ struct Ask<'a> {
 }
 
 impl Ask<'_> {
-    fn digest(&self, window: &Window, i: usize, n: usize, previous: Option<&str>) -> anyhow::Result<Digest> {
-        digest(self.engine, self.model, self.device, self.hf_token, window, i, n, previous, self.cancel)
+    fn digest(&self, window: &Window, i: usize, n: usize, previous: Option<&str>, language: &str) -> anyhow::Result<Digest> {
+        digest(self.engine, self.model, self.device, self.hf_token, window, i, n, previous, language, self.cancel)
     }
 
     /// The digest of a topic from the digests of its parts. The quotes of the parts are kept;
@@ -753,7 +755,7 @@ fn digest_topic(ask: &Ask<'_>, replies: &[Reply], topic: &PlanTopic, with_end: b
     if words <= WINDOW_WORDS {
         let text = picked.iter().map(outline::line).collect::<Vec<_>>().join("\n");
         let window = Window { start: topic.start, end: topic.end, text };
-        let mut digest = ask.digest(&window, 0, 1, previous)?;
+        let mut digest = ask.digest(&window, 0, 1, previous, language)?;
         digest.quotes = outline::verified_quotes(&digest.quotes, &picked);
         return Ok(digest);
     }
@@ -765,7 +767,7 @@ fn digest_topic(ask: &Ask<'_>, replies: &[Reply], topic: &PlanTopic, with_end: b
     let topic_before = previous.map(str::to_string);
     let mut previous = topic_before.clone();
     for (i, window) in windows.iter().enumerate() {
-        let mut digest = ask.digest(window, i, n, previous.as_deref())?;
+        let mut digest = ask.digest(window, i, n, previous.as_deref(), language)?;
         digest.quotes = outline::verified_quotes(&digest.quotes, &picked);
         previous = Some(digest.title.clone());
         parts.push(digest);
@@ -1349,11 +1351,12 @@ fn open_run(ai_dir: &Path, path: &Path, settings: &AgentSettings) -> anyhow::Res
     };
     let transcript = Transcript::open(ai_dir, &id)?;
     let dialog = transcript.dialog()?;
-    let language = outline::language(&dialog.iter().take(20).map(|r| r.text()).collect::<Vec<_>>().join(" "));
     Ok(Some(Run {
         transcript,
         dialog,
-        language,
+        // What the model writes is for the user: the outline, the breakdown, every phrase and
+        // title follow the interface language, never the language of the recording.
+        language: settings.language_name(),
         model,
         device: settings.devices.get(ModelRole::Agent),
         embedding: settings.models.embedding.as_ref().and_then(|source| crate::models::local_spec(source).ok()),
@@ -1506,7 +1509,7 @@ impl TopicTask {
         let n = windows.len().max(1);
         let mut cursor: DigestCursor = serde_json::from_value(task.cursor.clone()).unwrap_or_default();
         if cursor.done < windows.len() {
-            let mut part = ask.digest(&windows[cursor.done], cursor.done, n, if cursor.done == 0 { previous.as_deref() } else { cursor.parts.last().map(|p| p.title.as_str()) })?;
+            let mut part = ask.digest(&windows[cursor.done], cursor.done, n, if cursor.done == 0 { previous.as_deref() } else { cursor.parts.last().map(|p| p.title.as_str()) }, run.language)?;
             part.quotes = outline::verified_quotes(&part.quotes, &picked);
             cursor.parts.push(part);
             cursor.done += 1;
@@ -1661,7 +1664,7 @@ mod tests {
                     [00:26] Дана: Пока не знаю, обсудим в понедельник.\n\
                     [00:30] Олег: Я ещё проверю цифры по региону Север, там были вопросы.";
         let w = Window { start: 0.0, end: 35.0, text: text.into() };
-        let d = digest(engine.as_ref(), &model, Device::Auto, None, &w, 0, 1, None, &AtomicBool::new(false)).unwrap();
+        let d = digest(engine.as_ref(), &model, Device::Auto, None, &w, 0, 1, None, "Russian", &AtomicBool::new(false)).unwrap();
         eprintln!("{d:#?}");
         assert!(!d.title.is_empty() && d.title.split_whitespace().count() <= 12, "{}", d.title);
         assert!(!d.summary.is_empty());
@@ -1671,18 +1674,20 @@ mod tests {
 
     #[test]
     fn prompts_carry_the_part_and_its_neighbour() {
+        // The recording is Russian; the text is written for the user, so the language of the
+        // interface decides it, not the letters of the recording.
         let w = Window { start: 600.0, end: 1200.0, text: "[10:00] Дана: начнём.".into() };
         // A later part sees the part before it.
-        let p = prompt(&w, 1, 3, Some("Планы на квартал"));
-        assert!(p.starts_with("Part 2 of 3 of one topic of the recording (10:00 – 20:00).\nWrite everything in Russian.\n"), "{p}");
+        let p = prompt(&w, 1, 3, Some("Планы на квартал"), "English");
+        assert!(p.starts_with("Part 2 of 3 of one topic of the recording (10:00 – 20:00).\nWrite everything in English.\n"), "{p}");
         assert!(p.contains("The previous part of this topic was about: Планы на квартал\nDescribe what this part adds; do not repeat the previous part."), "{p}");
         assert!(p.contains("[10:00] Дана: начнём."));
         // The first window of a topic sees the topic before it.
-        let first = prompt(&w, 0, 1, Some("Планы на квартал"));
-        assert!(first.starts_with("One topic of the recording (10:00 – 20:00).\nWrite everything in Russian.\n"), "{first}");
+        let first = prompt(&w, 0, 1, Some("Планы на квартал"), "English");
+        assert!(first.starts_with("One topic of the recording (10:00 – 20:00).\nWrite everything in English.\n"), "{first}");
         assert!(first.contains("The previous topic of the recording was: Планы на квартал\nName this topic by what is new in it; do not reuse that title."), "{first}");
-        let single = prompt(&w, 0, 1, None);
-        assert!(single.starts_with("One topic of the recording (10:00 – 20:00).\nWrite everything in Russian.\n"), "{single}");
+        let single = prompt(&w, 0, 1, None, "English");
+        assert!(single.starts_with("One topic of the recording (10:00 – 20:00).\nWrite everything in English.\n"), "{single}");
         assert!(!single.contains("previous"));
     }
 
@@ -1994,6 +1999,11 @@ mod tests {
         assert_eq!(fake.chats().len(), 6, "three digests and three details — the merge asks nothing");
         assert!(fake.chats()[0].json_schema.as_deref().unwrap_or_default().contains("\"quotes\""));
         assert!(fake.chats()[3].json_schema.as_deref().unwrap_or_default().contains("\"sections\""));
+        // The replies are Russian, the interface of the default settings is English: every
+        // text the model writes for the user — a digest and a breakdown alike — is English.
+        for (i, chat) in fake.chats().iter().enumerate() {
+            assert!(chat.texts[1].contains("Write everything in English."), "call {i}: {:?}", chat.texts);
+        }
     }
 
     /// A program stop after one digest: the finished digest is not asked again, the rest of the
@@ -2047,6 +2057,67 @@ mod tests {
         assert_eq!(titles, ["Тема раз", "Тема два", "Тема три"]);
         assert!(t.chapters().unwrap().iter().all(|c| !c.digest.sections.is_empty()));
         assert_eq!(fake.chats().len(), 6, "three digests and three details — a written digest was not asked twice");
+    }
+
+    /// A language change while the topics are unfinished: what is written stays as written (the
+    /// user restarts the topics themselves to get them in another language), and only the rest is
+    /// written in the new language.
+    #[test]
+    fn a_language_change_keeps_written_topics_and_writes_the_rest_in_the_new_language() {
+        use mediaa_queue::Status as TaskStatus;
+        use mediaa_engine::testing::FakeEngine;
+
+        let (_dir, ai, file, id) = recording();
+        let settings = settings();
+        let fake = FakeEngine::new();
+        let section = sections_json(r#"[{"text":"итог темы"}]"#);
+        fake.chat_answers(&[
+            &digest_json("Тема раз", "[]"),
+            &digest_json("Тема два", "[]"),
+            &digest_json("Тема три", "[]"),
+            &section,
+            &section,
+            &section,
+        ]);
+        let engine: Arc<dyn Engine> = Arc::new(fake.clone());
+        let sched = topic_sched(&ai, engine.clone(), &settings);
+        let options = AnalysisOptions::default();
+        sched
+            .enqueue_tree(topics_task(&file, &options).scope(&id), vec![Child::new(plan_task(&file, &options).scope(&id))])
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while fake.chats().is_empty() {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            sched.tick().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        pause_until_quiet(&sched);
+        let written = fake.chats();
+        assert_eq!(written.len(), 1, "stopped after the first digest");
+        assert!(written[0].texts[1].contains("Write everything in English."), "the interface was English: {:?}", written[0].texts);
+        let t = Transcript::open(&ai, &id).unwrap();
+        assert_eq!(t.chapters().unwrap()[0].digest.title, "Тема раз");
+        drop(t);
+        drop(sched);
+
+        // The user switches the interface to Russian. The switch starts nothing; the run goes
+        // on in the new language, and the digest already written is kept.
+        let mut russian = settings.clone();
+        russian.ui_language = Some("ru".into());
+        let sched = topic_sched(&ai, engine, &russian);
+        drain(&sched);
+        let tasks = sched.store().list().unwrap();
+        assert!(tasks.iter().all(|t| t.status == TaskStatus::Done), "{tasks:?}");
+        let t = Transcript::open(&ai, &id).unwrap();
+        let titles: Vec<String> = t.chapters().unwrap().iter().map(|c| c.digest.title.clone()).collect();
+        assert_eq!(titles, ["Тема раз", "Тема два", "Тема три"], "the written digest is not redone");
+        let calls = fake.chats();
+        assert_eq!(calls.len(), 6, "three digests and three details: the written digest was not asked again");
+        for (i, chat) in calls.iter().skip(1).enumerate() {
+            assert!(chat.texts[1].contains("Write everything in Russian."), "call {}: {:?}", i + 1, chat.texts);
+        }
     }
 
     /// A stop after one detail: its sections are in the chapter, so the detail is not asked again.

@@ -1,5 +1,0 @@
----
-source: crates/agent/src/prompts.rs
-expression: "render(\"delegate_system.j2\", ())"
----
-You do one bounded task on a stretch of a recorded conversation for the main assistant. Answer compactly, in the language of the conversation, citing times [m:ss] from the lines.

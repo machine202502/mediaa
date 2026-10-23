@@ -38,19 +38,6 @@ pub const FINE_LINE_WORDS: usize = 60;
 /// is a paraphrase, so the share is lower than a quote's).
 pub const DETAIL_MATCH: f64 = 0.3;
 
-/// The language of a text by its letters: «Russian» when Cyrillic prevails, else «English».
-pub fn language(text: &str) -> &'static str {
-    let (mut cyrillic, mut latin) = (0usize, 0usize);
-    for c in text.chars().filter(|c| c.is_alphabetic()) {
-        if ('\u{0400}'..='\u{04FF}').contains(&c) {
-            cyrillic += 1;
-        } else if c.is_ascii_alphabetic() {
-            latin += 1;
-        }
-    }
-    if cyrillic >= latin && cyrillic > 0 { "Russian" } else { "English" }
-}
-
 /// What the model writes about a window.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Digest {
@@ -649,13 +636,6 @@ mod tests {
             })
             .collect();
         Reply { start: 0.0, end: words.last().unwrap().end, speaker: Some(0), words }
-    }
-
-    #[test]
-    fn language_by_letters() {
-        assert_eq!(language("Отчёт сдаём в пятницу, OK?"), "Russian");
-        assert_eq!(language("The report is due on Friday"), "English");
-        assert_eq!(language("1234"), "English");
     }
 
     #[test]

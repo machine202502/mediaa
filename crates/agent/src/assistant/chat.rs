@@ -11,7 +11,7 @@
 //! afterwards (it may take a while to notice, a web page is still being read) is dropped, and
 //! the message of the stopped answer keeps the timeline up to the stop.
 
-use super::{Answer, Event, Memory, StepRecord, WaitReason};
+use super::{Answer, Event, Memory, Metrics, StepRecord, WaitReason};
 use crate::scope::Scope;
 use mediaa_core::chat::{Author, ChatId, Timeline, STEP_RUNNING};
 use mediaa_queue::{Store, TaskId};
@@ -39,11 +39,15 @@ pub struct Live {
     pub waiting: Option<WaitReason>,
     /// Parts of the recording a running scan has read, of all.
     pub scanning: Option<(usize, usize)>,
+    /// The context fill and the speed of the current (or last) step.
+    pub metrics: Option<Metrics>,
     /// The tool steps that are over, with their arguments and results.
     pub steps: Vec<StepRecord>,
     /// Sections of the answer stored as messages so far (the pane re-reads the chat when this
     /// grows).
     pub stored: usize,
+    /// Corrections of the user the answer has taken (their messages are in the chat).
+    pub steers_taken: usize,
     pub state: State,
     /// The answer continues after the process was restarted (the pane says so, once).
     pub continuing: bool,
@@ -70,7 +74,7 @@ impl Default for Live {
 
 impl Live {
     pub fn new() -> Live {
-        Live { timeline: Timeline::default(), waiting: None, scanning: None, steps: Vec::new(), stored: 0, state: State::Running, continuing: false, closed: false }
+        Live { timeline: Timeline::default(), waiting: None, scanning: None, metrics: None, steps: Vec::new(), stored: 0, steers_taken: 0, state: State::Running, continuing: false, closed: false }
     }
 
     /// Takes one event of the answer.
@@ -83,7 +87,7 @@ impl Live {
         if self.closed && !matches!(event, Event::Done | Event::Stopped | Event::Failed(_)) {
             return;
         }
-        if !matches!(event, Event::Waiting { .. }) {
+        if !matches!(event, Event::Waiting { .. } | Event::Metrics(_)) {
             self.waiting = None;
         }
         match event {
@@ -104,7 +108,12 @@ impl Live {
                 self.timeline.section(text);
                 self.stored += 1;
             }
+            Event::SteerTaken { text } => {
+                self.timeline.steer(text);
+                self.steers_taken += 1;
+            }
             Event::Scanning { done, total } => self.scanning = Some((*done, *total)),
+            Event::Metrics(metrics) => self.metrics = Some(*metrics),
             Event::Done => self.state = State::Done,
             Event::Stopped => {
                 self.timeline.stop();
@@ -120,6 +129,9 @@ impl Live {
     /// The details of the answer's message.
     fn details(&self, forced: bool, stopped: bool) -> serde_json::Value {
         let mut details = json!({ "steps": self.steps, "forced": forced, "timeline": self.timeline.to_value() });
+        if let Some(metrics) = self.metrics {
+            details["metrics"] = json!(metrics);
+        }
         if stopped {
             details["stopped"] = json!(true);
         }

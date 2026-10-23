@@ -4,10 +4,12 @@
 pub mod assistant;
 pub mod check;
 pub mod diarize;
+pub mod diarize_quality;
 pub mod index;
 #[cfg(test)]
 mod live;
 pub mod models;
+pub mod names;
 pub mod outline;
 pub mod pipeline;
 pub mod prompts;

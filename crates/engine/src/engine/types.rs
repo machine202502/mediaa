@@ -4,6 +4,7 @@ use crate::engine::EngineError;
 use crate::hub;
 use crate::llm;
 use mediaa_core::agent::ModelSource;
+use mediaa_core::transcript::Turn;
 use std::time::Duration;
 
 /// How long an idle model stays loaded when a budget does not say. Zero unloads it at once.
@@ -186,12 +187,38 @@ pub trait VadSession: Send {
 }
 
 /// The models diarization needs; `speakers` is how many speakers there are when known.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DiarizeRequest {
     pub segmentation: String,
     pub embedding: String,
     pub speakers: Option<u32>,
+    /// Cut height of the clustering; `None` uses [`crate::speech::DEFAULT_CLUSTERING_THRESHOLD`].
+    /// A larger value gives fewer speakers.
+    pub clustering_threshold: Option<f32>,
+    /// Cosine similarity above which two speakers are merged by their mean voice; `None` keeps
+    /// the clusters as found.
+    pub merge_threshold: Option<f32>,
+    /// A speaker whose speech is shorter than this is moved to the nearest voice by similarity;
+    /// `None` uses [`crate::speech::MIN_SPEAKER_SECONDS`].
+    pub min_speaker_seconds: Option<f64>,
     pub hf_token: Option<String>,
+}
+
+/// The mean voice of one found speaker: the normalised speaker embeddings of their speech,
+/// averaged, and how long they talk.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Voice {
+    /// Mean embedding; empty when the extractor could not make one (too little speech).
+    pub embedding: Vec<f32>,
+    /// Seconds of speech.
+    pub seconds: f64,
+}
+
+/// Who speaks when, and the voice of each speaker: `voices` is indexed by `Turn::speaker`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Diarization {
+    pub turns: Vec<Turn>,
+    pub voices: Vec<Voice>,
 }
 
 /// What the engine is and which GPUs it sees.
@@ -214,7 +241,7 @@ pub struct Gpu {
 /// A model the engine keeps in memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedModel {
-    /// The loaded file (a model spec the engine resolved to a path).
+    /// The model as the caller asked for it: a Hugging Face `owner/repo` or an absolute path.
     pub model: String,
     pub pool: Pool,
     /// Memory the loaded model takes (weights and context).

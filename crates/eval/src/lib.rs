@@ -1,6 +1,7 @@
 //! Quality runs of the MediaA agent: ask as the app does, score without a model, write a report.
 
 mod cases;
+mod diarize;
 mod report;
 mod run;
 mod score;
@@ -45,6 +46,7 @@ pub struct RunArgs {
 const USAGE: &str = "\
 usage:
   mediaa-eval run --cases FILE --library DIR --file PATH --models DIR [--repeat N] [--judge none|agent|<model>] [--case ID] [--label TEXT]
+  mediaa-eval diarize --data DIR [--models DIR]
   mediaa-eval compare <run A> <run B>";
 
 /// The workspace root: the directory that has `Cargo.toml` and `crates/`.
@@ -145,6 +147,10 @@ pub fn main_args(args: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
             let path = report::compare_runs(Path::new(&args[1]), Path::new(&args[2]))?;
             println!("{}", path.display());
             Ok(())
+        }
+        Some("diarize") => {
+            let parsed = diarize::parse(&args[1..])?;
+            diarize::execute(&parsed)
         }
         _ => anyhow::bail!("{USAGE}"),
     }

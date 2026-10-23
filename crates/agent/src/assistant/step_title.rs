@@ -38,7 +38,6 @@ pub fn caption(tool: &str, topic: bool, english: bool) -> String {
         "time" => ("Время", "Time"),
         "scan" => ("Просмотр записи", "Looking through the recording"),
         "rename_speakers" => ("Имена говорящих", "Speaker names"),
-        "delegate" => ("Разбор отрывка", "Reading a passage"),
         "remember" => ("Память", "Memory"),
         "plan" => ("План", "Plan"),
         "say" => ("Ответ", "Answer"),

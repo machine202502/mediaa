@@ -12,7 +12,7 @@ use crate::theme;
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
 use mediaa_agent::assistant::chat::Live;
-use mediaa_agent::assistant::{StepRecord, WaitReason};
+use mediaa_agent::assistant::{Metrics, StepRecord, WaitReason};
 use mediaa_core::chat::{ChatMessage, TimelineEntry, STEP_RUNNING};
 use rust_i18n::t;
 use std::hash::Hash;
@@ -21,12 +21,20 @@ use std::hash::Hash;
 pub const GAP: f32 = 8.0;
 /// Text size of a step or a reasoning header.
 const ROW_TEXT: f32 = 12.5;
+/// Text size of the numbers under the status line.
+const METRICS_TEXT: f32 = 11.5;
+/// Height of the thin context bar under the numbers.
+const METRICS_BAR: f32 = 3.0;
+/// Gap between the numbers and the bar.
+const METRICS_GAP: f32 = 4.0;
 
 /// A step or a piece of reasoning.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row<'a> {
     Step { title: &'a str, tool: &'a str, status: &'a str },
     Thinking { text: &'a str },
+    /// A correction of the user the answer took from here on.
+    Steer { text: &'a str },
 }
 
 /// A block of the drawn answer.
@@ -51,6 +59,11 @@ pub fn blocks(entries: &[TimelineEntry], fold: bool) -> Vec<Block<'_>> {
             TimelineEntry::Thinking { text } => Block::Row(Row::Thinking { text }),
             TimelineEntry::Answer { text, .. } if text.trim().is_empty() => continue,
             TimelineEntry::Answer { text, .. } => Block::Answer(text),
+            TimelineEntry::Steer { text } => {
+                // Where the answer took a correction stays in place even when the rest is folded.
+                out.push(Block::Row(Row::Steer { text }));
+                continue;
+            }
         };
         match block {
             Block::Row(row) if fold => folded.push(row),
@@ -153,6 +166,50 @@ fn status_text(status: &Status) -> String {
     }
 }
 
+/// A number as the interface language writes it: a decimal comma in Russian, a dot in English.
+fn number(value: f64, digits: usize, locale: &str) -> String {
+    let text = format!("{value:.digits$}");
+    if locale == "ru" { text.replace('.', ",") } else { text }
+}
+
+/// The numbers line: how much of the context is taken, and how fast a local model writes. The
+/// speed is `None` for a provider's model (it is not measured).
+pub fn metrics_text(metrics: &Metrics, locale: &str) -> (String, Option<String>) {
+    let used = number(f64::from(metrics.context_tokens) / 1000.0, 1, locale);
+    let total = number(f64::from(metrics.context) / 1000.0, 0, locale);
+    let context = t!("studio.context_fill", locale = locale, used = used, total = total).to_string();
+    let speed = metrics.speed.map(|s| t!("studio.tokens_per_second", locale = locale, speed = format!("{s:.0}")).to_string());
+    (context, speed)
+}
+
+/// The numbers under the status line: a thin bar of the context taken and the text above it.
+/// The row takes its height even without the numbers, so the layout does not jump.
+pub fn metrics_ui(ui: &mut egui::Ui, metrics: Option<&Metrics>, p: theme::Palette) {
+    // The same widgets are drawn with and without numbers (an empty line instead), so the row
+    // always takes the same place.
+    let locale = rust_i18n::locale();
+    let (context, speed) = metrics.map_or_else(|| (" ".into(), None), |metrics| metrics_text(metrics, &locale));
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = METRICS_GAP;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.label(RichText::new(context).size(METRICS_TEXT).color(p.text_weak));
+            if let Some(speed) = speed {
+                ui.label(RichText::new("·").size(METRICS_TEXT).color(p.text_weak));
+                ui.label(RichText::new(speed).size(METRICS_TEXT).color(p.text_weak));
+            }
+        });
+        let (bar, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), METRICS_BAR), egui::Sense::hover());
+        let Some(metrics) = metrics else { return };
+        let filled = (metrics.context_tokens as f32 / metrics.context.max(1) as f32).clamp(0.0, 1.0);
+        ui.painter().rect_filled(bar, METRICS_BAR / 2.0, p.accent_soft);
+        if filled > 0.0 {
+            let width = bar.width() * filled;
+            ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, egui::vec2(width, METRICS_BAR)), METRICS_BAR / 2.0, p.accent);
+        }
+    });
+}
+
 /// A step as one line: the icon of how it went and the title the model gave it.
 fn step_row(ui: &mut egui::Ui, title: &str, status: &str, roster: &super::mentions::Roster, p: theme::Palette) {
     let (glyph, color) = match status {
@@ -199,7 +256,6 @@ fn tool_label(locale: &str, key: &str) -> String {
         "time" => t!("chat.tool_time", locale = locale),
         "scan" => t!("chat.tool_scan", locale = locale),
         "rename_speakers" => t!("chat.tool_rename_speakers", locale = locale),
-        "delegate" => t!("chat.tool_delegate", locale = locale),
         "remember" => t!("chat.tool_remember", locale = locale),
         "plan" => t!("chat.tool_plan", locale = locale),
         "say" => t!("chat.tool_say", locale = locale),
@@ -267,7 +323,21 @@ fn row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, row: &Row, steps: &[S
             thinking_row(ui, id, text, roster, p);
             None
         }
+        Row::Steer { text } => {
+            steer_row(ui, text, roster, p);
+            None
+        }
     }
+}
+
+/// Where the answer took a correction of the user.
+fn steer_row(ui: &mut egui::Ui, text: &str, roster: &super::mentions::Roster, p: theme::Palette) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(icon::CHAT_TEXT).color(p.accent));
+        let label = format!("{}: {}", t!("studio.steer_taken"), text.trim());
+        let galley = super::mentions::galley(ui, &label, roster, egui::FontId::proportional(ROW_TEXT), p.text_weak, ui.available_width(), true, false, p);
+        ui.add(egui::Label::new(galley).truncate());
+    });
 }
 
 /// Draws the blocks of one answer's timeline; `forced`: it was given before the agent finished
@@ -329,7 +399,8 @@ pub fn timeline_ui(
 }
 
 /// The answer being written: its timeline as it is, the progress of a scan and the status line.
-pub fn live_ui(ui: &mut egui::Ui, live: &Live, bare_times: bool, roster: &super::mentions::Roster, p: theme::Palette) -> Option<String> {
+/// `pending` are corrections the user sent while it runs and the answer has not taken yet.
+pub fn live_ui(ui: &mut egui::Ui, live: &Live, bare_times: bool, roster: &super::mentions::Roster, p: theme::Palette, pending: &[String]) -> Option<String> {
     let seek = timeline_ui(ui, "live", &live.timeline.entries, &live.steps, false, false, bare_times, roster, p);
     ui.spacing_mut().item_spacing.y = GAP;
     if let Some((done, total)) = live.scanning {
@@ -342,6 +413,12 @@ pub fn live_ui(ui: &mut egui::Ui, live: &Live, bare_times: bool, roster: &super:
             ui.label(RichText::new(status_text(&status)).color(p.text_weak));
         });
     }
+    // Under «думаю…»: the corrections it will take after this step, until it does.
+    for text in pending {
+        theme::hint(ui, t!("studio.steer_pending", text = text));
+    }
+    // Under «думаю…»: the context fill and the speed, live from the stream.
+    metrics_ui(ui, live.metrics.as_ref(), p);
     seek
 }
 
@@ -414,6 +491,38 @@ mod tests {
         let busy = WaitReason::Busy { tasks: vec![task("transcribe", "a.mp4")] };
         assert_eq!(wait_text(&busy), t!("studio.wait_busy_with", tasks = crate::pages::agent::task_label::label("transcribe", "a.mp4")).to_string());
         assert_eq!(wait_text(&WaitReason::Loading { model: "owner/Qwen3-4B".into() }), t!("studio.wait_loading", model = "Qwen3-4B").to_string(), "the model, not its owner");
+    }
+
+    #[test]
+    fn the_numbers_are_the_context_and_the_speed_in_the_interface_language() {
+        let metrics = Metrics { context_tokens: 6100, context: 8000, speed: Some(12.4) };
+        assert_eq!(metrics_text(&metrics, "ru"), ("контекст: 6,1 из 8 тыс.".into(), Some("12 ток/с".into())));
+        assert_eq!(metrics_text(&metrics, "en"), ("context: 6.1 of 8k".into(), Some("12 tok/s".into())));
+        // A provider's model does not measure its speed.
+        let provider = Metrics { context_tokens: 500, context: 4000, speed: None };
+        assert_eq!(metrics_text(&provider, "ru"), ("контекст: 0,5 из 4 тыс.".into(), None));
+    }
+
+    /// The line is drawn with fixed heights: without numbers it still takes its place, so the
+    /// answer below does not jump when they appear.
+    #[test]
+    fn the_numbers_take_their_place_even_without_them() {
+        fn height(metrics: Option<Metrics>) -> f32 {
+            let mut harness = egui_kittest::Harness::new_ui_state(
+                |ui: &mut egui::Ui, height: &mut Option<f32>| {
+                    let before = ui.cursor().min.y;
+                    metrics_ui(ui, metrics.as_ref(), crate::theme::DARK);
+                    *height = Some(ui.cursor().min.y - before);
+                },
+                None,
+            );
+            harness.run();
+            (*harness.state()).expect("the row is drawn")
+        }
+        let shown = height(Some(Metrics { context_tokens: 6100, context: 8000, speed: Some(12.4) }));
+        let hidden = height(None);
+        assert!(shown > 0.0);
+        assert_eq!(shown, hidden, "the row is reserved");
     }
 
     fn message(author: Author, text: &str, details: serde_json::Value) -> ChatMessage {

@@ -15,8 +15,6 @@ pub enum Ready {
     Provider,
     /// Optional role left unset.
     NotUsed,
-    /// The sub-agent uses the main agent's model.
-    SameAsAgent,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,7 +67,6 @@ fn check_local(engine: &dyn Engine, role: ModelRole, source: &ModelSource, token
 fn check_role(agent: &AgentSettings, engine: &dyn Engine, role: ModelRole, token: Option<&str>) -> Status {
     let source = match agent.models.get(role) {
         Some(s) => s,
-        None if role == ModelRole::Subagent => return Status::Ready(Ready::SameAsAgent),
         None if role.required() => return Status::Failed("no model selected".into()),
         None => return Status::Ready(Ready::NotUsed),
     };
@@ -120,7 +117,6 @@ mod tests {
                 embedding: Some(chat.clone()),
                 reranker: Some(wrong_role),
                 agent: Some(bad),
-                subagent: None,
                 titles: Some(ModelSource::Provider { provider: "gone".into(), model: "x".into() }),
                 speech_recognition: None,
                 diarization: None,
@@ -137,7 +133,6 @@ mod tests {
         assert_eq!(last(ModelRole::Embedding), Status::Ready(Ready::Ran { bytes: 123 }), "the engine tried it");
         assert!(matches!(last(ModelRole::Agent), Status::Failed(e) if e.contains("GGUF")), "the engine's error is reported");
         assert!(matches!(last(ModelRole::Reranker), Status::Failed(e) if e.contains("GGUF")), "a model of the wrong kind fails before a download");
-        assert_eq!(last(ModelRole::Subagent), Status::Ready(Ready::SameAsAgent));
         assert!(matches!(last(ModelRole::Titles), Status::Failed(e) if e.contains("removed")));
         assert!(matches!(last(ModelRole::SpeechRecognition), Status::Failed(e) if e.contains("no model")), "required");
         assert_eq!(last(ModelRole::Diarization), Status::Ready(Ready::NotUsed), "optional");

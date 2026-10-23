@@ -24,6 +24,8 @@ url = "2"
 regex = "1"
 minijinja = "2"
 minijinja-embed = "2"
+# A name the model writes in another alphabet («Anton Nazarov» for «Антон Назаров»).
+deunicode = "1"
 
 [dev-dependencies]
 mediaa-engine = { workspace = true, features = ["testing"] }
