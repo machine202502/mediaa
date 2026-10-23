@@ -1,9 +1,3 @@
-//! One short phrase for a tool step, written by the titles model while the tool runs.
-//!
-//! The row shows a plain label at once ([`caption`], the same words as `chat.tool_*` in the
-//! locales). The phrase replaces that label when it arrives and is written into the stored
-//! answer, so an old chat still shows it after the task is gone. A failure leaves the label.
-
 use crate::prompts;
 use crate::scope::Scope;
 use mediaa_core::agent::{AgentSettings, ModelRole};
@@ -19,12 +13,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use super::Session;
 
 pub const KIND: &str = "step-title";
-/// The same budget as a chat title: a few words, and no room spent on reasoning.
 const PHRASE_TOKENS: u32 = 128;
 const PHRASE_CONTEXT: u32 = 2048;
 
-/// The plain label of a tool step. `topic` is an outline read of one topic.
-/// The words are the same as `chat.tool_*` in both locale files.
 pub fn caption(tool: &str, topic: bool, english: bool) -> String {
     let key = if tool == "outline" && topic { "topic" } else { tool };
     let (ru, en) = match key {
@@ -49,13 +40,10 @@ pub fn caption(tool: &str, topic: bool, english: bool) -> String {
     if english { en } else { ru }.to_string()
 }
 
-/// Whether `args` asks the outline for one topic.
 pub fn is_topic(args: &Value) -> bool {
     args.get("topic").and_then(Value::as_i64).is_some()
 }
 
-/// The phrase out of what the model wrote: one line, quotes and a final period removed.
-/// `None` when nothing is left. The model's capitals stay (a small model is told how to write).
 pub fn clean_phrase(raw: &str) -> Option<String> {
     let text = split_thinking(raw).1;
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
@@ -66,7 +54,6 @@ pub fn clean_phrase(raw: &str) -> Option<String> {
     if line.is_empty() { None } else { Some(line.to_string()) }
 }
 
-/// Asks the titles model. `None` when it was not asked (no model, or it wrote nothing).
 #[allow(clippy::too_many_arguments)]
 fn ask(scope: &Scope, settings: &AgentSettings, question: &str, tool: &str, purpose: &str, arguments: &str, language: &str, cancel: &AtomicBool) -> anyhow::Result<Option<String>> {
     let Some(source) = settings.models.get(ModelRole::Titles).as_ref() else { return Ok(None) };
@@ -90,8 +77,6 @@ fn ask(scope: &Scope, settings: &AgentSettings, question: &str, tool: &str, purp
     Ok(clean_phrase(&answer.content))
 }
 
-/// Writes the phrase of one step. A failure finishes the task as failed and leaves no phrase,
-/// so the plain label stays.
 pub fn work(scope: &Scope, settings: &AgentSettings, task: &Task, cancel: &AtomicBool) -> Option<String> {
     let question = task.input.get("question").and_then(Value::as_str).unwrap_or("");
     let tool = task.input.get("tool").and_then(Value::as_str).unwrap_or("");
@@ -118,8 +103,6 @@ pub fn work(scope: &Scope, settings: &AgentSettings, task: &Task, cancel: &Atomi
     }
 }
 
-/// Puts finished phrases into the session's steps and timeline. A step with no phrase is left
-/// on its label.
 pub fn overlay(tasks: &[Task], answer: i64, session: &mut Session) {
     let mut timeline = Timeline::from_details(&json!({ "timeline": session.timeline }));
     let mut changed = false;
@@ -151,9 +134,6 @@ pub fn overlay(tasks: &[Task], answer: i64, session: &mut Session) {
     }
 }
 
-/// Writes `phrase` into the stored answer, when that message already exists (`details.task`
-/// is this task's `answer`). A phrase that finishes before the answer row exists is copied in
-/// when that row is saved (the next chunk, or a stop).
 pub fn save_phrase(ai: &Path, task: &Task, phrase: &str) {
     let Some(store) = task.input.get("store").and_then(Value::as_str).filter(|s| !s.is_empty()) else { return };
     let Some(chat) = task.input.get("chat").and_then(Value::as_i64) else { return };
@@ -165,7 +145,6 @@ pub fn save_phrase(ai: &Path, task: &Task, phrase: &str) {
     }
 }
 
-/// Phrases already written for the answer `answer`, in step order.
 pub fn phrases(tasks: &[Task], answer: i64) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     for task in tasks {
@@ -186,8 +165,6 @@ fn nth_step(entries: &mut [TimelineEntry], index: usize) -> Option<&mut String> 
     entries.iter_mut().filter_map(|e| if let TimelineEntry::Step { title, .. } = e { Some(title) } else { None }).nth(index)
 }
 
-/// Queues the phrase for the tool step that is about to run. Nothing is queued when the titles
-/// model is not chosen (the label stays, and no failed task is left behind).
 pub fn enqueue(scope: &Scope, session: &Session, index: usize, question: &str, tool: &str, purpose: &str, args: &Value) {
     if !session.titles {
         return;

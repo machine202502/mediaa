@@ -1,6 +1,3 @@
-//! The agent's way out to the web: searching and reading pages, for what the recordings do not
-//! cover. Links in what the agent writes must lead to pages it was shown.
-
 use crate::prompts;
 use super::brain::ToolSpec;
 use super::tools::Outcome;
@@ -9,21 +6,16 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-/// Results of a web search.
 const HITS: usize = 6;
-/// A page with less text (characters) is a script's loader, not the page.
 const EMPTY_PAGE: usize = 200;
 
 pub type WebSearch<'a> = dyn Fn(&str, usize) -> anyhow::Result<Vec<WebHit>> + Sync + 'a;
 pub type WebRead<'a> = dyn Fn(&str, usize) -> anyhow::Result<Page> + Sync + 'a;
 
-/// Web search and page reading, with the addresses the agent has been shown.
 pub struct Web<'a> {
     pub search: &'a WebSearch<'a>,
     pub read: &'a WebRead<'a>,
-    /// Longest page text (characters): a page must leave room for what was found in the recordings.
     pub max_chars: usize,
-    /// Shared by the threads of one step (its calls run at once).
     seen: Mutex<HashSet<String>>,
 }
 
@@ -49,7 +41,6 @@ impl<'a> Web<'a> {
         ]
     }
 
-    /// Runs a web tool (`None`: not one of them).
     pub fn run(&self, tool: &str, args: &Value) -> Option<anyhow::Result<Outcome>> {
         let arg = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or_default().trim().to_string();
         Some(match tool {
@@ -74,13 +65,11 @@ impl<'a> Web<'a> {
         seen.insert(url.to_string());
         seen.insert(page.url.clone());
         drop(seen);
-        // Some sites only send a script that loads the page: nothing to read there.
         let empty = page.text.chars().count() < EMPTY_PAGE;
         let text = prompts::render("results/web_page.j2", minijinja::context! { title => &page.title, url => &page.url, text => &page.text, empty });
         Ok(Outcome { text, seen: empty.then(Vec::new) })
     }
 
-    /// `text` with links to pages the agent was not shown turned into their plain text.
     pub fn known_links(&self, text: &str) -> String {
         static LINK: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\[([^\]]*)\]\((https?://[^)\s]+)\)").expect("regex"));
         let seen = self.seen.lock().expect("web links lock");

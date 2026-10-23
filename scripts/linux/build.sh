@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Builds MediaA for Linux with statically linked FFmpeg.
-# Works natively on Linux and is also what the Docker build runs inside the container.
-#
-#   scripts/linux/build.sh            # release build -> dist/linux/mediaa
-#   scripts/linux/build.sh --test     # run the test suite instead
-#   scripts/linux/build.sh --run      # debug run (needs a desktop session)
-#
-# Env: VCPKG_ROOT (required), MEDIAA_WORK (where vcpkg_installed/target live; default: repo).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

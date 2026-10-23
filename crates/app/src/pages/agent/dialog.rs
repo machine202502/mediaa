@@ -1,8 +1,3 @@
-//! The studio's dialog pane: the transcript of the file as replies of speakers, with the time of
-//! each; the word being played is highlighted, a click on a word or a time seeks there, a click
-//! on a speaker names them. Without replies: the «Transcribe» button, or the progress of the
-//! analysis; with replies: the topics, the analysis line, the search and the dialog.
-
 use super::composer;
 use super::studio::{self, panel_insets, StudioAction};
 use super::topics;
@@ -26,17 +21,13 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// How often the transcript is re-read while transcription runs / otherwise.
 const ACTIVE_REFRESH: Duration = Duration::from_secs(1);
 const IDLE_REFRESH: Duration = Duration::from_secs(5);
 
-/// The search card's clear button: its side, the gap before it and the card's right padding.
-/// The slot is reserved even while the button is hidden, so typing never moves the field.
 const SEARCH_CLEAR: f32 = 24.0;
 const SEARCH_GAP: f32 = 8.0;
 const SEARCH_PAD: f32 = 12.0;
 
-/// Speaker colours (by speaker number).
 const SPEAKER_COLORS: [Color32; 6] = [
     Color32::from_rgb(61, 139, 255),
     Color32::from_rgb(232, 121, 54),
@@ -50,12 +41,10 @@ pub fn speaker_color(speaker: u32) -> Color32 {
     SPEAKER_COLORS[speaker as usize % SPEAKER_COLORS.len()]
 }
 
-/// Now, in milliseconds since the epoch (the queue's clock).
 fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
-/// The latest analysis of the recording with `file_id` among `tasks`.
 pub fn task_of<'a>(tasks: &'a [Task], file_id: &str) -> Option<&'a Task> {
     tasks
         .iter()
@@ -63,7 +52,6 @@ pub fn task_of<'a>(tasks: &'a [Task], file_id: &str) -> Option<&'a Task> {
         .max_by_key(|t| t.id)
 }
 
-/// The word of `reply` at character `index` of its text (words joined by single spaces).
 pub fn word_at(reply: &Reply, index: usize) -> Option<usize> {
     let mut at = 0;
     for (i, w) in reply.words.iter().enumerate() {
@@ -76,30 +64,23 @@ pub fn word_at(reply: &Reply, index: usize) -> Option<usize> {
     None
 }
 
-/// What the studio header tells the dialog pane, and what the pane changes back.
 pub struct Chrome {
     pub sync: bool,
-    /// The dialog fills the studio.
     pub maximized: bool,
 }
 
-/// Scroll to the playing reply when sync is on and the reply left the view, and when sync
-/// has just been turned on.
 pub fn should_follow(sync: bool, changed: bool, visible: bool, jump: bool) -> bool {
     sync && (jump || (changed && !visible))
 }
 
-/// A click on a reply, a word, a search hit or a time seeks only while sync is on.
 pub fn click_seeks(sync: bool) -> bool {
     sync
 }
 
-/// The word at `now` is the one being said. A short word stays lit a little past its end.
 fn word_on(now: f64, start: f64, end: f64) -> bool {
     now >= start && now < end.max(start + 0.15)
 }
 
-/// One speaker of the recording: how long they talk and when they first do.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SpeakerFact {
     pub id: u32,
@@ -122,8 +103,6 @@ pub fn speaker_facts(replies: &[Reply]) -> Vec<SpeakerFact> {
     map.into_iter().map(|(id, (spoken, first))| SpeakerFact { id, spoken, first }).collect()
 }
 
-/// What shows an automatically found name: «[0:05] Меня зовут Антон.», one line per report.
-/// `None` for a name the user typed or a name without evidence.
 pub fn auto_evidence(info: &SpeakerName) -> Option<String> {
     if info.source != NameSource::Auto || info.evidence.is_empty() {
         return None;
@@ -131,7 +110,6 @@ pub fn auto_evidence(info: &SpeakerName) -> Option<String> {
     Some(info.evidence.iter().map(|e| format!("[{}] {}", analysis::clock(Duration::from_secs_f64(e.start.max(0.0))), e.text)).collect::<Vec<_>>().join("\n"))
 }
 
-/// Saved names after the dialog: an empty field removes the name, the others replace theirs.
 pub fn apply_names(current: &BTreeMap<u32, String>, draft: &[(u32, String)]) -> BTreeMap<u32, String> {
     let mut names = current.clone();
     for (id, raw) in draft {
@@ -147,13 +125,10 @@ pub fn apply_names(current: &BTreeMap<u32, String>, draft: &[(u32, String)]) -> 
     names
 }
 
-/// Hits shown for a search.
 const SEARCH_HITS: usize = 8;
-/// The sync switch: the pill and the gap before its label. The label width is measured.
 const SYNC_PILL: f32 = 28.0;
 const SYNC_GAP: f32 = 6.0;
 
-/// The sync switch in the dialog header. The pill and the label keep one width either way.
 fn sync_switch(ui: &mut egui::Ui, rect: Rect, on: bool, p: theme::Palette) -> egui::Response {
     let resp = ui.interact(rect, ui.id().with("dialog-sync"), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -172,16 +147,13 @@ fn sync_switch(ui: &mut egui::Ui, rect: Rect, on: bool, p: theme::Palette) -> eg
     resp
 }
 
-/// The search field of the dialog and its results.
 #[derive(Default)]
 struct Search {
     text: String,
     running: Option<Receiver<anyhow::Result<Vec<Hit>>>>,
-    /// Results of the last search (`None`: the dialog is shown).
     hits: Option<anyhow::Result<Vec<Hit>>>,
 }
 
-/// Search in the transcript of `id` (a user waits).
 fn search(services: &Services, id: &str, query: &str) -> anyhow::Result<Vec<Hit>> {
     let settings = services.settings.read().expect("settings lock").clone();
     Ok(mediaa_agent::search::search(services.engine.as_ref(), &services.slots, &settings, &services.ai_dir, id, query, SEARCH_HITS, true)?.0)
@@ -190,49 +162,33 @@ fn search(services: &Services, id: &str, query: &str) -> anyhow::Result<Vec<Hit>
 pub struct Dialog {
     path: PathBuf,
     ai_dir: PathBuf,
-    /// Content id of the file (`None` when it cannot be read).
     file_id: Option<String>,
-    /// Events of this recording already applied.
     seen: usize,
     transcript: Option<Transcript>,
     replies: Vec<Reply>,
     chapters: Vec<Chapter>,
     names: BTreeMap<u32, String>,
-    /// Where each name came from and what shows it (the names dialog shows the automatic ones).
     name_info: BTreeMap<u32, SpeakerName>,
-    /// The latest search for the speaker names, finished or not.
     names_task: Option<Task>,
     task: Option<Task>,
     read: Option<Instant>,
-    /// Speaker being named and the name typed so far.
     naming: Option<(u32, String)>,
-    /// The reply being played (to keep it in view).
     playing: Option<usize>,
-    /// The reply to bring into view (a click on a topic).
     scroll_to: Option<usize>,
-    /// What of the recording is ready, from its data.
     ready: Readiness,
-    /// The latest analysis with all its tasks, and the history of run times (for the estimates).
     tree: Vec<Task>,
     stats: Vec<KindStat>,
-    /// The topic whose breakdown is open (it takes the whole pane).
     reading: Option<usize>,
-    /// Topics whose breakdown the queue was already asked to hurry.
     asked: HashSet<usize>,
-    /// The analysis line over the topics is unfolded into the stage rows.
     compact_open: bool,
     options: Option<OptionsWindow>,
     confirm: Option<ConfirmWindow>,
-    /// A failed stage whose details are open, and the log excerpt taken when it was opened.
     details: Option<TaskId>,
     details_log: String,
     details_copied: bool,
     search: Search,
-    /// Names being edited for every speaker. `None`: the dialog is closed.
     name_draft: Option<Vec<(u32, String)>>,
-    /// Focus the first field once, when the dialog opens.
     name_focus: bool,
-    /// Sync as it was last frame, so turning it on can jump to the current reply.
     saw_sync: bool,
     jump_play: bool,
 }
@@ -275,12 +231,10 @@ impl Dialog {
         }
     }
 
-    /// A reply has a speaker (diarization ran).
     pub fn has_speakers(&self) -> bool {
         self.replies.iter().any(|reply| reply.speaker.is_some())
     }
 
-    /// Opens the names dialog. A second click leaves the typed names as they are.
     pub fn open_names(&mut self) {
         if self.name_draft.is_some() || !self.has_speakers() {
             return;
@@ -289,7 +243,6 @@ impl Dialog {
         self.name_focus = true;
     }
 
-    /// A window of this pane is open, so Esc belongs to it and not to the maximized pane.
     pub fn blocks_escape(&self) -> bool {
         self.name_draft.is_some() || self.naming.is_some() || self.options.is_some() || self.confirm.is_some() || self.details.is_some()
     }
@@ -298,7 +251,6 @@ impl Dialog {
         self.task.as_ref().is_some_and(|t| !t.status.is_finished())
     }
 
-    /// Whether the recording has replies: the dialog and the chat work only then.
     pub fn has_replies(&self) -> bool {
         self.ready.replies
     }
@@ -319,7 +271,6 @@ impl Dialog {
         self.read = Some(Instant::now());
         let id = self.file_id.clone();
         if let (Some(services), Some(id)) = (services, id) {
-            // The queue snapshot is the running analysis the menu and the progress rows read.
             match services.sched.snapshot() {
                 Ok(snap) => {
                     let tasks: Vec<Task> = snap.tasks.into_iter().map(|view| view.task).collect();
@@ -348,7 +299,6 @@ impl Dialog {
                     self.replies = r;
                     self.names = n;
                     self.name_info = info;
-                    // The topics exist for the interface only when they are all ready.
                     self.chapters = if self.ready.topics { t.chapters().unwrap_or_default() } else { Vec::new() };
                 }
                 (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => log::warn!("transcript: {e:#}"),
@@ -356,8 +306,6 @@ impl Dialog {
         }
     }
 
-    /// The topics of the recording (read with the transcript).
-    /// Speakers as the panes show them. Built from the names in memory, so a rename is immediate.
     pub fn roster(&self) -> super::mentions::Roster {
         super::mentions::Roster::recording(&self.names, self.replies.iter().filter_map(|r| r.speaker))
     }
@@ -372,11 +320,9 @@ impl Dialog {
 
     pub fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, player: &mut Player, services: Option<&Services>, p: theme::Palette, chrome: &mut Chrome) -> Option<StudioAction> {
         self.refresh(services);
-        // Changes come from the worker thread: look again while the pane is shown.
         ui.ctx().request_repaint_after(if self.active() { ACTIVE_REFRESH } else { IDLE_REFRESH });
         let sync_text = ui.fonts_mut(|f| f.layout_no_wrap(t!("studio.sync").to_string(), FontId::proportional(12.0), Color32::PLACEHOLDER)).size().x;
         let sync_w = SYNC_PILL + SYNC_GAP + sync_text;
-        // The expand button, the sync switch and the menu each keep their place.
         let left = 4.0 + theme::ICON_BUTTON + 8.0;
         let right = 4.0 + theme::ICON_BUTTON + 8.0 + sync_w + 8.0;
         let body = panel_insets(ui, rect, &t!("studio.dialog"), left, right, p);
@@ -385,7 +331,6 @@ impl Dialog {
         if studio::edge_button(ui, rect, false, glyph, &maximize_tip, "dialog").clicked() {
             chrome.maximized = !chrome.maximized;
         }
-        // What the analysis settings and models allow.
         let (defaults, model, names_model) = services
             .map(|s| {
                 let agent = s.settings.read().expect("settings lock");
@@ -394,10 +339,8 @@ impl Dialog {
             .unwrap_or((AnalysisOptions::default(), false, false));
         let av = analysis::availability(&self.ready, self.task.as_ref().map(|t| t.status));
         if !av.topics {
-            // The topics are being rebuilt (or not there yet): no breakdown to read.
             self.reading = None;
         }
-        // Header, right edge: sync, then the «⋯» menu. Both slots stay when the menu is hidden.
         let menu = Rect::from_min_max(egui::pos2(rect.max.x - 4.0 - theme::ICON_BUTTON, rect.min.y), egui::pos2(rect.max.x - 4.0, rect.min.y + studio::PANE_HEAD));
         let sync_rect = Rect::from_min_max(egui::pos2(menu.min.x - 8.0 - sync_w, rect.min.y), egui::pos2(menu.min.x - 8.0, rect.min.y + studio::PANE_HEAD));
         if sync_switch(ui, sync_rect, chrome.sync, p).clicked() {
@@ -449,19 +392,15 @@ impl Dialog {
                 }
                 Pane::Replies => {}
             }
-            // The rest of the analysis, one line over the topics (it unfolds into the stages).
             if av.compact {
                 if let Some(a) = self.compact_ui(ui, p) {
                     action = Some(a);
                 }
                 ui.add_space(6.0);
             }
-            // The topics stay at the top of the pane while the replies scroll below.
             if av.topics && !self.chapters.is_empty() {
-                // Owned, so the topic widgets can borrow `chapters` and `reading` together.
                 let roster = self.roster();
                 if self.reading.is_some() {
-                    // A topic's breakdown takes the whole pane; the replies are out of view.
                     let building = self.details_building();
                     let spin = analysis::topics_running(&self.tree);
                     if let Some(topic) = topics::reading(ui, &self.chapters, &mut self.reading, player, building, spin, &roster, p) {
@@ -472,13 +411,11 @@ impl Dialog {
                     }
                     return;
                 }
-                // A topic or one of its parts was clicked: seek there and show its first reply.
                 let spin = analysis::topics_running(&self.tree);
                 if let Some(start) = topics::block(ui, &self.chapters, player.position(), body.height() * 0.4, &mut self.reading, spin, &roster, p) {
                     if click_seeks(chrome.sync) {
                         player.seek(start);
                         self.scroll_to = self.replies.iter().position(|r| r.end > start + 0.001).or(Some(0));
-                        // The reply to scroll to is in the dialog, not in the search results.
                         self.search.hits = None;
                     }
                 }
@@ -517,8 +454,6 @@ impl Dialog {
         }
     }
 
-    /// The analysis options window and the restart confirmation, when one is open; returns the
-    /// action they end in.
     fn windows(&mut self, ctx: &egui::Context, defaults: &AnalysisOptions, model: bool, p: theme::Palette) -> Option<StudioAction> {
         let mut action = None;
         if let Some(window) = &mut self.options {
@@ -570,7 +505,6 @@ impl Dialog {
         }
     }
 
-    /// The rows of the stages of the latest analysis, its status and the estimate of what is left.
     fn analysis_rows(&self) -> Option<(TaskStatus, Vec<StageRow>, analysis::Left)> {
         let task = self.task.as_ref()?;
         let now = now_ms();
@@ -579,12 +513,10 @@ impl Dialog {
         Some((task.status, rows, total))
     }
 
-    /// Whether the details of the topics are still being built (the breakdown is "being prepared").
     fn details_building(&self) -> bool {
         self.analysis_rows().is_some_and(|(_, rows, _)| rows.iter().any(|r| r.stage == Stage::Details && matches!(r.state, RowState::Running | RowState::Waiting)))
     }
 
-    /// Asks the queue to build the breakdown of the topic being read first — once per topic.
     fn hurry_detail(&mut self, services: Option<&Services>, topic: usize) {
         if !self.asked.insert(topic) {
             return;
@@ -597,8 +529,6 @@ impl Dialog {
         }
     }
 
-    /// The whole progress of the analysis while there are no replies: the stage rows under the
-    /// total. Returns the resume of a failed stage.
     fn progress_ui(&mut self, ui: &mut egui::Ui, p: theme::Palette) -> Option<StudioAction> {
         let (status, rows, total) = self.analysis_rows()?;
         let title = analysis::total_title(status, total);
@@ -606,7 +536,6 @@ impl Dialog {
         self.take_stage(analysis::card(ui, &view, None, p))
     }
 
-    /// The one-line state of the analysis over the topics; a click unfolds the stage rows.
     fn compact_ui(&mut self, ui: &mut egui::Ui, p: theme::Palette) -> Option<StudioAction> {
         let (status, rows, total) = self.analysis_rows()?;
         let title = analysis::compact_title(status, &rows, total);
@@ -615,8 +544,6 @@ impl Dialog {
         self.take_stage(hit)
     }
 
-    /// No transcript yet (or no speech in it): what the analysis gives and its button; returns
-    /// whether the button was pressed.
     fn empty(&self, ui: &mut egui::Ui, p: theme::Palette) -> bool {
         let mut pressed = false;
         ui.vertical_centered(|ui| {
@@ -631,7 +558,6 @@ impl Dialog {
         pressed
     }
 
-    /// The search field; returns whether results are shown instead of the dialog.
     fn search_ui(&mut self, ui: &mut egui::Ui, player: &mut Player, services: Option<&Services>, available: bool, sync: bool, p: theme::Palette) -> bool {
         if !available {
             if self.task.as_ref().is_none_or(|t| t.status == TaskStatus::Done) {
@@ -640,9 +566,6 @@ impl Dialog {
             }
             return false;
         }
-        // The same card as the folded topics block — one fixed row, the same icon and text x: the
-        // card does not change height or move its contents when text appears, and the clear
-        // button's slot is reserved even while the button is hidden.
         let (card, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), topics::HEADER_H), Sense::hover());
         ui.painter().rect(card, CornerRadius::same(8), p.card, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
         ui.painter().text(egui::pos2(card.left() + topics::HEADER_ICON_X, card.center().y), egui::Align2::LEFT_CENTER, icon::MAGNIFYING_GLASS, FontId::proportional(14.0), p.accent);
@@ -738,7 +661,6 @@ impl Dialog {
         if click_seeks(sync) {
             if let Some(t) = seek {
                 player.seek(t);
-                // Back to the dialog at that place.
                 self.search.hits = None;
             }
         }
@@ -777,7 +699,6 @@ impl Dialog {
                         if click_seeks(sync) && time.clicked() {
                             seek = Some(reply.start);
                         }
-                        // Both buttons keep their place; the glyph appears only while the row is hovered.
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let copy = ui.allocate_exact_size(egui::vec2(theme::ICON_BUTTON, theme::ICON_BUTTON), Sense::click());
                             let reply_btn = ui.allocate_exact_size(egui::vec2(theme::ICON_BUTTON, theme::ICON_BUTTON), Sense::click());
@@ -828,7 +749,6 @@ impl Dialog {
         self.naming_window(ui);
     }
 
-    /// Every speaker at once. Enter / Save writes them all; Esc / Cancel writes nothing.
     fn names_window(&mut self, ui: &mut egui::Ui) {
         if self.name_draft.is_none() {
             return;
@@ -875,7 +795,6 @@ impl Dialog {
                                 save = true;
                             }
                             ui.label(RichText::new(t!("studio.names_meta", spoken = human_duration(spoken), first = human_duration(first_at))).size(11.5).color(p.text_weak));
-                            // A name the program found: say so, and show what the recording shows.
                             if let Some(evidence) = self.name_info.get(&id).and_then(auto_evidence) {
                                 let mark = ui.label(RichText::new(t!("studio.names_auto")).size(11.0).color(p.success));
                                 studio::tip(&mark, &evidence);
@@ -918,7 +837,6 @@ impl Dialog {
         self.names = apply_names(&self.names, &draft);
     }
 
-    /// A small window to name a speaker (an empty name brings the number back).
     fn naming_window(&mut self, ui: &mut egui::Ui) {
         let Some((speaker, name)) = &mut self.naming else { return };
         let speaker = *speaker;
@@ -958,8 +876,6 @@ impl Dialog {
     }
 }
 
-/// The words of a reply as one wrapped text, the one at `now` highlighted; returns the time of
-/// a clicked word when clicks seek.
 fn reply_text(ui: &mut egui::Ui, reply: &Reply, now: Option<f64>, seekable: bool, p: theme::Palette) -> Option<f64> {
     let mut job = LayoutJob::default();
     job.wrap.max_width = ui.available_width();
@@ -986,7 +902,6 @@ fn reply_text(ui: &mut egui::Ui, reply: &Reply, now: Option<f64>, seekable: bool
     word_at(reply, cursor.index.0).map(|i| reply.words[i].start)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1002,7 +917,6 @@ mod tests {
             evidence: vec![NameEvidence { start: 5.0, text: "Меня зовут Антон.".into(), how: "self".into() }],
         };
         assert_eq!(auto_evidence(&auto).unwrap(), "[0:05] Меня зовут Антон.");
-        // The user's own name is not marked, and a name without evidence has nothing to show.
         assert!(auto_evidence(&SpeakerName { source: NameSource::Manual, ..auto.clone() }).is_none());
         assert!(auto_evidence(&SpeakerName { evidence: Vec::new(), ..auto }).is_none());
     }
@@ -1066,7 +980,6 @@ mod tests {
         assert_eq!(speaker_color(0), speaker_color(SPEAKER_COLORS.len() as u32));
     }
 
-    /// A finished stage tells the studio; the replies show up without waiting out the idle poll.
     #[test]
     fn an_event_reloads_the_recording() {
         use super::Services;

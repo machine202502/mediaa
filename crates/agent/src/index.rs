@@ -1,8 +1,3 @@
-//! The `index` queue task: a file's dialog cut into chunks with a keyword index
-//! (`mediaa_core::retrieval`), then an embedding per chunk with the Embedding role's model.
-//! Resumable chunk by chunk. The pipeline queues it after the transcription (or diarization)
-//! and the topics after it.
-
 use crate::run::{Host, Stage, Work};
 use crate::scope::Scope;
 use mediaa_core::agent::{AgentSettings, ModelRole};
@@ -19,9 +14,7 @@ use std::sync::Arc;
 
 pub const KIND: &str = "index";
 
-/// Context of the embedding model (chunks are ~200 words).
 pub const EMBED_CTX: u32 = 2048;
-/// Embeddings written before the slot is given to someone else.
 const BATCH: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

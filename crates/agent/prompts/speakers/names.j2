@@ -1,4 +1,3 @@
-{# Small models copy concrete examples, so the forms are described instead. #}
 Part of the recording {{ start }} – {{ end }}. Speakers in it: {% for s in speakers %}{{ s }}{% if not loop.last %}, {% endif %}{% endfor %}.
 {% if known %}Names found so far (they may be wrong): {% for k in known %}{{ k.label }} — {{ k.name }}{% if not loop.last %}; {% endif %}{% endfor %}.
 {% endif %}

@@ -1,9 +1,3 @@
-//! A provider's model as the agent's brain: native OpenAI tool calls (`tools`, `tool_choice`,
-//! several calls at once), streamed (the answer shows as it is written), arguments checked as
-//! JSON with one corrective retry; a reply that is a step written as text (models imitate the
-//! history) is accepted too. Each request takes a «provider calls» slot of the budget and is
-//! counted in the task that runs it (tokens from the response's usage).
-
 use super::brain::{parse_step, AnswerStream, Brain, Call, Message, Piece, Role, Step, ToolSpec, MAX_CALLS};
 use crate::providers::chat_completion_stream;
 use crate::scope::Scope;
@@ -17,23 +11,16 @@ pub struct ProviderBrain {
     pub provider: Provider,
     pub model: String,
     pub slots: Slots,
-    /// Longest step (tokens).
     pub max_tokens: u32,
-    /// Where the calls are counted.
     pub scope: Scope,
-    /// The model reasons before it acts: the reasoning parameter is sent and the reasoning text
-    /// of the response is passed on.
     pub thinking: bool,
 }
 
-/// The request body for a step; `reasoning`: the kind of provider when the model should reason.
 pub fn request(model: &str, messages: &[Message], tools: &[ToolSpec], may_answer: bool, max_tokens: u32, reasoning: Option<ProviderKind>) -> Value {
     let messages: Vec<Value> = messages.iter().map(|m| json!({"role": m.role.as_str(), "content": m.content})).collect();
     let mut body = json!({"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.2});
     match reasoning {
-        // OpenRouter's own parameter, the same for every model it serves.
         Some(ProviderKind::OpenRouter) => body["reasoning"] = json!({"effort": "medium"}),
-        // The OpenAI parameter that compatible servers (and Hugging Face's router) understand.
         Some(_) => body["reasoning_effort"] = json!("medium"),
         None => {}
     }
@@ -44,19 +31,14 @@ pub fn request(model: &str, messages: &[Message], tools: &[ToolSpec], may_answer
             .collect();
         body["tools"] = Value::Array(specs);
         body["tool_choice"] = json!(if may_answer { "auto" } else { "required" });
-        // Several calls in one answer are the step's list of calls.
         body["parallel_tool_calls"] = json!(true);
     }
     body
 }
 
-/// A streamed response put together: the text, the tool calls by their index; the text is
-/// passed on as the answer while no call has begun (a step written as JSON text streams its
-/// `answer` only).
 #[derive(Default)]
 struct Collected {
     content: String,
-    /// The calls of the answer, by the index the provider gave them (its order).
     calls: std::collections::BTreeMap<u64, (String, String)>,
     json_text: Option<AnswerStream>,
     prompt_tokens: u64,
@@ -64,14 +46,12 @@ struct Collected {
 }
 
 impl Collected {
-    /// One chunk of the stream: reasoning and answer text go on at once, the tokens used are kept.
     fn add(&mut self, chunk: &Value, on_piece: &mut dyn FnMut(Piece)) {
         if let Some(usage) = chunk.get("usage").filter(|u| u.is_object()) {
             self.prompt_tokens = usage["prompt_tokens"].as_u64().unwrap_or(0);
             self.completion_tokens = usage["completion_tokens"].as_u64().unwrap_or(0);
         }
         let delta = &chunk["choices"][0]["delta"];
-        // `reasoning_content` (DeepSeek, vLLM) or `reasoning` (OpenRouter).
         if let Some(thought) = delta["reasoning_content"].as_str().or_else(|| delta["reasoning"].as_str()).filter(|t| !t.is_empty()) {
             on_piece(Piece::Thinking(thought));
         }
@@ -106,7 +86,6 @@ impl Collected {
         }
     }
 
-    /// The response as a non-streamed one.
     fn response(&self) -> Value {
         let mut message = json!({"content": self.content});
         if !self.calls.is_empty() {
@@ -117,7 +96,6 @@ impl Collected {
     }
 }
 
-/// The step in a chat completion response.
 pub fn read_response(body: &Value) -> anyhow::Result<Step> {
     let msg = &body["choices"][0]["message"];
     anyhow::ensure!(msg.is_object(), "no message in the answer: {body}");
@@ -128,7 +106,6 @@ pub fn read_response(body: &Value) -> anyhow::Result<Step> {
             let tool = item["function"]["name"].as_str().unwrap_or_default().to_string();
             let raw = item["function"]["arguments"].as_str().unwrap_or("{}");
             let mut args: Value = serde_json::from_str(raw).map_err(|e| anyhow::anyhow!(crate::prompts::render("errors/arguments_not_json.j2", minijinja::context! { tool => &tool, error => e.to_string(), raw })))?;
-            // A model may still send the old title argument. It is not a tool argument.
             if let Some(obj) = args.as_object_mut() {
                 obj.remove("title");
             }
@@ -140,7 +117,6 @@ pub fn read_response(body: &Value) -> anyhow::Result<Step> {
         }
         return Ok(Step::Tool { thought: content, calls });
     }
-    // A step written as text (the history shows steps as JSON), else a plain answer.
     if content.starts_with('{') {
         if let Ok(step) = parse_step(&content) {
             return Ok(step);
@@ -151,12 +127,10 @@ pub fn read_response(body: &Value) -> anyhow::Result<Step> {
 }
 
 impl ProviderBrain {
-    /// The kind of provider to send the reasoning parameter to, when the model should reason.
     fn reasoning(&self) -> Option<ProviderKind> {
         self.thinking.then_some(self.provider.kind)
     }
 
-    /// Counts one request in the task that is running it.
     fn count(&self, started: Instant, collected: &Collected) {
         self.scope.record_call(&self.model, started, collected.prompt_tokens, collected.completion_tokens);
     }
@@ -178,7 +152,6 @@ impl Brain for ProviderBrain {
             self.count(started, &collected);
             match streamed.and_then(|()| read_response(&collected.response())) {
                 Ok(step) => return Ok(step),
-                // A malformed call: once more, telling the model what was wrong.
                 Err(e) if !retried && e.to_string().contains("not JSON") => {
                     retried = true;
                     messages.push(Message::new(Role::User, crate::prompts::render("nudges/malformed_call.j2", minijinja::context! { error => e.to_string() })));
@@ -247,20 +220,17 @@ mod tests {
         let bad = json!({"choices": [{"message": {"tool_calls": [{"function": {"name": "search", "arguments": "{query:"}}]}}]});
         assert!(read_response(&bad).unwrap_err().to_string().contains("not JSON"));
         assert!(read_response(&json!({"error": "x"})).is_err());
-        // Calls to make at once, in the order of the response.
         let two = json!({"choices": [{"message": {"tool_calls": [
             {"function": {"name": "search", "arguments": "{\"query\":\"бюджет\"}"}},
             {"function": {"name": "read", "arguments": "{\"from\":\"0:00\",\"to\":\"1:00\"}"}}
         ]}}]});
         let Step::Tool { calls, .. } = read_response(&two).unwrap() else { panic!("not a step") };
         assert_eq!(calls, [Call { tool: "search".into(), args: json!({"query": "бюджет"}) }, Call { tool: "read".into(), args: json!({"from": "0:00", "to": "1:00"}) }]);
-        // More than allowed: the first three.
         let many = json!({"choices": [{"message": {"tool_calls": (0..4).map(|i| json!({"function": {"name": format!("t{i}"), "arguments": "{}"}})).collect::<Vec<_>>()}}]});
         let Step::Tool { calls, .. } = read_response(&many).unwrap() else { panic!("not a step") };
         assert_eq!(calls.len(), MAX_CALLS);
     }
 
-    /// An SSE server answering request n with the events of `script[n]` (chunk deltas).
     fn sse_server(script: Vec<Vec<Value>>) -> (String, Arc<Mutex<Vec<Value>>>) {
         let srv = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = srv.server_addr().to_ip().unwrap();
@@ -283,7 +253,6 @@ mod tests {
         (format!("http://{addr}/v1"), bodies)
     }
 
-    /// A brain over the server at `url`, counted in a task of a queue in `dir`.
     fn brain(url: String, dir: &std::path::Path) -> (ProviderBrain, Arc<dyn Store>, TaskId) {
         let mut p = Provider::new(ProviderKind::OpenAiCompatible, "Local");
         p.base_url = url;
@@ -299,8 +268,6 @@ mod tests {
 
     #[test]
     fn several_calls_stream_in_one_answer_in_their_order() {
-        // The calls come interleaved, by index, their arguments in pieces; the text before them
-        // is shown as the answer, the text after they begin is not.
         let (url, _) = sse_server(vec![vec![
             json!({"content": "Ищу."}),
             json!({"tool_calls": [{"index": 1, "function": {"name": "read", "arguments": "{\"from\":\"0:00\","}}]}),
@@ -336,12 +303,9 @@ mod tests {
     #[test]
     fn streams_answers_and_retries_a_malformed_call_once() {
         let (url, bodies) = sse_server(vec![
-            // A malformed call, then a good one in two pieces.
             vec![call("search", "{query:")],
             vec![call("search", r#"{"query":"бюд"#), call("", r#"жет","title":"Ищу"}"#)],
-            // A plain answer in pieces.
             vec![json!({"content": "Да, "}), json!({"content": "[1:00]."})],
-            // A step written as JSON text: only its answer streams.
             vec![json!({"content": r#"{"thought":"","action":"answer","#}), json!({"content": r#""answer":"Нет."}"#})],
         ]);
         let dir = tempfile::tempdir().unwrap();
@@ -370,7 +334,6 @@ mod tests {
     fn requests_are_counted_with_the_tokens_of_the_response() {
         let (url, _) = sse_server(vec![
             vec![json!({"content": "Да."}), json!({"usage": {"prompt_tokens": 120, "completion_tokens": 7}, "choices": []})],
-            // No usage in the stream: the call is counted, the tokens are not known.
             vec![json!({"content": "Сводка"})],
             vec![call("search", "{query:")],
         ]);
@@ -384,14 +347,12 @@ mod tests {
         assert_eq!(b.complete(&[Message::new(Role::User, "q")], &cancel).unwrap(), "Сводка");
         let stats = queue.get(task).unwrap().unwrap().stats;
         assert_eq!((stats.model_calls, stats.prompt_tokens, stats.completion_tokens), (2, 120, 7));
-        // A failed request is a call too.
         assert!(b.step(&[Message::new(Role::User, "q")], &[spec()], false, &cancel, &mut |_| {}).is_err());
         assert_eq!(queue.get(task).unwrap().unwrap().stats.model_calls, 4, "the malformed call and its retry (the script is over)");
     }
 
     #[test]
     fn reasoning_is_asked_for_and_streamed() {
-        // The parameter, per kind of provider.
         let on = |kind| request("m", &[], &[], true, 100, Some(kind));
         assert_eq!(on(ProviderKind::OpenRouter)["reasoning"], json!({"effort": "medium"}));
         assert_eq!(on(ProviderKind::OpenAiCompatible)["reasoning_effort"], "medium");

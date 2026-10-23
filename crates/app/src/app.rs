@@ -1,6 +1,3 @@
-//! Application state and the event loop glue: tray, hotkeys, timers, captures, recordings.
-//! Page UIs live in `pages/`.
-
 use rust_i18n::t;
 use crate::hotkeys::{HotkeyAction, Hotkeys};
 use crate::overlay::{self, Overlay, Outcome};
@@ -24,7 +21,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Delay between hiding the window and grabbing the screen (window fade-out animations).
 const HIDE_DELAY: Duration = Duration::from_millis(300);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,22 +31,16 @@ pub enum Page {
     Library,
     Convert,
     Settings,
-    /// Agent section: virtual catalogs of files.
     Catalogs,
-    /// Agent section: LLM providers.
     Providers,
-    /// Agent section: models per role.
     Models,
-    /// Agent section: the queue of neural-network tasks.
     Queue,
-    /// Agent section: memory and concurrency budget.
     Budget,
     About,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecordTarget {
-    /// Sound only (the "Record audio" page; its own settings).
     Audio,
     Screens(Vec<MonitorInfo>),
     Region(MonitorInfo, Rect),
@@ -81,11 +71,8 @@ pub struct App {
     pub settings: Settings,
     settings_dirty: Option<Instant>,
     pub page: Page,
-    /// Page to return to when switching back to the Capture section.
     pub last_capture_page: Page,
-    /// Page to return to when switching back to the Agent section.
     pub last_agent_page: Page,
-    /// Last section page (Settings / About toggle back to it).
     pub last_main_page: Page,
     pub toasts: egui_notify::Toasts,
     tray: Option<Tray>,
@@ -98,10 +85,7 @@ pub struct App {
     pub mic_devices: Vec<String>,
     overlay: Option<Overlay>,
     pending: Option<(Instant, Pending)>,
-    /// The window was hidden by us and should come back afterwards.
     hidden_by_us: bool,
-    /// The hidden window is temporarily "ghosted" (see `NativeWindow::set_ghost`) so the area
-    /// picker can run while the app sits in the tray.
     ghosted: bool,
     pub rec: pages::record::RecordUi,
     pub recorder: RecState,
@@ -111,15 +95,11 @@ pub struct App {
     pub agent: pages::agent::AgentUi,
     pub capabilities: Vec<(&'static str, bool)>,
     quit_after_save: bool,
-    /// Native handle of the main window (Windows), for reliable hide/show.
     native_window: Option<NativeWindow>,
-    /// Command-line action, run once the window has been shown (see `logic`).
     startup: StartupAction,
     logo: Option<egui::TextureHandle>,
 }
 
-/// Action requested on the command line (`mediaa --area`, `mediaa --fullscreen`), handy for
-/// binding MediaA to any system shortcut.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StartupAction {
     #[default]
@@ -145,7 +125,6 @@ impl App {
         let ctx = &cc.egui_ctx;
         theme::install(ctx);
         let settings = Settings::load();
-        // Scan the system fonts for text annotations in the background (takes a moment).
         std::thread::spawn(|| mediaa_core::annotate::fonts().len());
         theme::apply_preference(ctx, settings.theme);
         crate::i18n::apply(settings.language.as_deref());
@@ -168,7 +147,6 @@ impl App {
             .as_mut()
             .map(|h| h.apply(&settings.hotkeys))
             .unwrap_or_default();
-        // One engine for the whole process: the agent's services and the pages share it.
         let agent_budget = settings.agent.budget.clone();
         let engine: std::sync::Arc<dyn mediaa_engine::Engine> =
             std::sync::Arc::new(mediaa_engine::LocalEngine::new(mediaa_core::paths::models_dir(), agent_budget.clone().into()));
@@ -223,8 +201,6 @@ impl App {
         app
     }
 
-    // ---------------------------------------------------------------- shared helpers
-
     pub fn settings_changed(&mut self) {
         self.settings_dirty = Some(Instant::now());
     }
@@ -253,14 +229,11 @@ impl App {
         }
     }
 
-    /// Unregisters all global hotkeys while a new combination is being captured, so pressing
-    /// an existing one reaches the settings field instead of triggering it.
     pub fn suspend_hotkeys(&mut self) {
         if let Some(h) = self.hotkeys.as_mut() {
             let off = mediaa_core::settings::HotkeySettings { enabled: false, ..Default::default() };
             h.apply(&off);
         }
-        // Reset the "pressed since last poll" flag of the polled PrintScreen key.
         let _ = mediaa_platform::keys::print_screen_down();
     }
 
@@ -287,8 +260,6 @@ impl App {
             .clone()
     }
 
-    /// Hides / shows the main window: natively where supported (see `platform::window`),
-    /// otherwise through egui.
     fn set_window_visible(&mut self, ctx: &egui::Context, visible: bool) {
         let native = self.native_window.is_some_and(|w| w.set_visible(visible));
         if !native {
@@ -332,7 +303,6 @@ impl App {
         ctx.request_repaint_after(delay);
     }
 
-    /// Monitor that contains the main window (falls back to the primary one).
     fn current_monitor_index(&self, ctx: &egui::Context) -> usize {
         let pos = ctx.input(|i| {
             let ppp = i.viewport().native_pixels_per_point.unwrap_or(1.0);
@@ -349,15 +319,11 @@ impl App {
         .unwrap_or(0)
     }
 
-    // ---------------------------------------------------------------- screenshots
-
     pub fn start_region_screenshot(&mut self, ctx: &egui::Context, purpose: overlay::Purpose) {
         if self.overlay.is_some() {
             return;
         }
         self.refresh_monitors();
-        // The area picker is its own window; the main window stays as it is.
-        // egui only creates child windows while the main one runs its UI, so un-minimize it.
         if ctx.input(|i| i.viewport().minimized == Some(true)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         }
@@ -383,7 +349,6 @@ impl App {
         self.schedule(ctx, Pending::WindowScreenshot(window_id), hide);
     }
 
-    /// Copies and/or saves a captured image according to `action`.
     pub fn deliver_image(&mut self, frame: Frame, action: AfterCapture, format: Option<ImageFormat>) {
         let mut copied = false;
         let mut saved = None;
@@ -418,8 +383,6 @@ impl App {
         log::info!("running {pending:?}");
         match pending {
             Pending::RegionScreenshot { purpose } => {
-                // Capture only the display the picker opens on (others on Tab), then hand the
-                // frozen picture to the overlay before its window exists.
                 let start = self.current_monitor_index(ctx).min(self.monitors.len().saturating_sub(1));
                 let Some(monitor) = self.monitors.get(start).cloned() else {
                     self.error(t!("err.no_display"));
@@ -428,14 +391,11 @@ impl App {
                 match screen::capture_monitor(monitor.id) {
                     Ok(first) => {
                         let after = self.settings.screenshot.after_capture;
-                        // One recording at a time: no "Record" button while one is running.
                         let purpose = match purpose {
                             overlay::Purpose::Area if !self.recorder.is_idle() => overlay::Purpose::Screenshot,
                             p => p,
                         };
                         if self.hidden_by_us {
-                            // Hidden in the tray: egui renders child windows only while the main
-                            // one is shown, so show it fully transparent for the picker's lifetime.
                             self.ghosted = self.native_window.is_some_and(|w| w.set_ghost(true));
                             if !self.ghosted {
                                 self.show_window(ctx);
@@ -476,8 +436,6 @@ impl App {
         }
     }
 
-    /// Runs the command-line action after the first rendered frame (child windows such as the
-    /// area picker can only be created once the main window is up).
     fn run_startup_action(&mut self, ctx: &egui::Context) {
         if self.startup == StartupAction::None || ctx.cumulative_frame_nr() < 2 {
             if self.startup != StartupAction::None {
@@ -492,7 +450,6 @@ impl App {
         }
     }
 
-    /// Keeps the area-picker window alive and applies its result once the user is done.
     fn handle_overlay(&mut self, ctx: &egui::Context) {
         let Some(outcome) = self.overlay.as_ref().and_then(|o| o.show(ctx)) else { return };
         self.overlay = None;
@@ -504,7 +461,6 @@ impl App {
         match outcome {
             Outcome::Cancel => {}
             Outcome::Image { frame, action, format } => self.deliver_image(frame, action, format),
-            // Area picked on the Record page: record it right away with the app settings.
             Outcome::Region { monitor, rect } => {
                 self.rec.target = pages::record::TargetKind::Region;
                 self.rec.region = Some((monitor.clone(), rect));
@@ -512,21 +468,16 @@ impl App {
                 self.last_capture_page = Page::Record;
                 self.request_recording(ctx, RecordTarget::Region(monitor, rect), RecordProfile::App);
             }
-            // Area picked from the tray / hotkey: the hotkey recording settings apply.
             Outcome::RecordArea { monitor, rect } => {
                 self.request_recording(ctx, RecordTarget::Region(monitor, rect), RecordProfile::Hotkey);
             }
         }
     }
 
-    // ---------------------------------------------------------------- recording
-
-    /// Starts recording right away (one recording at a time).
     pub fn request_recording(&mut self, ctx: &egui::Context, target: RecordTarget, profile: RecordProfile) {
         if !self.recorder.is_idle() {
             return;
         }
-        // Audio recordings keep the window (there is nothing on screen to keep out of the picture).
         let hide = !matches!(target, RecordTarget::Audio) && self.settings.profile(profile).0.hide_to_tray;
         self.schedule(ctx, Pending::BeginRecording(target, profile), hide);
     }
@@ -535,7 +486,6 @@ impl App {
         if !self.recorder.is_idle() {
             return;
         }
-        // Devices may have been plugged in or out since startup.
         self.refresh_mics();
         let default_mic = mediaa_platform::audio::default_input_device();
         let (r, anim) = self.settings.profile(profile);
@@ -613,7 +563,6 @@ impl App {
         }
     }
 
-    /// Capture page of the running recording (video or audio).
     pub fn recording_page(&self) -> Page {
         match &self.recorder {
             RecState::Recording { session, .. } if matches!(session.output(), OutputKind::Audio(_)) => Page::RecordAudio,
@@ -701,12 +650,10 @@ impl App {
         }
     }
 
-    /// Current target from the Record page selections.
     pub fn record_target_from_ui(&self) -> Result<RecordTarget, String> {
         use pages::record::TargetKind;
         match self.rec.target {
             TargetKind::Screen => {
-                // Several displays at once (one file each); nothing ticked = the primary one.
                 let mut ms: Vec<_> = self.monitors.iter().filter(|m| self.rec.monitors.contains(&m.id)).cloned().collect();
                 if ms.is_empty() {
                     ms.extend(self.monitors.first().cloned());
@@ -731,7 +678,6 @@ impl App {
                     .cloned()
                     .collect();
                 if ws.is_empty() {
-                    // No message: the start button is simply disabled until a window is picked.
                     Err(String::new())
                 } else {
                     Ok(RecordTarget::Windows(ws))
@@ -740,7 +686,6 @@ impl App {
         }
     }
 
-    /// Records the source chosen on the Record page (the start button).
     pub fn start_recording_from_ui(&mut self, ctx: &egui::Context) {
         match self.record_target_from_ui() {
             Ok(t) => self.request_recording(ctx, t, RecordProfile::App),
@@ -749,13 +694,10 @@ impl App {
         }
     }
 
-    /// Records sound only, with the audio settings of `profile` (the page or the hotkey / tray).
     pub fn start_audio_recording(&mut self, ctx: &egui::Context, profile: RecordProfile) {
         self.request_recording(ctx, RecordTarget::Audio, profile);
     }
 
-    /// Display for hotkey / tray recordings (`Settings::hotkey_screen`). A remembered display
-    /// that is gone switches the setting back to the primary one.
     fn hotkey_screen(&mut self) -> Option<MonitorInfo> {
         self.refresh_monitors();
         let primary = self.monitors.first().cloned();
@@ -776,15 +718,12 @@ impl App {
         }
     }
 
-    /// Hotkey / tray "start recording": the configured display, hotkey settings.
     fn start_hotkey_recording(&mut self, ctx: &egui::Context) {
         match self.hotkey_screen() {
             Some(m) => self.request_recording(ctx, RecordTarget::Screens(vec![m]), RecordProfile::Hotkey),
             None => self.error(t!("err.no_display")),
         }
     }
-
-    // ---------------------------------------------------------------- external events
 
     fn handle_tray(&mut self, ctx: &egui::Context) {
         let cmds: Vec<_> = self.tray_rx.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
@@ -812,7 +751,6 @@ impl App {
             match action {
                 HotkeyAction::RegionScreenshot => self.start_region_screenshot(ctx, overlay::Purpose::Area),
                 HotkeyAction::FullscreenScreenshot => self.start_fullscreen_screenshot(ctx, None),
-                // One recording at a time: starts are ignored while one runs.
                 HotkeyAction::StartVideo if self.recorder.is_idle() => self.start_hotkey_recording(ctx),
                 HotkeyAction::StartAudio if self.recorder.is_idle() => self.start_audio_recording(ctx, RecordProfile::Hotkey),
                 HotkeyAction::StartVideo | HotkeyAction::StartAudio => {}
@@ -861,7 +799,6 @@ impl App {
 }
 
 impl eframe::App for App {
-    /// Runs every frame, and also while the window is hidden in the tray.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.run_startup_action(ctx);
         self.handle_tray(ctx);
@@ -883,7 +820,6 @@ impl eframe::App for App {
         if ctx.input(|i| i.viewport().close_requested()) && !self.quit_after_save {
             let busy = !self.recorder.is_idle();
             if busy && self.tray.is_some() {
-                // Keep recording in the background; the tray icon controls it.
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.hide_window(ctx);
             }
@@ -905,8 +841,6 @@ impl eframe::App for App {
         self.thumbs.poll(&ctx);
         self.handle_overlay(&ctx);
         pages::shell(self, ui);
-        // Toasts react to the raw pointer, so they would stay clickable over the viewer: they
-        // simply wait until it is closed.
         if !self.lib.viewer_open() {
             self.toasts.show(&ctx);
         }
@@ -924,7 +858,6 @@ impl eframe::App for App {
     }
 }
 
-/// `--page=<name>` opens the app on a given page (handy for checking layouts).
 pub fn page_from_args(args: &[String]) -> Option<Page> {
     args.iter().find_map(|a| match a.strip_prefix("--page=")? {
         "screenshot" => Some(Page::Screenshot),

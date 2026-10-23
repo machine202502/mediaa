@@ -1,6 +1,3 @@
-//! End-to-end tests of the media pipeline with synthetic capture sources.
-//! They run real FFmpeg encodes (statically linked into the test binary).
-
 use mediaa_core::audio::AudioSink;
 use mediaa_core::formats::{AnimFormat, MediaKind, OutputKind, VideoContainer};
 use mediaa_core::settings::AnimSettings;
@@ -14,7 +11,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// A moving square on a gradient, so encoders see real motion.
 struct Pattern {
     w: u32,
     h: u32,
@@ -50,7 +46,6 @@ fn pattern(w: u32, h: u32) -> SourceFactory {
     Box::new(move || Ok(Box::new(Pattern { w, h, n: 0 }) as Box<dyn FrameSource>))
 }
 
-/// 440 Hz sine generated on a background thread, like a real device callback.
 struct Sine {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -109,7 +104,6 @@ impl AudioSource for Failing {
     fn stop(&mut self) {}
 }
 
-/// Title part of a MediaA file name.
 fn title(p: &Path) -> String {
     naming::parse_path(p).unwrap_or_else(|| panic!("not a media name: {}", p.display())).title
 }
@@ -131,7 +125,6 @@ fn request(dir: &Path, sources: Vec<SourceFactory>, audio: Vec<Box<dyn AudioSour
     }
 }
 
-/// Waits for the terminal event, collecting warnings.
 fn finish(session: RecordingSession, save: bool) -> (SessionEvent, Vec<String>) {
     let events = session.events();
     session.stop(save, Arc::new(AtomicBool::new(false))).join().unwrap();
@@ -321,7 +314,6 @@ fn conversions_between_popular_formats() {
     };
     let s = opts();
 
-    // Video → every video format, with the codecs that format calls for.
     for (format, video, audio) in [
         (VideoFormat::Mp4, "h264", "aac"),
         (VideoFormat::Mov, "h264", "aac"),
@@ -335,14 +327,12 @@ fn conversions_between_popular_formats() {
         assert_eq!(info.audio_codec.as_deref(), Some(audio), "{format:?}");
         assert_eq!((info.width, info.height), (96, 64), "{format:?}");
     }
-    // Same format, smaller and silent.
     let small = run(&mp4, Target::Video(VideoFormat::Mp4), &ConvertSettings { remove_audio: true, max_height: Some(32), quality: 30, ..opts() });
     let info = probe(&small).unwrap();
     assert!(!info.has_audio());
     assert_eq!((info.width, info.height), (48, 32), "downscaled, aspect kept");
     assert_eq!(title(&small), "Recording test");
 
-    // Video → animations → video.
     let gif = run(&mp4, Target::Anim(AnimFormat::Gif), &s);
     assert_eq!((probe(&gif).unwrap().width, probe(&gif).unwrap().height), (50, 33), "height limit applied");
     let webp = run(&mp4, Target::Anim(AnimFormat::Webp), &s);
@@ -350,12 +340,10 @@ fn conversions_between_popular_formats() {
     let from_gif = run(&gif, Target::Video(VideoFormat::Webm), &s);
     let info = probe(&from_gif).unwrap();
     assert_eq!(info.video_codec.as_deref(), Some("vp9"));
-    // 96x64 limited to height 33 -> 50x33, padded to even 50x34 for video.
     assert_eq!((info.width, info.height), (50, 34), "even height after padding");
     assert!(probe(&run(&webp, Target::Video(VideoFormat::Mp4), &s)).unwrap().has_video());
     assert!(probe(&run(&webp, Target::Anim(AnimFormat::Gif), &s)).unwrap().has_video());
 
-    // Image → every image format.
     let png = dir.path().join("shot_2026-01-01_10-00-00.png");
     image::RgbaImage::from_fn(120, 80, |x, y| image::Rgba([x as u8, y as u8, 200, 255])).save(&png).unwrap();
     for format in StillFormat::ALL {
@@ -365,7 +353,6 @@ fn conversions_between_popular_formats() {
     }
     let half = run(&png, Target::Still(StillFormat::Jpeg), &ConvertSettings { max_height: Some(40), quality: 50, ..opts() });
     assert_eq!(image::image_dimensions(&half).unwrap(), (60, 40));
-    // Video / animation → image of the first frame.
     for (input, size) in [(&mp4, (96, 64)), (&gif, (50, 33)), (&webp, (50, 33))] {
         for format in [StillFormat::Png, StillFormat::Jpeg] {
             let p = run(input, Target::Still(format), &s);
@@ -373,7 +360,6 @@ fn conversions_between_popular_formats() {
         }
     }
 
-    // Video → sound only; sound → other sound formats.
     for format in mediaa_core::formats::AudioFormat::ALL {
         let p = run(&mp4, Target::Audio(format), &s);
         let info = probe(&p).unwrap();
@@ -437,7 +423,6 @@ fn output_height_downscales_keeping_aspect() {
     let info = probe(&out).unwrap();
     assert_eq!((info.width, info.height), (160, 96));
 
-    // Never upscales: a limit above the source height keeps the source size.
     let dir = tempfile::tempdir().unwrap();
     let mut req = request(dir.path(), vec![pattern(128, 72)], vec![], OutputKind::Video(VideoContainer::Mkv));
     req.max_height = Some(1080);
@@ -474,7 +459,6 @@ fn library_details_and_hover_preview_frames() {
         assert!(frames.windows(2).all(|p| p[1].0 > p[0].0), "{output:?}: increasing times");
         assert_eq!(frames[0].0, 0.0);
 
-        // Cancelling stops early.
         let mut n = 0;
         preview_frames(&path, 80, 0.1, 0.0, &AtomicBool::new(false), &mut |_| {
             n += 1;
@@ -483,7 +467,6 @@ fn library_details_and_hover_preview_frames() {
         .unwrap();
         assert_eq!(n, 2);
 
-        // Starting in the middle (where a hover preview was left): times stay clip times.
         let mut later = Vec::new();
         preview_frames(&path, 80, 0.1, 0.8, &AtomicBool::new(false), &mut |f| {
             later.push(f.at);
@@ -496,7 +479,6 @@ fn library_details_and_hover_preview_frames() {
     let dir = tempfile::tempdir().unwrap();
     let png = dir.path().join("shot.png");
     image::RgbaImage::new(30, 20).save(&png).unwrap();
-    // Thumbnails of every recorded format (animated WebP goes through image-webp).
     for output in formats {
         let dir = tempfile::tempdir().unwrap();
         let req = request(dir.path(), vec![pattern(160, 96)], vec![], output);
@@ -531,7 +513,6 @@ fn viewer_audio_follows_start_and_speed() {
     assert!((fast - full / 2.0).abs() < 0.2, "{fast} vs {full}");
     let tail = secs(1.0, 1.0);
     assert!((tail - (full - 1.0)).abs() < 0.2, "{tail} vs {full}");
-    // Stopping from the sink ends decoding quietly.
     decode_audio(&path, 0.0, 1.0, 48_000, Arc::new(AtomicBool::new(false)), |_| false).unwrap();
 }
 
@@ -546,7 +527,6 @@ fn audio_only_recordings_in_every_format() {
         (AudioFormat::Ogg, "opus"),
     ] {
         let dir = tempfile::tempdir().unwrap();
-        // Two sources (like microphone + system sound) mixed into one file.
         let req = request(dir.path(), vec![], vec![Sine::boxed(2), Sine::boxed(1)], OutputKind::Audio(format));
         let paths = record(dir.path(), req, 1.2);
         assert_eq!(paths.len(), 1);
@@ -557,7 +537,6 @@ fn audio_only_recordings_in_every_format() {
         assert_eq!((info.audio_streams, info.audio_codec.as_deref()), (1, Some(codec)), "{format:?}");
         assert_duration(&paths[0], 1.2, 0.5);
     }
-    // Audio recordings need sound sources and no picture.
     let dir = tempfile::tempdir().unwrap();
     assert!(RecordingSession::start(request(dir.path(), vec![], vec![], OutputKind::Audio(AudioFormat::Mp3))).is_err());
     assert!(RecordingSession::start(request(dir.path(), vec![pattern(64, 48)], vec![Sine::boxed(2)], OutputKind::Audio(AudioFormat::Mp3))).is_err());
@@ -576,8 +555,6 @@ fn compression_options_and_size_estimates() {
         out
     };
 
-    // PNG: oxipng keeps every pixel; a palette makes it much smaller.
-    // Photo-like: gradients with noise (hard to compress losslessly), a transparent strip.
     let noise = |x: u32, y: u32, k: u32| (x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663) ^ k.wrapping_mul(83_492_791)) % 24;
     let src = image::RgbaImage::from_fn(300, 200, |x, y| {
         let c = |base: u32, k| (base + noise(x, y, k)).min(255) as u8;
@@ -590,14 +567,11 @@ fn compression_options_and_size_estimates() {
     let palette = run(&png, Target::Still(StillFormat::Png), &ConvertSettings { png_colors: Some(32), ..ConvertSettings::default() }, "palette");
     assert_eq!(image::image_dimensions(&palette).unwrap(), (300, 200));
     assert!(size(&palette) < size(&lossless) / 2, "palette {} vs {}", size(&palette), size(&lossless));
-    // Lossless WebP keeps every pixel too.
     let webp = run(&png, Target::Still(StillFormat::Webp), &ConvertSettings { webp_lossless: true, ..ConvertSettings::default() }, "lossless_webp");
     assert!(image::open(&webp).unwrap().to_rgba8() == src, "lossless WebP keeps every pixel");
-    // Images are estimated by converting them whole: exact.
     let s = ConvertSettings { png_colors: Some(32), ..ConvertSettings::default() };
     assert_eq!(convert::estimate_size(&png, Target::Still(StillFormat::Png), &s, &cancel).unwrap(), size(&palette));
 
-    // Video: every effort, a frame-rate cap and mono sound.
     let req = request(dir.path(), vec![pattern(96, 64)], vec![Sine::boxed(2)], OutputKind::Video(VideoContainer::Mp4));
     let mp4 = record(dir.path(), req, 1.2).remove(0);
     for effort in Effort::ALL {
@@ -613,7 +587,6 @@ fn compression_options_and_size_estimates() {
     let estimate = convert::estimate_size(&mp4, Target::Video(VideoFormat::Mp4), &s, &cancel).unwrap();
     assert!(estimate.abs_diff(actual) * 10 < actual, "short files are converted whole: {estimate} vs {actual}");
 
-    // Sound: mono WAV is half the stereo one; FLAC at every effort.
     let wav = dir.path().join("long.wav");
     let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
     let mut w = hound::WavWriter::create(&wav, spec).unwrap();
@@ -629,14 +602,11 @@ fn compression_options_and_size_estimates() {
     for effort in Effort::ALL {
         run(&wav, Target::Audio(AudioFormat::Flac), &ConvertSettings { effort, ..ConvertSettings::default() }, &format!("{effort:?}"));
     }
-    // A 20 s file is estimated from a 5 s piece: 128 kbit/s × 20 s ≈ 320 kB.
     let s = ConvertSettings { audio_kbps: 128, ..ConvertSettings::default() };
     let estimate = convert::estimate_size(&wav, Target::Audio(AudioFormat::Mp3), &s, &cancel).unwrap();
     assert!((300_000..345_000).contains(&estimate), "{estimate}");
 }
 
-/// Speech models take 16 kHz mono: a 48 kHz stereo file decodes to a third of its frames,
-/// from any starting point.
 #[test]
 fn decodes_mono_for_speech() {
     let dir = tempfile::tempdir().unwrap();

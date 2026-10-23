@@ -1,12 +1,4 @@
 #!/usr/bin/env bash
-# Builds MediaA for macOS with statically linked FFmpeg and wraps it into MediaA.app
-# (an app bundle is needed for the microphone / screen recording permission prompts).
-#
-#   scripts/macos/build.sh          # -> dist/macos/MediaA.app
-#   scripts/macos/build.sh --test   # run the test suite
-#   scripts/macos/build.sh --run    # debug run
-#
-# Prerequisites: Xcode command line tools, Homebrew: brew install nasm pkg-config cmake ninja autoconf automake libtool
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

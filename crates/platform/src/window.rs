@@ -1,13 +1,5 @@
-//! Hiding / showing the app's own window.
-//!
-//! On Windows this goes straight to `ShowWindow`: through eframe/winit, re-showing a hidden
-//! (especially maximized) window from the tray is unreliable — the show request can be lost
-//! and the window stays hidden. Other platforms return `false` so the caller falls back to
-//! egui's `ViewportCommand::Visible`.
-
 use raw_window_handle::RawWindowHandle;
 
-/// Native handle of a top-level window, captured once at startup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeWindow(isize);
 
@@ -19,7 +11,6 @@ impl NativeWindow {
         }
     }
 
-    /// Shows or hides the window; returns `false` if not supported on this platform.
     pub fn set_visible(self, visible: bool) -> bool {
         #[cfg(windows)]
         {
@@ -44,10 +35,6 @@ impl NativeWindow {
         }
     }
 
-    /// "Ghost" mode for a hidden window: shown (so the UI toolkit keeps rendering it and its
-    /// child windows) but fully transparent, click-through, without a taskbar button and
-    /// excluded from screen capture. `ghost(false)` hides it again and restores its styles.
-    /// Returns `false` where not supported.
     pub fn set_ghost(self, ghost: bool) -> bool {
         #[cfg(windows)]
         {
@@ -88,8 +75,6 @@ impl NativeWindow {
     }
 }
 
-/// Keeps this process' window titled `title` out of screenshots and screen recordings
-/// (Windows 10 2004+); no-op elsewhere.
 pub fn exclude_from_capture(title: &str) -> bool {
     #[cfg(windows)]
     {
@@ -108,8 +93,6 @@ pub fn exclude_from_capture(title: &str) -> bool {
     }
 }
 
-/// Turns off the OS open/close animation of this process' window titled `title` (Windows DWM
-/// fade/zoom), so a fullscreen overlay appears instantly. No-op elsewhere.
 pub fn disable_open_animation(title: &str) -> bool {
     #[cfg(windows)]
     {

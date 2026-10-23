@@ -1,36 +1,3 @@
-//! Task queue: composites, dependencies, resource pools and chunked runs.
-//!
-//! The host opens a store, builds a [`Scheduler`], registers a [`Runner`] per kind, and calls
-//! [`Scheduler::tick`] for one quantum (reap stale runs, step each live run once, then start at
-//! most one wave of new runs). [`Scheduler::snapshot`] is what the UI shows. [`Scheduler::subscribe`]
-//! wakes the studio; on an event for its recording it re-reads the recording. [`Scheduler::models_needed`]
-//! is what the engine unloads last. [`Scheduler::purge_history`] drops finished top-level tasks older
-//! than [`HISTORY`] (30 days).
-//!
-//! ```ignore
-//! let store = SqliteStore::open(path, Arc::new(SystemClock))?;
-//! let sched = Scheduler::new(Arc::new(store), vec![
-//!     Pool { resource: Resource::Speech, capacity: 1, memory: 0 },
-//!     Pool { resource: Resource::Llm, capacity: 1, memory: budget },
-//! ]);
-//! sched.register(Box::new(my_runner));
-//! sched.tick()?;
-//! ```
-//!
-//! A leaf must name [`NewTask::resource`]; enqueue rejects one that does not. A composite or an
-//! inline task may omit it. Also set [`NewTask::memory`], [`NewTask::model`], and
-//! [`NewTask::chat`] or [`NewTask::analysis`] (the fairness key).
-//! [`Scheduler::begin_inline`] is work the chat itself runs: it is never claimed.
-//! [`Scheduler::recover`] cancels an inline run that was still going. Pausing a composite pauses
-//! its descendant leaves.
-//!
-//! `Stopping` means stop was asked and the run has not returned. The slot stays taken, `resume`
-//! is rejected, and the snapshot shows it on the task and on [`Live::stopping`]. `resume` is only
-//! paused → queued. `restart` (заново) requeues that task unless it is running or stopping, clears
-//! its cursor, and brings back failed or cancelled work under it and tasks cancelled because of it.
-//! Done work under it stays done. [`SqliteStore::open`] takes a file path and creates schema
-//! version 2. Any other `user_version` is dropped and created fresh.
-
 pub mod clock;
 pub mod events;
 pub mod runner;
@@ -68,5 +35,4 @@ pub enum Error {
 pub type Result<T> = std::result::Result<T, Error>;
 pub type TaskId = i64;
 
-/// Finished top-level tasks older than this are removed by [`Scheduler::purge_history`].
 pub const HISTORY: Duration = Duration::from_secs(30 * 24 * 60 * 60);

@@ -1,15 +1,3 @@
-//! The `speaker-names` queue task: who the speakers are, from what is said in the recording.
-//!
-//! The task reads the transcript in windows (~4 minutes with a 60-second overlap), first the
-//! first ten minutes (introductions are usually there), then the rest in order. The model reports
-//! where the text shows who a speaker is; the code checks every report against the transcript and
-//! only then weighs it (a speaker naming themself counts most). The names that win are written to
-//! the transcript as automatic ones: a name the user gave is never touched.
-//!
-//! The cursor keeps the windows read and every checked report, so a stopped or crashed run goes
-//! on with the next window. After each window the task stops early when every main speaker has a
-//! name.
-
 use crate::prompts;
 use crate::run::{Host, Stage, Work};
 use crate::scope::Scope;
@@ -25,42 +13,24 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-/// The queue kind of the task.
 pub const KIND: &str = "speaker-names";
 
-/// A window of the transcript is this long...
 const WINDOW_SECS: f64 = 240.0;
-/// ...and starts this much before the previous one ends, so a name said across the cut is seen:
-/// an address in the last minute of one window and the answer at the start of the next are read
-/// together.
 const OVERLAP_SECS: f64 = 60.0;
-/// The first windows cover the first ten minutes: introductions are usually there.
 const INTRO_SECS: f64 = 600.0;
-/// A speaker who talks this long (or this share of all the speech) is a main speaker: the task
-/// stops early only when every one of them has a name.
 const MAIN_SECS: f64 = 60.0;
 const MAIN_SHARE: f64 = 0.1;
-/// A name needs at least this much evidence to be accepted...
 const MIN_SCORE: f64 = 3.0;
-/// ...and this many times more than the speaker's next name.
 const LEAD: f64 = 2.0;
-/// The weights of the ways the text shows a name.
 const SELF: f64 = 3.0;
 const INTRODUCED: f64 = 2.0;
 const ADDRESSED: f64 = 2.0;
 const NICKNAME: f64 = 1.5;
-/// An uncertain report counts this much less.
 const LOW: f64 = 0.5;
-/// The context a window needs: four minutes of speech and the prompt, with room to spare.
 const CONTEXT: u32 = 8192;
-/// The grammar asks for at most five reports; the budget leaves room for the longest of them, so
-/// the answer is not cut in the middle of the JSON.
 const MAX_TOKENS: u32 = 4096;
-/// A name longer than this (or with a line break) is not a name the model found.
 const NAME_CHARS: usize = 60;
-/// A report points at a line if its time is this close to the line's.
 const TIME_SLACK: f64 = 2.0;
-/// Floating point sums of the weights must not fall just under a threshold.
 const EPS: f64 = 1e-9;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,13 +38,10 @@ pub struct Input {
     pub path: PathBuf,
 }
 
-/// The local model of the task: the one the topic digests use. `None` when it is a provider's
-/// (the task cannot run it) or not chosen.
 pub fn model(settings: &AgentSettings) -> Option<String> {
     settings.models.agent.as_ref().and_then(|source| crate::models::local_spec(source).ok())
 }
 
-/// The latest `speaker-names` task of the recording with `file_id`, finished or not.
 pub fn latest<'a>(tasks: &'a [Task], file_id: &str) -> Option<&'a Task> {
     tasks
         .iter()
@@ -82,7 +49,6 @@ pub fn latest<'a>(tasks: &'a [Task], file_id: &str) -> Option<&'a Task> {
         .max_by_key(|task| task.id)
 }
 
-/// Queues the task (or returns the unfinished one already queued: one run per recording).
 pub fn enqueue(sched: &Scheduler, ai_dir: &Path, path: &Path, settings: &AgentSettings) -> anyhow::Result<TaskId> {
     let id = transcript::file_id(path)?;
     anyhow::ensure!(Transcript::exists(ai_dir, &id), "{} has no transcript", path.display());
@@ -101,19 +67,13 @@ pub fn enqueue(sched: &Scheduler, ai_dir: &Path, path: &Path, settings: &AgentSe
     Ok(sched.enqueue_once(task)?)
 }
 
-// ---------------------------------------------------------------- windows
-
-/// A window of the transcript, in the order the task reads them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Window {
-    /// The place in [`plan`]; the checkpoint keeps the numbers of the windows read.
     pub index: usize,
     pub start: f64,
     pub end: f64,
 }
 
-/// Every window of a recording of `total` seconds, in reading order: the first ten minutes
-/// first, then the rest in order. Windows overlap by [`OVERLAP_SECS`].
 pub fn plan(total: f64) -> Vec<Window> {
     let step = WINDOW_SECS - OVERLAP_SECS;
     let mut starts = Vec::new();
@@ -131,7 +91,6 @@ pub fn plan(total: f64) -> Vec<Window> {
         .collect()
 }
 
-/// How much of the recording the windows read cover, in seconds (their overlaps count once).
 pub fn covered(windows: &[Window]) -> f64 {
     let mut spans: Vec<(f64, f64)> = windows.iter().map(|w| (w.start, w.end)).collect();
     spans.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -145,9 +104,6 @@ pub fn covered(windows: &[Window]) -> f64 {
     total
 }
 
-// ---------------------------------------------------------------- the cursor
-
-/// What the task keeps between chunks: the windows read and every report that held up.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Cursor {
     #[serde(default)]
@@ -162,18 +118,13 @@ impl Cursor {
     }
 }
 
-/// How the text shows who a speaker is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum How {
-    /// The speaker names themself.
     #[serde(rename = "self")]
     SelfName,
-    /// Someone calls the speaker by name and the speaker answers.
     Addressed,
-    /// Someone introduces the speaker or gives them the floor and the speaker then talks.
     Introduced,
-    /// A nickname or a username of the speaker appears in the line.
     Nickname,
 }
 
@@ -197,17 +148,13 @@ impl How {
     }
 }
 
-/// A report that the code checked against the transcript.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
     pub speaker: u32,
     pub name: String,
     pub how: How,
-    /// The start of the line that shows it.
     pub time: f64,
-    /// The text of that line.
     pub text: String,
-    /// `false` when the model was not sure.
     pub sure: bool,
 }
 
@@ -221,7 +168,6 @@ impl Evidence {
     }
 }
 
-/// A name the evidence supports.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Accepted {
     pub speaker: u32,
@@ -230,15 +176,10 @@ pub struct Accepted {
     pub evidence: Vec<Evidence>,
 }
 
-/// The name as it is compared: the spelling does not matter, only the trim.
 fn key(name: &str) -> String {
     name.trim().to_lowercase()
 }
 
-/// The names the evidence supports, one per speaker, from the weights of the reports:
-/// a name wins with at least [`MIN_SCORE`] and at least [`LEAD`] times the speaker's next name;
-/// a name belongs to one speaker only (the higher score wins, the other stays unnamed).
-/// Speakers the user named are left alone, and their names are not given to anyone else.
 pub fn aggregate(evidence: &[Evidence], manual: &BTreeMap<u32, String>) -> Vec<Accepted> {
     let taken: BTreeSet<String> = manual.values().map(|name| key(name)).collect();
     let mut per: BTreeMap<u32, BTreeMap<String, (f64, Vec<Evidence>)>> = BTreeMap::new();
@@ -260,7 +201,6 @@ pub fn aggregate(evidence: &[Evidence], manual: &BTreeMap<u32, String>) -> Vec<A
         if *score + EPS < MIN_SCORE || *score + EPS < LEAD * second {
             continue;
         }
-        // The spelling of the report that weighs most is the one shown.
         let name = shown
             .iter()
             .max_by(|a, b| a.score().total_cmp(&b.score()))
@@ -268,7 +208,6 @@ pub fn aggregate(evidence: &[Evidence], manual: &BTreeMap<u32, String>) -> Vec<A
             .unwrap_or_default();
         best.push(Accepted { speaker, name, score: *score, evidence: shown.clone() });
     }
-    // One name, one speaker.
     best.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.speaker.cmp(&b.speaker)));
     let mut used = BTreeSet::new();
     best.retain(|accepted| used.insert(key(&accepted.name)));
@@ -276,7 +215,6 @@ pub fn aggregate(evidence: &[Evidence], manual: &BTreeMap<u32, String>) -> Vec<A
     best
 }
 
-/// The speakers who talk at least [`MAIN_SECS`] seconds or [`MAIN_SHARE`] of the speech.
 pub fn main_speakers(dialog: &[Reply]) -> BTreeSet<u32> {
     let mut spoken: BTreeMap<u32, f64> = BTreeMap::new();
     let mut all = 0.0;
@@ -293,13 +231,10 @@ pub fn main_speakers(dialog: &[Reply]) -> BTreeSet<u32> {
         .collect()
 }
 
-/// Whether the run can stop: every main speaker has a name (from the user or from the evidence).
 pub fn all_main_named(dialog: &[Reply], evidence: &[Evidence], manual: &BTreeMap<u32, String>) -> bool {
     let named: BTreeSet<u32> = manual.keys().copied().chain(aggregate(evidence, manual).into_iter().map(|a| a.speaker)).collect();
     main_speakers(dialog).is_subset(&named)
 }
-
-// ---------------------------------------------------------------- the model's answer
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct RawEvidence {
@@ -321,7 +256,6 @@ struct RawAnswer {
     evidence: Vec<RawEvidence>,
 }
 
-/// The byte just after the `[` of the `"evidence"` array.
 fn evidence_array_at(text: &str) -> Option<usize> {
     let key = text.find("\"evidence\"")?;
     let after = key + "\"evidence\"".len();
@@ -329,8 +263,6 @@ fn evidence_array_at(text: &str) -> Option<usize> {
     Some(after + rel + 1)
 }
 
-/// The end (exclusive) of the object that starts at `start`, when its braces close. An object cut
-/// off mid-item has no end: a repair crate would close it and keep the cut item.
 fn closed_object_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut i = start;
     let mut depth = 0;
@@ -364,8 +296,6 @@ fn closed_object_end(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
-/// The reports whose objects closed completely: an answer cut at the token limit still brings the
-/// complete ones instead of losing the whole window. The item the answer was cut inside is dropped.
 fn closed_evidence(text: &str) -> RawAnswer {
     let mut evidence = Vec::new();
     let Some(mut i) = evidence_array_at(text) else { return RawAnswer { evidence } };
@@ -392,7 +322,6 @@ fn closed_evidence(text: &str) -> RawAnswer {
     RawAnswer { evidence }
 }
 
-/// `m:ss` or `h:mm:ss` into seconds.
 pub fn parse_time(text: &str) -> Option<f64> {
     let parts: Vec<&str> = text.trim().split(':').map(str::trim).collect();
     let nums: Option<Vec<u32>> = parts.iter().map(|part| part.parse::<u32>().ok()).collect();
@@ -415,7 +344,6 @@ fn parse_how(text: &str) -> Option<How> {
     }
 }
 
-/// The speaker's label (`@sN`).
 fn parse_speaker(text: &str) -> Option<u32> {
     let parsed = speakers::parse_label(text)?;
     if parsed.recording.is_some() {
@@ -424,7 +352,6 @@ fn parse_speaker(text: &str) -> Option<u32> {
     Some(parsed.index)
 }
 
-/// The line at `time` (±2 s), the nearest when several match.
 fn line_at(dialog: &[Reply], time: f64) -> Option<usize> {
     dialog
         .iter()
@@ -434,8 +361,6 @@ fn line_at(dialog: &[Reply], time: f64) -> Option<usize> {
         .map(|(at, _)| at)
 }
 
-/// The named speaker speaks within the `within` replies after the line at `at`, and the line is
-/// by someone else.
 fn answers_within(dialog: &[Reply], at: usize, speaker: u32, within: usize) -> bool {
     let line = &dialog[at];
     if line.speaker.is_none_or(|s| s == speaker) {
@@ -444,7 +369,6 @@ fn answers_within(dialog: &[Reply], at: usize, speaker: u32, within: usize) -> b
     dialog.iter().skip(at + 1).take(within).any(|reply| reply.speaker == Some(speaker))
 }
 
-/// The model's report checked against the transcript; `None` when the text does not show it.
 fn check(raw: &RawEvidence, dialog: &[Reply]) -> Option<Evidence> {
     let how = parse_how(&raw.how)?;
     let speaker = parse_speaker(&raw.speaker)?;
@@ -456,16 +380,11 @@ fn check(raw: &RawEvidence, dialog: &[Reply]) -> Option<Evidence> {
     let at = line_at(dialog, time)?;
     let line = &dialog[at];
     let text = line.text();
-    // The line shows the name itself, or spells it in another alphabet: the line then lends its
-    // spelling (the model keeps the nominative form).
     let found = name_in_line(&text, name);
     let holds = match how {
         How::SelfName => line.speaker == Some(speaker),
         How::Addressed => answers_within(dialog, at, speaker, 2),
         How::Introduced => answers_within(dialog, at, speaker, 3),
-        // A username read aloud in a line about someone else is not evidence about the speaker:
-        // like `self` and `addressed`, the name must be said by the speaker about themself, or
-        // said by another speaker who is answered within two replies.
         How::Nickname => found.is_some() && (line.speaker == Some(speaker) || answers_within(dialog, at, speaker, 2)),
     };
     holds.then(|| Evidence {
@@ -478,7 +397,6 @@ fn check(raw: &RawEvidence, dialog: &[Reply]) -> Option<Evidence> {
     })
 }
 
-/// A speaker label the model copied instead of a name (`s1`, `@s1`): never a name.
 fn looks_like_label(name: &str) -> bool {
     let bare = name.trim().trim_start_matches('@');
     bare.len() > 1
@@ -486,12 +404,10 @@ fn looks_like_label(name: &str) -> bool {
         && bare[1..].bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// A word as the comparison sees it: without the punctuation around it, in ASCII lower case.
 fn comparable(word: &str) -> String {
     deunicode::deunicode(word.trim_matches(|c: char| !c.is_alphanumeric())).to_lowercase()
 }
 
-/// The words of a line and where each one is.
 fn words(line: &str) -> Vec<(std::ops::Range<usize>, &str)> {
     let mut found = Vec::new();
     let mut start = None;
@@ -510,10 +426,6 @@ fn words(line: &str) -> Vec<(std::ops::Range<usize>, &str)> {
     found
 }
 
-/// The name as the line writes it, when the line shows it: the same letters (any case), or — when
-/// the model wrote the name in another alphabet — the words that become the same in ASCII
-/// (`Anton Nazarov` and «Антон Назаров»). Only the spelling comes from the line; a line that does
-/// not show the name changes nothing.
 fn name_in_line(line: &str, name: &str) -> Option<String> {
     let wanted: Vec<String> = name.split_whitespace().map(comparable).filter(|word| !word.is_empty()).collect();
     if wanted.is_empty() {
@@ -533,12 +445,10 @@ fn name_in_line(line: &str, name: &str) -> Option<String> {
     })
 }
 
-/// Whether the line a report points at was shown to the model (the window's lines).
 fn shown(item: &Evidence, window: &Window) -> bool {
     item.time >= window.start && item.time < window.end
 }
 
-/// A time as the prompt and the reports write it: `m:ss`, and `h:mm:ss` from an hour.
 fn stamp(secs: f64) -> String {
     let total = secs.max(0.0).round() as u64;
     let (h, m, s) = (total / 3600, (total / 60) % 60, total % 60);
@@ -549,7 +459,6 @@ fn stamp(secs: f64) -> String {
     }
 }
 
-/// The text of one reply as the prompt writes it: `[time] @label: text`.
 fn line_text(reply: &Reply) -> String {
     match reply.speaker {
         Some(speaker) => format!("[{}] {}: {}", stamp(reply.start), speakers::label(speaker), reply.text()),
@@ -557,7 +466,6 @@ fn line_text(reply: &Reply) -> String {
     }
 }
 
-/// The names the run has so far, as the prompt lists them for the next window.
 fn known_names(evidence: &[Evidence], manual: &BTreeMap<u32, String>) -> Vec<Value> {
     let mut known: BTreeMap<u32, String> = manual.clone();
     for accepted in aggregate(evidence, manual) {
@@ -569,14 +477,11 @@ fn known_names(evidence: &[Evidence], manual: &BTreeMap<u32, String>) -> Vec<Val
         .collect()
 }
 
-// ---------------------------------------------------------------- the task
-
 pub struct SpeakerNames {
     ai_dir: PathBuf,
     settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>,
 }
 
-/// What the model is asked about one window: the window, the lines it shows and the run's cursor.
 struct Ask<'a> {
     window: &'a Window,
     dialog: &'a [Reply],
@@ -590,7 +495,6 @@ impl SpeakerNames {
         SpeakerNames { ai_dir: ai_dir.to_path_buf(), settings }
     }
 
-    /// Asks the model about one window; the answer is checked by [`check`].
     fn read(&self, engine: &dyn Engine, model: &str, device: mediaa_engine::Device, hf_token: Option<&str>, ask: Ask<'_>) -> anyhow::Result<Vec<Evidence>> {
         let Ask { window, dialog, picked, known, cancel } = ask;
         let labels: Vec<String> = picked.iter().filter_map(|reply| reply.speaker).collect::<BTreeSet<_>>().into_iter().map(speakers::label).collect();
@@ -616,22 +520,18 @@ impl SpeakerNames {
             device: Some(device),
             priority: Some(Priority::Background),
             hf_token: hf_token.map(str::to_string),
-            // A verdict per line, no reasoning: thinking would only make the run slower.
             enable_thinking: false,
         };
         let answer = engine.chat(&request, cancel, &mut |_| true)?;
         let text = answer.content.trim();
         let raw: RawAnswer = match serde_json::from_str(text) {
             Ok(raw) => raw,
-            // A model can still cut its answer: the items that closed stay, the cut one is lost,
-            // and the run goes on with the next window instead of failing for the recording.
             Err(e) => {
                 let raw = closed_evidence(text);
                 log::warn!("names: the model's answer is not valid JSON ({e}); kept {} complete items", raw.evidence.len());
                 raw
             }
         };
-        // Only the lines the model was shown: a report about another part is not evidence of this one.
         Ok(raw
             .evidence
             .iter()
@@ -641,7 +541,6 @@ impl SpeakerNames {
     }
 }
 
-/// The answer's grammar: a list of reports.
 const EVIDENCE_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
@@ -713,7 +612,6 @@ impl Stage for SpeakerNames {
         if cancel.load(Ordering::Relaxed) {
             return Ok(Work::Stopped);
         }
-        // The same line may be reported twice by overlapping windows: it counts once.
         for item in evidence {
             let seen = cursor
                 .evidence
@@ -735,8 +633,6 @@ impl Stage for SpeakerNames {
     }
 }
 
-/// The end of the run: the names the evidence supports are written to the transcript (an
-/// automatic name only; the user's names are never touched) and the result says what was read.
 fn finish(
     t: &mut Transcript,
     id: &str,
@@ -747,7 +643,6 @@ fn finish(
     stopped_early: bool,
 ) -> anyhow::Result<Work> {
     let accepted = aggregate(&cursor.evidence, manual);
-    // A new run replaces the names of an earlier one; the user's names stay.
     t.clear_auto_names()?;
     for name in &accepted {
         let evidence: Vec<NameEvidence> = name.evidence.iter().map(Evidence::to_name_evidence).collect();
@@ -818,12 +713,9 @@ mod tests {
         assert_eq!(starts, [0.0, 180.0, 360.0, 540.0, 720.0, 900.0, 1080.0, 1260.0, 1440.0]);
         assert_eq!(windows[2].end, 600.0, "a window is four minutes");
         assert_eq!(windows.last().unwrap().end, 1620.0, "the last window ends with the recording");
-        // The order: everything starting in the first ten minutes first.
         assert_eq!(windows.iter().map(|w| w.index).collect::<Vec<_>>(), (0..9).collect::<Vec<_>>());
-        // Their overlaps count once.
         assert!((covered(&windows) - 1620.0).abs() < 1e-6);
         assert!((covered(&windows[..3]) - 600.0).abs() < 1e-6);
-        // A recording shorter than one window is one window.
         assert_eq!(plan(100.0), [Window { index: 0, start: 0.0, end: 100.0 }]);
         assert_eq!(plan(0.0), Vec::<Window>::new());
     }
@@ -836,7 +728,6 @@ mod tests {
         assert_eq!(parse_time("1:60"), None);
         assert_eq!(parse_time("12"), None);
         assert_eq!(parse_time(""), None);
-        // A time as the prompt and the reports write it.
         assert_eq!(stamp(5.0), "0:05");
         assert_eq!(stamp(754.0), "12:34");
         assert_eq!(stamp(3723.0), "1:02:03");
@@ -844,7 +735,6 @@ mod tests {
 
     #[test]
     fn every_way_must_hold_in_the_text() {
-        // s0 names themself; s1 asks s0; s2 introduces s0; a username shows in a line.
         let dialog = [
             reply(0.0, 2.0, 0, "Меня зовут Антон."),
             reply(10.0, 12.0, 1, "Антон, ты где?"),
@@ -856,41 +746,29 @@ mod tests {
         assert_eq!(check(&raw("@s1", "Антон", "self", "0:00", "high"), &dialog), Some(Evidence {
             speaker: 0, name: "Антон".into(), how: How::SelfName, time: 0.0, text: "Меня зовут Антон.".into(), sure: true,
         }));
-        // Addressed: s1 calls s0, and s0 answers within two replies.
         let addressed = check(&raw("@s1", "Антон", "addressed", "0:10", "high"), &dialog).unwrap();
         assert_eq!((addressed.speaker, addressed.how, addressed.time), (0, How::Addressed, 10.0));
-        // Introduced: s2 introduces s0, and s0 speaks within three replies.
         let introduced = check(&raw("@s1", "Антон", "introduced", "0:30", "high"), &dialog).unwrap();
         assert_eq!((introduced.how, introduced.time), (How::Introduced, 30.0));
-        // Nickname: another speaker says it and the speaker answers within two replies.
         let nicknamed = [reply(0.0, 2.0, 1, "Это @anton_dev, наш админ."), reply(3.0, 4.0, 0, "Да, это я.")];
         let nickname = check(&raw("@s1", "anton_dev", "nickname", "0:00", "low"), &nicknamed).unwrap();
         assert_eq!((nickname.name.as_str(), nickname.how, nickname.sure), ("anton_dev", How::Nickname, false));
-        // The speaker may say their own nickname.
         let own_nickname = [reply(0.0, 2.0, 0, "Пишите мне в @anton_dev.")];
         assert!(check(&raw("@s1", "anton_dev", "nickname", "0:00", "high"), &own_nickname).is_some());
-        // A nickname only mentioned by another speaker, with no answer, is not evidence.
         assert_eq!(check(&raw("@s1", "anton_dev", "nickname", "0:50", "low"), &dialog), None);
 
-        // The wrong speaker for a name they do not say.
         assert_eq!(check(&raw("@s2", "Антон", "self", "0:00", "high"), &dialog), None);
-        // A time no line has.
         assert_eq!(check(&raw("@s1", "Антон", "self", "5:00", "high"), &dialog), None);
-        // A person only talked about: nobody addresses them and they do not answer.
         let talked = [reply(0.0, 2.0, 1, "Антон в отпуске."), reply(3.0, 4.0, 2, "Понятно.")];
         assert_eq!(check(&raw("@s1", "Антон", "addressed", "0:00", "high"), &talked), None);
         assert_eq!(check(&raw("@s1", "Антон", "introduced", "0:00", "high"), &talked), None);
-        // A nickname must really be in the line.
         assert_eq!(check(&raw("@s1", "anton_dev", "nickname", "0:00", "high"), &dialog), None);
-        // Not a speaker label, an unknown way, an empty name, a line break.
         assert_eq!(check(&raw("Антон", "Антон", "self", "0:00", "high"), &dialog), None);
         assert_eq!(check(&raw("@s1", "Антон", "guessed", "0:00", "high"), &dialog), None);
         assert_eq!(check(&raw("@s1", "  ", "self", "0:00", "high"), &dialog), None);
         assert_eq!(check(&raw("@s1", "Антон\nПетров", "self", "0:00", "high"), &dialog), None);
-        // The label copied as a name (small models do it) is not a name.
         assert_eq!(check(&raw("@s1", "s1", "self", "0:00", "high"), &dialog), None);
         assert_eq!(check(&raw("@s1", " @S12 ", "self", "0:00", "high"), &dialog), None);
-        // Two seconds off still matches the line.
         assert!(check(&raw("@s1", "Антон", "self", "0:02", "high"), &dialog).is_some());
     }
 
@@ -904,8 +782,6 @@ mod tests {
         assert!(!shown(&far, &window), "the model never saw this line in this window");
     }
 
-    /// The model may write a name in another alphabet («Anton Nazarov» while the line says
-    /// «Антон Назаров»): the line lends its spelling, and the name stays the same person.
     #[test]
     fn a_name_in_another_alphabet_takes_the_spelling_of_the_line() {
         let dialog = [
@@ -917,40 +793,31 @@ mod tests {
         assert_eq!((self_name.name.as_str(), self_name.how), ("Антон Назаров", How::SelfName));
         let addressed = check(&raw("@s1", "Anton Nazarov", "addressed", "0:10", "high"), &dialog).unwrap();
         assert_eq!(addressed.name, "Антон Назаров");
-        // The same letters keep the spelling of the model: the nominative form is its.
         let same = check(&raw("@s1", "Антон Назаров", "self", "0:00", "high"), &dialog).unwrap();
         assert_eq!(same.name, "Антон Назаров");
-        // A line that does not show the name changes nothing.
         let other = [reply(0.0, 2.0, 0, "Меня зовут Антон.")];
         assert_eq!(check(&raw("@s1", "Anton Nazarov", "self", "0:00", "high"), &other).unwrap().name, "Anton Nazarov");
     }
 
     #[test]
     fn weights_threshold_and_the_two_times_rule() {
-        // Two kinds of proof beat a single one.
         let many = [evidence(0, "Антон", How::SelfName, true), evidence(0, "Антон", How::Addressed, true)];
         assert_eq!(aggregate(&many, &BTreeMap::new()).len(), 1);
-        // A single self is enough; a single nickname is not.
         assert_eq!(aggregate(&[evidence(0, "Антон", How::SelfName, true)], &BTreeMap::new()).len(), 1);
         assert_eq!(aggregate(&[evidence(0, "Антон", How::Nickname, true)], &BTreeMap::new()).len(), 0);
-        // An unsure report counts half.
         assert_eq!(aggregate(&[evidence(0, "Антон", How::SelfName, false)], &BTreeMap::new()).len(), 0);
         assert_eq!(aggregate(&[evidence(0, "Антон", How::SelfName, false), evidence(0, "Антон", How::Introduced, true)], &BTreeMap::new()).len(), 1);
-        // The name must lead the speaker's next name twice over.
         let two = [evidence(0, "Антон", How::SelfName, true), evidence(0, "Олег", How::Addressed, true)];
         assert_eq!(aggregate(&two, &BTreeMap::new()).len(), 0, "3 against 2 is not twice");
         let lead = [evidence(0, "Антон", How::SelfName, true), evidence(0, "Олег", How::Nickname, true)];
         let accepted = aggregate(&lead, &BTreeMap::new());
         assert_eq!((accepted.len(), accepted[0].name.as_str(), accepted[0].score), (1, "Антон", 3.0));
-        // Spelling and case do not make two names.
         let variants = [evidence(0, "Антон", How::SelfName, true), evidence(0, " антон ", How::SelfName, true)];
         let accepted = aggregate(&variants, &BTreeMap::new());
         assert_eq!((accepted.len(), accepted[0].score), (1, 6.0));
-        // One name cannot go to two speakers: the higher score wins, the other stays unnamed.
         let both = [evidence(0, "Антон", How::SelfName, true), evidence(0, "Антон", How::Introduced, true), evidence(1, "Антон", How::SelfName, true)];
         let accepted = aggregate(&both, &BTreeMap::new());
         assert_eq!(accepted.iter().map(|a| (a.speaker, a.name.as_str())).collect::<Vec<_>>(), [(0, "Антон")]);
-        // The evidence of an accepted name is kept.
         assert_eq!(accepted[0].evidence.len(), 2);
     }
 
@@ -964,20 +831,16 @@ mod tests {
 
     #[test]
     fn the_run_stops_when_the_main_speakers_have_names() {
-        // 0 talks for 70 seconds, 1 for 5: only 0 is a main speaker.
         let dialog = [reply(0.0, 70.0, 0, "долгая речь"), reply(70.0, 75.0, 1, "короткая")];
         assert_eq!(main_speakers(&dialog), BTreeSet::from([0]));
         let named = [evidence(0, "Антон", How::SelfName, true)];
         assert!(all_main_named(&dialog, &named, &BTreeMap::new()));
         assert!(!all_main_named(&dialog, &[], &BTreeMap::new()));
-        // A speaker with a tenth of the speech is main too.
         let dialog = [reply(0.0, 90.0, 0, "речь"), reply(90.0, 100.0, 1, "ещё")];
         assert_eq!(main_speakers(&dialog), BTreeSet::from([0, 1]));
         assert!(!all_main_named(&dialog, &named, &BTreeMap::new()));
-        // So is one who talks over a minute.
         let dialog = [reply(0.0, 100.0, 0, "речь"), reply(100.0, 165.0, 1, "ещё"), reply(165.0, 170.0, 2, "мало")];
         assert_eq!(main_speakers(&dialog), BTreeSet::from([0, 1]));
-        // A name the user gave counts as a name.
         assert!(all_main_named(&dialog, &named, &BTreeMap::from([(1, "Дана".to_string())])));
     }
 
@@ -988,8 +851,6 @@ mod tests {
         assert_eq!(known, [json!({ "label": "@s1", "name": "Антон" }), json!({ "label": "@s2", "name": "Дана" })]);
     }
 
-    // ------------------------------------------------------------ through the queue
-
     fn test_settings() -> AgentSettings {
         AgentSettings::default()
     }
@@ -998,8 +859,6 @@ mod tests {
         Arc::new(test_settings)
     }
 
-    /// A transcript of `minutes` minutes where s0 talks `talk.0` seconds and s1 `talk.1` seconds
-    /// in turn, with the replies stored, and the queue opened on the same folder.
     fn recording(ai: &Path, path: &Path, minutes: f64, talk: (f64, f64), engine: Arc<dyn Engine>) -> Arc<mediaa_queue::Scheduler> {
         std::fs::write(path, b"x").unwrap();
         let id = transcript::file_id(path).unwrap();
@@ -1056,7 +915,6 @@ mod tests {
         assert_eq!(entries[&0].evidence.len(), 1);
         assert_eq!((entries[&0].evidence[0].start, entries[&0].evidence[0].how.as_str()), (0.0, "self"));
         assert_eq!(entries[&1].name, "Дана");
-        // The user's name wins over a new automatic one.
         t.rename_speaker(0, "Антоша").unwrap();
         assert!(!t.set_auto_name(0, "Антон", &[]).unwrap());
         assert_eq!(t.speaker_names().unwrap()[&0], "Антоша");
@@ -1075,7 +933,6 @@ mod tests {
         let file = transcript::file_id(&media).unwrap();
         assert_eq!((task.kind.as_str(), task.scope.as_deref()), (KIND, Some(file.as_str())));
         assert!(task.model.is_some(), "the task keeps the model warm");
-        // Another recording has its own run.
         let other = tmp.path().join("other.wav");
         std::fs::write(&other, b"x").unwrap();
         let mut t = Transcript::open(&ai, &transcript::file_id(&other).unwrap()).unwrap();
@@ -1089,7 +946,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ai = tmp.path().join(".ai");
         let media = tmp.path().join("talk.wav");
-        // 20 minutes, s1 barely talks: s0 alone is a main speaker, and one name stops the run.
         let fake = FakeEngine::new();
         fake.chat_answers(&[NAMES_FIRST]);
         let sched = recording(&ai, &media, 20.0, (20.0, 0.5), Arc::new(fake.clone()));
@@ -1102,7 +958,6 @@ mod tests {
         assert_eq!(result["windows"]["done"], json!(1));
         assert!(result["windows"]["all"].as_u64().unwrap() > 4, "{result}");
         assert_eq!(result["read_secs"], json!(240.0));
-        // The fake was asked once: the rest of the recording was not read.
         assert_eq!(fake.chats().len(), 1);
     }
 
@@ -1112,7 +967,6 @@ mod tests {
         let ai = tmp.path().join(".ai");
         let media = tmp.path().join("talk.wav");
         let fake = FakeEngine::new();
-        // Nothing is found in any window.
         fake.chat_answers(&[r#"{"evidence":[]}"#; 8]);
         let sched = recording(&ai, &media, 20.0, (20.0, 5.0), Arc::new(fake.clone()));
         let id = enqueue(&sched, &ai, &media, &test_settings()).unwrap();
@@ -1127,13 +981,6 @@ mod tests {
         assert!(Transcript::open(&ai, &transcript::file_id(&media).unwrap()).unwrap().speaker_names().unwrap().is_empty());
     }
 
-    /// Real names on real recordings, with the models in `MEDIAA_TEST_MODELS`:
-    ///
-    ///   bash scripts/live-test.sh LOG mediaa-agent speaker_names_live [MEDIAA_NAMES_FILE=...]
-    ///
-    /// The sample is transcribed and diarized first in a temporary library when its transcript is
-    /// not there; `MEDIAA_NAMES_FILE` tries another recording as well. Prints the evidence, the
-    /// names, how much of the recording was read and how long the run took.
     #[test]
     #[ignore]
     fn speaker_names_live() {
@@ -1157,7 +1004,6 @@ mod tests {
             let media = library.path().join(format!("{n}-{}", source.file_name().unwrap().to_string_lossy()));
             std::fs::copy(source, &media).unwrap();
             let id = transcript::file_id(&media).unwrap();
-            // A previous live run may have found no names: its transcript is still good.
             let transcribed = Transcript::exists(&ai, &id)
                 && Transcript::open(&ai, &id).ok().is_some_and(|t| t.dialog().is_ok_and(|dialog| !dialog.is_empty()));
             if !transcribed {
@@ -1180,7 +1026,6 @@ mod tests {
             eprintln!("evidence: {}", serde_json::to_string_pretty(&result["evidence"]).unwrap_or_default());
             let t = Transcript::open(&ai, &id).unwrap();
             eprintln!("transcript: {:?}", t.speaker_entries().unwrap());
-            // What the task read: enough to see whether the recording names anyone at all.
             for reply in t.dialog().unwrap_or_default().iter().take(20) {
                 let text: String = reply.text().chars().take(120).collect();
                 eprintln!("[{}] {}: {text}", stamp(reply.start), reply.speaker.map_or_else(|| "-".to_string(), speakers::label));
@@ -1189,8 +1034,6 @@ mod tests {
         }
     }
 
-    /// A chunk reads one window and checkpoints; the next chunk starts at the next window and the
-    /// window before is not read again.
     #[test]
     fn a_resumed_run_goes_on_with_the_next_window() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1220,15 +1063,12 @@ mod tests {
         assert_eq!(cursor["done"], json!([0, 1]));
         let chats = fake.chats();
         assert_eq!(chats.len(), 2);
-        // The second window starts at 3:00 and does not repeat the beginning.
         assert!(chats[1].texts[1].contains("Part of the recording 3:00 – 7:00."), "{}", chats[1].texts[1]);
         assert!(chats[1].texts[1].contains("[3:15] @s2: Ответ второго говорящего номер 7."), "{}", chats[1].texts[1]);
         assert!(!chats[1].texts[1].contains("[0:00]"), "the first window was read again");
         assert!(chats[0].texts[1].contains("[0:00] @s1: Реплика первого говорящего номер 0."));
     }
 
-    /// A model can cut its answer at the token limit: that window brings no evidence, and the
-    /// next window still counts — one bad answer does not fail the run for the whole recording.
     #[test]
     fn a_cut_answer_costs_one_window_not_the_run() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1236,7 +1076,6 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         let fake = FakeEngine::new();
         fake.chat_answers(&[
-            // The answer stops in the middle of a name, as at the token limit.
             r#"{"evidence":[{"speaker":"@s1","name":"Ан"#,
             r#"{"evidence":[{"speaker":"@s2","name":"Антон","how":"self","time":"3:15","sure":"high"}]}"#,
         ]);
@@ -1268,22 +1107,17 @@ mod tests {
         assert_eq!(fake.chats().len(), 2);
     }
 
-    /// An answer cut at the token limit keeps the reports whose objects closed instead of losing
-    /// the whole window.
     #[test]
     fn a_cut_answer_keeps_the_items_that_closed() {
         let cut = r#"{"evidence":[{"speaker":"@s1","name":"Антон","how":"self","time":"0:00","sure":"high"},{"speaker":"@s2","name":"Ан"#;
         let raw = closed_evidence(cut);
         assert_eq!(raw.evidence.len(), 1);
         assert_eq!((raw.evidence[0].speaker.as_str(), raw.evidence[0].name.as_str()), ("@s1", "Антон"));
-        // A whole answer is read as a whole, cut or not.
         let whole = r#"{"evidence":[{"speaker":"@s1","name":"Антон","how":"self","time":"0:00","sure":"high"}]}"#;
         assert_eq!(closed_evidence(whole).evidence.len(), 1);
-        // Cut before any object closed: nothing to keep.
         assert!(closed_evidence(r#"{"evidence":[{"speaker""#).evidence.is_empty());
     }
 
-    /// The complete reports of a cut answer become evidence: the window is not lost.
     #[test]
     fn a_cut_answer_keeps_its_complete_reports() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1321,8 +1155,6 @@ mod tests {
         assert_eq!(schema["properties"]["evidence"]["maxItems"], json!(5));
     }
 
-    /// An address in the last 30 seconds of a window and the answer in the next window are read
-    /// together: the 60-second overlap shows the model both lines, so the report holds up.
     #[test]
     fn an_address_at_the_end_of_a_window_and_the_answer_in_the_next_are_seen() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1330,7 +1162,6 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         std::fs::write(&media, b"x").unwrap();
         let mut t = Transcript::open(&ai, &transcript::file_id(&media).unwrap()).unwrap();
-        // 6:35: s2 addresses s1; 7:05: s1 answers. Windows: 0–240, 180–420, 360–435.
         let address = reply(395.0, 400.0, 1, "Антон, расскажи, как ты подтвердил опыт.");
         let answer = reply(425.0, 435.0, 0, "Я работал в трёх компаниях.");
         t.set_replies(&[reply(0.0, 2.0, 1, "Начало."), address.clone(), answer]).unwrap();
@@ -1366,7 +1197,6 @@ mod tests {
         }
         let cursor = Cursor::from_value(&task.cursor);
         assert_eq!(cursor.done, [0, 1, 2]);
-        // Window 1 ends right after the address; window 2 shows the address and the answer.
         let chats = fake.chats();
         assert_eq!(chats.len(), 3);
         assert!(chats[1].texts[1].contains("[6:35] @s2: Антон, расскажи"), "{}", chats[1].texts[1]);

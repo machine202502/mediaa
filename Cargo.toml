@@ -29,19 +29,14 @@ directories = "6"
 tempfile = "3"
 rusqlite = { version = "0.40", features = ["bundled"] }
 
-# Single self-contained executable: FFmpeg is linked statically, so trim what we can.
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
 
-# Dependencies do the per-pixel work (screen capture, image conversion); keep them fast in
-# debug builds too, otherwise recording a large display drops to a few frames per second.
 [profile.dev.package."*"]
 opt-level = 3
-# Frame conversion loops in the platform crate run per pixel as well.
 [profile.dev.package.mediaa-platform]
 opt-level = 3
-# The preview decoder scales frames per pixel too (generic `image` code is built in this crate).
 [profile.dev.package.mediaa-media]
 opt-level = 3

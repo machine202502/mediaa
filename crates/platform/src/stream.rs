@@ -1,8 +1,3 @@
-//! Recording source on `xcap`'s streaming monitor recorder: AVFoundation screen input on macOS
-//! (cursor drawn by the system), PipeWire via the ScreenCast portal on Wayland. Frames arrive
-//! on xcap's thread; `grab` hands out the newest one without waiting, so the recorder keeps
-//! its frame rate.
-
 use anyhow::Context as _;
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
@@ -10,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-/// macOS answers at once; on Wayland the user first confirms the screen-share prompt.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(if cfg!(target_os = "macos") { 5 } else { 60 });
 
 #[derive(Default)]
@@ -22,9 +16,7 @@ struct Latest {
 pub struct StreamSource {
     name: String,
     size: (u32, u32),
-    /// Area of the monitor to keep (monitor pixels), `None` = everything.
     region: Option<Rect>,
-    /// Monitor size in the same pixels as `region` (frames may come at another scale).
     monitor_size: (u32, u32),
     recorder: xcap::VideoRecorder,
     latest: Arc<Latest>,
@@ -33,8 +25,6 @@ pub struct StreamSource {
 }
 
 impl StreamSource {
-    /// The frame size comes from the stream itself (it may differ from `xcap`'s monitor size,
-    /// e.g. points vs. pixels on macOS).
     pub fn monitor(monitor: &xcap::Monitor, name: String, region: Option<Rect>) -> anyhow::Result<Self> {
         let monitor_size = (monitor.width()?, monitor.height()?);
         let (recorder, rx) = monitor.video_recorder().context("screen recorder")?;
@@ -45,7 +35,6 @@ impl StreamSource {
             while !s.load(Ordering::Relaxed) {
                 if let Ok(f) = rx.recv_timeout(Duration::from_millis(200)) {
                     let mut raw = f.raw;
-                    // PipeWire RGBx/BGRx streams leave the fourth byte undefined.
                     if cfg!(target_os = "linux") {
                         raw.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
                     }
@@ -56,7 +45,6 @@ impl StreamSource {
         })?;
         recorder.start().context("start screen recorder")?;
         let mut s = Self { name, size: (0, 0), region, monitor_size, recorder, latest, stop, last: None };
-        // The first frame proves the stream works (Wayland: after the permission prompt).
         let guard = s.latest.frame.lock().expect("frame lock");
         let (guard, _) = s
             .latest
@@ -72,7 +60,6 @@ impl StreamSource {
         Ok(s)
     }
 
-    /// Crops the region (scaled if the stream delivers another resolution than `xcap` reports).
     fn cut(&self, frame: Frame) -> Frame {
         match self.region {
             Some(r) => {

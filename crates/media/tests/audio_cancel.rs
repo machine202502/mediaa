@@ -1,6 +1,3 @@
-//! Stopping the player's audio decoder early is a normal part of playback (seek, speed
-//! change, another recording), so it must not show up in the log as an FFmpeg failure.
-
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -24,7 +21,6 @@ impl log::Log for Capture {
 
 static LOGGER: Capture = Capture;
 
-/// A 3 s stereo 48 kHz tone written next to the test binary's temp dir.
 fn tone(dir: &std::path::Path) -> std::path::PathBuf {
     let wav = dir.join("tone.wav");
     let spec = hound::WavSpec { channels: 2, sample_rate: 48_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
@@ -45,8 +41,6 @@ fn stopping_the_audio_decoder_early_logs_no_ffmpeg_error() {
     let dir = tempfile::tempdir().unwrap();
     let wav = tone(dir.path());
 
-    // The player's sink says "enough" after the first chunk (its buffer is full or playback
-    // moved on): the decoder must stop without FFmpeg reporting a muxing/trailer error.
     let fed = Arc::new(AtomicUsize::new(0));
     let f = fed.clone();
     mediaa_media::preview::decode_audio(&wav, 0.0, 1.0, 48_000, Arc::new(AtomicBool::new(false)), move |samples| {
@@ -57,7 +51,6 @@ fn stopping_the_audio_decoder_early_logs_no_ffmpeg_error() {
     .unwrap();
     assert!(fed.load(Ordering::Relaxed) > 0, "the job never reached the sink");
 
-    // Cancelling before the first write (a seek right after opening) does the same.
     let started = Arc::new(AtomicBool::new(false));
     let s = started.clone();
     mediaa_media::preview::decode_audio(&wav, 1.0, 1.5, 48_000, Arc::new(AtomicBool::new(true)), move |_| {
@@ -72,7 +65,6 @@ fn stopping_the_audio_decoder_early_logs_no_ffmpeg_error() {
         assert!(logs.is_empty(), "FFmpeg errors logged while stopping on purpose: {logs:?}");
     }
 
-    // A real failure is still an error, not a silent success.
     let missing = dir.path().join("missing.wav");
     assert!(mediaa_media::preview::decode_audio(&missing, 0.0, 1.0, 48_000, Arc::new(AtomicBool::new(false)), |_| true).is_err());
 }

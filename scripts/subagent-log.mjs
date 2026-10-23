@@ -1,29 +1,4 @@
 #!/usr/bin/env node
-// Mirrors the dialogs of subagents into readable Markdown files in `subagents/` (one per run),
-// so the user can watch what each subagent does while it works:
-// * Claude Code's own subagents (Sonnet, Haiku…): ~/.claude/projects/<project>/<session>/subagents/agent-*.jsonl
-//   with agent-*.meta.json (task description, model);
-// * runs of scripts/subagent.sh (DeepSeek, Grok…): target/subagents/<run>/stream.jsonl with task.md, model,
-//   name (optional), result.json. Grok's stream is streaming-json (flat events or ACP session updates).
-// * Grok's built-in subagents: ~/.grok/sessions/<cwd>/<parent>/subagents/**/meta.json points at the
-//   child session; the dialog is that child's updates.jsonl. GROK_HOME overrides ~/.grok.
-//
-//   node scripts/subagent-log.mjs once            render every transcript once
-//   node scripts/subagent-log.mjs watch           keep rendering what changes (every 3 s); one at a time
-//   node scripts/subagent-log.mjs watch --detach  start that watcher in the background and return
-//   node scripts/subagent-log.mjs follow RUN_DIR  render one scripts/subagent.sh run until its process exits
-//
-// A DeepSeek run is finished by its result line. A Grok stream writes `end` after every turn and a
-// resume appends after that, so `end` alone does not finish the run: `follow` keeps rendering while
-// the agent pid is alive. A Claude Code subagent is finished only by its SubagentHandback tool call
-// (a quiet transcript alone may just be a long build).
-// Finished runs (a result line: готово, ошибка, лимит ходов) whose transcript has not changed for
-// `archiveAfterHours` hours move to subagents/archive/ — the log and its artifacts keep their layout,
-// so the links inside the log stay valid. The limit comes from subagents/config.json (created with
-// {"archiveAfterHours": 6} when missing; the env SUBAGENT_ARCHIVE_HOURS overrides it) and is read on
-// every pass. A resumed run (its transcript changes) comes back to subagents/. registry.md never moves.
-// `watch` keeps one watcher: its pid is in subagents/.watch.pid; `watch --detach` starts it in the
-// background and returns at once (SessionStart hook).
 
 import fs from "node:fs";
 import os from "node:os";
@@ -37,12 +12,9 @@ const archiveDir = path.join(outDir, "archive");
 const indexFile = path.join(outDir, ".index.json");
 const pidFile = path.join(outDir, ".watch.pid");
 const configFile = path.join(outDir, "config.json");
-/// Longest text kept of one thought, tool input or tool result.
 const CUT = 2000;
-/// A transcript untouched this long (and not finished explicitly) counts as stopped.
 const IDLE_MS = 10 * 60 * 1000;
 
-// ~/.claude/projects/<the project path with every non-alphanumeric character as '-'>
 const projectKey = repo.replace(/[^A-Za-z0-9]/g, "-");
 const claudeProject = path.join(os.homedir(), ".claude", "projects", projectKey);
 
@@ -73,7 +45,6 @@ const readText = (file) => {
     }
 };
 
-/// A path with forward slashes, relative to `base` (for links inside a log).
 const relTo = (base, abs) => path.relative(base, abs).replace(/\\/g, "/");
 const cut = (s) => (s.length > CUT ? `${s.slice(0, CUT)}\n… (ещё ${s.length - CUT} символов)` : s);
 const time = (iso) => (iso ? new Date(iso).toLocaleTimeString("ru-RU", { hour12: false }) : "");
@@ -132,7 +103,6 @@ function isGrok(src, events) {
     return isGrokEvents(events);
 }
 
-/// Model names that actually ran: modelUsage keys, else the recorded model id.
 function collectModels(events, usage) {
     const names = [];
     const add = (mu) => {
@@ -181,7 +151,6 @@ function isAgentText(e) {
     return e.type === "text" || acpUpdate(e)?.sessionUpdate === "agent_message_chunk";
 }
 
-/// The last turn's answer: text after its last tool call.
 function finalGrokText(events) {
     let prev = -1;
     let last = -1;
@@ -264,7 +233,6 @@ const FAST_WARNING = (names) =>
         "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
     ].join("\n");
 
-/// Tokens, cost and the fast-model check for one Grok run. `usage` is `grok usage` JSON or null.
 export function grokRunFacts(events, usage) {
     const models = collectModels(events, usage);
     const fast = models.filter((m) => /fast/i.test(m));
@@ -294,8 +262,6 @@ export function grokRunFacts(events, usage) {
     };
 }
 
-/// Grok ACP `timestamp` is unix seconds. Claude lines are ISO strings or milliseconds.
-/// A bare `new Date(seconds)` lands in 1970 and names the log that way.
 export function startedAt(value, fallbackMs) {
     if (typeof value === "number" && Number.isFinite(value)) return new Date(value < 1e12 ? value * 1000 : value);
     if (typeof value === "string" && value.trim()) {
@@ -330,7 +296,6 @@ function grokToolOutput(upd) {
     return "";
 }
 
-/// Grok streaming-json (flat or ACP) as the same dialog Markdown DeepSeek runs use.
 function renderGrokEvents(events) {
     const outputs = new Map();
     for (const e of events) {
@@ -404,7 +369,6 @@ function renderGrokEvents(events) {
     return lines;
 }
 
-/// Dialog after the last turn ending: a later turn, or a resume appended after `end`.
 function grokContinued(events) {
     let last = -1;
     for (let i = 0; i < events.length; i++) if (isTerminal(events[i])) last = i;
@@ -428,7 +392,6 @@ function grokContinued(events) {
     return false;
 }
 
-/// The agent process recorded in RUN_DIR/pid. Missing or dead is false; EPERM means it is alive.
 function agentPidAlive(src) {
     if (!src?.dir) return false;
     const pid = Number(readText(path.join(src.dir, "pid")));
@@ -442,13 +405,11 @@ function agentPidAlive(src) {
 }
 
 function grokState(src, events, mtime) {
-    // `end` / turn_completed is one turn. The process keeps writing, and a resume appends after it.
     if (agentPidAlive(src) || !events.some(isTerminal) || grokContinued(events)) {
         const alive = agentPidAlive(src) || Date.now() - mtime < IDLE_MS;
         return { status: alive ? "работает" : "остановлен (журнал давно не менялся)", finished: false, summary: [] };
     }
     const facts = grokRunFacts(events, null);
-    // A built-in subagent's summary names the model even when the stream has no modelUsage.
     if (src.model && !facts.models.includes(src.model)) facts.models.push(src.model);
     if (src.model && /fast/i.test(src.model) && !facts.fast.includes(src.model)) {
         facts.fast.push(src.model);
@@ -459,7 +420,6 @@ function grokState(src, events, mtime) {
     const ok = facts.subtype === "success" && !fast;
     const sec = Math.round((facts.durationMs || 0) / 1000);
     const status = fast ? "ошибка (fast model)" : ok ? "готово" : maxTurns ? "остановлен на лимите ходов" : `ошибка (${facts.subtype})`;
-    // streaming-json `end` often has no wall-clock duration; don't print a fake 0s.
     const turns = facts.durationMs
         ? `Ходов: ${facts.numTurns ?? "?"}, время: ${Math.floor(sec / 60)} мин ${sec % 60} с.`
         : `Ходов: ${facts.numTurns ?? "?"}.`;
@@ -477,7 +437,6 @@ function grokState(src, events, mtime) {
     };
 }
 
-/// Markdown of a Grok transcript: model, dialog, result. Used by the tests.
 export function renderGrokLog(events) {
     const src = { kind: "script", provider: "grok", model: "", dir: "", file: "stream.jsonl" };
     const st = state(src, events, Date.now());
@@ -493,7 +452,6 @@ export function renderGrokLog(events) {
     ].join("\n");
 }
 
-/// The dialog as Markdown lines: thoughts, texts, tool calls with their results.
 function renderEvents(events, src) {
     if (isGrok(src, events)) return renderGrokEvents(events);
     return renderClaudeEvents(events);
@@ -506,7 +464,6 @@ function renderClaudeEvents(events) {
         const content = e.message?.content;
         if (e.type === "user") {
             if (typeof content === "string") {
-                // The task (first) or a later message to the subagent (a resume, a nudge).
                 if (!first) lines.push(`### ${time(e.timestamp)} · сообщение подагенту`, "", content, "");
                 first = false;
                 continue;
@@ -532,7 +489,6 @@ function renderClaudeEvents(events) {
     return lines;
 }
 
-/// The task: the first user message of the transcript.
 function firstTask(events) {
     for (const e of events) {
         if (e.type !== "user") continue;
@@ -555,7 +511,6 @@ function readJson(file) {
     }
 }
 
-/// First user_message_chunk text (Grok sessions store the task there, not as a Claude user line).
 function userChunkText(events) {
     for (const e of events) {
         if (acpUpdate(e)?.sessionUpdate !== "user_message_chunk") continue;
@@ -565,8 +520,6 @@ function userChunkText(events) {
     return "";
 }
 
-/// Child sessions of Grok's built-in subagents whose parent or child cwd is this repo.
-/// `meta.json` (SubagentMeta) lives under `<parent>/subagents/` and names `child_session_id`.
 export function grokBuiltinSources(sessionsDir, repoPath) {
     const repoN = normPath(repoPath);
     const byId = new Map();
@@ -644,10 +597,8 @@ export function grokBuiltinSources(sessionsDir, repoPath) {
     return out;
 }
 
-/// Every transcript: { key, file (the JSONL), title, model, task, started, status, summary }.
 function sources() {
     const out = [];
-    // Claude Code's subagents, every session of this project.
     if (fs.existsSync(claudeProject)) {
         for (const session of fs.readdirSync(claudeProject)) {
             const dir = path.join(claudeProject, session, "subagents");
@@ -663,12 +614,10 @@ function sources() {
             }
         }
     }
-    // Runs of scripts/subagent.sh.
     const runs = path.join(repo, "target", "subagents");
     if (fs.existsSync(runs)) {
         for (const r of fs.readdirSync(runs)) out.push(runSource(path.join(runs, r)));
     }
-    // Grok's built-in subagents (child sessions), not the lead's own session.
     out.push(...grokBuiltinSources(path.join(grokHome(), "sessions"), repo));
     return out.filter((s) => s && fs.existsSync(s.file));
 }
@@ -686,8 +635,6 @@ function runSource(dir) {
     };
 }
 
-/// A path a task wrote (relative, absolute Windows, backslashes) as repo-relative; "" when it is
-/// not a path inside the repo or holds a placeholder (`<name>` and the like).
 function repoRel(raw) {
     const v = String(raw || "").trim().replace(/\\/g, "/").replace(/[.,;:]+$/, "");
     if (!v || /[<>]/.test(v)) return "";
@@ -696,10 +643,6 @@ function repoRel(raw) {
     return rel;
 }
 
-/// The run's artifacts folder, repo-relative, from the authoritative place for its kind:
-/// scripts/subagent.sh writes it to RUN_DIR/artifacts (one line, repo-relative); a Claude Code
-/// subagent names it in the task («Artifacts folder…: <path>»), else the first
-/// `subagents/artifacts/<name>` mention counts.
 function artifactFolder(src, task) {
     const folder = (p) => {
         const rel = repoRel(p);
@@ -713,7 +656,6 @@ function artifactFolder(src, task) {
     return mention ? folder(mention[0]) : "";
 }
 
-/// How to continue a run that stopped at its turn limit.
 function continueLines(src) {
     if (src.kind === "script") {
         const dir = relTo(repo, src.dir);
@@ -725,7 +667,6 @@ function continueLines(src) {
     return ["Подагент Claude Code остановился на лимите ходов: запустите его снова или продолжите работу над задачей сами."];
 }
 
-/// Running / done / error and the closing summary of a transcript.
 function state(src, events, mtime) {
     if (isGrok(src, events)) return grokState(src, events, mtime);
     const result = [...events].reverse().find((e) => e.type === "result");
@@ -741,8 +682,6 @@ function state(src, events, mtime) {
         const alive = Date.now() - mtime < IDLE_MS;
         return { status: alive ? "работает" : "остановлен (журнал давно не менялся)", finished: false, summary: [] };
     }
-    // Claude Code's subagent: finished only by its SubagentHandback tool call (the final report).
-    // A last text without tool calls means nothing — a long build looks exactly like that.
     for (const e of [...events].reverse()) {
         if (e.type !== "assistant") continue;
         const handback = (e.message?.content || []).find((c) => c.type === "tool_use" && c.name === "SubagentHandback");
@@ -751,7 +690,6 @@ function state(src, events, mtime) {
     return { status: Date.now() - mtime < IDLE_MS ? "работает" : "остановлен (журнал давно не менялся)", finished: false, summary: [] };
 }
 
-/// How long a finished run waits before it moves to subagents/archive/ (config.json, env wins).
 function archiveHours() {
     const def = { archiveAfterHours: 6 };
     let config = null;
@@ -769,7 +707,6 @@ function archiveHours() {
     return process.env.SUBAGENT_ARCHIVE_HOURS && Number.isFinite(env) && env >= 0 ? env : config.archiveAfterHours;
 }
 
-/// Rename a file or folder, creating the parent; true when nothing is left at `from`.
 function move(from, to) {
     if (from === to || !fs.existsSync(from)) return true;
     try {
@@ -778,12 +715,10 @@ function move(from, to) {
         fs.renameSync(from, to);
         return true;
     } catch {
-        return false; // in use: the next pass tries again
+        return false;
     }
 }
 
-/// Move the files of `from` into `to` (skipping names already there) and remove the source folder
-/// once it is empty; true when everything that could move did.
 function mergeDir(from, to) {
     if (!fs.existsSync(from)) return true;
     try {
@@ -796,18 +731,13 @@ function mergeDir(from, to) {
         if (!fs.readdirSync(from).length) fs.rmdirSync(from);
         return true;
     } catch {
-        return false; // in use: the next pass tries again
+        return false;
     }
 }
 
 const underArchive = (rel) => rel.replace(/^subagents\//, "subagents/archive/");
 const fromArchive = (rel) => rel.replace(/^subagents\/archive\//, "subagents/");
 
-/// The run's artifacts folder (repo-relative, "" when there is none), keeping the index in step:
-/// the authoritative folder wins when it exists, else the stored mapping if that one still exists;
-/// mappings to a folder that is gone or a placeholder are dropped. Files are never moved here,
-/// except that a finished Claude Code subagent's folder takes the log's name and a leftover
-/// task-named folder is merged into it (the subagent may keep writing after the first rename).
 function resolveArtifacts(src, index, task, archived, finished) {
     const key = `${src.key}#artifacts`;
     const named = artifactFolder(src, task);
@@ -831,7 +761,6 @@ function resolveArtifacts(src, index, task, archived, finished) {
     return artifacts;
 }
 
-/// The files whose links follow subagents/: every workflow/*.md and CLAUDE.md at the root.
 export function docFiles(root) {
     const files = [];
     try {
@@ -843,12 +772,8 @@ export function docFiles(root) {
 }
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-/// A path segment ends here: no letter, digit or name character follows (so run `a` never matches `a-b`).
 const SEGMENT_END = "(?![\\p{L}\\p{N}_.-])";
 
-/// Rewrite occurrences of the repo paths `from` → `to` in the docs. Only the `subagents/…` part is
-/// replaced, so a relative prefix stays as it was (`../subagents/x` → `../subagents/archive/x`).
-/// A file is written only when its text changed (line endings are left alone). Returns its path.
 function rewriteDocPaths(root, pairs) {
     const rules = pairs.map(([from, to]) => [
         new RegExp(`subagents/${escapeRe(from.replace(/^subagents\//, ""))}${SEGMENT_END}`, "gu"),
@@ -871,9 +796,6 @@ function rewriteDocPaths(root, pairs) {
     return changed;
 }
 
-/// Follow a run's log and artifacts links in the docs: archived → under subagents/archive/, back
-/// when it returns from the archive. `kinds` says which of the two actually moved (a failed move
-/// must not point the docs at a path that is not there).
 export function rewriteRunLinks(root, run, archived, kinds = { log: true, artifacts: true }) {
     const name = run.replace(/\.md$/, "");
     const pairs = [];
@@ -887,11 +809,8 @@ export function rewriteRunLinks(root, run, archived, kinds = { log: true, artifa
     return rewriteDocPaths(root, pairs);
 }
 
-/// A link in a doc: the relative prefix, subagents/, an optional archive/ and artifacts/, the name.
 const DOC_LINK = /((?:\.\.?\/)*)subagents\/(archive\/)?(artifacts\/)?([^\s\/)\]}`'"<>,;:]+)(?=\/|[\s)\]}`'"<>,;:]|$)/gu;
 
-/// One-time repair: a link to a log (`<run>.md`) or an artifacts folder that is missing while its
-/// archived (or live) counterpart exists moves to the existing one. Other paths and text are left.
 export function repairDocLinks(root) {
     const changed = [];
     for (const file of docFiles(root)) {
@@ -903,8 +822,8 @@ export function repairDocLinks(root) {
         }
         const base = path.dirname(file);
         const out = text.replace(DOC_LINK, (m, prefix, archived = "", kind = "", name) => {
-            if (!kind && !name.endsWith(".md")) return m; // not a log
-            if (name === "registry.md") return m; // its paths are its own
+            if (!kind && !name.endsWith(".md")) return m;
+            if (name === "registry.md") return m;
             const rel = `subagents/${archived}${kind}${name}`;
             const other = archived ? rel.replace("subagents/archive/", "subagents/") : rel.replace(/^subagents\//, "subagents/archive/");
             if (fs.existsSync(path.resolve(base, prefix + rel))) return m;
@@ -918,7 +837,6 @@ export function repairDocLinks(root) {
     return changed;
 }
 
-/// A finished run untouched for long: its log and artifacts move under subagents/archive/.
 function archiveRun(src, index, mtime) {
     const name = index[src.key];
     if (!move(path.join(outDir, name), path.join(archiveDir, name))) return;
@@ -936,7 +854,6 @@ function archiveRun(src, index, mtime) {
     rewriteRunLinks(repo, name, true, { log: true, artifacts: movedArtifacts });
 }
 
-/// The transcript changed after archiving (a resume): the log and artifacts come back.
 function unarchiveRun(src, index) {
     const name = index[src.key];
     if (!move(path.join(archiveDir, name), path.join(outDir, name))) return;
@@ -954,9 +871,8 @@ function unarchiveRun(src, index) {
     rewriteRunLinks(repo, name, false, { log: true, artifacts: movedArtifacts });
 }
 
-const checked = new Map(); // key → mtime the run was judged for archiving
+const checked = new Map();
 
-/// Archive what is finished and old.
 function archivePass(all, index, hours) {
     const cutoff = Date.now() - hours * 3600e3;
     for (const src of all) {
@@ -965,13 +881,12 @@ function archivePass(all, index, hours) {
             mtime = fs.statSync(src.file).mtimeMs;
         } catch {}
         if (!index[src.key] || index[`${src.key}#archived`] || !mtime || mtime >= cutoff) continue;
-        if (checked.get(src.key) === mtime) continue; // judged this version of the transcript already
+        if (checked.get(src.key) === mtime) continue;
         checked.set(src.key, mtime);
         if (state(src, readJsonl(src.file), mtime).finished) archiveRun(src, index, mtime);
     }
 }
 
-/// Bring back the archived runs that became active again (transcript changed: a resume).
 function unarchivePass(all, index) {
     for (const src of all) {
         if (!index[`${src.key}#archived`]) continue;
@@ -983,7 +898,6 @@ function unarchivePass(all, index) {
     }
 }
 
-/// The pid of a living watcher from subagents/.watch.pid, or 0.
 function runningWatcher() {
     const pid = Number(readText(pidFile));
     if (!Number.isInteger(pid) || pid <= 0) return 0;
@@ -995,7 +909,6 @@ function runningWatcher() {
     }
 }
 
-/// Where the run lives, for watching and recovery: pids, the session to resume.
 function processLines(src, events) {
     const session = events.find((e) => e.session_id || e.sessionId);
     const sid = session?.session_id || session?.sessionId || "";
@@ -1007,7 +920,6 @@ function processLines(src, events) {
         const r = (f) => readText(path.join(src.dir, f));
         const bin = r("provider") === "grok" ? "grok" : "claude";
         const pids = [`${bin} ${r("pid") || "?"}${r("winpid") ? ` (Windows ${r("winpid")})` : ""}`, `скрипт ${r("script_pid") || "?"}`, `зеркало ${r("log_pid") || "?"}`];
-        // Cost per call (cost-run, cost-resume-…), written by scripts/subagent.sh at the end.
         let costs = [];
         try {
             costs = fs.readdirSync(src.dir).filter((f) => f.startsWith("cost-")).map((f) => Number(r(f))).filter(Number.isFinite);
@@ -1019,14 +931,12 @@ function processLines(src, events) {
             `* **Сессия:** \`${sid || r("session_id") || "?"}\` · продолжить: \`scripts/subagent.sh resume ${path.relative(repo, src.dir).replace(/\\/g, "/")} MESSAGE_FILE\`, ход: \`scripts/subagent.sh status …\``,
         ];
     }
-    // A subagent of Claude Code runs inside the lead's Claude Code process.
     const agent = path.basename(src.file, ".jsonl").replace(/^agent-/, "");
     const sessionDir = path.basename(path.dirname(path.dirname(src.file)));
     const host = sessionDir === process.env.CLAUDE_CODE_SESSION_ID && process.env.CLAUDE_PID ? `, процесс Claude Code ${process.env.CLAUDE_PID}` : "";
     return [`* **Процессы:** внутри сессии головы \`${sessionDir}\`${host}; агент \`${agent}\``];
 }
 
-/// A row in subagents/registry.md (the same table scripts/subagent.sh writes to).
 function register(src, events, title, model, started) {
     const reg = path.join(outDir, "registry.md");
     if (!fs.existsSync(reg)) {
@@ -1044,7 +954,6 @@ function register(src, events, title, model, started) {
     fs.appendFileSync(reg, `| ${when} | ${title.replace(/\|/g, "/")} | ${model} | ${procs} | \`${session}\` | \`${src.file}\` |\n`);
 }
 
-/// The artifacts the subagent left, linked from the log (paths relative to the log's folder).
 function artifactLines(logDir, artifacts) {
     if (!artifacts) return [];
     const abs = path.join(repo, artifacts);
@@ -1070,7 +979,7 @@ function loadIndex() {
     }
 }
 
-const rendered = new Map(); // key → mtime rendered
+const rendered = new Map();
 
 function render(src, index, env = {}) {
     let mtime;
@@ -1093,10 +1002,8 @@ function render(src, index, env = {}) {
     const streamModels = isGrok(src, events) ? collectModels(events, null) : [];
     const model = streamModels.length ? streamModels.join(", ") : src.model || events.find((e) => e.type === "system" && e.model)?.model || "";
     if (!index[src.key]) {
-        // A run of scripts/subagent.sh is already named that way: its log takes the same name.
         const named = src.kind === "script" && /^\d{4}-\d\d-\d\d_\d\d-\d\d_/.test(path.basename(src.dir));
         index[src.key] = named ? `${path.basename(src.dir)}.md` : `${stamp(started)}_${shortModel(model)}_${slug(title)}.md`;
-        // scripts/subagent.sh registers its runs itself. Claude Code's and Grok's built-in subagents are registered here.
         if (src.kind === "claude" || src.kind === "grok-builtin") register(src, events, title, model, started);
     }
     const { status, summary, finished } = state(src, events, mtime);
@@ -1129,10 +1036,9 @@ function render(src, index, env = {}) {
     return finished;
 }
 
-let repaired = false; // the one-time repair of links in the docs has run
+let repaired = false;
 
 function pass(force) {
-    // Once per process, before anything moves: point every stale link at the path that exists.
     if (!repaired) {
         repaired = true;
         repairDocLinks(repo);
@@ -1145,7 +1051,6 @@ function pass(force) {
         try {
             mtime = fs.statSync(src.file).mtimeMs;
         } catch {}
-        // Claude Code's subagents settle a little after their last line: re-render while recent.
         const recent = Date.now() - mtime < 60000;
         if (force || rendered.get(src.key) !== mtime || recent) render(src, index);
     }
@@ -1154,7 +1059,6 @@ function pass(force) {
     fs.writeFileSync(indexFile, JSON.stringify(index, null, 2));
 }
 
-/// One watcher only: take subagents/.watch.pid and keep rendering until stopped.
 function startWatch() {
     fs.mkdirSync(outDir, { recursive: true });
     fs.writeFileSync(pidFile, String(process.pid));
@@ -1181,7 +1085,6 @@ function readUsageFile(file) {
     try {
         return JSON.parse(text);
     } catch {
-        // A warning line may sit in front of the JSON object.
         const i = text.indexOf("{");
         const j = text.lastIndexOf("}");
         if (i >= 0 && j > i) {
@@ -1195,7 +1098,6 @@ function readUsageFile(file) {
     }
 }
 
-/// result.json, the cost inputs and the fast-model warning for scripts/subagent.sh.
 function writeGrokFacts(dir) {
     const events = readJsonl(path.join(dir, "stream.jsonl"));
     const usage = readUsageFile(path.join(dir, "usage.json"));
@@ -1230,10 +1132,6 @@ function writeGrokFacts(dir) {
     }
 }
 
-/// One pass of `follow`: re-read the run (provider, model, name, stream) and render the log.
-/// `end` in a Grok stream is one turn. While that agent pid is alive, the run is not finished,
-/// so a later turn and a resume keep showing up. A partial last line is skipped, not fatal.
-/// `env.outDir` / `env.index` / `env.isolated` keep tests off the real subagents/ folder.
 export function followTick(dir, env = {}) {
     const src = runSource(path.resolve(dir));
     const index = env.index || loadIndex();
@@ -1246,7 +1144,6 @@ export function followTick(dir, env = {}) {
             fs.mkdirSync(path.dirname(indexFile), { recursive: true });
             fs.writeFileSync(indexFile, JSON.stringify(index, null, 2));
         }
-        // The pid wins over a turn's `end`: the process is about to write the next turn.
         if (agentPidAlive(src)) finished = false;
         const name = index[src.key] || "";
         return { finished, log: name ? path.join(logRoot, name) : "" };
@@ -1256,7 +1153,6 @@ export function followTick(dir, env = {}) {
     }
 }
 
-// Run the CLI only when this file is executed, so tests can import the helpers above.
 const isMain = (() => {
     try {
         return fs.realpathSync(path.resolve(process.argv[1])) === fs.realpathSync(fileURLToPath(import.meta.url));
@@ -1268,13 +1164,11 @@ const isMain = (() => {
 if (isMain) {
     const [cmd, arg] = process.argv.slice(2);
     if (cmd === "id") {
-        // The shared name of a run (log, artifacts, run folder): `id MODEL TITLE`, now.
         const [model, title] = process.argv.slice(3);
         console.log(`${stamp(new Date())}_${shortModel(model)}_${slug(title || "")}`);
     } else if (cmd === "once") {
         pass(true);
     } else if (cmd === "watch" && arg === "--detach") {
-        // Started from a hook: hand the work to the background and return without a sound.
         try {
             const script = path.resolve(process.argv[1]);
             const child = spawn(process.execPath, [script, "watch"], { detached: true, stdio: "ignore", windowsHide: true });

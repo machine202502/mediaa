@@ -1,11 +1,3 @@
-//! Lightshot-style area selection in its own borderless fullscreen window (an egui deferred
-//! viewport, so it works the same on every platform and the main window stays where it is).
-//!
-//! The window shows a frozen screenshot; the user drags a rectangle, may move/resize it, draw
-//! on it (pen, line, arrow, rectangle, highlighter, text) and then copies / saves it.
-//! Geometry lives in `mediaa_core::geometry`, shapes and their rasterization in
-//! `mediaa_core::annotate` — this module is the interaction and painting layer.
-
 use crate::theme;
 use eframe::egui::{
     self, Align2, Color32, CornerRadius, CursorIcon, FontId, Pos2, Rect as ERect, Sense, Stroke,
@@ -23,11 +15,8 @@ use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
-    /// Screenshot from the app window: copy / save only.
     Screenshot,
-    /// Screen area from the tray / global hotkey: copy, save or record it right away.
     Area,
-    /// Pick the area to record (no drawing tools).
     RecordRegion,
 }
 
@@ -36,11 +25,9 @@ pub enum Outcome {
     Cancel,
     Image { frame: Frame, action: AfterCapture, format: Option<ImageFormat> },
     Region { monitor: MonitorInfo, rect: Rect },
-    /// Area purpose only: record the selected area right away.
     RecordArea { monitor: MonitorInfo, rect: Rect },
 }
 
-/// Lightshot's palette.
 const COLORS: [[u8; 4]; 8] = [
     [255, 59, 48, 255],
     [255, 149, 0, 255],
@@ -61,17 +48,13 @@ struct TextEdit {
     focus: bool,
 }
 
-/// Title of the overlay window (unique, so the native window can be found by it).
 const WINDOW_TITLE: &str = "MediaA area picker";
 
 struct State {
     purpose: Purpose,
-    /// Every monitor with its frozen screenshot; only the starting one is captured up front,
-    /// the others on demand (Tab), so the picker opens as fast as possible.
     shots: Vec<(MonitorInfo, Option<Frame>)>,
     current: usize,
     texture: Option<(usize, egui::TextureHandle)>,
-    /// Frames drawn in the (still hidden) window; it is revealed once its content is ready.
     frames_drawn: u32,
     shown: bool,
     editor: SelectionEditor,
@@ -81,7 +64,6 @@ struct State {
     drawing: Option<Shape>,
     text: Option<TextEdit>,
     palette_open: bool,
-    /// Measured panel sizes (previous frame), for collision-free placement.
     tools_size: Option<egui::Vec2>,
     actions_size: Option<egui::Vec2>,
     default_action: AfterCapture,
@@ -89,14 +71,11 @@ struct State {
     outcome: Option<Outcome>,
 }
 
-/// Owned by the app; the overlay window itself renders from a shared copy of the state.
 pub struct Overlay {
     state: Arc<Mutex<State>>,
 }
 
 impl Overlay {
-    /// `first` is the frozen screenshot of `monitors[start]`. The texture is uploaded right
-    /// away, before the window exists, so its very first frame already shows the picture.
     pub fn new(
         ctx: &egui::Context,
         purpose: Purpose,
@@ -109,7 +88,7 @@ impl Overlay {
         let current = start.min(monitors.len().saturating_sub(1));
         let mut editor = SelectionEditor::new(Rect::new(0, 0, first.width as i32, first.height as i32));
         if std::env::var_os("MEDIAA_DEV_PICKER").is_some() {
-            editor.select_all(); // dev: start with a selection, to check the toolbars
+            editor.select_all();
         }
         let texture = Some((current, upload(ctx, &first)));
         let mut shots: Vec<(MonitorInfo, Option<Frame>)> = monitors.into_iter().map(|m| (m, None)).collect();
@@ -138,8 +117,6 @@ impl Overlay {
         }
     }
 
-    /// Registers the overlay window for this frame (call every frame from the main window's
-    /// `ui`) and returns the outcome once the user is done.
     pub fn show(&self, ctx: &egui::Context) -> Option<Outcome> {
         let (id, builder, focus) = {
             let mut s = self.state.lock().expect("overlay lock");
@@ -153,11 +130,7 @@ impl Overlay {
             let builder = egui::ViewportBuilder::default()
                 .with_title(WINDOW_TITLE)
                 .with_decorations(false)
-                // Created hidden and revealed by `State::ui` once the frozen screen is painted:
-                // no empty or half-sized window is ever visible.
                 .with_visible(false)
-                // A plain window covering the monitor (logical units); switching to borderless
-                // fullscreen at creation time breaks swapchain creation on some GPUs.
                 .with_position([monitor.x as f32 / monitor.scale, monitor.y as f32 / monitor.scale])
                 .with_inner_size([monitor.width as f32 / monitor.scale, monitor.height as f32 / monitor.scale])
                 .with_always_on_top()
@@ -166,7 +139,6 @@ impl Overlay {
             (id, builder, s.shown && s.opened.elapsed() < Duration::from_millis(600))
         };
         if focus {
-            // Window managers may open it behind the active window; insist for a moment.
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
             ctx.request_repaint_after(Duration::from_millis(50));
@@ -188,7 +160,6 @@ fn upload(ctx: &egui::Context, frame: &Frame) -> egui::TextureHandle {
     ctx.load_texture("overlay-shot", img, egui::TextureOptions::LINEAR)
 }
 
-/// Maps between screen points of the overlay window and image pixels of the screenshot.
 #[derive(Clone, Copy)]
 struct Mapping {
     origin: Pos2,
@@ -223,7 +194,6 @@ impl State {
         self.shots[self.current].1.as_ref().expect("current monitor is always captured")
     }
 
-    /// Moves to the next display, capturing it now if it has not been yet.
     fn switch_monitor(&mut self) {
         let n = self.shots.len();
         for step in 1..n {
@@ -243,7 +213,6 @@ impl State {
             self.shapes.clear();
             self.drawing = None;
             self.text = None;
-            // A new window is created for the other display: reveal it the same way.
             self.frames_drawn = 0;
             self.shown = false;
             self.opened = Instant::now();
@@ -259,7 +228,6 @@ impl State {
         }
     }
 
-    /// The selected area with annotations burnt in.
     fn result(&mut self) -> Option<Frame> {
         self.commit_text();
         let sel = self.editor.usable_selection()?;
@@ -302,8 +270,6 @@ impl State {
         self.reveal(&ctx);
     }
 
-    /// Shows the window once two frames with the frozen screen have been painted (the first
-    /// one may still be sized before the window settles), with the OS open animation off.
     fn reveal(&mut self, ctx: &egui::Context) {
         if self.shown {
             return;
@@ -314,8 +280,6 @@ impl State {
             return;
         }
         mediaa_platform::window::disable_open_animation(WINDOW_TITLE);
-        // Keep the picker itself out of recordings that may be running
-        // (`MEDIAA_DEV_PICKER=1` keeps it capturable, for UI checks).
         if std::env::var_os("MEDIAA_DEV_PICKER").is_none() {
             mediaa_platform::window::exclude_from_capture(WINDOW_TITLE);
         }
@@ -332,7 +296,6 @@ impl State {
         let press = ui.input(|i| i.pointer.press_origin());
 
         match self.tool {
-            // Selection mode: draw / move / resize the rectangle.
             None => {
                 if resp.drag_started() {
                     if let Some(origin) = press {
@@ -361,9 +324,7 @@ impl State {
                     });
                 }
             }
-            // Text: click inside the selection to start typing.
             Some(Tool::Text) => {
-                // Right click: font and size.
                 resp.context_menu(|ui| self.text_menu(ui));
                 if resp.hover_pos().is_some_and(inside) {
                     ui.ctx().set_cursor_icon(CursorIcon::Text);
@@ -375,7 +336,6 @@ impl State {
                     }
                 }
             }
-            // Drawing tools.
             Some(tool) => {
                 if resp.hover_pos().is_some_and(inside) {
                     ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
@@ -423,7 +383,6 @@ impl State {
             painter.rect_filled(r, CornerRadius::ZERO, dim);
         }
 
-        // Annotations, clipped to the selection like in the final image.
         let clipped = painter.with_clip_rect(s);
         for shape in self.shapes.iter().chain(self.drawing.as_ref()) {
             paint_shape(&clipped, map, shape);
@@ -456,7 +415,6 @@ impl State {
         painter.galley(pos, galley, Color32::WHITE);
     }
 
-    /// In-place text editor for the text tool (committed on Enter or when clicking elsewhere).
     fn text_editor(&mut self, ui: &mut egui::Ui, map: Mapping) {
         let Some(edit) = self.text.as_mut() else { return };
         let ShapeKind::Text { pos, text } = &mut edit.shape.kind else { return };
@@ -491,7 +449,6 @@ impl State {
     fn keyboard(&mut self, ctx: &egui::Context) {
         use egui::Key;
         if self.text.is_some() {
-            // The text field owns the keyboard; Esc drops the text being typed.
             if ctx.input(|i| i.key_pressed(Key::Escape)) {
                 self.text = None;
             }
@@ -557,7 +514,6 @@ impl State {
         }
         let s = map.rect(sel);
         let to_f = |r: ERect| RectF::new(r.min.x, r.min.y, r.width(), r.height());
-        // Panel sizes from the previous frame (estimates before the first one).
         let tools = (self.purpose != Purpose::RecordRegion)
             .then(|| self.tools_size.unwrap_or(egui::vec2(46.0, 420.0)))
             .map(|v| (v.x, v.y));
@@ -572,7 +528,6 @@ impl State {
         self.remember_size(ctx, false, size);
     }
 
-    /// Stores a panel size; if it changed, repaint so the layout uses the real size at once.
     fn remember_size(&mut self, ctx: &egui::Context, tools: bool, size: egui::Vec2) {
         let slot = if tools { &mut self.tools_size } else { &mut self.actions_size };
         if slot.is_none_or(|old| (old - size).length() > 0.5) {
@@ -614,7 +569,6 @@ impl State {
         });
     }
 
-    /// Font and size of text annotations (right-click menu of the text tool).
     fn text_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(200.0);
         ui.label(egui::RichText::new(t!("overlay.font")).strong());
@@ -637,7 +591,6 @@ impl State {
             }
         });
         ui.add(egui::Slider::new(&mut self.style.font_size, 8.0..=200.0).suffix(" px"));
-        // Applies to the text being typed as well.
         if let Some(t) = self.text.as_mut() {
             (t.shape.style.font, t.shape.style.font_size) = (self.style.font, self.style.font_size);
         }
@@ -672,7 +625,6 @@ impl State {
                 }
             }
             ui.separator();
-            // Current colour; click to open the palette.
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::click());
             ui.painter().circle_filled(rect.center(), 10.0, c32(self.style.color));
             ui.painter().circle_stroke(rect.center(), 10.0, Stroke::new(2.0, Color32::WHITE));
@@ -695,7 +647,6 @@ impl State {
                     }
                 }
             }
-            // Thickness: click cycles 2 → 4 → 8 → 12.
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(32.0, 28.0), Sense::click());
             ui.painter().line_segment(
                 [rect.left_center() + egui::vec2(7.0, 0.0), rect.right_center() - egui::vec2(7.0, 0.0)],
@@ -721,7 +672,6 @@ impl State {
     }
 }
 
-/// Floating panel with fixed dark styling (readable over any screen content and theme).
 fn dark_bar(ctx: &egui::Context, id: &str, pos: Pos2, add: impl FnOnce(&mut egui::Ui)) -> egui::Vec2 {
     egui::Area::new(egui::Id::new(id))
         .order(egui::Order::Foreground)
@@ -741,7 +691,6 @@ fn dark_bar(ctx: &egui::Context, id: &str, pos: Pos2, add: impl FnOnce(&mut egui
         .size()
 }
 
-/// Paints one annotation in screen space (mirrors `annotate::render`).
 fn paint_shape(painter: &egui::Painter, map: Mapping, shape: &Shape) {
     let color = c32(shape.style.color);
     let stroke = Stroke::new(map.len(shape.style.width), color);
@@ -778,8 +727,6 @@ fn paint_shape(painter: &egui::Painter, map: Mapping, shape: &Shape) {
     }
 }
 
-/// Makes the system fonts of [`annotate::fonts`] available to egui (the two built-in ones are
-/// egui's own proportional and monospace fonts). Takes effect from the next frame.
 fn register_fonts(ctx: &egui::Context) {
     use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
     for face in annotate::fonts().iter().skip(2) {
@@ -793,8 +740,6 @@ fn register_fonts(ctx: &egui::Context) {
     }
 }
 
-/// egui font for a text annotation; falls back to the default font until a system font has
-/// been loaded by egui.
 fn text_font(ctx: &egui::Context, style: &Style, size: f32) -> FontId {
     let family = match style.font {
         annotate::FONT_SANS => egui::FontFamily::Proportional,

@@ -1,8 +1,3 @@
-//! A catalog file opened in a tab, laid out like the media-analysis studio: a title bar, three
-//! panes — dialog (the recording's text), the video, chat with the agent — separated by
-//! draggable sashes, and a transport bar (play, time, position, volume, speed, mute, hide the
-//! video, video only). Audio files have no video pane. Narrow tabs stack the panes.
-
 use super::chat::Chat;
 use super::dialog::Dialog;
 use super::topics;
@@ -19,35 +14,19 @@ use rust_i18n::t;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Playback speeds of the transport (as in media-analysis).
 pub const SPEEDS: [f64; 6] = [0.8, 1.0, 1.25, 1.5, 2.0, 3.0];
-/// Default pane proportions: dialog, video, chat.
 const PANES: [f32; 3] = [1.15, 1.0, 0.95];
-/// Narrowest / shortest pane.
 const MIN_PANE: f32 = 150.0;
-/// Below this width the panes stack (video, dialog, chat).
 const NARROW: f32 = 980.0;
 const SASH: f32 = 8.0;
-/// Gap between the boxes of neighbouring controls in the transport row. Every box keeps
-/// [`ROW_PAD`] of inert space around its visible body (a glyph, a slider track, a text), so
-/// the visible gap between any two neighbours is `ROW_GAP + 2 * ROW_PAD` — one spacing for
-/// the whole row.
 const ROW_GAP: f32 = 8.0;
-/// Inert space on each side of a control's visible body; equals the seek bar's track inset.
 const ROW_PAD: f32 = topics::TRACK_INSET;
-/// Height of the transport row (the icon buttons; the sliders are 24 px, centred in it).
 const ROW_H: f32 = theme::ICON_BUTTON;
-/// Visible width of the row's icons.
 const ROW_ICON: f32 = 14.0;
-/// Visible track widths of the volume and speed sliders.
 const VOLUME_TRACK: f32 = 96.0;
 const SPEED_TRACK: f32 = 84.0;
-/// Largest radius of a slider's knob. The knob's centre keeps this distance from the track's
-/// ends, so the thumb never sticks out of its box into a gap — the slider's visible body is
-/// always its track, for every value and while hovered.
 const KNOB: f32 = topics::KNOB;
 
-/// Which pane fills the studio. The other panes are hidden; the sizes stay for the restore.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 enum Maximized {
     #[default]
@@ -56,14 +35,12 @@ enum Maximized {
     Chat,
 }
 
-/// Layout choices shared by all studios (kept across restarts).
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Layout {
     sizes: [f32; 3],
     show_video: bool,
     cinema: bool,
     maximized: Maximized,
-    /// Follow the player in the dialog: highlight, scroll, and clicks that seek.
     sync: bool,
 }
 
@@ -74,7 +51,6 @@ impl Default for Layout {
 }
 
 impl Layout {
-    /// One pane fills the studio. Again on the same pane restores. Cinema turns off.
     fn toggle_max(&mut self, which: Maximized) {
         if self.maximized == which {
             self.maximized = Maximized::None;
@@ -84,7 +60,6 @@ impl Layout {
         }
     }
 
-    /// Video fills the studio. A maximized pane turns off; the pane sizes stay.
     fn toggle_cinema(&mut self) {
         self.cinema = !self.cinema;
         if self.cinema {
@@ -112,15 +87,11 @@ pub struct Studio {
     texture: Option<egui::TextureHandle>,
     dialog: Dialog,
     chat: Chat,
-    /// Action from the dialog pane this frame.
     pending: Option<StudioAction>,
-    /// Drawn this frame (tabs that are not shown are paused).
     pub drawn: bool,
 }
 
 impl Studio {
-    /// Opens `path` paused at the start (its transcript in `ai_dir`); fails when it cannot be
-    /// read.
     pub fn open(path: &Path, ai_dir: &Path) -> anyhow::Result<Studio> {
         let kind = MediaKind::from_path(path).ok_or_else(|| anyhow::anyhow!("{}: not audio or video", path.display()))?;
         let info = mediaa_media::info::probe(path)?;
@@ -130,7 +101,6 @@ impl Studio {
         Ok(Studio { path: path.to_path_buf(), video, player, texture: None, dialog: Dialog::new(path, ai_dir), chat: Chat::new(path, ai_dir), pending: None, drawn: false })
     }
 
-    /// Moves playback to `t` seconds (a search hit opened from the catalog).
     pub fn seek(&mut self, t: f64) {
         self.player.jump(t);
     }
@@ -164,7 +134,6 @@ impl Studio {
         let bar = Rect::from_min_max(egui::pos2(full.min.x, full.max.y - 60.0), full.max);
         let stage = Rect::from_min_max(egui::pos2(full.min.x + 6.0, top.max.y), egui::pos2(full.max.x - 6.0, bar.min.y - 2.0));
 
-        // Title bar: icon tools, then the title. The three tools stay, even when the third is off.
         ui.scope_builder(egui::UiBuilder::new().max_rect(top.shrink2(egui::vec2(10.0, 6.0))), |ui| {
             ui.horizontal_centered(|ui| {
                 let open = theme::icon_face(ui, icon::ARROW_SQUARE_OUT, &t!("studio.open"), theme::ICON_BUTTON);
@@ -202,7 +171,6 @@ impl Studio {
         action.or(self.pending.take())
     }
 
-    /// The panes and the sashes between them.
     fn stage(&mut self, ui: &mut egui::Ui, rect: Rect, layout: &mut Layout, services: Option<&Services>, p: theme::Palette) {
         if layout.maximized == Maximized::Dialog {
             self.dialog_pane(ui, rect, layout, services, p);
@@ -218,7 +186,6 @@ impl Studio {
             return;
         }
         let narrow = rect.width() < NARROW;
-        // Visible panes in display order (index into `sizes`: 0 dialog, 1 video, 2 chat).
         let order: Vec<usize> = match (show_video, narrow) {
             (false, _) => vec![0, 2],
             (true, true) => vec![1, 0, 2],
@@ -311,16 +278,12 @@ impl Studio {
                 egui::Spinner::new().size(24.0).color(Color32::WHITE).paint_at(ui, Rect::from_center_size(body.center(), egui::vec2(24.0, 24.0)));
             }
         }
-        // Click on the picture: play / pause.
         if ui.interact(body, ui.id().with("studio-screen"), Sense::click()).clicked() {
             self.player.toggle_pause();
         }
     }
 
-    /// Play · time · seek · mute · volume · gauge · speed · «1×» · hide video · video only;
-    /// the current topic runs under the seek bar. All controls of the row are one gap apart.
     fn transport(&mut self, ui: &mut egui::Ui, rect: Rect, layout: &mut Layout, p: theme::Palette) {
-        // The topics of the recording cut the seek bar into segments (loaded by the dialog).
         let chapters = self.dialog.chapters();
         let roster = self.dialog.roster();
         ui.painter().hline(rect.x_range(), rect.min.y, Stroke::new(1.0, p.border));
@@ -336,11 +299,6 @@ impl Studio {
                 let shown = if duration > 0.0 && pos >= duration - 0.05 { duration } else { pos.floor() };
                 ui.label(RichText::new(format!("{} / {}", human_duration(shown), human_duration(duration))).font(FontId::monospace(12.0)));
 
-                // The row is laid out from the right: every control gets a box of its visible
-                // body plus `ROW_PAD` on both sides, the boxes are `ROW_GAP` apart, and the seek
-                // bar takes what is left. Every body has a fixed width (the speed label is
-                // monospaced and two-decimal, so all its variants are equally wide), so no value
-                // of any control can move the row.
                 let label = speed_label(player.speed());
                 let boxes = row_boxes(ui.available_rect_before_wrap(), self.video, player.has_sound(), speed_label_width(ui));
 
@@ -379,7 +337,6 @@ impl Studio {
                         player.set_volume(if muted { 1.0 } else { 0.0 });
                     }
                 }
-                // Position: whatever width is left, in the recording's topics.
                 let frac = if duration > 0.0 { (pos / duration) as f32 } else { 0.0 };
                 let seek = boxes.seek;
                 let (resp, v) = at(ui, seek, 24.0, |ui| topics::seek_bar(ui, seek.width(), frac, duration, chapters, "studio-position", &roster, p));
@@ -396,15 +353,12 @@ impl Studio {
                 }
                 resp.rect
             });
-            // The current topic under the bar, left-aligned with it; a blank line without topics.
             if !chapters.is_empty() {
                 let seek = row.inner;
                 let top = row.response.rect.bottom() + 2.0;
                 let left = seek.left() + topics::TRACK_INSET;
                 let line = Rect::from_min_max(egui::pos2(left, top), egui::pos2(seek.right(), top + 16.0));
                 let text = topics::current_label(chapters, self.player.position());
-                // A child UI at the bar's left edge keeps the line left-aligned with it (and the
-                // label truncates at the bar's right edge).
                 ui.scope_builder(egui::UiBuilder::new().max_rect(line), |ui| {
                     let galley = super::mentions::galley(ui, &text, &roster, FontId::proportional(11.0), p.text_weak, ui.available_width(), true, false, p);
                     ui.add(egui::Label::new(galley).truncate());
@@ -414,9 +368,6 @@ impl Studio {
     }
 }
 
-/// Lays the transport controls out from the right: every `take` returns the next control's
-/// box, [`ROW_GAP`] left of the previous one, and [`Self::seek`] gives the seek bar what is
-/// left. Pure geometry, so the single gap is testable.
 struct Row {
     right: f32,
     top: f32,
@@ -439,8 +390,6 @@ impl Row {
     }
 }
 
-/// The transport row's boxes: `None` for the controls of a file with no video or no sound —
-/// they take no room at all, and the seek bar stretches instead.
 struct Boxes {
     cinema: Option<Rect>,
     camera: Option<Rect>,
@@ -452,8 +401,6 @@ struct Boxes {
     seek: Rect,
 }
 
-/// Lays the row out from the right (the same order as [`Row`]); `label_width` is the visible
-/// width of the speed label.
 fn row_boxes(area: Rect, video: bool, sound: bool, label_width: f32) -> Boxes {
     let mut boxes = Row::new(area);
     let cinema = video.then(|| boxes.take(ROW_ICON));
@@ -467,21 +414,15 @@ fn row_boxes(area: Rect, video: bool, sound: bool, label_width: f32) -> Boxes {
     Boxes { cinema, camera, label, speed, gauge, volume, speaker, seek }
 }
 
-/// Runs `add` in a child UI occupying `rect`, shrunk to `height` and centred, so the 24 px
-/// sliders and the 26 px icon buttons share one centre line.
 fn at<R>(ui: &mut egui::Ui, rect: Rect, height: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let inner = Rect::from_center_size(rect.center(), egui::vec2(rect.width(), height));
     ui.scope_builder(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)), add).inner
 }
 
-/// The «1.00×» text of a speed: two decimals in the monospace font, so every speed has the same
-/// glyph count and therefore the same width — the label needs no reserved spare, the row never
-/// moves when the speed changes, and its single gap stays equal to the others.
 fn speed_label(speed: f64) -> String {
     format!("{speed:.2}×")
 }
 
-/// The visible width of the speed label — the same for every speed (see [`speed_label`]).
 fn speed_label_width(ui: &egui::Ui) -> f32 {
     let font = FontId::monospace(12.0);
     SPEEDS.iter().map(|&s| ui.fonts_mut(|f| f.layout_no_wrap(speed_label(s), font.clone(), Color32::PLACEHOLDER)).size().x).fold(0.0, f32::max)
@@ -490,21 +431,13 @@ fn speed_label_width(ui: &egui::Ui) -> f32 {
 pub enum StudioAction {
     Open(PathBuf),
     Reveal(PathBuf),
-    /// Analyse the file with the chosen stages: `from` `None` is a first analysis (earlier data
-    /// is left alone), `Some(stage)` rebuilds that stage and what follows. `remember` saves the
-    /// options as the default for the next analysis.
     Analyse { path: PathBuf, from: Option<Stage>, options: AnalysisOptions, remember: bool },
-    /// Cancel the running analysis of the recording.
     Stop(mediaa_queue::TaskId),
-    /// Queue the search for the speaker names of the recording.
     FindNames(PathBuf),
-    /// Continue a failed task.
     ResumeTask(mediaa_queue::TaskId),
-    /// Open a recording at a time (a citation in a folder's chat).
     OpenAt(PathBuf, f64),
 }
 
-/// The chat pane of a recording that has no replies yet: the frame and a note, no chat.
 fn chat_later(ui: &mut egui::Ui, rect: Rect, p: theme::Palette) {
     let body = panel(ui, rect, &t!("studio.chat"), p);
     ui.scope_builder(egui::UiBuilder::new().max_rect(body.shrink2(egui::vec2(10.0, 8.0))), |ui| {
@@ -512,15 +445,12 @@ fn chat_later(ui: &mut egui::Ui, rect: Rect, p: theme::Palette) {
     });
 }
 
-/// Height of a pane header. The same in the normal and the maximized state.
 pub(super) const PANE_HEAD: f32 = 30.0;
 
-/// A pane frame with its title row; returns the body rect.
 pub(super) fn panel(ui: &egui::Ui, rect: Rect, title: &str, p: theme::Palette) -> Rect {
     panel_insets(ui, rect, title, 12.0, 12.0, p)
 }
 
-/// [`panel`] with room kept free on the left and the right of the title, for header buttons.
 pub(super) fn panel_insets(ui: &egui::Ui, rect: Rect, title: &str, left: f32, right: f32, p: theme::Palette) -> Rect {
     let painter = ui.painter_at(rect);
     painter.rect(rect, CornerRadius::same(12), p.card, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
@@ -533,7 +463,6 @@ pub(super) fn panel_insets(ui: &egui::Ui, rect: Rect, title: &str, left: f32, ri
     Rect::from_min_max(egui::pos2(rect.min.x + 1.0, head.max.y + 1.0), rect.max - egui::vec2(1.0, 1.0))
 }
 
-/// A tooltip without a shadow, shown on a disabled button too.
 pub(crate) fn tip(resp: &egui::Response, text: &str) {
     let mut tip = if resp.enabled() { egui::Tooltip::for_enabled(resp) } else { egui::Tooltip::for_disabled(resp) };
     tip.popup = tip.popup.frame(super::topics::tooltip_frame(resp.ctx.global_style().as_ref()));
@@ -542,7 +471,6 @@ pub(crate) fn tip(resp: &egui::Response, text: &str) {
     });
 }
 
-/// The expand / collapse icon in a pane header. `right` puts it on the right edge.
 pub(crate) fn edge_button(ui: &mut egui::Ui, pane: Rect, right: bool, glyph: &str, text: &str, salt: &str) -> egui::Response {
     let x = if right { pane.right() - 4.0 - theme::ICON_BUTTON } else { pane.left() + 4.0 };
     let y = pane.top() + (PANE_HEAD - theme::ICON_BUTTON) / 2.0;
@@ -567,7 +495,6 @@ pub(crate) fn edge_button(ui: &mut egui::Ui, pane: Rect, right: bool, glyph: &st
     resp
 }
 
-/// An icon button that stays highlighted while `on`.
 fn toggle_button(ui: &mut egui::Ui, ic: &str, tip: &str, on: bool, p: theme::Palette) -> egui::Response {
     let resp = theme::icon_button(ui, ic, tip);
     if on {
@@ -577,10 +504,6 @@ fn toggle_button(ui: &mut egui::Ui, ic: &str, tip: &str, on: bool, p: theme::Pal
     resp
 }
 
-/// Thin track with an accent fill and a round knob; `track_width` is the visible track, which is
-/// also the slider's visible body: the knob's centre stops one radius short of each end, so a
-/// full or an empty slider never reaches into the row's gaps. The new value while clicked or
-/// dragged.
 fn slider(ui: &mut egui::Ui, track_width: f32, frac: f32, id: &str, p: theme::Palette) -> (egui::Response, Option<f32>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(track_width + 2.0 * ROW_PAD, 24.0), Sense::hover());
     let resp = ui.interact(rect, ui.id().with(id), Sense::click_and_drag());
@@ -598,8 +521,6 @@ fn slider(ui: &mut egui::Ui, track_width: f32, frac: f32, id: &str, p: theme::Pa
     (resp, value)
 }
 
-/// The track of a slider in its box and the knob's centre for `frac`. Pure, so the transport
-/// row's test can check that the knob never leaves the track (and so never reaches a gap).
 fn slider_parts(rect: Rect, frac: f32) -> (Rect, egui::Pos2) {
     let track = Rect::from_center_size(rect.center(), egui::vec2(rect.width() - 2.0 * ROW_PAD, 4.0));
     let x = track.left() + KNOB + (track.width() - 2.0 * KNOB) * frac.clamp(0.0, 1.0);
@@ -642,20 +563,16 @@ mod tests {
         assert_eq!(layout.sizes, sizes);
     }
 
-    /// The visible part of a control inside its box: an icon's glyph, a label's text or a
-    /// slider's track, centred in the box.
     fn body(box_: Rect, width: f32) -> Rect {
         Rect::from_center_size(box_.center(), egui::vec2(width, box_.height()))
     }
 
-    /// The gap between the visible bodies of two neighbours, as the eye sees it.
     fn gap(left: Rect, right: Rect) -> f32 {
         right.left() - left.right()
     }
 
     #[test]
     fn the_transport_row_uses_one_gap() {
-        // Right to left: cinema, camera, the speed label, speed slider, gauge, volume, speaker.
         let area = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(600.0, ROW_H));
         let b = row_boxes(area, true, true, 34.0);
         let boxes = [b.cinema.unwrap(), b.camera.unwrap(), b.label, b.speed, b.gauge, b.volume.unwrap(), b.speaker.unwrap()];
@@ -665,14 +582,11 @@ mod tests {
             assert_eq!(box_.center().y, area.center().y, "icons and sliders share one centre line");
         }
         for pair in boxes.windows(2) {
-            // The boxes are taken right to left.
             assert!((gap(pair[1], pair[0]) - ROW_GAP).abs() < 1e-6, "one gap between neighbouring boxes");
         }
         assert!((gap(b.seek, b.speaker.unwrap()) - ROW_GAP).abs() < 1e-6, "and the same gap before the seek bar");
         assert_eq!(b.seek.left(), area.left());
-        // The icon button's glyph and a slider's track sit at the same distance from the box edges.
         assert!((theme::ICON_BUTTON - ROW_ICON - 2.0 * ROW_PAD).abs() < 1e-6);
-        // Without video or sound their boxes disappear and the seek bar takes the room.
         let b = row_boxes(area, false, false, 34.0);
         assert!(b.cinema.is_none() && b.camera.is_none() && b.volume.is_none() && b.speaker.is_none());
         assert_eq!(b.seek.right(), b.gauge.left() - ROW_GAP);
@@ -681,7 +595,6 @@ mod tests {
     #[test]
     fn every_visible_gap_is_the_same_at_both_ends_of_the_volume() {
         let area = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(900.0, ROW_H));
-        // The label's width comes from the font; it is the same for every speed.
         let label_w = 36.0;
         let mut previous: Option<Vec<f32>> = None;
         for volume in [0.0, 1.0] {
@@ -689,7 +602,6 @@ mod tests {
             let seek = body(b.seek, b.seek.width() - 2.0 * topics::TRACK_INSET);
             let (volume_track, _) = slider_parts(b.volume.unwrap(), volume);
             let (speed_track, _) = slider_parts(b.speed, 1.0 / (SPEEDS.len() - 1) as f32);
-            // The knob stays inside the track at both ends, so it cannot shorten a gap.
             for frac in [0.0, 1.0] {
                 let (t, centre) = slider_parts(b.volume.unwrap(), frac);
                 assert!(centre.x - KNOB >= t.left() - 1e-6 && centre.x + KNOB <= t.right() + 1e-6, "the thumb never leaves its track");
@@ -719,8 +631,6 @@ mod tests {
     fn the_speed_label_is_the_same_width_for_every_speed() {
         assert_eq!(speed_label(1.0), "1.00×");
         assert_eq!(speed_label(1.25), "1.25×");
-        // The same glyph count in the monospace font → the same width: the label's box is the
-        // text plus the row's padding, with no reserved spare to widen the gap before the camera.
         let counts: Vec<usize> = SPEEDS.iter().map(|&s| speed_label(s).chars().count()).collect();
         assert!(counts.windows(2).all(|w| w[0] == w[1]), "{counts:?}");
     }

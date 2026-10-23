@@ -1,6 +1,3 @@
-//! Tests against the real desktop. They need a display session, so they are ignored by
-//! default: `cargo test -p mediaa-platform -- --ignored`.
-
 use mediaa_core::source::{FrameSource, SourceFactory};
 use mediaa_core::{OutputKind, Rect, VideoContainer};
 use mediaa_media::recorder::{RecordingRequest, RecordingSession, SessionEvent};

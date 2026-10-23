@@ -49,6 +49,22 @@ How to be the lead (model, limits, commits, notifications): [workflow/lead.md](w
 - Prefer mature third-party crates over hand-written code.
 - Keep everything covered by tests; run `cargo test --workspace` and
   `cargo clippy --workspace --all-targets` before finishing.
+- **No comments in code of any kind** (Rust, `.j2` templates, scripts, TOML and other configs):
+  names and tests carry the meaning. Explanations of decisions go to `workflow/*.md`, and only
+  when they will be needed later. `cargo test --workspace` enforces it
+  (`crates/core/tests/no_comments.rs`). A comment stays only where it is a part of the
+  construct, i.e. explains what the code cannot show by itself:
+  - `// SAFETY: …` right before an `unsafe` block or impl, and the `# Safety` section of the
+    doc comment of an `unsafe fn`/`unsafe trait` (clippy `undocumented_unsafe_blocks`,
+    `missing_safety_doc`);
+  - a comment that is the only content of an empty block (`catch {}`, `{}`, `_ => {}`,
+    `Err(_) => {}`, `Ok(_) | Err(_) => {}`) or that stands right before/after a deliberately
+    ignored result (`let _ = …;`, `.ok();`, `.unwrap_or_default()` used to swallow an error)
+    and says why it may be ignored;
+  - tool directives that are comments by syntax: `#!` shebang, `# shellcheck …`,
+    `// eslint-…`, `// @ts-…`, `// biome-ignore …`, `# noqa`, `# type: ignore`.
+  A lint suppression in Rust is not a comment: move the reason into the attribute —
+  `#[allow(lint, reason = "…")]` / `#[expect(lint, reason = "…")]`.
 - **The lead always writes the prompts.** The wording of every text sent to a model (every
   `crates/agent/prompts/**/*.j2`: system prompts, task prompts, tool descriptions, corrective
   messages, merge/summary questions) is written or rewritten by the lead, never by a subagent —

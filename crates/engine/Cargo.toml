@@ -6,7 +6,6 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# `mediaa_engine::testing::FakeEngine`: an engine without models for tests.
 testing = []
 
 [dependencies]
@@ -19,12 +18,10 @@ safetensors = "0.8"
 memmap2 = "0.9"
 llama-cpp-2 = "0.1.159"
 libloading = "0.8"
-# Speech: recognition (GigaAM), voice activity, diarization, speaker embeddings (ONNX Runtime inside).
 sherpa-onnx = "1.13.8"
 serde.workspace = true
 serde_json = "1"
 
-# Windows: models run on any GPU with a Vulkan driver (NVIDIA, AMD, Intel), else on the CPU.
 [target.'cfg(windows)'.dependencies]
 llama-cpp-2 = { version = "0.1.159", features = ["vulkan"] }
 

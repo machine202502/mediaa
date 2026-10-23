@@ -1,7 +1,3 @@
-//! `mediaa-eval diarize`: runs the real diarization on every `evals/data/*/audio.opus` and
-//! prints the found speaker count, DER, «clones» and time. Measurement only, like the ignored
-//! live test of the same name; the models are the app's defaults.
-
 use anyhow::Context;
 use mediaa_agent::diarize_quality::{self, Der};
 use mediaa_core::agent::AgentSettings;
@@ -9,11 +5,9 @@ use mediaa_engine::{Engine, LocalEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// What `mediaa-eval diarize` was asked to measure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub data: PathBuf,
-    /// Models folder; the app's own when omitted.
     pub models: Option<PathBuf>,
 }
 

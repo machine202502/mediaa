@@ -1,5 +1,3 @@
-//! About page: version, FFmpeg build capabilities, logs.
-
 use super::header;
 use crate::app::App;
 use crate::theme;

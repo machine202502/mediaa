@@ -1,11 +1,3 @@
-//! The analysis of a recording as a graph of queue tasks: which stages there are, what each
-//! needs, how it is reset and when it counts as ready. One table ([`Stage`]) is the source of
-//! truth for the pipeline, the restart and (later) the interface.
-//!
-//! The analysis is a composite task `analysis` (titled with the file name, scope = the file id) with one
-//! child per chosen stage, linked by dependencies. The data lives in the recording's transcript,
-//! so a stage continues after a crash and readiness is read from the data itself, not from marks.
-
 use mediaa_core::agent::AnalysisOptions;
 use mediaa_core::outline::Chapter;
 use mediaa_core::retrieval::Chunk;
@@ -14,10 +6,8 @@ use mediaa_queue::{Child, Filter, KindGroup, NewTask, Resource, Scheduler, Task,
 use serde_json::{json, Value};
 use std::path::Path;
 
-/// The kind of the composite task of one analysis.
 pub const ANALYSIS_KIND: &str = "analysis";
 
-/// The stages of the analysis, in the order they run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
     Transcribe,
@@ -30,7 +20,6 @@ pub enum Stage {
 impl Stage {
     pub const ALL: [Stage; 5] = [Stage::Transcribe, Stage::Diarize, Stage::Index, Stage::Topics, Stage::Details];
 
-    /// The queue kind of the stage (the details are a composite of `topic-detail` tasks).
     pub fn kind(self) -> Option<&'static str> {
         match self {
             Stage::Transcribe => Some(crate::transcribe::KIND),
@@ -41,7 +30,6 @@ impl Stage {
         }
     }
 
-    /// Whether the options chose the stage (Transcribe is always part of an analysis).
     fn chosen(self, options: &AnalysisOptions) -> bool {
         match self {
             Stage::Transcribe => true,
@@ -52,7 +40,6 @@ impl Stage {
         }
     }
 
-    /// The data the stage builds, forgotten when it is rebuilt.
     fn reset(self, ai_dir: &Path, id: &str) -> anyhow::Result<()> {
         if !Transcript::exists(ai_dir, id) {
             return Ok(());
@@ -62,7 +49,6 @@ impl Stage {
             Stage::Transcribe => t.clear(),
             Stage::Diarize => t.clear_speakers(),
             Stage::Index => t.set_chunks(&[]),
-            // The chapters go with the `outline-` keys, so the details go too.
             Stage::Topics => {
                 t.clear_chapters()?;
                 t.remove_meta_prefix("outline-")
@@ -78,7 +64,6 @@ impl Stage {
     }
 }
 
-/// What of a recording is ready, from its data (§0: no stage marks).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Readiness {
     pub replies: bool,
@@ -88,14 +73,10 @@ pub struct Readiness {
     pub details: bool,
 }
 
-/// The stages of a new analysis: from `from` on, the chosen ones, with the dependants of a
-/// skipped stage skipped too. Stages before `from` keep their data and are not run.
 fn stages(from: Stage, options: &AnalysisOptions) -> Vec<Stage> {
     let mut active: Vec<Stage> = Vec::new();
     for stage in Stage::ALL.into_iter().filter(|stage| *stage >= from) {
         let wanted = stage == from || stage.chosen(options);
-        // The topics need the index, the details need the topics. An earlier stage (before
-        // `from`) is not re-run but its data is kept, so it is enough.
         let prerequisite = match stage {
             Stage::Topics => Some(Stage::Index),
             Stage::Details => Some(Stage::Topics),
@@ -116,13 +97,10 @@ fn stage_input(stage: Stage, path: &Path, options: &AnalysisOptions) -> Value {
     }
 }
 
-/// Enqueues the composite analysis and its stages in one transaction; returns the composite's id.
 fn enqueue_analysis(sched: &Scheduler, ai_dir: &Path, path: &Path, options: &AnalysisOptions, from: Stage) -> anyhow::Result<TaskId> {
     let id = transcript::file_id(path)?;
     let mut stages = stages(from, options);
     anyhow::ensure!(!stages.is_empty(), "no analysis stage to run from {from:?}");
-    // The merge creates the details when the topics run in this analysis; only a restart from
-    // the details themselves builds the `details` composite here, from the existing chapters.
     if stages.contains(&Stage::Topics) {
         stages.retain(|stage| *stage != Stage::Details);
     }
@@ -161,19 +139,14 @@ fn stage_task(kind: &str, name: &str, input: &Value, id: &str) -> NewTask {
     NewTask::new(kind, name, input).resource(resource).scope(id).analysis(id)
 }
 
-/// Starts the analysis of `path`: the composite task and the chosen stages, with the stages the
-/// options turn off left out. Earlier data (a previous transcription) is not touched.
 pub fn start(sched: &Scheduler, ai_dir: &Path, path: &Path, options: AnalysisOptions) -> anyhow::Result<TaskId> {
     enqueue_analysis(sched, ai_dir, path, &options, Stage::Transcribe)
 }
 
-/// Rebuilds `path` from `from`: cancels the unfinished work of the recording, forgets the data
-/// of `from` and every later stage that will run, and queues a new analysis of those stages.
 pub fn restart(sched: &Scheduler, ai_dir: &Path, path: &Path, from: Stage, options: AnalysisOptions) -> anyhow::Result<TaskId> {
     let id = transcript::file_id(path)?;
     let chain = stages(from, &options);
     anyhow::ensure!(!chain.is_empty(), "no analysis stage to run from {from:?}");
-    // Only the analysis: a chat answer about the same recording keeps running.
     sched.cancel_analysis(&id)?;
     for stage in chain {
         stage.reset(ai_dir, &id)?;
@@ -181,7 +154,6 @@ pub fn restart(sched: &Scheduler, ai_dir: &Path, path: &Path, from: Stage, optio
     enqueue_analysis(sched, ai_dir, path, &options, from)
 }
 
-/// The unfinished analysis of the recording with `id`, if there is one.
 pub fn active(sched: &Scheduler, id: &str) -> anyhow::Result<Option<Task>> {
     let filter = Filter { scope: Some(id.to_string()), group: KindGroup::Analysis };
     Ok(sched
@@ -192,7 +164,6 @@ pub fn active(sched: &Scheduler, id: &str) -> anyhow::Result<Option<Task>> {
         .max_by_key(|t| t.id))
 }
 
-/// What of the recording with `id` is ready, read from its transcript's data.
 pub fn readiness(ai_dir: &Path, id: &str) -> anyhow::Result<Readiness> {
     if !Transcript::exists(ai_dir, id) {
         return Ok(Readiness::default());
@@ -205,14 +176,11 @@ pub fn readiness(ai_dir: &Path, id: &str) -> anyhow::Result<Readiness> {
         replies: !dialog.is_empty(),
         speakers: dialog.iter().any(|reply| reply.speaker.is_some()),
         index: !chunks.is_empty() && chunks.iter().all(|(_, _, embedded)| *embedded),
-        // Placeholders with empty titles are the plan, not ready topics.
         topics: !chapters.is_empty() && chapters.iter().all(|chapter| !chapter.digest.title.trim().is_empty()),
         details: !chapters.is_empty() && chapters.iter().all(|chapter| !chapter.digest.sections.is_empty()),
     })
 }
 
-/// Raises the priority of the unfinished `topic-detail` of topic `topic` of the recording, so the
-/// interface (P5) gets the breakdown it is waiting for first; returns how many tasks were raised.
 pub fn prioritize_detail(sched: &Scheduler, file_id: &str, topic: usize) -> anyhow::Result<usize> {
     let mut raised = 0;
     for task in sched.store().list()? {
@@ -241,7 +209,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    /// A short silent PCM WAV the media decoder can read.
     fn wav(path: &Path, seconds: f64) {
         let rate = 8_000u32;
         let samples = (seconds * f64::from(rate)) as u32;
@@ -276,15 +243,10 @@ mod tests {
         sched
     }
 
-    /// Runs the queue to the end; the fake answers the outline with a valid digest and a section
-    /// per topic.
     fn drain(sched: &Scheduler) {
         crate::run::drain(sched, Duration::from_secs(60));
     }
 
-    /// Waits until the task and everything under it is finished. [`drain`] cannot be used when
-    /// the queue also holds an inline task with no runner (a chat answer): it is never finished,
-    /// so the drain would sit until its limit.
     fn drain_tree(sched: &Scheduler, root: mediaa_queue::TaskId) {
         let deadline = Instant::now() + Duration::from_secs(60);
         loop {
@@ -358,7 +320,6 @@ mod tests {
         let sched = opened(&ai, engine, &settings);
         let queue = sched.store();
 
-        // Without the index there are no topics either (details need topics).
         let options = AnalysisOptions { diarize: false, speakers: Some(2), index: false, topics: true, details: true };
         let task = start(&sched, &ai, &media, options).unwrap();
         assert_eq!(queue.children(task).unwrap().len(), 1);
@@ -415,7 +376,6 @@ mod tests {
         drop(t);
         let speakers = replies.iter().filter_map(|r| r.speaker).collect::<Vec<_>>();
 
-        // An analysis that has not finished yet: the restart must cancel it.
         let running = start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
         let restarted = restart(&sched, &ai, &media, Stage::Index, AnalysisOptions::default()).unwrap();
         assert_eq!(queue.get(running).unwrap().unwrap().status, TaskStatus::Cancelled, "running analysis cancelled");
@@ -451,7 +411,6 @@ mod tests {
         let t = Transcript::open(&ai, &id(&media)).unwrap();
         assert!(t.chapters().unwrap().iter().all(|c| !c.digest.sections.is_empty()));
 
-        // A chat answer about the same recording is not the analysis: the restart leaves it.
         let answer = queue.begin_inline("answer", "тест", &json!({}), None, Some(&id(&media))).unwrap();
         let restarted = restart(&sched, &ai, &media, Stage::Details, AnalysisOptions::default()).unwrap();
         assert_eq!(queue.get(answer).unwrap().unwrap().status, TaskStatus::Running, "the chat answer survives");
@@ -489,7 +448,6 @@ mod tests {
                 "{from:?}: a stage that can run makes its composites go: {:?}",
                 before.iter().map(|t| (&t.kind, t.status)).collect::<Vec<_>>()
             );
-            // The program is closed and opened again while the work is half done.
             sched.tick().unwrap();
             drop(sched);
             sched = opened(&ai, engine.clone(), &settings);
@@ -523,7 +481,6 @@ mod tests {
         let sched = opened(&ai, engine, &settings);
         start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
         drain(&sched);
-        // The details again, this time unfinished: their tasks wait in the queue.
         restart(&sched, &ai, &media, Stage::Details, AnalysisOptions::default()).unwrap();
         let id = id(&media);
         let queue = sched.store();
@@ -603,7 +560,6 @@ mod tests {
         assert_eq!(back.analysis, AnalysisOptions::default());
         assert!(back.analysis.diarize && back.analysis.index && back.analysis.topics && back.analysis.details);
         assert_eq!(back.analysis.speakers, None);
-        // A settings file from before the field gets the defaults.
         let old: AgentSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.analysis, AnalysisOptions::default());
         let models = ModelChoices { diarization: None, ..ModelChoices::default() };
@@ -626,9 +582,6 @@ mod tests {
         assert_eq!(active(&sched, &id(&media)).unwrap().map(|t| t.id), Some(task));
     }
 
-    /// The analysis graph, stopped once the topics composite has digests and the details
-    /// composite has its `topic-detail` children. The tick that queues the details can also run
-    /// them, so they may already be done by the time the graph is stopped.
     fn analysis_graph() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let ai = tmp.path().join(".ai");
@@ -725,7 +678,6 @@ mod tests {
             if children.is_empty() || task.inline {
                 continue;
             }
-            // The same rule the store applies, including a dependency behind another task.
             let world = q.world().unwrap();
             let states: Vec<ChildState> = children.iter().map(|child| mediaa_queue::state::child_state(&world, child)).collect();
             let expected = composite_status(&states).unwrap();
@@ -792,9 +744,6 @@ mod tests {
                 q.complete(*id, &json!({})).unwrap();
             }
         }
-        // The tick that queues the details runs them too, so by the time the graph is stopped
-        // every detail may already be done. A finished detail says nothing about its parents,
-        // so it is started again first, as «повторить» does in the interface.
         if q.get(failed).unwrap().unwrap().status.is_finished() {
             q.restart(failed).unwrap();
         }

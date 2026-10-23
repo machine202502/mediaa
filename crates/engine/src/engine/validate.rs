@@ -1,8 +1,5 @@
-//! Checks of speech calls: offsets and speaker counts.
-
 use crate::engine::EngineError;
 
-/// An offset into a recording: seconds, finite, not negative.
 pub(crate) fn offset(offset: f64) -> Result<f64, EngineError> {
     if !offset.is_finite() || offset < 0.0 {
         return Err(EngineError::bad_request("offset must be a non-negative number of seconds"));
@@ -10,7 +7,6 @@ pub(crate) fn offset(offset: f64) -> Result<f64, EngineError> {
     Ok(offset)
 }
 
-/// How many speakers diarization was told about: a known count is at least one.
 pub(crate) fn speakers(speakers: Option<u32>) -> Result<Option<u32>, EngineError> {
     if speakers == Some(0) {
         return Err(EngineError::bad_request("speakers must be greater than 0 when known"));

@@ -1,7 +1,3 @@
-//! Media pipeline on top of FFmpeg (statically linked, driven through `ez-ffmpeg`, whose
-//! scheduler is a port of the `ffmpeg` CLI). Everything that touches codecs lives here:
-//! probing, conversions, and live recording sessions.
-
 pub mod convert;
 pub mod filters;
 pub mod info;
@@ -10,12 +6,10 @@ pub mod preview;
 pub mod recorder;
 pub mod thumbnail;
 
-/// Quiets FFmpeg's own logging (routed through the `log` crate) down to warnings.
 pub fn init() {
     ez_ffmpeg::set_ffmpeg_log_level(ez_ffmpeg::FfmpegLogLevel::Warning);
 }
 
-/// Encoders/muxers/filters this build relies on, with a flag telling whether each is present.
 pub fn capabilities() -> Vec<(&'static str, bool)> {
     use ez_ffmpeg::capabilities as caps;
     let enc = |n: &str| caps::is_encoder_available(n);

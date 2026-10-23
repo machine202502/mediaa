@@ -1,5 +1,3 @@
-//! User settings, persisted as TOML.
-
 use crate::formats::{AudioFormat, ImageFormat, OutputKind};
 use crate::paths;
 use serde::{Deserialize, Serialize};
@@ -14,7 +12,6 @@ pub enum ThemePreference {
     Dark,
 }
 
-/// What happens right after a screenshot is taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AfterCapture {
@@ -36,7 +33,6 @@ impl AfterCapture {
     }
 }
 
-/// `paletteuse` dithering for GIF output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GifDither {
@@ -70,7 +66,6 @@ impl GifDither {
 pub struct ScreenshotSettings {
     pub format: ImageFormat,
     pub after_capture: AfterCapture,
-    /// Hide the main window before capturing so it does not appear in the shot.
     pub hide_window: bool,
 }
 
@@ -84,21 +79,16 @@ impl Default for ScreenshotSettings {
     }
 }
 
-/// Microphone for recordings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MicChoice {
-    /// The system default input device (whichever is connected when recording starts).
     #[default]
     Auto,
-    /// No microphone.
     Off,
-    /// A device by name; if it is not connected, the default one is used instead.
     Device(String),
 }
 
 impl MicChoice {
-    /// Device to record from, given the connected `devices` and the system `default` one.
     pub fn resolve(&self, devices: &[String], default: Option<&str>) -> Option<String> {
         let fallback = || default.map(str::to_string).or_else(|| devices.first().cloned());
         match self {
@@ -114,19 +104,13 @@ impl MicChoice {
 #[serde(default)]
 pub struct RecordSettings {
     pub output: OutputKind,
-    /// Master switch for sound; off records silent videos whatever the sources below say.
     pub record_audio: bool,
     pub fps: u32,
-    /// 1–100, mapped to the encoder's quality scale (x264 CRF).
     pub video_quality: u8,
     pub microphone: MicChoice,
-    /// Record what the computer plays (loopback) where the OS supports it.
     pub system_audio: bool,
-    /// Several sources (displays / windows): the sound goes into every file, not only the first.
     pub audio_in_every_file: bool,
-    /// Draw the mouse cursor into the recording.
     pub record_cursor: bool,
-    /// Output video height in pixels (aspect ratio kept, never upscaled); 0 = original.
     pub output_height: u32,
     pub hide_to_tray: bool,
 }
@@ -148,12 +132,10 @@ impl Default for RecordSettings {
     }
 }
 
-/// Audio recording (the "Record audio" page).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioRecordSettings {
     pub format: AudioFormat,
-    /// Bitrate of lossy formats, kbit/s.
     pub kbps: u32,
     pub microphone: MicChoice,
     pub system_audio: bool,
@@ -165,17 +147,13 @@ impl Default for AudioRecordSettings {
     }
 }
 
-/// Bitrates offered for lossy audio (kbit/s).
 pub const AUDIO_BITRATES: [u32; 5] = [96, 128, 192, 256, 320];
 
-/// Output height presets offered for recordings (4K, QHD, FHD, HD, SD).
 pub const OUTPUT_HEIGHTS: [u32; 5] = [2160, 1440, 1080, 720, 480];
 
-/// Height presets for GIF / WebP animations.
 pub const ANIM_HEIGHTS: [u32; 5] = [1080, 720, 480, 360, 240];
 
 impl RecordSettings {
-    /// Height limit for the encoder, `None` = keep the source size.
     pub fn max_height(&self) -> Option<u32> {
         (self.output_height > 0).then_some(self.output_height)
     }
@@ -185,16 +163,13 @@ impl RecordSettings {
     }
 }
 
-/// Settings for GIF / animated WebP output, used both for recordings and conversions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnimSettings {
     pub fps: u32,
-    /// Downscale to this height (keeping aspect, never upscaling); 0 keeps the source size.
     pub max_height: u32,
     pub gif_colors: u32,
     pub gif_dither: GifDither,
-    /// libwebp quality 0–100.
     pub webp_quality: u8,
 }
 
@@ -202,7 +177,6 @@ impl Default for AnimSettings {
     fn default() -> Self {
         Self {
             fps: 15,
-            // 480p: the usual size of GIFs / WebPs for chats and web pages.
             max_height: 480,
             gif_colors: 256,
             gif_dither: GifDither::Sierra2,
@@ -223,11 +197,8 @@ pub struct HotkeySettings {
     pub enabled: bool,
     pub region_screenshot: String,
     pub fullscreen_screenshot: String,
-    /// Starts a video recording (hotkey settings, configured display).
     pub start_video: String,
-    /// Starts an audio recording.
     pub start_audio: String,
-    /// Stops whichever recording runs.
     pub stop_recording: String,
 }
 
@@ -244,20 +215,15 @@ impl Default for HotkeySettings {
     }
 }
 
-/// Display recorded by the hotkey / tray "start recording".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ScreenChoice {
     #[default]
     Primary,
-    /// The display the mouse cursor is on.
     UnderCursor,
-    /// A specific display by its stable system device name.
     Display(String),
 }
 
-/// Which recording settings apply: the ones used from the app window (Record page, its area
-/// picker) or the separate ones for the global hotkey / tray area picker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordProfile {
     App,
@@ -268,25 +234,18 @@ pub enum RecordProfile {
 #[serde(default)]
 pub struct Settings {
     pub theme: ThemePreference,
-    /// UI language code ("en", "ru"…); `None` follows the system language.
     pub language: Option<String>,
-    /// Where screenshots and recordings are saved (and what the library shows).
     pub media_dir: PathBuf,
-    /// Default folder for conversion results; `None` = the library folder (follows it).
     pub convert_dir: Option<PathBuf>,
     pub screenshot: ScreenshotSettings,
     pub record: RecordSettings,
     pub anim: AnimSettings,
-    /// Recording settings used by the global hotkey and the tray area picker.
     pub hotkey_record: RecordSettings,
     pub hotkey_anim: AnimSettings,
     pub hotkey_screen: ScreenChoice,
-    /// Audio recording from the "Record audio" page.
     pub audio_record: AudioRecordSettings,
-    /// Audio recording started by the hotkey or from the tray.
     pub hotkey_audio: AudioRecordSettings,
     pub hotkeys: HotkeySettings,
-    /// Agent section: providers and models.
     pub agent: crate::agent::AgentSettings,
 }
 
@@ -312,7 +271,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Loads settings; a missing or unreadable file yields defaults (logged, never fatal).
     pub fn load_from(path: &Path) -> Settings {
         match std::fs::read_to_string(path) {
             Ok(text) => match toml::from_str::<Settings>(&text) {
@@ -331,27 +289,23 @@ impl Settings {
             std::fs::create_dir_all(parent)?;
         }
         let text = toml::to_string_pretty(self)?;
-        // Write-then-rename so a crash never leaves a half-written file behind.
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
     }
 
-    /// The user's settings, with provider keys from the OS keychain.
     pub fn load() -> Settings {
         let mut s = Self::load_from(&paths::settings_file());
         crate::secrets::load(&mut s.agent);
         s
     }
 
-    /// Saves the user's settings; provider keys go to the OS keychain.
     pub fn save(&self) -> anyhow::Result<()> {
         crate::secrets::save(&self.agent)?;
         self.save_to(&paths::settings_file())
     }
 
-    /// Clamps numeric values into supported ranges (hand-edited files may contain anything).
     pub fn sanitized(mut self) -> Settings {
         for r in [&mut self.record, &mut self.hotkey_record] {
             r.fps = r.fps.clamp(1, 60);
@@ -368,12 +322,10 @@ impl Settings {
         self
     }
 
-    /// Folder conversions go to by default.
     pub fn convert_dir(&self) -> PathBuf {
         self.convert_dir.clone().unwrap_or_else(|| self.media_dir.clone())
     }
 
-    /// Audio recording settings of a profile.
     pub fn audio_profile(&self, p: RecordProfile) -> &AudioRecordSettings {
         match p {
             RecordProfile::App => &self.audio_record,
@@ -381,7 +333,6 @@ impl Settings {
         }
     }
 
-    /// Recording and animation settings of a profile.
     pub fn profile(&self, p: RecordProfile) -> (&RecordSettings, &AnimSettings) {
         match p {
             RecordProfile::App => (&self.record, &self.anim),

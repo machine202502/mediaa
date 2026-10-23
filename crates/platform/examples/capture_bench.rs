@@ -1,6 +1,3 @@
-//! Dev helper: `cargo run --release -p mediaa-platform --example capture_bench [mp4|gif|webp]`
-//! measures how fast the primary display can be grabbed (recording backend vs plain screenshots)
-//! and records it for 3 s at 60 fps, printing the frame count and rate of the result.
 use mediaa_core::formats::{AnimFormat, OutputKind, VideoContainer};
 use mediaa_core::settings::AnimSettings;
 use mediaa_core::source::{FrameSource, SourceFactory};
@@ -39,14 +36,12 @@ fn main() -> anyhow::Result<()> {
     };
     let dir = std::env::temp_dir().join("mediaa-capture-bench");
     let id = m.id;
-    // `WINDOW=<title part>` records that window instead of the display.
     let window = std::env::var("WINDOW").ok().map(|t| -> anyhow::Result<u32> {
         let w = mediaa_platform::screen::windows()?.into_iter().find(|w| w.title.contains(&t));
         Ok(w.ok_or_else(|| anyhow::anyhow!("no window matching {t}"))?.id)
     });
     let factory: SourceFactory = match window.transpose()? {
         Some(wid) => Box::new(move || mediaa_platform::screen::window_source(wid, true)),
-        // `REGION=1` records a 800×600 area at (100, 100).
         None => {
             let region = std::env::var_os("REGION").map(|_| mediaa_core::Rect::new(100, 100, 800, 600));
             Box::new(move || mediaa_platform::screen::monitor_source(id, region, true))
@@ -54,7 +49,6 @@ fn main() -> anyhow::Result<()> {
     };
     let session = RecordingSession::start(RecordingRequest {
         sources: vec![factory],
-        // `AUDIO=1` also records what the computer plays (Windows / macOS).
         audio: if std::env::var_os("AUDIO").is_some() {
             vec![Box::new(mediaa_platform::audio::CpalSource::new(mediaa_platform::audio::CpalTarget::System)) as Box<dyn mediaa_core::source::AudioSource>]
         } else {
@@ -71,7 +65,6 @@ fn main() -> anyhow::Result<()> {
         work_dir: dir.join(format!("work-{}", std::process::id())),
         title: "bench".into(),
     })?;
-    // With `AUDIO=1`, play a quiet tone meanwhile so the loopback has something to record.
     let _tone = std::env::var_os("AUDIO").and_then(|_| mediaa_platform::audio::AudioOut::open().ok()).inspect(|out| {
         let rate = out.sample_rate() as f32;
         let tone: Vec<f32> = (0..(rate as usize) * 3)

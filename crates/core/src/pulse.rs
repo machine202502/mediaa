@@ -1,15 +1,3 @@
-//! The pulse of a chunk of work: the evidence the queue's watchdog uses to tell a slow model
-//! call from a stuck one.
-//!
-//! Long work that cannot be interrupted (a model call, a download, a decode) reports that it is
-//! moving with [`beat`]. The queue's runner watches the pulse of each chunk from its own thread:
-//! a chunk whose pulse has not moved for longer than its stale limit is stuck, and is reaped.
-//!
-//! The pulse belongs to the thread the work runs on. [`Pulse::attach`] installs it for the
-//! current thread (the runner does this for the chunk thread), and the code below reports with
-//! the free [`beat`] without passing the pulse through every call. Work that hands a long job to
-//! another thread takes a [`Pulse`] with it ([`Pulse::clone`]) and beats on that copy.
-
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,12 +6,9 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 struct Inner {
     beats: AtomicU64,
-    /// The model the thread's call is using. It stays after a call that never returns, so the
-    /// watchdog knows which model to unload.
     model: Mutex<Option<String>>,
 }
 
-/// The pulse of one chunk of work. Cheap to clone; clones share the count.
 #[derive(Clone, Default)]
 pub struct Pulse(Arc<Inner>);
 
@@ -36,41 +21,32 @@ impl Pulse {
         Pulse::default()
     }
 
-    /// Installs this pulse on the calling thread until the returned guard is dropped. Work below
-    /// this point reports with [`beat`].
     pub fn attach(&self) -> Attached {
         let previous = CURRENT.with(|current| current.borrow_mut().replace(self.clone()));
         Attached { previous, _thread: PhantomData }
     }
 
-    /// How many times the work moved.
     pub fn beats(&self) -> u64 {
         self.0.beats.load(Ordering::Relaxed)
     }
 
-    /// Reports that the work moved.
     pub fn beat(&self) {
         self.0.beats.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The model file the call is using, if a call set it and has not returned yet.
     pub fn model(&self) -> Option<String> {
         self.0.model.lock().expect("pulse model").clone()
     }
 
-    /// Names the model the call is about to use.
     pub fn using(&self, model: &str) {
         *self.0.model.lock().expect("pulse model") = Some(model.to_string());
     }
 
-    /// The call returned: there is no model to unload any more.
     pub fn release(&self) {
         self.0.model.lock().expect("pulse model").take();
     }
 }
 
-/// Restores the pulse that was installed before [`Pulse::attach`]. Must be dropped on the thread
-/// that made it.
 pub struct Attached {
     previous: Option<Pulse>,
     _thread: PhantomData<*const ()>,
@@ -83,26 +59,22 @@ impl Drop for Attached {
     }
 }
 
-/// The pulse of the calling thread, `None` outside a chunk.
 pub fn current() -> Option<Pulse> {
     CURRENT.with(|current| current.borrow().clone())
 }
 
-/// Reports that the calling thread's work moved. A no-op outside a chunk.
 pub fn beat() {
     if let Some(pulse) = current() {
         pulse.beat();
     }
 }
 
-/// Names the model the calling thread's call is using (see [`Pulse::using`]).
 pub fn using(model: &str) {
     if let Some(pulse) = current() {
         pulse.using(model);
     }
 }
 
-/// The call returned (see [`Pulse::release`]).
 pub fn release() {
     if let Some(pulse) = current() {
         pulse.release();
@@ -155,7 +127,6 @@ mod tests {
             let _guard = attached.attach();
             using("C:/models/m.gguf#2048");
             tx.send(()).unwrap();
-            // The call never returns: the thread stays here with the model set.
             std::thread::sleep(Duration::from_millis(300));
             release();
         });

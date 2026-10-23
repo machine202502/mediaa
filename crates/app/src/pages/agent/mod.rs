@@ -1,5 +1,3 @@
-//! Agent section: virtual catalogs of files, LLM providers and the models used per role.
-
 pub mod analysis;
 pub mod budget;
 pub mod catalogs;
@@ -28,7 +26,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-/// The queue of a library's `.ai` folder. Dropping it asks the host thread to stop.
 struct Hosted {
     dir: PathBuf,
     stop: Arc<AtomicBool>,
@@ -36,7 +33,6 @@ struct Hosted {
     sched: Arc<Scheduler>,
     streams: Arc<Streams>,
     feed: Arc<Feed>,
-    /// Pool sizes the scheduler was opened with. A change opens it again.
     pools: (u32, u32, u32, u32, u64),
 }
 
@@ -56,9 +52,6 @@ fn pool_key(budget: &Budget) -> (u32, u32, u32, u32, u64) {
     )
 }
 
-/// The settings the stages see: the app's settings with the code of the interface language,
-/// which the texts the models write for the user follow. The stages have no other way to learn
-/// it, and it is not saved with the settings.
 fn with_language(agent: &AgentSettings, language: &str) -> AgentSettings {
     let mut wanted = agent.clone();
     wanted.ui_language = Some(language.to_string());
@@ -70,13 +63,9 @@ pub struct AgentUi {
     pub providers: providers::ProvidersUi,
     pub models: models::ModelsUi,
     pub queue: queue::QueueUi,
-    /// The engine's state, shared by every page (and the section header).
     pub engine_state: engine_state::EngineState,
-    /// The models' engine, shared with the agent's services.
     engine: Arc<dyn Engine>,
-    /// The memory budget the engine was last told (settings may change it).
     engine_budget: mediaa_engine::Budget,
-    /// Limits of the app's own model work (the engine has its own queue of loaded models).
     slots: Slots,
     hosted: Option<Hosted>,
 }
@@ -96,22 +85,15 @@ impl AgentUi {
         }
     }
 
-    /// The models' engine of the app (one for the whole process).
     pub fn engine(&self) -> &Arc<dyn Engine> {
         &self.engine
     }
 
-    /// Keeps the engine's budget, the slots of model work and the queue worker on the library's
-    /// `.ai` folder and the current settings (called every frame; cheap when nothing changed).
-    /// `language` is the interface language's code: the texts the models write for the user
-    /// follow it. Also asks the engine for its state in the background (one poller for every
-    /// page).
     pub fn tick(&mut self, ai_dir: &Path, agent: &AgentSettings, language: &str, ctx: &egui::Context) {
         self.engine_state.tick(&self.engine, ctx);
         self.slots.set_budget(agent.budget.clone());
         let budget: mediaa_engine::Budget = agent.budget.clone().into();
         if budget != self.engine_budget {
-            // The engine keeps its models under the same memory budget.
             self.engine.set_budget(budget);
             self.engine_budget = budget;
         }
@@ -126,8 +108,6 @@ impl AgentUi {
                 return;
             }
         }
-        // A new library, or new pool sizes: a host of its own. Recover continues runs the
-        // previous process left in the file.
         self.hosted = None;
         let settings = Arc::new(RwLock::new(wanted));
         let s = settings.clone();
@@ -151,8 +131,6 @@ impl AgentUi {
     }
 }
 
-/// What studios need for searching and asking: the engine, the slots of model work and the
-/// current settings.
 #[derive(Clone)]
 pub struct Services {
     pub ai_dir: PathBuf,
@@ -165,7 +143,6 @@ pub struct Services {
 }
 
 impl AgentUi {
-    /// The services of the current library (after [`AgentUi::tick`]).
     pub fn services(&self) -> Option<Services> {
         let hosted = self.hosted.as_ref()?;
         Some(Services {

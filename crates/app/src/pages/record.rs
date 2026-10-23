@@ -1,10 +1,3 @@
-//! Record page, laid out like the Screenshot page:
-//!
-//! | source tiles: Select area · Full screen · Window |
-//! | source details (fixed height)                     |
-//! | Output | Audio / Animation   (same height)        |
-//! | Start                                             |
-
 use super::{header, tile};
 use crate::app::{App, RecState};
 use crate::overlay::Purpose;
@@ -21,7 +14,6 @@ use rust_i18n::t;
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-/// Height of the source details panel (constant, so switching sources does not move the page).
 const SOURCE_PANEL_H: f32 = 150.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -35,7 +27,6 @@ pub enum TargetKind {
 #[derive(Default)]
 pub struct RecordUi {
     pub target: TargetKind,
-    /// Displays to record (ids); empty = the primary one.
     pub monitors: BTreeSet<u32>,
     pub region: Option<(MonitorInfo, Rect)>,
     pub windows: BTreeSet<u32>,
@@ -49,7 +40,6 @@ pub fn monitor_label(m: &MonitorInfo) -> String {
     }
 }
 
-/// Live status while counting down / recording / saving. Returns `true` if it drew something.
 pub fn live_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
     let p = theme::palette(ui);
     match &app.recorder {
@@ -108,7 +98,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         return;
     }
 
-    // --- Source tiles
     let w = super::tile_width(ui, 3);
     let target = app.rec.target;
     ui.horizontal_wrapped(|ui| {
@@ -127,7 +116,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     });
     ui.add_space(4.0);
 
-    // --- Source details (fixed height)
     theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.set_height(SOURCE_PANEL_H);
@@ -135,7 +123,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     });
     ui.add_space(4.0);
 
-    // --- Output | Audio / Animation (settings used by this page's start button and area)
     let sources_h = source_height(app);
     let mut refresh_mics = false;
     if profile_editor(ui, &mut app.settings, RecordProfile::App, &app.mic_devices, sources_h, &mut refresh_mics) {
@@ -146,9 +133,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Output and Audio / Animation settings of one recording profile in a single card (also used
-/// on the Settings page for the hotkey profile). Returns `true` if something changed.
-/// `refresh_mics` is set when the microphone list was just opened (the caller re-reads devices).
 pub fn profile_editor(
     ui: &mut egui::Ui,
     settings: &mut Settings,
@@ -200,7 +184,6 @@ pub fn profile_editor(
                 theme::row(ui, "", |ui| {
                     mark(ui.checkbox(record_audio, t!("record.record_audio")).changed());
                 });
-                // Sources only matter when sound is recorded at all.
                 ui.add_enabled_ui(*record_audio, |ui| {
                 theme::row(ui, &t!("record.microphone"), |ui| {
                     let (c, opened) = mic_combo(ui, microphone, mics, egui::Id::new(("rec-mic", salt)));
@@ -231,7 +214,6 @@ pub fn profile_editor(
     changed.get()
 }
 
-/// Source height used to offer only downscaling presets (`None` = unknown / varies).
 fn source_height(app: &App) -> Option<u32> {
     match app.rec.target {
         TargetKind::Screen => app.monitors.iter().filter(|m| app.rec.monitors.contains(&m.id)).map(|m| m.height).min().or_else(|| app.monitors.first().map(|m| m.height)),
@@ -240,8 +222,6 @@ fn source_height(app: &App) -> Option<u32> {
     }
 }
 
-/// Output size by height: "Original", the `presets` below the source height, or a custom
-/// height typed in (aspect ratio always kept, never upscaled). `value`: 0 = original.
 pub fn resolution_picker(ui: &mut egui::Ui, value: &mut u32, presets: &[u32], source_h: Option<u32>, id: egui::Id) -> bool {
     let label = |h: u32| match h {
         0 => t!("record.res_original").to_string(),
@@ -251,7 +231,6 @@ pub fn resolution_picker(ui: &mut egui::Ui, value: &mut u32, presets: &[u32], so
         720 => "720p (HD)".into(),
         h => format!("{h}p"),
     };
-    // "Custom" stays selected while its number is typed (it may pass through preset values).
     let custom_id = id.with("custom");
     let mut custom = ui.data(|d| d.get_temp::<bool>(custom_id)).unwrap_or(*value != 0 && !presets.contains(value));
     let mut changed = false;
@@ -287,7 +266,6 @@ pub fn resolution_picker(ui: &mut egui::Ui, value: &mut u32, presets: &[u32], so
 fn source_details(app: &mut App, ui: &mut egui::Ui) {
     match app.rec.target {
         TargetKind::Screen => {
-            // Header with the refresh button on the right, like the Windows list.
             ui.horizontal(|ui| {
                 theme::section(ui, icon::MONITOR, &t!("record.displays_title"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -345,8 +323,6 @@ fn source_details(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// GIF / WebP options shared by the Record and Convert pages. `fmt = None` shows both.
-/// `source_h`: height of what is converted / recorded, to offer only smaller sizes.
 pub fn anim_options(ui: &mut egui::Ui, a: &mut AnimSettings, fmt: Option<AnimFormat>, source_h: Option<u32>) -> bool {
     let mut changed = false;
     theme::row(ui, &t!("anim.fps"), |ui| {
@@ -375,7 +351,6 @@ pub fn anim_options(ui: &mut egui::Ui, a: &mut AnimSettings, fmt: Option<AnimFor
     changed
 }
 
-/// "Start recording" bar, pinned to the bottom of the window by the page shell.
 pub fn start_bar(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let target = app.record_target_from_ui();
@@ -397,8 +372,6 @@ pub fn start_bar(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-/// Microphone choice: automatic, none or a device (a disconnected one is marked). Returns
-/// (changed, list just opened — the caller re-reads the devices).
 pub fn mic_combo(ui: &mut egui::Ui, microphone: &mut MicChoice, mics: &[String], id: egui::Id) -> (bool, bool) {
     let label = |m: &MicChoice| match m {
         MicChoice::Auto => t!("record.mic_auto").to_string(),

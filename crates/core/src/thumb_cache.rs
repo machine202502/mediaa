@@ -1,14 +1,3 @@
-//! Thumbnail cache of the library, kept in its cache folder (`.cache`): thumbnails are packed
-//! into atlas pages (`thumbs-N.jpg`, one JPEG holds dozens of them) whose slots are rows of the
-//! `thumbs` table in the cache database (see `cache_db`), so showing a screen of tiles after a
-//! restart reads a couple of files instead of decoding every video again.
-//!
-//! Pages are filled shelf by shelf; the page being filled stays in memory and is written now
-//! and then ([`ThumbCache::flush`]) together with the rows of its new thumbnails (a row never
-//! points at pixels that are not on disk yet). A thumbnail is found by file name and is valid
-//! while the file keeps its size and modification time. Pages whose thumbnails are all gone
-//! are deleted.
-
 use crate::Frame;
 use image::{ImageFormat, RgbImage};
 use rusqlite::{params, Connection};
@@ -16,11 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Atlas page side in pixels (a 512 px thumbnail fits several times per row).
 const PAGE: u32 = 2048;
-/// JPEG quality of the pages.
 const QUALITY: u8 = 85;
-/// Decoded pages kept in memory (tiles on screen usually come from one or two pages).
 const KEEP_PAGES: usize = 4;
 
 fn page_file(dir: &Path, page: u32) -> PathBuf {
@@ -31,7 +17,6 @@ fn to_ms(t: SystemTime) -> u64 {
     t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Where a thumbnail lives and which version of its file it shows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Slot {
     size: u64,
@@ -43,7 +28,6 @@ struct Slot {
     h: u32,
 }
 
-/// The page being filled.
 struct OpenPage {
     id: u32,
     image: RgbImage,
@@ -58,7 +42,6 @@ impl OpenPage {
         Self { id, image: RgbImage::new(PAGE, PAGE), shelf_x: 0, shelf_y: 0, shelf_h: 0, used_h: 0 }
     }
 
-    /// Top-left corner for a `w`×`h` thumbnail, `None` when the page is full.
     fn place(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
         if self.shelf_x + w > PAGE {
             self.shelf_y += self.shelf_h;
@@ -77,14 +60,11 @@ impl OpenPage {
 
 pub struct ThumbCache {
     dir: PathBuf,
-    /// `None` if the database cannot be opened (thumbnails then live for this session only).
     db: Option<Connection>,
     items: HashMap<String, Slot>,
     next_page: u32,
     open: Option<OpenPage>,
-    /// Thumbnails put on the open page since it was last written (their rows go with it).
     pending: Vec<String>,
-    /// Recently decoded pages, most recent last.
     pages: Vec<(u32, RgbImage)>,
 }
 
@@ -111,7 +91,6 @@ fn load_items(db: &Connection) -> rusqlite::Result<(HashMap<String, Slot>, u32)>
 }
 
 impl ThumbCache {
-    /// The cache in `dir` (the library's cache folder); missing or unreadable: starts empty.
     pub fn open(dir: &Path) -> ThumbCache {
         let db = crate::cache_db::open(dir).map_err(|e| log::warn!("thumbnail cache: {e:#}")).ok();
         let (items, next_page) = db
@@ -125,7 +104,6 @@ impl ThumbCache {
         &self.dir
     }
 
-    /// New thumbnails wait to be written ([`ThumbCache::flush`]).
     pub fn is_dirty(&self) -> bool {
         !self.pending.is_empty()
     }
@@ -138,7 +116,6 @@ impl ThumbCache {
         }
     }
 
-    /// The cached thumbnail of file `name`, if it was made from this version of the file.
     pub fn get(&mut self, name: &str, size: u64, modified: SystemTime) -> Option<Frame> {
         let slot = *self.items.get(name)?;
         if slot.size != size || slot.modified_ms != to_ms(modified) {
@@ -172,7 +149,6 @@ impl ThumbCache {
                         self.pages.len() - 1
                     }
                     Err(e) => {
-                        // Page lost or damaged: forget what it held.
                         log::debug!("thumbnail page {}: {e:#}", slot.page);
                         self.items.retain(|_, s| s.page != slot.page);
                         self.sql(|db| db.execute("DELETE FROM thumbs WHERE page = ?1", [slot.page]).map(|_| ()));
@@ -191,8 +167,6 @@ impl ThumbCache {
         frame
     }
 
-    /// Stores the thumbnail of file `name`. Thumbnails with transparency are not cached (pages
-    /// are JPEG); returns whether it was stored.
     pub fn put(&mut self, name: &str, size: u64, modified: SystemTime, thumb: &Frame) -> bool {
         let (w, h) = (thumb.width, thumb.height);
         if w == 0 || h == 0 || w > PAGE || h > PAGE || thumb.data.as_chunks::<4>().0.iter().any(|p| p[3] != 255) {
@@ -226,7 +200,6 @@ impl ThumbCache {
         true
     }
 
-    /// Forgets the thumbnail of file `name` (deleted or renamed).
     pub fn remove(&mut self, name: &str) {
         if let Some(old) = self.items.remove(name) {
             self.pending.retain(|n| n != name);
@@ -235,7 +208,6 @@ impl ThumbCache {
         }
     }
 
-    /// Keeps only the thumbnails of `names` (the files now in the library).
     pub fn retain(&mut self, names: &HashSet<String>) {
         let gone: Vec<String> = self.items.keys().filter(|n| !names.contains(*n)).cloned().collect();
         if gone.is_empty() {
@@ -262,7 +234,6 @@ impl ThumbCache {
         }
     }
 
-    /// Deletes page `page` once no thumbnail uses it.
     fn release(&mut self, page: u32) {
         if self.open.as_ref().is_some_and(|o| o.id == page) || self.items.values().any(|s| s.page == page) {
             return;
@@ -271,8 +242,6 @@ impl ThumbCache {
         let _ = std::fs::remove_file(page_file(&self.dir, page));
     }
 
-    /// Writes the page being filled (write-then-rename, never half-written), then the rows of
-    /// its new thumbnails.
     pub fn flush(&mut self) -> anyhow::Result<()> {
         if self.pending.is_empty() {
             return Ok(());
@@ -347,7 +316,6 @@ mod tests {
         assert!(cache.get("a.mp4", 11, t).is_none(), "file changed: stale");
         assert!(cache.get("a.mp4", 10, t + Duration::from_secs(1)).is_none());
         assert!(cache.get("missing.gif", 1, t).is_none());
-        // New thumbnails go to a new page, never over the stored one.
         cache.put("c.gif", 1, t, &thumb(64, 64, [0, 0, 200]));
         cache.flush().unwrap();
         assert_eq!(pages(dir.path()), 2);
@@ -359,7 +327,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let t = SystemTime::UNIX_EPOCH;
         let mut cache = ThumbCache::open(dir.path());
-        // 4 per shelf, 4 shelves of 512 per 2048 page: the 17th starts a second page.
         for i in 0..17 {
             assert!(cache.put(&format!("{i}.png"), 1, t, &thumb(512, 512, [i as u8 * 10, 0, 0])));
         }
@@ -367,7 +334,6 @@ mod tests {
         assert_eq!(pages(dir.path()), 2);
         assert!(close(cache.get("5.png", 1, t).unwrap().pixel(10, 10), [50, 0, 0, 255]));
 
-        // Keeping only the file on the second page deletes the first page.
         cache.retain(&HashSet::from(["16.png".to_string()]));
         assert_eq!(pages(dir.path()), 1);
         drop(cache);

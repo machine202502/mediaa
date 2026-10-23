@@ -1,6 +1,3 @@
-//! Time source. The scheduler and the store stamp tasks with [`Clock::now_ms`].
-//! Tests use [`FakeClock`]; the process uses [`SystemClock`].
-
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,7 +16,6 @@ impl Clock for SystemClock {
     }
 }
 
-/// A clock the test moves by hand. Shared behind an `Arc`.
 #[derive(Debug)]
 pub struct FakeClock {
     ms: AtomicI64,

@@ -1,6 +1,3 @@
-# Build environment for the Linux version of MediaA.
-# Ubuntu 24.04: the PipeWire bindings used for Wayland capture need PipeWire >= 1.0.
-# The binary needs glibc >= 2.39 (Ubuntu 24.04+, Debian 13+, Fedora 40+, WSL Ubuntu-24.04).
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -17,7 +14,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 ENV PATH=/root/.cargo/bin:$PATH
 
-# vcpkg pinned to the same commit as the Windows build (scripts/vcpkg-commit.txt).
 ARG VCPKG_COMMIT
 RUN git clone https://github.com/microsoft/vcpkg /opt/vcpkg \
     && cd /opt/vcpkg && git checkout "$VCPKG_COMMIT" \

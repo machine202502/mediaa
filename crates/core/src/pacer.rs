@@ -1,17 +1,5 @@
-//! Wall-clock based frame pacing.
-//!
-//! Capture loops never run at a perfectly steady rate (slow window grabs, encoder
-//! back-pressure). Instead of assuming "N captured frames == N/fps seconds" — which makes
-//! recordings play back too fast — every captured frame gets a *timestamp slot* derived from
-//! the active (non-paused) recording time. Frames arriving early for an already filled slot
-//! are dropped; late frames leave a gap that players fill by holding the previous frame.
-//!
-//! [`SessionClock`] is shared by all sources of one recording (so parallel window recordings
-//! stay on the same timeline); each capture thread owns a [`SlotTracker`].
-
 use std::time::Duration;
 
-/// Active-time clock with pause support. Times are offsets from the session start.
 #[derive(Debug, Clone, Default)]
 pub struct SessionClock {
     paused_at: Option<Duration>,
@@ -27,7 +15,6 @@ impl SessionClock {
         self.paused_at.is_some()
     }
 
-    /// Recording time excluding pauses.
     pub fn active_time(&self, now: Duration) -> Duration {
         self.paused_at
             .unwrap_or(now)
@@ -47,7 +34,6 @@ impl SessionClock {
     }
 }
 
-/// Maps active time to frame slots (units of `1/fps`) for one stream.
 #[derive(Debug, Clone)]
 pub struct SlotTracker {
     interval: Duration,
@@ -55,7 +41,6 @@ pub struct SlotTracker {
 }
 
 impl SlotTracker {
-    /// `fps` is clamped to `1..=120`.
     pub fn new(fps: u32) -> Self {
         Self {
             interval: Duration::from_secs_f64(1.0 / f64::from(fps.clamp(1, 120))),
@@ -67,7 +52,6 @@ impl SlotTracker {
         self.interval
     }
 
-    /// Slot for a frame captured at active time `active`, or `None` if that slot is filled.
     pub fn slot(&mut self, active: Duration) -> Option<u64> {
         let idx = (active.as_secs_f64() / self.interval.as_secs_f64()).floor() as u64;
         match self.last {
@@ -79,7 +63,6 @@ impl SlotTracker {
         }
     }
 
-    /// Active time at which the next slot opens.
     pub fn next_deadline(&self) -> Duration {
         let next = self.last.map_or(0, |s| s + 1);
         self.interval.mul_f64(next as f64)
@@ -114,7 +97,6 @@ mod tests {
     fn slow_capture_leaves_gaps_keeping_real_time() {
         let mut t = SlotTracker::new(30);
         assert_eq!(t.slot(ms(0)), Some(0));
-        // A 500 ms stall: the next frame lands at slot 15, so playback duration stays correct.
         assert_eq!(t.slot(ms(500)), Some(15));
     }
 
@@ -163,7 +145,6 @@ mod tests {
         assert_eq!(t.slot(c.active_time(ms(100))), Some(1));
         c.pause(ms(150));
         c.resume(ms(1150));
-        // 1150 ms wall clock = 150 ms active -> slot 1 already filled.
         assert_eq!(t.slot(c.active_time(ms(1150))), None);
         assert_eq!(t.slot(c.active_time(ms(1200))), Some(2));
     }

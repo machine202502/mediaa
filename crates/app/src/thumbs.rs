@@ -1,8 +1,3 @@
-//! Library tiles: thumbnails and media details (size, duration, audio), loaded on a background
-//! thread and uploaded as textures on the UI thread. Thumbnails are kept in the library's
-//! atlas cache (`mediaa_core::thumb_cache`), so after a restart they are read back instead of
-//! being decoded from the media again.
-
 use crossbeam_channel::{Receiver, RecvTimeoutError, Sender};
 use eframe::egui;
 use mediaa_core::library::LibraryEntry;
@@ -14,14 +9,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-/// Longest thumbnail side in pixels (sharp on HiDPI tiles).
 const THUMB_SIZE: u32 = 512;
-/// New thumbnails are written to the cache after this long without requests.
 const FLUSH_AFTER: Duration = Duration::from_secs(1);
 
 type Key = (PathBuf, SystemTime);
 
-/// What a tile shows; fields stay `None` while loading or when they cannot be read.
 #[derive(Clone, Default)]
 pub struct Tile {
     pub texture: Option<egui::TextureHandle>,
@@ -31,7 +23,6 @@ pub struct Tile {
 enum Msg {
     Thumb { key: Key, size: u64, kind: MediaKind, need_details: bool },
     Forget(PathBuf),
-    /// Library folder and the file names now in it: cached thumbnails of other files go.
     Retain(PathBuf, HashSet<String>),
     Flush(Sender<()>),
 }
@@ -42,7 +33,6 @@ pub struct Thumbnails {
     done_rx: Receiver<(Key, Option<Frame>, Option<MediaInfo>)>,
 }
 
-/// The worker's cache, opened for the folder of the file at hand.
 fn cache_for<'a>(cache: &'a mut Option<ThumbCache>, media_dir: &Path) -> &'a mut ThumbCache {
     let dir = cache_dir(media_dir);
     if cache.as_ref().is_none_or(|c| c.dir() != dir) {
@@ -119,7 +109,6 @@ impl Thumbnails {
         Self { tiles: HashMap::new(), req_tx, done_rx }
     }
 
-    /// Uploads finished thumbnails; call once per frame.
     pub fn poll(&mut self, ctx: &egui::Context) {
         while let Ok((key, frame, info)) = self.done_rx.try_recv() {
             let texture = frame.map(|f| {
@@ -130,8 +119,6 @@ impl Thumbnails {
         }
     }
 
-    /// Tile data for `e`, requesting it if needed (empty while loading). `need_details`: also
-    /// probe dimensions / duration / sound (when the library index does not have them yet).
     pub fn get(&mut self, e: &LibraryEntry, need_details: bool) -> Tile {
         let key = (e.path.clone(), e.modified);
         match self.tiles.get(&key) {
@@ -145,18 +132,15 @@ impl Thumbnails {
         }
     }
 
-    /// The file was deleted or renamed: drop its tile and cached thumbnail.
     pub fn forget(&mut self, path: &Path) {
         self.tiles.retain(|(p, _), _| p != path);
         let _ = self.req_tx.send(Msg::Forget(path.to_path_buf()));
     }
 
-    /// After a full library scan: cached thumbnails of files no longer in `dir` are dropped.
     pub fn retain(&mut self, dir: &Path, names: HashSet<String>) {
         let _ = self.req_tx.send(Msg::Retain(dir.to_path_buf(), names));
     }
 
-    /// Writes pending thumbnails to the cache (on exit), waiting for the worker briefly.
     pub fn flush(&self) {
         let (tx, rx) = crossbeam_channel::bounded(1);
         if self.req_tx.send(Msg::Flush(tx)).is_ok() {

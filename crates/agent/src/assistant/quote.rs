@@ -1,20 +1,14 @@
-//! A quoted reply as the model reads it. The chat stores one token; [`expand`] turns it into the
-//! sentence of `agent/quote.j2`. The times stay the way they were written.
-
 use crate::prompts;
 use serde_json::Value;
 
 const OPEN: char = '\u{E000}';
 const CLOSE: char = '\u{E001}';
 
-/// The token a chat message stores for one quoted reply. `label` is `@sN` or `@sN#R`.
 pub fn token(label: &str, start: &str, end: &str, text: &str) -> String {
     let body = serde_json::json!({ "label": label, "start": start, "end": end, "text": text }).to_string();
     format!("{OPEN}{body}{CLOSE}")
 }
 
-/// Quoted replies in `text` become the sentence the model reads. Anything else stays as written,
-/// including times (`[1:40]`, `[0:00–30:00]`).
 pub fn expand(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;

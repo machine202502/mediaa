@@ -1,8 +1,3 @@
-//! Providers: any number of OpenAI-compatible servers, OpenRouter accounts and Hugging Face
-//! tokens, each with its key, an optional proxy and a "Check" that lists the models it serves.
-//! The first Hugging Face provider with a token (else the first one) is also used for model
-//! downloads.
-
 use super::super::header;
 use crate::app::App;
 use crate::theme;
@@ -20,16 +15,12 @@ enum CheckState {
 
 #[derive(Default)]
 pub struct ProvidersUi {
-    /// Check per provider id.
     checks: HashMap<String, CheckState>,
-    /// Provider ids whose key is shown in clear text.
     shown_keys: Vec<String>,
-    /// The last test search of the web settings (titles found).
     web_check: Option<CheckState>,
 }
 
 impl ProvidersUi {
-    /// Models a provider served at its last successful check (for model pickers).
     pub fn known_models(&self, id: &str) -> Option<&[String]> {
         match self.checks.get(id) {
             Some(CheckState::Done(Ok(m))) => Some(m),
@@ -182,7 +173,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// The web search the agent uses: the engine, its address or key, a proxy and a test search.
 fn web_card(app: &mut App, ui: &mut egui::Ui) -> bool {
     let mut changed = false;
     let mut check = false;

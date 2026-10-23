@@ -1,17 +1,4 @@
 #!/usr/bin/env node
-// What each executor spends. The user types nothing.
-//
-//   node scripts/usage.mjs grok-limit
-//   node scripts/usage.mjs deepseek-balance
-//   node scripts/usage.mjs snapshot --label TEXT [--claude-5h N] [--claude-week N] [--only grok|deepseek]
-//   node scripts/usage.mjs note RUN_DIR
-//   node scripts/usage.mjs report
-//
-// grok-limit reads the weekly subscription % from the official `grok` TUI (`/usage`).
-// It never reads ~/.grok/auth.json and never calls an xAI endpoint itself.
-// A Grok lead has no get_usage: it snapshots without --claude-5h / --claude-week.
-// A missing part is recorded as unavailable. Snapshot and the two readers print JSON
-// and do not throw.
 
 import fs from "node:fs";
 import os from "node:os";
@@ -83,9 +70,6 @@ async function settle(fn, extra = {}) {
     }
 }
 
-/// Weekly % and reset text from a `/usage` screen. Positions are not trusted.
-/// The percent has to follow "Weekly limit". The Context usage tab shows a different
-/// percent (the prompt window, e.g. 0.53%) under the same tab labels.
 export function parseUsageScreen(raw) {
     const text = String(raw || "").replace(/\r/g, "");
     const weekAt = text.toLowerCase().lastIndexOf("weekly limit");
@@ -104,7 +88,6 @@ export function parseUsageScreen(raw) {
         const timeLine = lines.find((l) => /\b(?:am|pm|\d{1,2}:\d{2}|day|hour|minute)\b/i.test(l) && !/%/.test(l));
         if (timeLine) resets = timeLine;
     }
-    // The modal draws a box. The reset time is the words, not the trailing │.
     resets = String(resets)
         .replace(/^[\s\u2500-\u257F|]+/g, "")
         .replace(/[\s\u2500-\u257F|]+$/g, "")
@@ -114,7 +97,6 @@ export function parseUsageScreen(raw) {
 }
 
 function screenOf(term) {
-    // The viewport only. Scrollback keeps the previous tab, including its percent.
     const buf = term.buffer.active;
     const top = buf.viewportY || 0;
     const lines = [];
@@ -141,7 +123,6 @@ function findGrok() {
     return "grok";
 }
 
-// The splash also says "Grok 4.7 is here". The composer footer is "Grok 4.7 (medium)".
 function composerReady(text) {
     if (/Grok 4\.7[^\n]{0,24}fast/i.test(text)) return false;
     return /Grok 4\.7 \(/.test(text) && /\u2502 >/.test(text);
@@ -165,8 +146,6 @@ function modalOpen(text) {
     return /context usage/i.test(text) && /usage limit/i.test(text);
 }
 
-/// `{ok, percent, resets, raw}` or `{ok:false, error, raw}`. Never throws.
-/// No prompt is sent, so grok does not call the model. `/usage` only opens the meter.
 export async function grokLimit() {
     let raw = "";
     let term;
@@ -181,7 +160,6 @@ export async function grokLimit() {
         raw = term ? screenOf(term) : raw;
         return raw;
     };
-    // Two polls, not a frozen screen: the header spinner rewrites a character forever.
     const waitFor = async (pred, until) => {
         let hits = 0;
         while (Date.now() < until && !exited) {
@@ -194,7 +172,6 @@ export async function grokLimit() {
         }
         return null;
     };
-    // Letters, then Enter only after the composer echoes them or the modal is already up.
     const typeUsage = async () => {
         for (const ch of "/usage") {
             try {
@@ -217,9 +194,6 @@ export async function grokLimit() {
         }
         return true;
     };
-    // The body stays on "Loading usage…" and sometimes comes back "meter unavailable"
-    // with no percent. That is the modal, not a missing one. Tab moves to the other views;
-    // only the Weekly limit section counts. One retry sends the keys again.
     const readModal = async (until) => {
         let tabs = 0;
         while (Date.now() < until && !exited) {
@@ -254,7 +228,6 @@ export async function grokLimit() {
         const { Terminal } = require("@xterm/headless");
         term = new Terminal({ cols: COLS, rows: ROWS, allowProposedApi: true });
         const bin = findGrok();
-        // -m grok-4.7 only. No prompt, so the TUI does not call the model. Never the fast model.
         pty = ptyMod.spawn(bin, ["-m", "grok-4.7"], {
             name: "xterm-256color",
             cols: COLS,
@@ -291,7 +264,6 @@ export async function grokLimit() {
                         hits++;
                         if (hits >= 2) return "ready";
                     } else hits = 0;
-                    // The splash covers the composer. One Esc, then wait for the footer.
                     if (!nudged && Date.now() > attemptStart + 8000) {
                         nudged = true;
                         try {
@@ -344,7 +316,6 @@ export async function grokLimit() {
                   : modalOpen(raw) || usageLoading(raw)
                     ? "usage modal has no weekly percent"
                     : "usage modal did not appear";
-        // Esc, then /exit. Kill only this child if it is still there.
         try {
             pty.write("\x1b");
         } catch {
@@ -396,7 +367,6 @@ function deepseekKey() {
     return text || "";
 }
 
-/// Balance from the official DeepSeek API. The key is never printed.
 export async function deepseekBalance() {
     const key = deepseekKey();
     if (!key) return unavailable("no key");
@@ -437,7 +407,6 @@ function claudePart(opts) {
     return { ok: true, fiveHour, week: weekN };
 }
 
-/// Append one snapshot. A failed meter is recorded; this does not throw.
 export async function takeSnapshot(opts = {}) {
     const only = opts.only || "";
     const want = (part) => !only || only === part;
@@ -468,7 +437,6 @@ function money(n) {
     return `$${Number(n).toFixed(2)}`;
 }
 
-/// One summary line for a run directory, from usage-start.json and usage-end.json.
 export function runNote(dir) {
     const prov = readText(path.join(dir, "provider"));
     const start = readJson(path.join(dir, "usage-start.json"));
@@ -572,7 +540,6 @@ function cell(v) {
     return String(v ?? "").replace(/\|/g, "/").replace(/\n/g, " ");
 }
 
-/// Claude subagent rows from registry.md. Script runs are read from their folders, not from here.
 function registryClaude(root) {
     const text = readText(path.join(root, "subagents", "registry.md"));
     const rows = [];
@@ -621,7 +588,6 @@ async function claudeUsage(file) {
     let output = 0;
     let reasoning = 0;
     for (const u of seen.values()) {
-        // Cache read and cache write are input too; the bare input_tokens field is often just the uncached tail.
         input += num(u.input_tokens) + num(u.cache_creation_input_tokens) + num(u.cache_read_input_tokens);
         output += num(u.output_tokens);
         reasoning += num(u.output_tokens_details?.thinking_tokens);
@@ -683,7 +649,6 @@ function loadSnapshots(root) {
     return out;
 }
 
-/// Each `start X` with the next later `end X`.
 export function pairSnapshots(snaps) {
     const open = new Map();
     const pairs = [];

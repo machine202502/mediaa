@@ -1,10 +1,7 @@
-//! The media library: every screenshot, recording and conversion in the output folders.
-
 use crate::formats::MediaKind;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-/// Media details that take a decoder to find out; cached in the library index.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Details {
     pub width: u32,
@@ -17,12 +14,10 @@ pub struct Details {
 pub struct LibraryEntry {
     pub path: PathBuf,
     pub name: String,
-    /// What the user sees and can rename: the file name without the date stamp.
     pub title: String,
     pub kind: MediaKind,
     pub size: u64,
     pub modified: SystemTime,
-    /// Date stamp from the file name (when it was made).
     pub taken: chrono::NaiveDateTime,
     pub details: Option<Details>,
 }
@@ -36,13 +31,11 @@ impl LibraryEntry {
             .to_ascii_uppercase()
     }
 
-    /// `file:///…` URL, handy for pasting into browsers and chat apps.
     pub fn file_url(&self) -> String {
         file_url(&self.path)
     }
 }
 
-/// Which entries to show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KindFilter {
     #[default]
@@ -59,7 +52,6 @@ impl KindFilter {
     }
 }
 
-/// Entries (already sorted newest first) split into runs of the same local calendar day.
 pub fn group_by_day<'a>(entries: &[&'a LibraryEntry]) -> Vec<(chrono::NaiveDate, Vec<&'a LibraryEntry>)> {
     let mut groups: Vec<(chrono::NaiveDate, Vec<&LibraryEntry>)> = Vec::new();
     for e in entries {
@@ -72,7 +64,6 @@ pub fn group_by_day<'a>(entries: &[&'a LibraryEntry]) -> Vec<(chrono::NaiveDate,
     groups
 }
 
-/// `1.5 MB`-style sizes (binary units, one decimal).
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
@@ -88,7 +79,6 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// `HH:MM:SS` / `MM:SS` durations.
 pub fn human_duration(secs: f64) -> String {
     let total = secs.max(0.0).round() as u64;
     let (h, m, s) = (total / 3600, (total / 60) % 60, total % 60);
@@ -99,7 +89,6 @@ pub fn human_duration(secs: f64) -> String {
     }
 }
 
-/// Percent-encodes a path into a `file://` URL.
 pub fn file_url(path: &Path) -> String {
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     let s = abs.to_string_lossy().replace('\\', "/");

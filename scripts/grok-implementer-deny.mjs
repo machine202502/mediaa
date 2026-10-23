@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-// PreToolUse guard for the MediaA implementer agents (.grok/agents/implementer*.md).
-// Denies the same commands scripts/subagent.sh denies with --deny. Exit 0 and a JSON
-// decision, or exit 2 when the hook cannot read its input (a deny, not a fail-open).
 
 import fs from "node:fs";
 
@@ -15,7 +12,6 @@ function words(segment) {
         .filter(Boolean);
 }
 
-/// "" when the command is allowed, otherwise the reason to deny.
 export function denialReason(command) {
     const segments = String(command || "").split(/&&|\|\||[;\n|]/);
     for (const segment of segments) {

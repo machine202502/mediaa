@@ -1,10 +1,5 @@
-//! What a task of the queue is called on screen. The queue stores only the data part of the name
-//! (`Task::title`: a file name, a topic title, the start of a question, a step number); the label
-//! is built here from the kind of the task and that data, in the language of the interface.
-
 use rust_i18n::t;
 
-/// Every kind of task the program puts into the queue.
 #[cfg(test)]
 pub const KINDS: &[&str] = &[
     "analysis",
@@ -26,13 +21,10 @@ pub const KINDS: &[&str] = &[
     "step-title",
 ];
 
-/// The label of a task of `kind` with the data `title`: «Анализ: interview.mp4». A kind the
-/// program does not know is shown as it is stored.
 pub fn label(kind: &str, title: &str) -> String {
     label_in(&rust_i18n::locale(), kind, title)
 }
 
-/// [`label`] in a given language.
 pub(crate) fn label_in(locale: &str, kind: &str, title: &str) -> String {
     let text: String = match kind {
         "analysis" => t!("queue.kind.analysis", locale = locale, title = title),
@@ -82,7 +74,6 @@ mod tests {
         assert_eq!(label_in("ru", "chat", "Когда отчёт?"), "Ответ: Когда отчёт?");
         assert_eq!(label_in("en", "analysis", "talk.mp4"), "Analysis: talk.mp4");
         assert_eq!(label_in("en", "chat", "When?"), "Answer: When?");
-        // Not a known kind: shown as stored.
         assert_eq!(label_in("ru", "count", "to ten"), "count: to ten");
         assert_eq!(label_in("ru", "count", ""), "count");
     }

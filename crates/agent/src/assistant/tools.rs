@@ -1,7 +1,3 @@
-//! The agent's tools over one recording, run by code: the outline, search, reading a time range,
-//! speakers (talk time computed, never guessed), and exact arithmetic and time math. Results are
-//! text for the model, bounded by its context; each says what it adds, for the novelty check.
-
 use crate::prompts;
 use super::brain::ToolSpec;
 use crate::search::Options;
@@ -13,28 +9,23 @@ use mediaa_core::transcript::Reply;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashSet};
 
-/// What the agent knows about the recording it talks about.
 #[derive(Debug, Clone, Default)]
 pub struct Recording {
     pub title: String,
     pub duration: f64,
-    /// Speakers were told apart.
     pub diarized: bool,
     pub names: BTreeMap<u32, String>,
     pub replies: Vec<Reply>,
     pub chapters: Vec<Chapter>,
-    /// Where the user is in playback (seconds).
     pub position: Option<f64>,
 }
 
 impl Recording {
-    /// The label the model uses for a speaker. Names stay in `names` and are shown only in the UI.
     pub fn speaker(&self, s: u32) -> String {
         mediaa_core::speakers::label(s)
     }
 }
 
-/// Speakers the user can mention: one recording, or one recording of a folder (`number` is 1-based).
 pub fn whos(rec: &Recording, number: Option<u32>) -> Vec<mediaa_core::speakers::Who> {
     let mut ids: Vec<u32> = rec.replies.iter().filter_map(|r| r.speaker).collect();
     ids.extend(rec.names.keys().copied());
@@ -48,7 +39,6 @@ pub fn whos(rec: &Recording, number: Option<u32>) -> Vec<mediaa_core::speakers::
 
 impl Recording {
 
-    /// The card at the top of the context.
     pub fn card(&self) -> String {
         let mut ids: Vec<u32> = self.replies.iter().filter_map(|r| r.speaker).collect();
         ids.sort_unstable();
@@ -80,7 +70,6 @@ impl Recording {
     }
 }
 
-/// The tools the agent has for a recording.
 pub fn specs() -> Vec<ToolSpec> {
     let none = json!({"type": "object", "properties": {}});
     vec![
@@ -138,11 +127,9 @@ pub fn specs() -> Vec<ToolSpec> {
     ]
 }
 
-/// A tool's result: text for the model and the keys of what it showed (for novelty).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Outcome {
     pub text: String,
-    /// Places / facts shown (`None`: the tool has no notion of new information).
     pub seen: Option<Vec<String>>,
 }
 
@@ -152,7 +139,6 @@ impl Outcome {
     }
 }
 
-/// Text cut to `max` characters with a note (the template `results/cut/<note>.j2`).
 pub(super) fn bounded(mut text: String, max: usize, note: &str) -> String {
     if text.chars().count() > max {
         text = text.chars().take(max).collect();
@@ -161,12 +147,10 @@ pub(super) fn bounded(mut text: String, max: usize, note: &str) -> String {
     text
 }
 
-/// A tool's error text for the model: the template `errors/<name>.j2`.
 pub(super) fn error(name: &str, ctx: impl serde::Serialize) -> anyhow::Error {
     anyhow::anyhow!(prompts::render(&format!("errors/{name}.j2"), ctx))
 }
 
-/// The error of a tool called without a required argument (`errors/needs_<what>.j2`).
 pub(super) fn needs(tool: &str, what: &str) -> anyhow::Error {
     error(&format!("needs_{what}"), minijinja::context! { tool })
 }
@@ -175,8 +159,6 @@ fn line(rec: &Recording, r: &Reply) -> String {
     prompts::render("results/recording/line.j2", minijinja::context! { time => format_time(r.start), speaker => r.speaker.map(|s| rec.speaker(s)), text => r.text() })
 }
 
-/// The focused scan of a recording: instruction → what matches, with coverage. Shared by the
-/// threads of one step, so it is `Sync`.
 pub type Scanner<'a> = dyn Fn(&str) -> anyhow::Result<super::scan::Scan> + Sync + 'a;
 
 fn section_kind(kind: SectionKind) -> &'static str {
@@ -187,8 +169,6 @@ fn section_kind(kind: SectionKind) -> &'static str {
     }
 }
 
-/// The topic a call asks for (1-based). `Ok(None)` is the map. Anything else is an error the
-/// model can answer by picking a number that exists.
 fn topic_number(args: &Value, count: usize) -> anyhow::Result<Option<usize>> {
     let raw = match &args["topic"] {
         Value::Null => return Ok(None),
@@ -203,42 +183,31 @@ fn topic_number(args: &Value, count: usize) -> anyhow::Result<Option<usize>> {
     }
 }
 
-/// Hybrid search over a recording: (query, what to favour or narrow down, how many) → hits.
 pub type Search<'a> = dyn Fn(&str, Options, usize) -> anyhow::Result<Vec<Hit>> + Sync + 'a;
 
-/// Runs the tools of a recording.
 pub struct Tools<'a> {
     pub recording: &'a Recording,
     pub search: &'a Search<'a>,
-    /// Longest result (characters), from the model's context.
     pub max_chars: usize,
-    /// The focused scan of the whole recording for an instruction, when the model can do it.
     pub scan: Option<&'a Scanner<'a>>,
-    /// Gives a speaker a name (kept with the transcript).
     pub rename: Option<&'a Renamer<'a>>,
-    /// The web, when the agent may use it.
     pub web: Option<&'a super::internet::Web<'a>>,
 }
 
-/// Names a speaker of the recording.
 pub type Renamer<'a> = dyn Fn(u32, &str) -> anyhow::Result<()> + Sync + 'a;
 
 impl<'a> Tools<'a> {
-    /// The tools of reading a recording (no scan or renaming).
     pub fn new(recording: &'a Recording, search: &'a Search<'a>, max_chars: usize) -> Tools<'a> {
         Tools { recording, search, max_chars, scan: None, rename: None, web: None }
     }
 }
 
-/// The speaker a model label means (`@sN`, `sN`, `@sN#R`). The recording number is ignored:
-/// the tool runs on one recording. A person's name is not a label.
 pub fn speaker_of(recording: &Recording, label: &str) -> Option<u32> {
     let s = mediaa_core::speakers::parse_label(label)?.index;
     (recording.replies.iter().any(|r| r.speaker == Some(s)) || recording.names.contains_key(&s)).then_some(s)
 }
 
 impl Tools<'_> {
-    /// The tools offered: all of them, the scan when there is one.
     pub fn specs(&self) -> Vec<ToolSpec> {
         let mut s = specs();
         if self.scan.is_some() {
@@ -403,14 +372,10 @@ impl Tools<'_> {
     }
 }
 
-/// Mentions listed with their context (the count covers all).
 const MENTIONS_LISTED: usize = 15;
-/// Words of context on each side of a mention.
 const MENTION_CONTEXT: usize = 6;
-/// A hit shorter than this many characters is shown with the replies around it.
 const SHORT_HIT: usize = 80;
 
-/// Words that say nothing about what to look for: pronouns, articles, auxiliaries.
 const EMPTY_WORDS: &[&str] = &[
     "она", "он", "они", "оно", "это", "этот", "эта", "эти", "тот", "та", "те", "того", "то", "тех", "тем", "такой", "такая", "такое", "такие",
     "его", "ее", "их", "ему", "ей", "им", "ими", "меня", "тебя", "нас", "вас", "себя", "себе", "собой", "весь", "все", "который", "которая",
@@ -424,7 +389,6 @@ const EMPTY_WORDS: &[&str] = &[
     "mentioned", "talk", "talks", "talked", "discuss", "discusses", "discussed", "me", "my", "you", "your", "we", "us", "our", "i",
 ];
 
-/// Whether a query is made only of such words («что она сказала»): it names nothing to look for.
 pub(super) fn vague(query: &str) -> bool {
     let words: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric())
@@ -434,7 +398,6 @@ pub(super) fn vague(query: &str) -> bool {
     !words.is_empty() && words.iter().all(|w| EMPTY_WORDS.contains(&w.as_str()))
 }
 
-/// The span `from`/`to` name (both may be empty: the whole recording).
 fn span_of(rec: &Recording, from: &str, to: &str) -> anyhow::Result<Option<(f64, f64)>> {
     if from.is_empty() && to.is_empty() {
         return Ok(None);
@@ -446,7 +409,6 @@ fn span_of(rec: &Recording, from: &str, to: &str) -> anyhow::Result<Option<(f64,
     Ok(Some((a, b)))
 }
 
-/// One place in the recording a search result shows.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Fragment {
     pub start: f64,
@@ -455,7 +417,6 @@ pub(super) struct Fragment {
     pub text: String,
 }
 
-/// A place before merging; `replies` is the range it widens to, when it does.
 struct Piece {
     start: f64,
     end: f64,
@@ -464,7 +425,6 @@ struct Piece {
     replies: Option<(usize, usize)>,
 }
 
-/// Speakers (in order) and text of the replies `first..=last`.
 fn reply_text(rec: &Recording, first: usize, last: usize) -> (Vec<u32>, String) {
     let mut speakers = Vec::new();
     let mut text = String::new();
@@ -486,8 +446,6 @@ fn reply_text(rec: &Recording, first: usize, last: usize) -> (Vec<u32>, String) 
     (speakers, text)
 }
 
-/// The places of `hits`: a short hit takes the reply before and after it (one wider fragment),
-/// overlapping places become one; `hits` stay the unit of `seen`.
 pub(super) fn fragments(rec: &Recording, hits: &[Hit]) -> Vec<Fragment> {
     let touches = |r: &Reply, h: &Hit| r.end >= h.chunk.start && r.start <= h.chunk.end;
     let mut pieces: Vec<Piece> = Vec::new();
@@ -523,8 +481,6 @@ pub(super) fn fragments(rec: &Recording, hits: &[Hit]) -> Vec<Fragment> {
                 cur.replies = Some((first, last));
             }
             _ => {
-                // One place is widened to replies, the other may be a plain chunk of them: the
-                // merged place is rebuilt from every reply the union touches, so no word repeats.
                 let (start, end) = (cur.start.min(p.start), cur.end.max(p.end));
                 let first = rec.replies.iter().position(|r| r.end >= start && r.start <= end);
                 let last = rec.replies.iter().rposition(|r| r.end >= start && r.start <= end);
@@ -556,13 +512,11 @@ pub(super) fn fragments(rec: &Recording, hits: &[Hit]) -> Vec<Fragment> {
     out.into_iter().map(|p| Fragment { start: p.start, end: p.end, speakers: p.speakers, text: p.text }).collect()
 }
 
-/// Whether a word's stem matches a query stem (equal, or one begins the other when long).
 fn same_stem(word: &str, query: &str) -> bool {
     word == query || (word.chars().count() >= 5 && query.chars().count() >= 5 && (word.starts_with(query) || query.starts_with(word)))
 }
 
 impl Tools<'_> {
-    /// Every place the words of `query` are said in a row (by stems).
     fn mentions(&self, query: &str) -> anyhow::Result<Outcome> {
         let q = stems(query);
         anyhow::ensure!(!q.is_empty(), needs("mentions", "word"));
@@ -596,7 +550,6 @@ impl Tools<'_> {
     }
 }
 
-/// Whether `seen` adds anything to `known` (and remembers it).
 pub fn adds(known: &mut HashSet<String>, seen: &[String]) -> bool {
     let mut new = false;
     for s in seen {
@@ -703,7 +656,6 @@ pub(crate) mod tests {
     #[test]
     fn a_vague_query_is_refused() {
         let rec = recording();
-        // A call seen from another thread must be safe: the search is `Sync`.
         let called = std::sync::Mutex::new(false);
         let search = |_: &str, _: Options, _: usize| {
             *called.lock().unwrap() = true;
@@ -807,7 +759,6 @@ pub(crate) mod tests {
         assert!(out.text.contains("[0:10] @s1: …Отчёт отправляем в пятницу.…"), "{}", out.text);
         assert!(out.text.contains("[6:40] @s2: …Отчёты"), "{}", out.text);
         assert_eq!(out.seen.as_ref().map(Vec::len), Some(3));
-        // A phrase: its words in a row.
         let out = tools.run("mentions", &json!({"query": "бюджет на квартал"})).unwrap();
         assert!(out.text.starts_with("«бюджет на квартал»: 1 mentions, first at [5:00]"), "{}", out.text);
         assert!(tools.run("mentions", &json!({"query": "погода"})).unwrap().text.contains("never said"));
@@ -834,7 +785,6 @@ pub(crate) mod tests {
         assert_eq!(out.text, "Named: @s2 → Олег.");
         assert_eq!(*named.lock().unwrap(), [(1, "Олег".to_string())]);
         assert!(tools.run("rename_speakers", &json!({"names": [{"speaker": "@s9", "name": "X"}]})).is_err());
-        // Without diarization there is nobody to name.
         let plain = Recording { diarized: false, ..recording() };
         let tools = Tools { rename: Some(&rename), ..Tools::new(&plain, &no_search, 4000) };
         assert!(!tools.specs().iter().any(|s| s.name == "rename_speakers"));

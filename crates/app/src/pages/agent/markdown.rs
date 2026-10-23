@@ -1,21 +1,12 @@
-//! Chat answers as Markdown: one line of text is one row, so a list marker and a time link
-//! sit on the text's line at the body size. The rows share one gap ([`LINE_GAP`]).
-//!
-//! [`layout`] decides the lines; [`show`] only draws them.
-
 use super::topics;
 use crate::theme;
 use eframe::egui::{self, Color32, FontId, Stroke, TextFormat};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 
-/// Gap between the lines of one answer. The only vertical spacing inside an answer's text.
 pub const LINE_GAP: f32 = 2.0;
-/// Body text, the same size as the rest of the chat.
 const BODY: f32 = 13.0;
-/// A heading is a little larger than the body; every heading uses this one size.
 const HEADING: f32 = 15.0;
 
-/// One run of text with one style.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Span {
     pub text: String,
@@ -23,11 +14,9 @@ pub struct Span {
     pub emphasis: bool,
     pub code: bool,
     pub link: Option<String>,
-    /// A speaker mention: the accent chip, same size as the text around it.
     pub mention: bool,
 }
 
-/// One row. A list item's marker is the start of this row, not a row of its own.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Line {
     pub spans: Vec<Span>,
@@ -35,7 +24,6 @@ pub struct Line {
 }
 
 struct List {
-    /// Next number of an ordered list; `None` is a bullet list.
     next: Option<u64>,
 }
 
@@ -43,7 +31,6 @@ struct Build {
     lines: Vec<Line>,
     cur: Line,
     lists: Vec<List>,
-    /// The current row is a list item that has not taken its text yet.
     fresh_item: bool,
     strong: u32,
     emphasis: u32,
@@ -86,7 +73,6 @@ impl Build {
 
     fn flush(&mut self) {
         let text: String = self.cur.spans.iter().map(|s| s.text.as_str()).collect();
-        // A marker a list item never filled («1.», «•») is not a row.
         if text.trim().is_empty() || is_marker(text.trim()) {
             self.cur.spans.clear();
             return;
@@ -96,12 +82,10 @@ impl Build {
     }
 }
 
-/// `1.` or `•` with nothing after it.
 fn is_marker(text: &str) -> bool {
     text == "•" || (text.ends_with('.') && text.len() > 1 && text[..text.len() - 1].chars().all(|c| c.is_ascii_digit()))
 }
 
-/// The lines of `markdown` (CommonMark). List markers share the item's line.
 pub fn layout(markdown: &str) -> Vec<Line> {
     let mut b = Build {
         lines: Vec::new(),
@@ -184,8 +168,6 @@ pub fn layout(markdown: &str) -> Vec<Line> {
     b.lines
 }
 
-/// The link a character of `line` belongs to. `index` is a character offset; the character
-/// just before it counts too, so a click on the end of a link still hits it.
 fn link_at(line: &Line, index: usize) -> Option<&str> {
     let at = |index: usize| {
         let mut n = 0usize;
@@ -201,7 +183,6 @@ fn link_at(line: &Line, index: usize) -> Option<&str> {
     at(index).or_else(|| index.checked_sub(1).and_then(at))
 }
 
-/// The spans as shown: `@sN` is the speaker's current name. A link stays a link.
 fn shown_spans(spans: &[Span], roster: &super::mentions::Roster) -> Vec<Span> {
     let mut out = Vec::new();
     for span in spans {
@@ -219,8 +200,6 @@ fn shown_spans(spans: &[Span], roster: &super::mentions::Roster) -> Vec<Span> {
     out
 }
 
-/// Draws `markdown`. A `seek:` link returns its target; an http link opens in the browser.
-/// Speaker labels are the current names (`roster`).
 pub fn show(ui: &mut egui::Ui, markdown: &str, roster: &super::mentions::Roster, p: theme::Palette) -> Option<String> {
     let lines = layout(markdown);
     if lines.is_empty() {

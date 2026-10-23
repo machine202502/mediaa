@@ -1,4 +1,3 @@
-{# The result of the focused scan: coverage, then the findings. #}
 {% if failed %}
 Scanned {{ done }} of {{ parts }} parts for «{{ instruction }}»: {{ count }} findings. NOT checked: {% for f in failed %}{{ ", " if not loop.first else "" }}[{{ f.start }}–{{ f.end }}] ({{ f.why }}){% endfor %}.
 {% else %}

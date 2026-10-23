@@ -1,4 +1,3 @@
-{# What the agent knows up front about one recording. #}
 Recording: «{{ title }}», {{ length }} long ({% if minutes < 10 %}short{% elif minutes < 60 %}medium{% else %}long{% endif %}).
 {% if speakers %}
 Speakers: {% for s in speakers %}{{ s.label }}{% if s.name %} (the user calls them {{ s.name }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}.

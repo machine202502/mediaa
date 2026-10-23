@@ -1,25 +1,12 @@
-//! Slots per kind of work: how many jobs of each kind run at once, from the budget.
-//!
-//! The engine owns the memory (its models, GPU/RAM); the app only limits concurrency, since every
-//! task would otherwise ask the engine for a model at the same time. A job asks for a
-//! [`Ticket`] — its kind of work and whether it is interactive — and waits for a [`Lease`]:
-//!
-//! * **Limit**: at most `Budget::limit(kind)` jobs of a kind run at once.
-//! * **Order**: one line, first come first served; interactive work (chat answers) goes before
-//!   background jobs of the same kind.
-
 use mediaa_core::agent::{Budget, WorkKind};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-/// What the slots are doing (for the queue page).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Status {
-    /// Jobs running per kind of work.
     pub running: Vec<(WorkKind, u32)>,
-    /// Tickets in line, in order: id and kind.
     pub waiting: Vec<(u64, WorkKind)>,
 }
 
@@ -38,7 +25,6 @@ struct State {
 }
 
 impl State {
-    /// Hands out every lease that can be given now.
     fn schedule(&mut self) {
         let mut i = 0;
         while i < self.line.len() {
@@ -60,7 +46,6 @@ struct Shared {
 }
 
 impl Shared {
-    /// Runs `f` on the state, schedules and wakes waiters.
     fn update<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
         let mut s = self.state.lock().expect("slots lock");
         let r = f(&mut s);
@@ -88,12 +73,10 @@ impl Slots {
         Slots { shared: Arc::new(Shared { state: Mutex::new(state), changed: Condvar::new() }) }
     }
 
-    /// New limits (take effect for the next leases).
     pub fn set_budget(&self, budget: Budget) {
         self.shared.update(|s| s.budget = budget);
     }
 
-    /// Joins the line; `interactive` work goes before background jobs of its kind.
     pub fn request(&self, kind: WorkKind, interactive: bool) -> Ticket {
         let id = self.shared.update(|s| {
             let id = s.next;
@@ -118,7 +101,6 @@ impl Slots {
     }
 }
 
-/// A place in the line.
 pub struct Ticket {
     shared: Arc<Shared>,
     id: u64,
@@ -131,7 +113,6 @@ impl Ticket {
         self.id
     }
 
-    /// The lease if granted by now.
     pub fn try_take(&mut self) -> Option<Lease> {
         let granted = self.shared.state.lock().expect("slots lock").granted.remove(&self.id);
         if !granted {
@@ -141,7 +122,6 @@ impl Ticket {
         Some(Lease { shared: self.shared.clone(), kind: self.kind })
     }
 
-    /// Waits for the lease (or until `cancel`).
     pub fn wait(mut self, cancel: &AtomicBool) -> anyhow::Result<Lease> {
         loop {
             if let Some(lease) = self.try_take() {
@@ -168,7 +148,6 @@ impl Drop for Ticket {
     }
 }
 
-/// Permission to run. Dropping it frees the slot.
 pub struct Lease {
     shared: Arc<Shared>,
     kind: WorkKind,
@@ -190,7 +169,6 @@ mod tests {
     use super::*;
 
     fn slots() -> Slots {
-        // Generous limits: these tests are about one kind unless they set limits.
         Slots::new(Budget { agent: 8, transcription: 8, indexing: 8, web_search: 8, provider_calls: 8, ..Budget::default() })
     }
 
@@ -209,7 +187,6 @@ mod tests {
         assert!(w3.try_take().is_none());
         assert_eq!(s.status().running.iter().find(|(k, _)| *k == WorkKind::WebSearch), Some(&(WorkKind::WebSearch, 2)));
         assert_eq!(s.status().waiting, [(w3.id(), WorkKind::WebSearch)]);
-        // Another kind is not held up by a full one.
         let mut a = s.request(WorkKind::Agent, false);
         assert!(a.try_take().is_some());
         drop(l1);
@@ -228,7 +205,7 @@ mod tests {
         let mut chat = s.request(WorkKind::Agent, true);
         assert!(bg.try_take().is_none() && chat.try_take().is_none());
         drop(l);
-        let _answer = take(&mut chat); // the chat answer runs first
+        let _answer = take(&mut chat);
         assert!(bg.try_take().is_none());
         let cancel = AtomicBool::new(true);
         let t = s.request(WorkKind::Agent, false);

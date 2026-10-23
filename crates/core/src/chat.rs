@@ -1,6 +1,3 @@
-//! Chats with the agent about a recording, stored with its transcript: questions, answers and
-//! each answer's details (the steps the agent took), kept whole.
-
 use crate::transcript::Transcript;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -8,7 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type ChatId = i64;
 
-/// The `meta` key with the chats shown as tabs: a JSON array of ids, in tab order.
 const OPEN_CHATS: &str = "chat-tabs";
 
 fn now_ms() -> i64 {
@@ -23,7 +19,6 @@ fn memory_key(chat: ChatId) -> String {
 pub struct ChatInfo {
     pub id: ChatId,
     pub title: String,
-    /// When it was started, Unix milliseconds.
     pub created_ms: i64,
     pub messages: usize,
 }
@@ -38,63 +33,46 @@ pub enum Author {
 pub struct ChatMessage {
     pub author: Author,
     pub text: String,
-    /// The agent's steps and timeline (JSON, see [`Timeline`]), `Null` for the user's messages.
     pub details: serde_json::Value,
 }
 
 impl ChatMessage {
-    /// What happened while the answer was written (empty for the user's messages and for
-    /// answers stored before timelines).
     pub fn timeline(&self) -> Timeline {
         Timeline::from_details(&self.details)
     }
 
-    /// The answer was stopped by the user before it was finished.
     pub fn stopped(&self) -> bool {
         self.details["stopped"].as_bool() == Some(true)
     }
 }
 
-/// How a step of the timeline went (`running` until it is known).
 pub const STEP_RUNNING: &str = "running";
-/// A step that was still running when the answer was stopped.
 pub const STEP_STOPPED: &str = "stopped";
 
-/// One entry of an answer's timeline, in the order it happened.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TimelineEntry {
-    /// A tool call: the title the model gave it, the tool and how it went (`running`, `found`,
-    /// `nothing`, `repeated`, `failed` or `stopped`). The arguments and the result are in the
-    /// message's `steps`.
     Step { title: String, tool: String, status: String },
-    /// The model's reasoning.
     Thinking { text: String },
-    /// A part of the answer; `section`: it was also stored as a message of its own.
     Answer {
         text: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         section: bool,
     },
-    /// A correction of the user taken into account in the middle of the answer.
     Steer { text: String },
 }
 
-/// The steps, reasoning and parts of the answer of one question, in order: a timeline growing
-/// downward. A piece of reasoning or of the answer continues the entry before it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Timeline {
     pub entries: Vec<TimelineEntry>,
 }
 
 impl Timeline {
-    /// The timeline in a message's details (`details["timeline"]`).
     pub fn from_details(details: &serde_json::Value) -> Timeline {
         let entries = serde_json::from_value(details["timeline"].clone()).unwrap_or_default();
         Timeline { entries }
     }
 
-    /// The entries as JSON, for `details["timeline"]`.
     pub fn to_value(&self) -> serde_json::Value {
         serde_json::to_value(&self.entries).unwrap_or(serde_json::Value::Null)
     }
@@ -103,13 +81,10 @@ impl Timeline {
         self.entries.is_empty()
     }
 
-    /// A tool call begins (`status` is not known yet) or is known already.
     pub fn step(&mut self, title: &str, tool: &str, status: &str) {
         self.entries.push(TimelineEntry::Step { title: title.to_string(), tool: tool.to_string(), status: status.to_string() });
     }
 
-    /// The `index`-th tool step (thinking and answer entries do not count) gets `title`.
-    /// `false` when there is no such step.
     pub fn set_step_title(&mut self, index: usize, title: &str) -> bool {
         let Some(slot) = self.entries.iter_mut().filter_map(|entry| match entry {
             TimelineEntry::Step { title, .. } => Some(title),
@@ -121,9 +96,6 @@ impl Timeline {
         true
     }
 
-    /// A tool call is over. The calls of one step run at once and their results are shown in
-    /// order: the first one still running (in the order they began) is the one that ends, and
-    /// only when none is running, the last one.
     pub fn finish_step(&mut self, status: &str) {
         let running = self.entries.iter().position(|e| matches!(e, TimelineEntry::Step { status, .. } if status == STEP_RUNNING));
         let last = self.entries.iter().rposition(|e| matches!(e, TimelineEntry::Step { .. }));
@@ -133,7 +105,6 @@ impl Timeline {
         }
     }
 
-    /// More reasoning: it continues the entry before when that is reasoning too.
     pub fn thinking(&mut self, piece: &str) {
         match self.entries.last_mut() {
             Some(TimelineEntry::Thinking { text }) => text.push_str(piece),
@@ -141,7 +112,6 @@ impl Timeline {
         }
     }
 
-    /// More of the answer: it continues the entry before when that is a part of the answer.
     pub fn answer(&mut self, piece: &str) {
         match self.entries.last_mut() {
             Some(TimelineEntry::Answer { text, section: false }) => text.push_str(piece),
@@ -149,27 +119,21 @@ impl Timeline {
         }
     }
 
-    /// The part of the answer being written is a message of its own now (`text`, the cleaned
-    /// version of what was streamed).
     pub fn section(&mut self, text: &str) {
         self.discard_answer();
         self.entries.push(TimelineEntry::Answer { text: text.to_string(), section: true });
     }
 
-    /// The answer takes a correction of the user from here on.
     pub fn steer(&mut self, text: &str) {
         self.entries.push(TimelineEntry::Steer { text: text.to_string() });
     }
 
-    /// The text streamed last was not the answer after all: it is taken back.
     pub fn discard_answer(&mut self) {
         if matches!(self.entries.last(), Some(TimelineEntry::Answer { section: false, .. })) {
             self.entries.pop();
         }
     }
 
-    /// The answer is final: its last streamed part becomes `text` (the cleaned version), or is
-    /// added when nothing was streamed.
     pub fn finish_answer(&mut self, text: &str) {
         if text.trim().is_empty() {
             self.discard_answer();
@@ -181,7 +145,6 @@ impl Timeline {
         }
     }
 
-    /// The answer was stopped: steps still running are marked so.
     pub fn stop(&mut self) {
         for e in &mut self.entries {
             if let TimelineEntry::Step { status, .. } = e {
@@ -192,7 +155,6 @@ impl Timeline {
         }
     }
 
-    /// The part of the answer after the last stored section: what is being written.
     pub fn draft(&self) -> &str {
         match self.entries.last() {
             Some(TimelineEntry::Answer { text, section: false }) => text,
@@ -207,7 +169,6 @@ impl Transcript {
         Ok(self.db.last_insert_rowid())
     }
 
-    /// Chats, the newest first.
     pub fn chats(&self) -> anyhow::Result<Vec<ChatInfo>> {
         let mut q = self.db.prepare(
             "SELECT c.id, c.title, c.created_ms, (SELECT COUNT(*) FROM messages m WHERE m.chat = c.id) FROM chats c ORDER BY c.id DESC",
@@ -218,8 +179,6 @@ impl Transcript {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The chats shown as tabs, in tab order. Without the stored list every chat is open,
-    /// newest first (as they were before tabs).
     pub fn open_chats(&self) -> anyhow::Result<Vec<ChatId>> {
         if let Some(json) = self.meta(OPEN_CHATS)? {
             match serde_json::from_str::<Vec<ChatId>>(&json) {
@@ -230,12 +189,10 @@ impl Transcript {
         Ok(self.chats()?.into_iter().map(|c| c.id).collect())
     }
 
-    /// Stores the tabs and their order.
     pub fn set_open_chats(&self, chats: &[ChatId]) -> anyhow::Result<()> {
         self.set_meta(OPEN_CHATS, &serde_json::to_string(chats)?)
     }
 
-    /// Chats that have no tab (closed/archived), the newest first.
     pub fn archived_chats(&self) -> anyhow::Result<Vec<ChatInfo>> {
         let open = self.open_chats()?;
         Ok(self.chats()?.into_iter().filter(|c| !open.contains(&c.id)).collect())
@@ -245,9 +202,6 @@ impl Transcript {
         Ok(self.db.query_row("SELECT title FROM chats WHERE id = ?1", [chat], |r| r.get(0)).optional()?)
     }
 
-    /// Gives a chat its title, once: a chat that has a title keeps it (there is no renaming, the
-    /// user cannot rename a chat). A new chat has an empty title until this is called. Returns
-    /// whether the title was set.
     pub fn set_chat_title(&self, chat: ChatId, title: &str) -> anyhow::Result<bool> {
         let title = title.trim();
         if title.is_empty() {
@@ -257,7 +211,6 @@ impl Transcript {
         Ok(changed > 0)
     }
 
-    /// Removes a chat with its messages, memory and tab.
     pub fn delete_chat(&self, chat: ChatId) -> anyhow::Result<()> {
         self.db.execute("DELETE FROM chats WHERE id = ?1", [chat])?;
         self.db.execute("DELETE FROM meta WHERE key = ?1", [memory_key(chat)])?;
@@ -269,7 +222,6 @@ impl Transcript {
         Ok(())
     }
 
-    /// What the agent keeps for a chat (opaque JSON: remembered facts, the summary).
     pub fn chat_memory(&self, chat: ChatId) -> anyhow::Result<Option<String>> {
         self.meta(&memory_key(chat))
     }
@@ -304,9 +256,6 @@ impl Transcript {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Writes `phrase` into the `index`-th tool step of the agent message for the answer task
-    /// `answer` (`details.task`). A chat with no such message, or no such step, is left as it is.
-    /// Returns whether the phrase is now that step's title.
     pub fn set_step_phrase(&self, chat: ChatId, answer: i64, index: usize, phrase: &str) -> anyhow::Result<bool> {
         if phrase.is_empty() {
             return Ok(false);
@@ -335,9 +284,6 @@ impl Transcript {
         Ok(false)
     }
 
-    /// The correction that is asked as the chat's next question stops being a correction of the
-    /// answer `from`: the first `skip` corrections of that answer are left alone. Returns whether
-    /// one was found.
     pub fn unsteer(&self, chat: ChatId, from: i64, mut skip: usize) -> anyhow::Result<bool> {
         let rows = {
             let mut q = self.db.prepare("SELECT id, details FROM messages WHERE chat = ?1 AND role = 'user' ORDER BY id")?;
@@ -362,9 +308,6 @@ impl Transcript {
         Ok(false)
     }
 
-    /// Points the corrections the user sent for the answer `from` at the answer `to`, so that the
-    /// next answer takes them: the first `skip` of them were taken by `from` and are left as they
-    /// are. Returns how many moved.
     pub fn retag_steers(&self, chat: ChatId, from: i64, to: i64, mut skip: usize) -> anyhow::Result<usize> {
         let rows = {
             let mut q = self.db.prepare("SELECT id, details FROM messages WHERE chat = ?1 AND role = 'user' ORDER BY id")?;
@@ -413,7 +356,6 @@ mod tests {
         t.set_chat_memory(a, r#"{"facts":["x"]}"#).unwrap();
         assert_eq!(t.chat_memory(a).unwrap().as_deref(), Some(r#"{"facts":["x"]}"#));
         assert_eq!(t.chat_memory(b).unwrap(), None);
-        // The title is set once: an empty one is filled, a set one never changes.
         let fresh = t.create_chat("").unwrap();
         assert!(!t.set_chat_title(fresh, "  ").unwrap(), "an empty title is nothing");
         assert!(t.set_chat_title(fresh, " Деньги ").unwrap());
@@ -440,7 +382,6 @@ mod tests {
         tl.answer("В пят");
         tl.answer("ницу.");
         assert_eq!(tl.draft(), "В пятницу.");
-        // More steps after a part of the answer continue the same timeline.
         tl.step("Проверяю", "read", STEP_RUNNING);
         assert_eq!(tl.draft(), "");
         tl.answer("И ещё.");
@@ -470,8 +411,6 @@ mod tests {
 
     #[test]
     fn sibling_steps_of_one_call_batch_end_in_their_own_order() {
-        // The calls of one step begin together and are shown as siblings; their results come
-        // back in the order of the list, so each ends the first call still running.
         let mut tl = Timeline::default();
         tl.step("Поиск", "search", STEP_RUNNING);
         tl.step("Чтение записи", "read", STEP_RUNNING);
@@ -485,7 +424,6 @@ mod tests {
                 TimelineEntry::Step { title: "Чтение записи".into(), tool: "read".into(), status: "nothing".into() },
             ]
         );
-        // A step of its own, then a result with nothing running: the last step is marked.
         tl.step("Спикеры", "speakers", STEP_RUNNING);
         tl.finish_step("found");
         tl.finish_step("failed");
@@ -548,11 +486,9 @@ mod tests {
             ]
         );
         assert_eq!(tl.draft(), "");
-        // A finished answer with no text adds nothing; the same text after a section is a new part.
         tl.finish_answer("  ");
         tl.finish_answer("Итог.");
         assert_eq!(tl.entries.last(), Some(&TimelineEntry::Answer { text: "Итог.".into(), section: false }));
-        // `section` is written only when set.
         assert_eq!(tl.to_value()[0], json!({"kind": "answer", "text": "Часть 1.", "section": true}));
         assert_eq!(tl.to_value()[3], json!({"kind": "answer", "text": "Итог."}));
     }
@@ -564,27 +500,22 @@ mod tests {
         let a = t.create_chat("А").unwrap();
         let b = t.create_chat("Б").unwrap();
         let c = t.create_chat("В").unwrap();
-        // Without the key every chat is open, newest first, and none is archived.
         assert_eq!(t.open_chats().unwrap(), [c, b, a]);
         assert!(t.archived_chats().unwrap().is_empty());
 
-        // Tab order is kept; chats left out are archived, newest first.
         t.set_open_chats(&[b, a]).unwrap();
         assert_eq!(t.open_chats().unwrap(), [b, a]);
         assert_eq!(t.archived_chats().unwrap().iter().map(|x| x.id).collect::<Vec<_>>(), [c]);
 
-        // A restored chat becomes a tab again.
         t.set_open_chats(&[b, a, c]).unwrap();
         assert!(t.archived_chats().unwrap().is_empty());
 
-        // Deleting an open chat drops its tab and its memory; the others keep their order.
         t.set_chat_memory(a, r#"{"facts":["x"]}"#).unwrap();
         t.delete_chat(a).unwrap();
         assert_eq!(t.open_chats().unwrap(), [b, c]);
         assert_eq!(t.chat_memory(a).unwrap(), None);
         assert!(t.chats().unwrap().iter().all(|x| x.id != a));
 
-        // Deleting an archived chat leaves the open tabs as they are.
         t.set_open_chats(&[b]).unwrap();
         t.delete_chat(c).unwrap();
         assert_eq!(t.open_chats().unwrap(), [b]);
@@ -613,16 +544,13 @@ mod tests {
         t.add_message(chat, Author::User, "Первое", &steer(7)).unwrap();
         t.add_message(chat, Author::User, "Второе", &steer(7)).unwrap();
         t.add_message(chat, Author::User, "Третье", &steer(7)).unwrap();
-        // The first was taken; the next one becomes the next question; the rest follow it.
         assert_eq!(t.retag_steers(chat, 7, 9, 2).unwrap(), 1);
         let tasks: Vec<i64> = t.messages(chat).unwrap().iter().filter_map(|m| m.details["steer"]["task"].as_i64()).collect();
         assert_eq!(tasks, [7, 7, 9]);
-        // Nothing else is touched: the plain question, and the corrections left behind.
         assert_eq!(t.retag_steers(chat, 7, 11, 0).unwrap(), 2);
         let messages = t.messages(chat).unwrap();
         assert_eq!(messages[0].details, serde_json::Value::Null);
         assert_eq!(messages[2].details["steer"]["task"], 11);
-        // The correction asked as the next question is a question of the chat now.
         assert!(t.unsteer(chat, 11, 0).unwrap());
         let messages = t.messages(chat).unwrap();
         assert!(messages[1].details.get("steer").is_none());

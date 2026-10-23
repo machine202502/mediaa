@@ -1,10 +1,7 @@
-//! Saving still images.
-
 use crate::formats::ImageFormat;
 use crate::frame::Frame;
 use std::path::Path;
 
-/// Encodes `frame` as PNG or (lossless) WebP into `path`.
 pub fn save(frame: &Frame, format: ImageFormat, path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

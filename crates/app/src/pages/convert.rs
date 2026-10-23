@@ -1,8 +1,3 @@
-//! Convert section: pick a file → the formats it can become → their settings (plus an optional
-//! name and the folder) → Convert. Video ⇄ video / animation / audio, animation → video /
-//! animation, image → image, audio → audio. Results land in the conversions folder (the
-//! library by default).
-
 use super::header;
 use crate::app::App;
 use crate::{i18n, theme};
@@ -33,31 +28,22 @@ pub struct ConvertUi {
     probed: Option<Result<(MediaKind, MediaInfo), String>>,
     target: Option<Target>,
     settings: ConvertSettings,
-    /// Output height limit, 0 = original.
     max_height: u32,
-    /// Output title; empty = after the input.
     name: String,
-    /// Output folder; `None` = the conversions folder from Settings.
     folder: Option<PathBuf>,
     job: Option<Job>,
-    /// Last finished output (shown with Open / Show buttons).
     last: Option<PathBuf>,
-    /// Output size estimate for the current file, format and settings.
     estimate: Option<Estimate>,
 }
 
-/// Pause after the last settings change before a trial conversion starts.
 const ESTIMATE_DELAY: Duration = Duration::from_millis(500);
 
-/// A trial conversion (see `convert::estimate_size`) running in the background.
 struct Estimate {
     key: (PathBuf, Target, ConvertSettings),
-    /// When `key` last changed.
     since: Instant,
     cancel: Arc<AtomicBool>,
     rx: Option<Receiver<Result<u64, String>>>,
     result: Option<Result<u64, String>>,
-    /// Previous estimate, shown while this one is being made.
     previous: Option<u64>,
 }
 
@@ -73,7 +59,6 @@ impl ConvertUi {
             None => Err(t!("convert.unsupported").into()),
             Some(kind) => mediaa_media::preview::details(&path, kind).map(|i| (kind, i)).map_err(|e| format!("{e:#}")),
         });
-        // Keep the chosen format when it still applies to the new file.
         let targets = self.targets();
         if self.target.is_some_and(|t| !targets.contains(&t)) {
             self.target = None;
@@ -84,7 +69,6 @@ impl ConvertUi {
         self.last = None;
     }
 
-    /// The settings a conversion uses (the resolution picker keeps 0 for "original").
     fn effective(&self) -> ConvertSettings {
         ConvertSettings { max_height: (self.max_height > 0).then_some(self.max_height), ..self.settings.clone() }
     }
@@ -93,7 +77,6 @@ impl ConvertUi {
         match &self.probed {
             Some(Ok((kind, info))) => Target::for_kind(*kind)
                 .into_iter()
-                // Sound only out of files that have sound.
                 .filter(|t| !matches!(t, Target::Audio(_)) || info.has_audio())
                 .collect(),
             _ => Vec::new(),
@@ -131,8 +114,6 @@ fn start(app: &mut App, ctx: &egui::Context, target: Target) {
     app.conv.job = Some(Job { output, progress, cancel, done: rx });
 }
 
-/// Keeps the size estimate in step with the file, format and settings: a trial conversion
-/// starts once they stay unchanged for [`ESTIMATE_DELAY`] (and no conversion is running).
 fn update_estimate(app: &mut App, ctx: &egui::Context, target: Target) {
     let Some(input) = app.conv.input.clone() else { return };
     let key = (input, target, app.conv.effective());
@@ -173,7 +154,6 @@ fn update_estimate(app: &mut App, ctx: &egui::Context, target: Target) {
     }
 }
 
-/// "≈ 4.2 MB (−58 %)" against the input size, a spinner while estimating.
 fn estimate_row(ui: &mut egui::Ui, estimate: Option<&Estimate>, input: Option<&std::path::Path>) {
     let Some(e) = estimate else { return };
     let source = input.and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len());
@@ -230,7 +210,6 @@ fn mono_checkbox(ui: &mut egui::Ui, mono: &mut bool) {
     ui.checkbox(mono, t!("convert.mono")).on_hover_text(t!("convert.mono_hint"));
 }
 
-/// Frame-rate cap: "Original" or the common rates below the source's.
 fn fps_combo(ui: &mut egui::Ui, max_fps: &mut Option<u32>, source_fps: f64) {
     let label = |f: Option<u32>| f.map_or_else(|| t!("convert.fps_original").to_string(), |f| format!("{f} fps"));
     egui::ComboBox::from_id_salt("convert-fps")
@@ -280,7 +259,6 @@ fn pick_file(app: &mut App) {
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     header(ui, &t!("convert.title"), "");
-    // Dev: `MEDIAA_DEV_CONVERT=<file>` loads that file (and its first format) once, for UI checks.
     if app.conv.input.is_none() {
         if let Some(p) = std::env::var_os("MEDIAA_DEV_CONVERT") {
             app.conv.set_input(p.into());
@@ -305,14 +283,12 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     let busy = app.conv.job.is_some();
-    // A file dropped onto the window is the new input.
     if !busy {
         if let Some(p) = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty())) {
             app.conv.set_input(p);
         }
     }
 
-    // 1. File
     theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         theme::section(ui, icon::FILE, &t!("convert.input"));
@@ -338,7 +314,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 if info.fps > 0.0 && *kind == MediaKind::Video {
                     facts.push(format!("{:.0} fps", info.fps));
                 }
-                // Sound only matters for videos (audio always has it, images and animations never).
                 if *kind == MediaKind::Video {
                     facts.push(if info.has_audio() { t!("record.with_audio").into() } else { t!("record.no_audio").into() });
                 }
@@ -354,7 +329,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let Some(Ok((_, info))) = app.conv.probed.clone() else { return };
     ui.add_space(4.0);
 
-    // 2. Format
     let targets = app.conv.targets();
     theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -381,7 +355,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     update_estimate(app, &ctx, target);
     ui.add_space(4.0);
 
-    // 3. Settings, name and folder
     let mut changed = false;
     theme::split_card(
         ui,
@@ -481,7 +454,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
     ui.add_space(14.0);
 
-    // 4. Convert (or its progress), centred.
     ui.vertical_centered(|ui| {
         if let Some(job) = &app.conv.job {
             let frac = job.progress.load(Ordering::Relaxed) as f32 / 1000.0;
@@ -499,7 +471,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             if let Some(last) = app.conv.last.clone() {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    // Centre the row: the label and its two buttons.
                     let name = last.file_name().unwrap_or_default().to_string_lossy().into_owned();
                     let w = ui.fonts_mut(|f| f.layout_no_wrap(name.clone(), egui::FontId::proportional(13.0), egui::Color32::WHITE).size().x) + 60.0;
                     ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));

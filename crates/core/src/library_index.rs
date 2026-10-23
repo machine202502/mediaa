@@ -1,9 +1,3 @@
-//! The library index: the `files` table of the cache database (`.cache/library.db`, see
-//! `cache_db`), mirrored in memory, listing every media file with what the library needs to show, filter and sort it without touching
-//! the files again — title, kind, size, date and the slower-to-get details (dimensions,
-//! duration, sound). It is reconciled with a folder listing ([`scan_dir`], off the UI thread)
-//! and kept current by a file watcher; the UI reads it in chunks.
-
 use crate::formats::MediaKind;
 use crate::library::{Details, KindFilter, LibraryEntry};
 use crate::naming;
@@ -12,13 +6,10 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Cache folder inside the media folder (index, thumbnail atlases).
 pub const CACHE_DIR: &str = ".cache";
-/// The cache folder of the library in `media_dir`.
 pub fn cache_dir(media_dir: &Path) -> PathBuf {
     media_dir.join(CACHE_DIR)
 }
-/// How results are ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Sort {
     #[default]
@@ -31,24 +22,18 @@ pub enum Sort {
 impl Sort {
     pub const ALL: [Sort; 4] = [Sort::Newest, Sort::Oldest, Sort::Title, Sort::Largest];
 
-    /// Results grouped by day make sense only for date orders.
     pub fn by_date(self) -> bool {
         matches!(self, Sort::Newest | Sort::Oldest)
     }
 }
 
-/// What the library shows.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Query {
     pub kind: KindFilter,
-    /// Search, see [`Search`].
     pub search: String,
     pub sort: Sort,
 }
 
-/// Parsed search: `<title pattern>[ && <date pattern>]`. The title pattern only looks at the title
-/// (never at the date in the file name); the optional date pattern after `&&` looks at the date
-/// stamp `YYYY-MM-DD_HH-MM-SS`. Both are simple patterns, see [`simple_pattern`].
 #[derive(Debug, Default)]
 pub struct Search {
     title: Option<Regex>,
@@ -67,8 +52,6 @@ impl Search {
     }
 }
 
-/// Case-insensitive simple pattern: plain text matches anywhere; `*` stands for any characters,
-/// `^` / `$` at the ends anchor to the start / end. `None` for an empty (or lone `*`) pattern.
 pub fn simple_pattern(search: &str) -> Option<Regex> {
     let s = search.trim();
     if s.trim_matches('*').is_empty() {
@@ -83,12 +66,8 @@ pub fn simple_pattern(search: &str) -> Option<Regex> {
 
 pub struct LibraryIndex {
     dir: PathBuf,
-    /// Newest first.
     entries: Vec<LibraryEntry>,
-    /// Changes whenever the entries do (cheap check for cached queries).
     version: u64,
-    /// Where changes are written as they happen; `None` if the database cannot be opened
-    /// (the library still works, it is just read from the folder again next time).
     db: Option<rusqlite::Connection>,
 }
 
@@ -100,15 +79,10 @@ fn from_ms(ms: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_millis(ms)
 }
 
-/// Library entry for a file, `None` if it is not a MediaA media file (see `naming`).
 fn read_entry(path: &Path) -> Option<LibraryEntry> {
     entry_from(path, &std::fs::metadata(path).ok()?)
 }
 
-/// Media files of `dir` as the file system lists them (no details). The metadata comes with
-/// the listing itself (free on Windows: no extra request per file), so even 10 000 files take
-/// a fraction of a second; still, run it off the UI thread and pass the result to
-/// [`LibraryIndex::apply_scan`].
 pub fn scan_dir(dir: &Path) -> Vec<LibraryEntry> {
     let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
     read.flatten().filter_map(|item| entry_from(&item.path(), &item.metadata().ok()?)).collect()
@@ -132,7 +106,6 @@ fn entry_from(path: &Path, meta: &std::fs::Metadata) -> Option<LibraryEntry> {
     })
 }
 
-/// Same file contents as far as the index can tell (details stay valid).
 fn unchanged(a: &LibraryEntry, b: &LibraryEntry) -> bool {
     a.size == b.size && to_ms(a.modified) == to_ms(b.modified)
 }
@@ -150,7 +123,6 @@ fn kind_from(code: &str) -> Option<MediaKind> {
     [MediaKind::Image, MediaKind::Video, MediaKind::Animation, MediaKind::Audio].into_iter().find(|k| kind_code(*k) == code)
 }
 
-/// Every stored file of the library in `dir` (rows that no longer parse are skipped).
 fn read_rows(db: &rusqlite::Connection, dir: &Path) -> rusqlite::Result<Vec<LibraryEntry>> {
     let mut q = db.prepare("SELECT name, title, kind, size, modified_ms, width, height, duration, audio FROM files")?;
     let rows = q.query_map([], |r| {
@@ -181,8 +153,6 @@ fn read_rows(db: &rusqlite::Connection, dir: &Path) -> rusqlite::Result<Vec<Libr
 }
 
 impl LibraryIndex {
-    /// Loads the stored index of `dir` (missing or unreadable: starts empty). It may be out of
-    /// date: follow with [`scan_dir`] + [`LibraryIndex::apply_scan`].
     pub fn load(dir: &Path) -> LibraryIndex {
         let db = crate::cache_db::open(&cache_dir(dir)).map_err(|e| log::warn!("library index: {e:#}")).ok();
         let mut entries = db.as_ref().map_or_else(Vec::new, |db| {
@@ -220,7 +190,6 @@ impl LibraryIndex {
         self.entries.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.name.cmp(&b.name)));
     }
 
-    /// Writes changed rows: `upsert` (new or changed files), `delete` (file names gone).
     fn store(&self, upsert: &[&LibraryEntry], delete: &[&str]) {
         let Some(db) = &self.db else { return };
         if upsert.is_empty() && delete.is_empty() {
@@ -259,8 +228,6 @@ impl LibraryIndex {
         }
     }
 
-    /// Takes over a folder listing from [`scan_dir`]: adds new files, drops deleted ones,
-    /// refreshes changed ones (keeping the details of files that did not change).
     pub fn apply_scan(&mut self, listing: Vec<LibraryEntry>) {
         let mut known: HashMap<String, LibraryEntry> = self.entries.drain(..).map(|e| (e.name.clone(), e)).collect();
         let mut fresh = Vec::with_capacity(listing.len());
@@ -282,8 +249,6 @@ impl LibraryIndex {
         }
     }
 
-    /// Updates files after changes on disk (created, modified, renamed or deleted). All of
-    /// them are written in one transaction, so a rename (old and new path) is stored whole.
     pub fn refresh_paths(&mut self, paths: &[PathBuf]) {
         let mut upserts: Vec<LibraryEntry> = Vec::new();
         let mut deletes: Vec<String> = Vec::new();
@@ -317,7 +282,6 @@ impl LibraryIndex {
         self.changed();
     }
 
-    /// Stores the slow-to-compute details of a file (dimensions, duration, sound).
     pub fn set_details(&mut self, path: &Path, details: Details) {
         let Some(i) = self.entries.iter().position(|e| e.path == path) else { return };
         if self.entries[i].details != Some(details) {
@@ -326,7 +290,6 @@ impl LibraryIndex {
         }
     }
 
-    /// Indices of the entries matching `q`, in its order.
     pub fn query(&self, q: &Query) -> Vec<usize> {
         let search = Search::parse(&q.search);
         let mut hits: Vec<usize> = (0..self.entries.len())
@@ -346,15 +309,12 @@ impl LibraryIndex {
     }
 }
 
-/// What the watcher saw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Change {
     Path(PathBuf),
-    /// Events were lost (queue overflow) or watching failed: the folder must be read again.
     Rescan,
 }
 
-/// Changes reported by one watcher callback.
 fn changes_of(res: notify::Result<notify::Event>) -> Vec<Change> {
     match res {
         Ok(event) if event.need_rescan() => vec![Change::Rescan],
@@ -366,23 +326,18 @@ fn changes_of(res: notify::Result<notify::Event>) -> Vec<Change> {
     }
 }
 
-/// Changes since the last [`LibraryWatcher::changes`] call.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Changes {
-    /// Changed paths (deduplicated).
     pub paths: Vec<PathBuf>,
-    /// Events were lost: re-read the whole folder (and recreate the watcher).
     pub rescan: bool,
 }
 
-/// Watches the media folder and reports changed paths (create / modify / remove / rename).
 pub struct LibraryWatcher {
     _watcher: notify::RecommendedWatcher,
     rx: crossbeam_channel::Receiver<Change>,
 }
 
 impl LibraryWatcher {
-    /// `on_change` runs on the watcher thread after each batch (e.g. to wake the UI).
     pub fn new(dir: &Path, on_change: impl Fn() + Send + 'static) -> anyhow::Result<LibraryWatcher> {
         use notify::Watcher;
         std::fs::create_dir_all(dir)?;
@@ -465,14 +420,12 @@ mod tests {
         assert!(dir.path().join(".cache").join("library.db").is_file(), "stored in the cache folder");
         assert_eq!(names(&LibraryIndex::load(dir.path()), &Query::default()), ["Demo", "Demo clip", "Old"], "written at once, loads without a scan");
 
-        // Details survive reopening while the file is unchanged.
         let reopened = open(dir.path());
         assert_eq!(reopened.len(), 3);
         let e = reopened.entries().iter().find(|e| e.path == gif).unwrap();
         assert_eq!(e.details.unwrap().width, 64);
         assert_eq!(reopened.version(), 1, "nothing changed on disk");
 
-        // Changes made while the app was closed are picked up on open.
         std::fs::remove_file(dir.path().join("Old_2026-01-01_10-00-00.png")).unwrap();
         touch(dir.path(), "New_2026-01-04_10-00-00.png", 0, b"new");
         touch(dir.path(), "Demo_2026-01-03_10-00-00.gif", 0, b"gif changed");
@@ -520,9 +473,7 @@ mod tests {
         assert_eq!(names(&index, &q(KindFilter::All, "A", Sort::Title)), ["alpha", "Beta", "Gamma demo"]);
         assert_eq!(names(&index, &q(KindFilter::All, "^a", Sort::Title)), ["alpha"]);
         assert_eq!(names(&index, &q(KindFilter::All, "*demo$", Sort::Newest)), ["Gamma demo"]);
-        // The date in the file name is not part of the title search…
         assert!(names(&index, &q(KindFilter::All, "2026", Sort::Newest)).is_empty());
-        // …but can be searched after `&&`.
         assert_eq!(names(&index, &q(KindFilter::All, "*&&2026-01-0", Sort::Title)), ["alpha", "Beta", "Gamma demo"]);
         assert_eq!(names(&index, &q(KindFilter::All, "*&& 2026-01-02", Sort::Newest)), ["alpha"]);
         assert_eq!(names(&index, &q(KindFilter::All, "a && ^2026-01-0*_10$", Sort::Title)).len(), 0, "time part anchored at end");

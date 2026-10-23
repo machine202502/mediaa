@@ -1,6 +1,3 @@
-//! Monitor and window enumeration/capture backed by `xcap`
-//! (Windows GDI/PrintWindow, macOS CoreGraphics, Linux X11 and Wayland portals).
-
 use anyhow::{anyhow, Context};
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
@@ -8,13 +5,9 @@ use mediaa_core::{Frame, Rect};
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorInfo {
     pub id: u32,
-    /// Stable system device name (e.g. `\\.\DISPLAY1` on Windows), to remember a display across runs.
     pub device: String,
-    /// Position in the OS enumeration order (matches winit's `available_monitors()`,
-    /// used to open the selection overlay on this monitor).
     pub index: usize,
     pub name: String,
-    /// Position on the virtual desktop, physical pixels.
     pub x: i32,
     pub y: i32,
     pub width: u32,
@@ -38,7 +31,6 @@ pub struct WindowInfo {
     pub id: u32,
     pub title: String,
     pub app: String,
-    /// The process that owns the window.
     pub pid: u32,
     pub width: u32,
     pub height: u32,
@@ -55,7 +47,6 @@ impl WindowInfo {
 }
 
 fn monitor_info(m: &xcap::Monitor, index: usize) -> anyhow::Result<MonitorInfo> {
-    // Built-in panels often report no EDID name ("Unknown Monitor 65537").
     let name = m
         .friendly_name()
         .ok()
@@ -75,7 +66,6 @@ fn monitor_info(m: &xcap::Monitor, index: usize) -> anyhow::Result<MonitorInfo> 
     })
 }
 
-/// All monitors, primary first.
 pub fn monitors() -> anyhow::Result<Vec<MonitorInfo>> {
     let mut list: Vec<MonitorInfo> = xcap::Monitor::all()?
         .iter()
@@ -86,7 +76,6 @@ pub fn monitors() -> anyhow::Result<Vec<MonitorInfo>> {
     Ok(list)
 }
 
-/// Id of the monitor containing the virtual-desktop point `(x, y)` (physical pixels).
 pub fn monitor_at(x: i32, y: i32) -> Option<u32> {
     xcap::Monitor::from_point(x, y).ok().and_then(|m| m.id().ok())
 }
@@ -112,7 +101,6 @@ pub fn capture_monitor(id: u32) -> anyhow::Result<Frame> {
     Ok(Frame::from_image(img))
 }
 
-/// Top-level windows worth recording: titled, visible, not minimized, not our own.
 pub fn windows() -> anyhow::Result<Vec<WindowInfo>> {
     let own_pid = std::process::id();
     let mut list = Vec::new();
@@ -138,8 +126,6 @@ pub fn windows() -> anyhow::Result<Vec<WindowInfo>> {
 }
 
 pub fn capture_window(id: u32) -> anyhow::Result<Frame> {
-    // xcap rescales and crops Windows window shots by the invisible resize borders, cutting
-    // off the bottom / right (maximized windows come out blank); WGC returns the window as shown.
     #[cfg(windows)]
     match crate::wgc::WgcSource::window_frame(id) {
         Ok(frame) => return Ok(frame),
@@ -151,20 +137,15 @@ pub fn capture_window(id: u32) -> anyhow::Result<Frame> {
     Ok(Frame::from_image(img))
 }
 
-/// Records a whole monitor or a region of it.
 pub struct MonitorSource {
     monitor: xcap::Monitor,
     name: String,
     region: Option<Rect>,
     size: (u32, u32),
-    /// Top-left of the recorded area on the virtual desktop and the monitor scale (for the
-    /// cursor overlay); `None` when the cursor is not recorded.
     cursor: Option<((i32, i32), f32)>,
 }
 
 impl MonitorSource {
-    /// `region` is in the monitor's pixel space; it is clamped and made even-sized
-    /// (yuv420p encoders need even dimensions).
     pub fn new(monitor_id: u32, region: Option<Rect>, with_cursor: bool) -> anyhow::Result<Self> {
         let monitor = find_monitor(monitor_id)?;
         let info = monitor_info(&monitor, 0)?;
@@ -228,7 +209,6 @@ impl FrameSource for MonitorSource {
     }
 }
 
-/// Records one window; its frame size is fixed at start (resizes are padded/cropped).
 pub struct WindowSource {
     window: xcap::Window,
     name: String,
@@ -272,7 +252,6 @@ impl FrameSource for WindowSource {
     }
 }
 
-/// Region offsets are monitor pixels; the virtual desktop uses points on macOS.
 fn logical_to_desktop(v: i32, scale: f32) -> i32 {
     if cfg!(target_os = "macos") {
         (v as f32 / scale).round() as i32
@@ -281,8 +260,6 @@ fn logical_to_desktop(v: i32, scale: f32) -> i32 {
     }
 }
 
-/// Draws the current mouse cursor into a frame whose top-left is at `origin` on the virtual
-/// desktop (`scale` converts desktop units to frame pixels on macOS).
 fn draw_cursor(frame: &mut Frame, origin: (i32, i32), scale: f32) {
     let Some(c) = crate::cursor::current() else { return };
     let k = if cfg!(target_os = "macos") { scale } else { 1.0 };
@@ -291,8 +268,6 @@ fn draw_cursor(frame: &mut Frame, origin: (i32, i32), scale: f32) {
     mediaa_core::cursor::draw(frame, &c.image, x, y);
 }
 
-/// Recording source for a display or a region of it: Windows Graphics Capture on Windows
-/// (falls back to `xcap` screenshots if unavailable), `xcap` elsewhere.
 pub fn monitor_source(monitor_id: u32, region: Option<Rect>, with_cursor: bool) -> anyhow::Result<Box<dyn FrameSource>> {
     let src = MonitorSource::new(monitor_id, region, with_cursor)?;
     #[cfg(windows)]
@@ -306,10 +281,8 @@ pub fn monitor_source(monitor_id: u32, region: Option<Rect>, with_cursor: bool) 
         crate::x11::X11Source::new(crate::x11::Target::Area(area), src.name(), with_cursor)
             .map(|s| Box::new(s) as Box<dyn FrameSource>)
     } else {
-        // Wayland: PipeWire stream (the compositor decides about the cursor).
         crate::stream::StreamSource::monitor(&src.monitor, src.name(), src.region).map(|s| Box::new(s) as Box<dyn FrameSource>)
     };
-    // macOS: AVFoundation stream; it always shows the cursor.
     #[cfg(target_os = "macos")]
     let fast = crate::stream::StreamSource::monitor(&src.monitor, src.name(), src.region).map(|s| Box::new(s) as Box<dyn FrameSource>);
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
@@ -320,7 +293,6 @@ pub fn monitor_source(monitor_id: u32, region: Option<Rect>, with_cursor: bool) 
     Ok(Box::new(src))
 }
 
-/// Recording source for a window (see [`monitor_source`]).
 pub fn window_source(window_id: u32, with_cursor: bool) -> anyhow::Result<Box<dyn FrameSource>> {
     #[cfg(windows)]
     {

@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# Headless smoke test of dist/linux/mediaa (runs inside a clean ubuntu:24.04 container):
-# installs only runtime deps, checks that every shared library resolves, starts the app on a
-# virtual X server and saves a screenshot to dist/linux/smoke.png.
 set -u
 export DEBIAN_FRONTEND=noninteractive
 bash /src/scripts/linux/install-runtime-deps.sh >/tmp/deps.log 2>&1 || { tail -20 /tmp/deps.log; exit 1; }

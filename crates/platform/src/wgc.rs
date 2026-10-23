@@ -1,8 +1,3 @@
-//! Windows recording sources on Windows Graphics Capture (`windows-capture`): the GPU delivers
-//! a frame whenever the screen / window changes (up to the display refresh rate), the cursor
-//! is composited by Windows itself. `grab` returns the newest frame without waiting, so the
-//! recorder keeps its frame rate even for large displays (GDI screenshots take ~40 ms at 4K).
-
 use anyhow::{anyhow, Context as _};
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
@@ -20,7 +15,6 @@ use windows_capture::window::Window;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Newest captured frame, shared between the capture thread and `grab`.
 #[derive(Default)]
 struct Latest {
     frame: Mutex<Option<Frame>>,
@@ -55,26 +49,22 @@ impl GraphicsCaptureApiHandler for Handler {
     }
 }
 
-/// A display (optionally a region of it) or a window captured with WGC.
 pub struct WgcSource {
     name: String,
     size: (u32, u32),
     latest: Arc<Latest>,
     last: Option<Frame>,
-    /// Grabs that got a new picture vs. all grabs (logged at the end, to diagnose frame rates).
     fresh: u64,
     grabs: u64,
     control: Option<CaptureControl<Handler, BoxError>>,
 }
 
 impl WgcSource {
-    /// `monitor_id` / `region` as for `screen::MonitorSource` (`region` already clamped, even).
     pub fn monitor(monitor_id: u32, name: String, size: (u32, u32), region: Option<Rect>, cursor: bool) -> anyhow::Result<Self> {
         let monitor = Monitor::from_raw_hmonitor(monitor_id as i32 as isize as *mut std::ffi::c_void);
         Self::start(monitor, name, size, region, cursor)
     }
 
-    /// Window by its id (HWND); the frame size is fixed to the first frame's.
     pub fn window(window_id: u32, name: String, cursor: bool) -> anyhow::Result<Self> {
         let window = Window::from_raw_hwnd(window_id as i32 as isize as *mut std::ffi::c_void);
         let mut s = Self::start(window, name, (0, 0), None, cursor)?;
@@ -84,8 +74,6 @@ impl WgcSource {
         Ok(s)
     }
 
-    /// One picture of a window (screenshots): exactly its visible frame, without the
-    /// invisible resize borders or the drop shadow.
     pub fn window_frame(window_id: u32) -> anyhow::Result<Frame> {
         let window = Window::from_raw_hwnd(window_id as i32 as isize as *mut std::ffi::c_void);
         Self::start(window, String::new(), (0, 0), None, false)?.wait_first()
@@ -109,7 +97,6 @@ impl WgcSource {
                 (latest.clone(), region),
             )
         };
-        // Hiding the yellow capture border needs Windows 11; older systems keep it.
         let control = Handler::start_free_threaded(settings(DrawBorderSettings::WithoutBorder))
             .or_else(|_| Handler::start_free_threaded(settings(DrawBorderSettings::Default)))
             .map_err(|e| anyhow!("Windows Graphics Capture: {e}"))?;
@@ -120,7 +107,6 @@ impl WgcSource {
         Ok(s)
     }
 
-    /// Waits for the first frame (WGC delivers it within a few milliseconds).
     fn wait_first(&mut self) -> anyhow::Result<Frame> {
         let guard = self.latest.frame.lock().expect("frame lock");
         let (guard, _) = self
@@ -144,14 +130,11 @@ impl FrameSource for WgcSource {
         self.size
     }
 
-    /// The newest frame; the previous one again if the screen has not changed.
     fn grab(&mut self) -> anyhow::Result<Frame> {
         if self.control.as_ref().is_some_and(|c| c.is_finished()) {
             anyhow::bail!("capture ended (window closed or display disconnected)");
         }
         self.grabs += 1;
-        // Never wait here: the recorder's frame timer must keep its pace (waiting for a fresh
-        // picture costs whole frames when the display refresh drifts against the timer).
         if let Some(f) = self.latest.frame.lock().expect("frame lock").take() {
             self.last = Some(f);
             self.fresh += 1;

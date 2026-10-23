@@ -1,9 +1,3 @@
-//! The `transcribe` queue task: the sound of a file → voice activity → speech recognition,
-//! phrase by phrase into the file's transcript (`mediaa_core::transcript`), checkpointing the
-//! time recognised up to, then the dialog's replies without speakers. A stopped or crashed task
-//! continues from its last phrase. Speakers are a task of their own (`diarize`), the index and
-//! the topics too: the pipeline links them by dependencies.
-
 use crate::run::{Host, Stage, Work};
 use crate::scope::Scope;
 use mediaa_core::agent::AgentSettings;
@@ -18,26 +12,20 @@ use std::sync::Arc;
 
 pub const KIND: &str = "transcribe";
 
-/// The engine's sample rate of speech models: 16 kHz mono PCM f32.
 pub const SAMPLE_RATE: u32 = 16_000;
 
-/// Voice activity detection (engine model spec).
 pub const VAD_MODEL: &str = "csukuangfj/vad/silero_vad.onnx";
 
-/// What to transcribe.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Input {
     pub path: PathBuf,
 }
 
-/// Where a task stopped.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct Cursor {
-    /// Seconds of the recording recognised.
     t: f64,
 }
 
-/// The engine's model specs of a task and the token to download the model files.
 struct Specs {
     recognizer: String,
     vad: String,
@@ -65,7 +53,6 @@ impl Transcribe {
         Transcribe { ai_dir: ai_dir.to_path_buf(), settings }
     }
 
-    /// One phrase from `cursor.t`. `None` when the recording has no more speech.
     fn one_phrase(
         &self,
         engine: &dyn Engine,
@@ -94,7 +81,6 @@ impl Transcribe {
             }
         })?;
         let decoder = std::thread::Builder::new().name("transcribe-decode".into()).spawn(move || {
-            // The decoding runs on this thread; its progress is the chunk's pulse too.
             let pulse = mediaa_core::pulse::current();
             mediaa_media::preview::decode_mono(&path, start, SAMPLE_RATE, decode_stop, move |samples| {
                 if let Some(pulse) = &pulse {
@@ -113,9 +99,6 @@ impl Transcribe {
             for speech in session.push(&chunk) {
                 match engine.recognize(&specs.recognizer, speech.start, &speech.samples, hf_token) {
                     Ok(phrase) => {
-                        // A segment that does not move past the cursor is behind us (a new
-                        // session can report it again). Skipping it is what lets the next
-                        // chunk reach the end of the file.
                         if phrase.end <= cursor.t {
                             continue;
                         }
@@ -206,9 +189,6 @@ mod tests {
     use mediaa_core::agent::{AgentSettings, AnalysisOptions, Budget};
     use mediaa_queue::Status as TaskStatus;
 
-    /// A real transcription through the queue with models in `MEDIAA_TEST_MODELS` (the app's
-    /// folder by default): GigaAM + VAD on a two-speaker sample, diarized. The engine downloads
-    /// the models on first use.
     #[test]
     #[ignore]
     fn transcribes_through_the_queue() {
@@ -222,7 +202,6 @@ mod tests {
         let library = tempfile::tempdir().unwrap();
         let media = library.path().join("talk.wav");
         std::fs::copy(&wav, &media).unwrap();
-        // Models (shared between test runs), the queue and the transcript live in `ai`.
         let defaults = AgentSettings::default();
         let options = AnalysisOptions { diarize: true, speakers: None, index: true, topics: false, details: false };
         let sched = crate::run::open_scheduler(&ai, &defaults.budget).unwrap();

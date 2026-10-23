@@ -1,7 +1,3 @@
-//! The web for the agent: search (DuckDuckGo's HTML results without a key, a SearXNG instance,
-//! or the Brave / Tavily APIs with a key) and reading a page as text (its main content by the
-//! readability algorithm, as Markdown, bounded).
-
 use mediaa_core::agent::{WebEngine, WebSettings};
 use serde_json::Value;
 use std::io::Read;
@@ -9,10 +5,8 @@ use std::time::Duration;
 
 const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 const TIMEOUT: Duration = Duration::from_secs(20);
-/// Largest page read (bytes).
 const MAX_PAGE: u64 = 4 << 20;
 
-/// A search result.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct WebHit {
     pub title: String,
@@ -20,7 +14,6 @@ pub struct WebHit {
     pub snippet: String,
 }
 
-/// A page read as text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Page {
     pub title: String,
@@ -41,7 +34,6 @@ fn text_of(e: scraper::ElementRef) -> String {
     e.text().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The real address behind a DuckDuckGo redirect (`//duckduckgo.com/l/?uddg=<address>`).
 fn unwrap_redirect(href: &str) -> Option<String> {
     let full = if href.starts_with("//") { format!("https:{href}") } else { href.to_string() };
     let url = url::Url::parse(&full).ok()?;
@@ -51,7 +43,6 @@ fn unwrap_redirect(href: &str) -> Option<String> {
     Some(full)
 }
 
-/// Results of DuckDuckGo's HTML page (ads left out).
 pub fn parse_duckduckgo(html: &str) -> anyhow::Result<Vec<WebHit>> {
     let doc = scraper::Html::parse_document(html);
     let result = scraper::Selector::parse("div.result").expect("selector");
@@ -72,7 +63,6 @@ pub fn parse_duckduckgo(html: &str) -> anyhow::Result<Vec<WebHit>> {
     Ok(hits)
 }
 
-/// Results of a JSON API: `items` is where the list is, then the fields of title, url, text.
 fn parse_json(body: &Value, items: &[&str], fields: (&str, &str, &str)) -> Vec<WebHit> {
     let mut list = body;
     for k in items {
@@ -96,7 +86,6 @@ fn parse_json(body: &Value, items: &[&str], fields: (&str, &str, &str)) -> Vec<W
 fn ok(resp: reqwest::blocking::Response, what: &str) -> anyhow::Result<reqwest::blocking::Response> {
     match resp.status().as_u16() {
         200..=299 => Ok(resp),
-        // An HTML page instead of the API's JSON: the address is blocked before the key is looked at.
         403 if resp.headers().get(reqwest::header::CONTENT_TYPE).is_some_and(|t| t.to_str().is_ok_and(|t| t.starts_with("text/html"))) => {
             anyhow::bail!("{what} refuses requests from this network (403); set a proxy below or pick another search service")
         }
@@ -106,13 +95,11 @@ fn ok(resp: reqwest::blocking::Response, what: &str) -> anyhow::Result<reqwest::
     }
 }
 
-/// Searches the web with the engine of `web`: up to `n` results.
 pub fn search(web: &WebSettings, query: &str, n: usize) -> anyhow::Result<Vec<WebHit>> {
     let c = client(web)?;
     let key = web.api_key.trim();
     let mut hits = match web.engine {
         WebEngine::DuckDuckGo => {
-            // A GET: the form POST is the one DuckDuckGo meets with a captcha.
             let resp = ok(c.get("https://html.duckduckgo.com/html/").query(&[("q", query)]).send()?, "DuckDuckGo")?;
             parse_duckduckgo(&resp.text()?)?
         }
@@ -138,7 +125,6 @@ pub fn search(web: &WebSettings, query: &str, n: usize) -> anyhow::Result<Vec<We
     Ok(hits)
 }
 
-/// The readable text of an HTML page (Markdown), its title.
 pub fn readable(html: &str, url: &str) -> anyhow::Result<(String, String)> {
     let cfg = dom_smoothie::Config { text_mode: dom_smoothie::TextMode::Markdown, ..Default::default() };
     let mut r = dom_smoothie::Readability::new(html, Some(url), Some(cfg)).map_err(|e| anyhow::anyhow!("{url}: {e}"))?;
@@ -146,8 +132,6 @@ pub fn readable(html: &str, url: &str) -> anyhow::Result<(String, String)> {
     Ok((article.title.to_string(), article.text_content.to_string()))
 }
 
-/// Markdown made lean for a model: links keep their text, images and footnote marks go, HTML
-/// line breaks and empty table rows go, escapes are undone.
 pub fn lean(markdown: &str) -> String {
     static LINK: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"!?\[((?:[^\[\]]|\[[^\]]*\])*)\]\([^)]*\)").expect("regex"));
@@ -167,8 +151,6 @@ pub fn lean(markdown: &str) -> String {
     out
 }
 
-/// Reads `url`: an HTML page's main content as Markdown, plain text as it is; at most
-/// `max_chars` characters.
 pub fn read(web: &WebSettings, url: &str, max_chars: usize) -> anyhow::Result<Page> {
     let parsed = url::Url::parse(url.trim()).map_err(|e| anyhow::anyhow!("«{url}» is not an address: {e}"))?;
     anyhow::ensure!(matches!(parsed.scheme(), "http" | "https"), "only http(s) pages are read");
@@ -238,9 +220,6 @@ mod tests {
         assert!(!text.contains("Меню Меню"), "navigation left out: {text}");
     }
 
-    /// Live: searches with DuckDuckGo (or Tavily with the key in `MEDIAA_BENCH_TAVILY`, through
-    /// `MEDIAA_BENCH_PROXY`) and reads the first page with text (some are only a script's
-    /// loader). `cargo test -- --ignored`.
     #[test]
     #[ignore]
     fn searches_and_reads_the_web() {
@@ -252,7 +231,6 @@ mod tests {
         if let Ok(proxy) = std::env::var("MEDIAA_BENCH_PROXY") {
             web.proxy = proxy;
         }
-        // DuckDuckGo may answer with a captcha (it marks addresses that search often).
         let urls = match search(&web, "электронная трудовая книжка выписка", 5) {
             Ok(hits) => {
                 eprintln!("{hits:#?}");

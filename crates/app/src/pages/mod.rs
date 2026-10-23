@@ -1,6 +1,3 @@
-//! Window layout: top header (sections, recording status, theme, settings), a slim row of
-//! sub-pages under it for the sections that have them (Capture, Agent), and the active page.
-
 pub mod about;
 pub mod agent;
 pub mod audio;
@@ -18,7 +15,6 @@ use mediaa_core::library::human_duration;
 use mediaa_core::settings::ThemePreference;
 use rust_i18n::t;
 
-/// Narrowest catalogs side bar (the widest: 60 % of the window).
 const SIDEBAR_MIN: f32 = 180.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +26,6 @@ pub enum Section {
 }
 
 impl Page {
-    /// Header section of the page (`None` for Settings / About).
     pub fn section(self) -> Option<Section> {
         match self {
             Page::Library => Some(Section::Library),
@@ -42,7 +37,6 @@ impl Page {
     }
 }
 
-/// Sub-pages of a section (empty: the section is one page).
 fn sub_pages(section: Section) -> Vec<(Page, &'static str, String)> {
     match section {
         Section::Capture => vec![
@@ -82,7 +76,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
             Section::Agent => app.last_agent_page = app.page,
             Section::Library | Section::Convert => {}
         }
-        // Sections with sub-pages: a slim row under the header.
         let pages = sub_pages(section);
         if !pages.is_empty() {
             egui::Panel::top("subnav")
@@ -98,7 +91,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    // The record pages keep their start button at the bottom of the window, centred.
     if matches!(app.page, Page::Record | Page::RecordAudio) && app.recorder.is_idle() {
         egui::Panel::bottom("record-start")
             .resizable(false)
@@ -106,7 +98,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
             .show(ui, |ui| if app.page == Page::Record { record::start_bar(app, ui) } else { audio::start_bar(app, ui) });
     }
 
-    // Catalogs: the tree in a resizable side bar, open files in tabs filling the rest.
     if app.page == Page::Catalogs {
         let width_id = egui::Id::new("catalog-sidebar-width");
         let max = (ui.available_width() * 0.6).max(SIDEBAR_MIN);
@@ -119,7 +110,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(p.bg))
             .show(ui, |ui| agent::catalogs::tabs(app, ui));
-        // Splitter on the side bar's edge (registered last: above both panels).
         let edge = panel.response.rect.right();
         let y = panel.response.rect.y_range();
         let handle = ui.interact(egui::Rect::from_x_y_ranges(edge - 4.0..=edge + 4.0, y), egui::Id::new("catalog-splitter"), egui::Sense::drag());
@@ -132,7 +122,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
             ctx.data_mut(|d| d.insert_persisted(width_id, w));
         }
         let (line, stroke) = if active { (2.0, p.accent) } else { (1.0, p.border) };
-        // On the window's own layer, after both panels: above them, below menus and popups.
         ui.painter().vline(edge, y, Stroke::new(line, stroke));
         agent::catalogs::dialogs(app, &ctx);
         return;
@@ -219,8 +208,6 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     });
 }
 
-/// Sub-pages of a section as compact tabs in one row; a red dot marks the page of the
-/// recording in progress (the shell remembers the last sub-page of each section).
 fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)]) {
     let p = theme::palette(ui);
     ui.horizontal_centered(|ui| {
@@ -229,7 +216,6 @@ fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)]) {
             let selected = app.page == page;
             let (fill, fg) = if selected { (p.accent_soft, p.accent) } else { (Color32::TRANSPARENT, p.text) };
             let recording = page == app.recording_page() && !app.recorder.is_idle();
-            // Room for the dot after the label.
             let text = if recording { format!("{ic}  {label}    ") } else { format!("{ic}  {label}") };
             let btn = egui::Button::new(RichText::new(text).size(13.0).color(fg))
                 .fill(fill)
@@ -248,7 +234,6 @@ fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)]) {
     });
 }
 
-/// Compact recording status + controls in the header.
 fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     let p = theme::palette(ui);
     let (label, paused) = match &app.recorder {
@@ -263,7 +248,6 @@ fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
         RecState::Saving { progress, .. } => (format!("{} {:.0}%", t!("record.saving"), progress * 100.0), false),
         _ => return,
     };
-    // Right-to-left layout: controls first, then the label.
     if matches!(app.recorder, RecState::Recording { .. }) {
         if theme::icon_button(ui, icon::X, &t!("record.cancel")).clicked() {
             app.stop_recording(ctx, false);
@@ -281,7 +265,6 @@ fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     ui.add_space(8.0);
 }
 
-/// Page heading with a subtitle.
 pub fn header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     let p = theme::palette(ui);
     ui.horizontal(|ui| {
@@ -293,9 +276,6 @@ pub fn header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     ui.add_space(8.0);
 }
 
-/// Compact clickable action tile (icon badge + title + subtitle).
-/// Width of one of `n` tiles in a row: as many columns as fit (min. 180 pt each), the rest wrap
-/// (lay them out with `ui.horizontal_wrapped`).
 pub fn tile_width(ui: &egui::Ui, n: usize) -> f32 {
     let gap = ui.spacing().item_spacing.x;
     let avail = ui.available_width();

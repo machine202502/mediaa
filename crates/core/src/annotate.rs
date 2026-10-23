@@ -1,24 +1,15 @@
-//! Screenshot annotations (Lightshot-style): pen, line, arrow, rectangle, highlighter, text.
-//!
-//! Shapes are stored in *image pixel* coordinates. The overlay draws them on screen with egui;
-//! [`render`] rasterizes them into the final image with `tiny-skia` (antialiased paths) and
-//! `ab_glyph` (text, using egui's default UI font so the result looks like the editor).
-
 use crate::frame::Frame;
 use crate::geometry::Rect;
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use std::sync::{Arc, OnceLock};
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, PixmapMut, Stroke, Transform};
 
-/// Default font for text annotations (same as egui's default proportional font).
 pub const FONT: &[u8] = epaint_default_fonts::UBUNTU_LIGHT;
 
-/// A font offered for text annotations.
 #[derive(Clone)]
 pub struct FontFace {
     pub name: String,
     pub data: Arc<Vec<u8>>,
-    /// Face index inside a font collection (`.ttc`).
     pub index: u32,
 }
 
@@ -28,20 +19,15 @@ impl std::fmt::Debug for FontFace {
     }
 }
 
-/// Index of the built-in sans font in [`fonts`]; index 1 is the built-in monospace one.
 pub const FONT_SANS: u16 = 0;
 pub const FONT_MONO: u16 = 1;
 
-/// Common system font families offered when installed (regular face).
 const SYSTEM_FONTS: [&str; 18] = [
     "Arial", "Segoe UI", "Calibri", "Verdana", "Tahoma", "Times New Roman", "Georgia", "Consolas", "Courier New",
     "Comic Sans MS", "Impact", "Helvetica", "Times", "Menlo", "DejaVu Sans", "DejaVu Serif", "Liberation Sans",
     "Noto Serif",
 ];
 
-/// Fonts for text annotations: the two built-in ones, then the installed system fonts from
-/// [`SYSTEM_FONTS`] (found with `fontdb`). Scanning takes a moment; call once early in the
-/// background to warm it up.
 pub fn fonts() -> &'static [FontFace] {
     static FONTS: OnceLock<Vec<FontFace>> = OnceLock::new();
     FONTS.get_or_init(|| {
@@ -63,12 +49,9 @@ pub fn fonts() -> &'static [FontFace] {
     })
 }
 
-/// Font sizes offered for text annotations (image pixels).
 pub const TEXT_SIZES: [f32; 9] = [12.0, 16.0, 20.0, 24.0, 32.0, 40.0, 56.0, 72.0, 96.0];
 
-/// Highlighter strokes are this many times wider than the selected thickness.
 pub const MARKER_WIDTH_FACTOR: f32 = 4.0;
-/// Highlighter opacity.
 pub const MARKER_ALPHA: u8 = 90;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -89,7 +72,6 @@ impl Tool {
 pub struct Style {
     pub color: [u8; 4],
     pub width: f32,
-    /// Text: index into [`fonts`] and size in image pixels.
     pub font: u16,
     pub font_size: f32,
 }
@@ -102,14 +84,11 @@ impl Style {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShapeKind {
-    /// Free-hand polyline.
     Pen(Vec<(f32, f32)>),
-    /// Translucent wide free-hand stroke.
     Marker(Vec<(f32, f32)>),
     Line { from: (f32, f32), to: (f32, f32) },
     Arrow { from: (f32, f32), to: (f32, f32) },
     Rect { a: (f32, f32), b: (f32, f32) },
-    /// Text with its top-left corner at `pos`.
     Text { pos: (f32, f32), text: String },
 }
 
@@ -120,7 +99,6 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// Starts a shape for `tool` at `p` (text shapes start empty).
     pub fn begin(tool: Tool, p: (f32, f32), style: Style) -> Shape {
         let kind = match tool {
             Tool::Pen => ShapeKind::Pen(vec![p]),
@@ -133,11 +111,9 @@ impl Shape {
         Shape { kind, style }
     }
 
-    /// Extends the shape while dragging.
     pub fn drag_to(&mut self, p: (f32, f32)) {
         match &mut self.kind {
             ShapeKind::Pen(pts) | ShapeKind::Marker(pts) => {
-                // Skip sub-pixel jitter to keep paths small.
                 if pts.last().is_none_or(|l| (l.0 - p.0).hypot(l.1 - p.1) >= 1.0) {
                     pts.push(p);
                 }
@@ -148,7 +124,6 @@ impl Shape {
         }
     }
 
-    /// Shapes that would draw nothing (a click without drag, empty text) are dropped.
     pub fn is_meaningful(&self) -> bool {
         let far = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).hypot(a.1 - b.1) >= 2.0;
         match &self.kind {
@@ -160,7 +135,6 @@ impl Shape {
     }
 }
 
-/// Triangle of an arrow head at `to`, sized from the stroke width.
 pub fn arrow_head(from: (f32, f32), to: (f32, f32), width: f32) -> [(f32, f32); 3] {
     let (dx, dy) = (to.0 - from.0, to.1 - from.1);
     let len = dx.hypot(dy).max(1e-3);
@@ -171,7 +145,6 @@ pub fn arrow_head(from: (f32, f32), to: (f32, f32), width: f32) -> [(f32, f32); 
     [to, (base.0 - uy * half, base.1 + ux * half), (base.0 + uy * half, base.1 - ux * half)]
 }
 
-/// End of the arrow shaft (the shaft stops inside the head so the tip stays sharp).
 pub fn arrow_shaft_end(from: (f32, f32), to: (f32, f32), width: f32) -> (f32, f32) {
     let [tip, l, r] = arrow_head(from, to, width);
     let base = ((l.0 + r.0) / 2.0, (l.1 + r.1) / 2.0);
@@ -199,7 +172,6 @@ fn polyline(pts: &[(f32, f32)]) -> Option<tiny_skia::Path> {
     let (first, rest) = pts.split_first()?;
     pb.move_to(first.0, first.1);
     if rest.is_empty() {
-        // A dot: zero-length segment drawn with round caps.
         pb.line_to(first.0 + 0.01, first.1);
     }
     for p in rest {
@@ -254,7 +226,6 @@ fn draw_text(pm: &mut PixmapMut, pos: (f32, f32), text: &str, style: &Style) {
     }
 }
 
-/// Draws `shapes` onto `frame` (opaque RGBA, i.e. already premultiplied for tiny-skia).
 pub fn render(frame: &mut Frame, shapes: &[Shape]) {
     let (w, h) = (frame.width, frame.height);
     let Some(mut pm) = PixmapMut::from_bytes(&mut frame.data, w, h) else { return };
@@ -310,7 +281,6 @@ pub fn render(frame: &mut Frame, shapes: &[Shape]) {
     }
 }
 
-/// Crops `rect` out of `full` with `shapes` (in `full`'s coordinates) drawn on top.
 pub fn render_crop(full: &Frame, rect: Rect, shapes: &[Shape]) -> Frame {
     let mut out = full.crop(rect);
     let r = rect.clamp_to(&Rect::new(0, 0, full.width as i32, full.height as i32));
@@ -366,7 +336,7 @@ mod tests {
     fn pen_and_line_draw_along_path() {
         let mut f = white(100, 100);
         let mut pen = Shape::begin(Tool::Pen, (10.0, 10.0), RED);
-        pen.drag_to((10.4, 10.2)); // jitter, ignored
+        pen.drag_to((10.4, 10.2));
         pen.drag_to((90.0, 10.0));
         assert!(matches!(&pen.kind, ShapeKind::Pen(p) if p.len() == 2));
         let mut line = Shape::begin(Tool::Line, (50.0, 20.0), RED);
@@ -383,8 +353,6 @@ mod tests {
         let s = Shape { kind: ShapeKind::Arrow { from: (10.0, 50.0), to: (190.0, 50.0) }, style: RED };
         render(&mut f, &[s]);
         assert!(is_red(&f, 100, 50), "shaft");
-        // The head is much wider than the 4 px shaft.
-        // Head: 16 px long, ±8.8 px wide at its base (x = 174).
         assert!(is_red(&f, 177, 56), "head");
         assert!(is_white(&f, 100, 58), "shaft is thin");
     }

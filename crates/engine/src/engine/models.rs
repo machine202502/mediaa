@@ -1,16 +1,9 @@
-//! What the engine knows about models without running them: the format of a model from its file
-//! names, the roles it fits, the bytes a download takes, and the Hugging Face repository listing.
-//!
-//! Format detection and role fitness are pure functions over file names (unit-tested); only
-//! `fetch_remote_files` touches the network.
-
 use crate::engine::{EngineError, ModelFile, ModelFormat, ModelInspect};
 use crate::hub;
 use mediaa_core::agent::ModelRole;
 use serde::Deserialize;
 use std::time::Duration;
 
-/// The API name of a role (its `ModelRole` name in snake_case).
 pub fn role_name(role: ModelRole) -> &'static str {
     match role {
         ModelRole::Embedding => "embedding",
@@ -40,7 +33,6 @@ fn is_tokens(name: &str) -> bool {
     name.rsplit(['/', '\\']).next().is_some_and(|file| file.eq_ignore_ascii_case("tokens.txt"))
 }
 
-/// The format of a model from its file names.
 pub fn detect_format(files: &[ModelFile]) -> ModelFormat {
     if files.iter().any(|file| is_gguf(&file.name)) {
         ModelFormat::Gguf
@@ -53,7 +45,6 @@ pub fn detect_format(files: &[ModelFile]) -> ModelFormat {
     }
 }
 
-/// For which roles the model fits, by its format, and why the other roles do not fit it.
 pub fn role_fitness(files: &[ModelFile]) -> (Vec<String>, Vec<String>) {
     let format = detect_format(files);
     let mut roles: Vec<String> = Vec::new();
@@ -77,7 +68,6 @@ pub fn role_fitness(files: &[ModelFile]) -> (Vec<String>, Vec<String>) {
     (roles, problems)
 }
 
-/// `pattern` with `*` standing for any run of characters (the globs of `hub::select_files`).
 fn glob_match(pattern: &str, name: &str) -> bool {
     let pattern: Vec<char> = pattern.chars().collect();
     let name: Vec<char> = name.chars().collect();
@@ -93,7 +83,6 @@ fn glob_match(pattern: &str, name: &str) -> bool {
         } else if let Some((star_p, star_n)) = star {
             p = star_p + 1;
             n = star_n + 1;
-            // Let the star consume one more character, or the next mismatch would retry the same one.
             star = Some((star_p, n));
         } else {
             return false;
@@ -102,8 +91,6 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     pattern[p..].iter().all(|c| *c == '*')
 }
 
-/// Bytes a download of these files takes: one weights format per repository, as
-/// `hub::select_files` chooses it.
 fn selected_bytes(files: &[ModelFile]) -> u64 {
     let names: Vec<String> = files.iter().map(|file| file.name.clone()).collect();
     let selection = hub::select_files(&names);
@@ -115,8 +102,6 @@ fn selected_bytes(files: &[ModelFile]) -> u64 {
         .sum()
 }
 
-/// The inspection answer for a list of files; `only_selected`: count only what a pull will
-/// download (a repository), rather than the size of the files given (one requested file).
 pub fn inspect_files(spec: &str, mut files: Vec<ModelFile>, only_selected: bool) -> ModelInspect {
     files.sort_by(|a, b| a.name.cmp(&b.name));
     let format = detect_format(&files);
@@ -146,7 +131,6 @@ struct LfsSize {
     size: u64,
 }
 
-/// Files of a Hugging Face repository with their sizes, from the API (no model is downloaded).
 pub fn fetch_remote_files(repo: &str, hf_token: Option<&str>) -> Result<Vec<ModelFile>, EngineError> {
     let client = reqwest::blocking::Client::builder()
         .user_agent(concat!("mediaa/", env!("CARGO_PKG_VERSION")))
@@ -257,7 +241,6 @@ mod tests {
         assert!(glob_match("*", "anything/at/all"));
         assert!(glob_match("a*b*c", "aXXbYYc"));
         assert!(!glob_match("a*b*c", "aXXbYY"));
-        // Backtracking must advance, or a failing star loops forever.
         assert!(!glob_match("*a", "bbb"));
         assert!(glob_match("*a", "bbba"));
     }

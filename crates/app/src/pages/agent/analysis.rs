@@ -1,9 +1,3 @@
-//! The analysis of a recording in the studio: the options window, the «⋯» menu of the dialog
-//! with its confirmation, and the progress of the stages. The decisions (which restarts are
-//! offered, what a restart rebuilds, which parts of the recording are available, the text of a
-//! row) are pure functions on the data of `mediaa_agent::pipeline` and `mediaa_queue`,
-//! tested without a window; the drawing below them only follows them.
-
 use super::topics;
 use crate::theme::{self, Palette};
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Margin, Rect, RichText, Sense, Stroke, StrokeKind};
@@ -15,9 +9,6 @@ use mediaa_queue::{self as queue, KindStat, Status as TaskStatus, Task, TaskId};
 use rust_i18n::t;
 use std::time::Duration;
 
-// ---------------------------------------------------------------- what is offered and rebuilt
-
-/// Why a command of the «⋯» menu cannot be used now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Why {
     NoReplies,
@@ -44,17 +35,13 @@ impl Why {
     }
 }
 
-/// What the menu offers for one stage of a recording.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Offer {
-    /// The recording has the stage: «Заново: …».
     Redo,
-    /// It does not: «Добавить: …».
     Add,
     Unavailable(Why),
 }
 
-/// What the menu offers for `stage`, from the data of the recording.
 pub fn offer(stage: Stage, ready: &Readiness, diarization_model: bool) -> Offer {
     if stage == Stage::Transcribe {
         return Offer::Redo;
@@ -76,45 +63,32 @@ pub fn offer(stage: Stage, ready: &Readiness, diarization_model: bool) -> Offer 
     }
 }
 
-/// An entry of the «⋯» menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    /// The options window, then everything from the recognition again.
     Analyse,
-    /// Redo or add one stage (and what depends on it).
     Stage(Stage),
-    /// Cancel the running analysis.
     Stop,
-    /// Find the names of the speakers from what is said in the recording.
     Names,
-    /// Stop the running search for the names.
     StopNames,
 }
 
-/// How a stage of the running analysis is shown in the menu, instead of «Добавить» / «Заново».
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Live {
-    /// Queued or waiting on another stage.
     Queued,
-    /// Running, with the percent done and, for topics and the breakdown, «2 из 7».
     Running { percent: u8, count: Option<(usize, usize)> },
     Paused,
     Failed,
     Cancelled,
 }
 
-/// The state of the running search for the speaker names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamesLive {
-    /// Queued or waiting on the model.
     Queued,
-    /// Running, with the part of the recording read so far.
     Running { percent: u8 },
     Paused,
 }
 
 impl NamesLive {
-    /// The state of the names task of the recording (`None`: no run that could be shown).
     pub fn of(task: Option<&Task>) -> Option<NamesLive> {
         let task = task?;
         match task.status {
@@ -129,11 +103,8 @@ impl NamesLive {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuItem {
     pub command: Command,
-    /// For a stage that is not in the running analysis: redo, add or unavailable.
     pub offer: Option<Offer>,
-    /// For a stage that is in the running analysis and not finished.
     pub live: Option<Live>,
-    /// The state of the running names search (the names item only).
     pub names: Option<NamesLive>,
     pub enabled: bool,
     pub why: Option<Why>,
@@ -154,12 +125,6 @@ fn percent(progress: f32) -> u8 {
     (progress.clamp(0.0, 1.0) * 100.0).round() as u8
 }
 
-/// The menu. `rows` are the stages of the running analysis (empty when nothing is running):
-/// a stage that is in it and not finished is «в очереди» / «идёт», and «Добавить» is only a
-/// stage that is neither in the data nor in that analysis. While it runs only «Stop» is usable.
-/// `names` is the latest names task of the recording (finished or not) and `names_model` says
-/// whether its model is chosen: an unfinished run shows its state and «Остановить» instead of a
-/// second start.
 pub fn menu(ready: &Readiness, rows: &[StageRow], active: bool, diarization_model: bool, names: Option<&Task>, names_model: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
     if active {
@@ -200,7 +165,6 @@ pub fn menu(ready: &Readiness, rows: &[StageRow], active: bool, diarization_mode
     items
 }
 
-/// Tasks of one analysis as the queue snapshot lists them: the root and every descendant.
 pub fn descendants(tasks: &[Task], root: TaskId) -> Vec<Task> {
     let mut keep = vec![root];
     loop {
@@ -217,9 +181,6 @@ pub fn descendants(tasks: &[Task], root: TaskId) -> Vec<Task> {
     tasks.iter().filter(|task| keep.contains(&task.id)).cloned().collect()
 }
 
-/// What a restart from `from` rebuilds: the options it queues and the stages in the chain — `from`
-/// and every later stage the recording has or the saved default enables (dependants of a
-/// disabled stage drop out).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     pub options: AnalysisOptions,
@@ -227,7 +188,6 @@ pub struct Plan {
 }
 
 pub fn plan(from: Stage, ready: &Readiness, defaults: &AnalysisOptions, diarization_model: bool, speakers: Option<u32>) -> Plan {
-    // Stages before `from` keep their data: they only must not switch their dependants off.
     let on = |stage: Stage, have: bool, default: bool| stage <= from || have || default;
     let options = AnalysisOptions {
         diarize: diarization_model && on(Stage::Diarize, ready.speakers, defaults.diarize),
@@ -248,7 +208,6 @@ pub fn plan(from: Stage, ready: &Readiness, defaults: &AnalysisOptions, diarizat
     Plan { options, stages }
 }
 
-/// «Будут пересобраны: …» / «Будут добавлены: …» for a restart of `plan`.
 pub fn confirm_text(plan: &Plan, add: bool) -> String {
     let stages = plan.stages.iter().map(|s| stage_name(*s).to_lowercase()).collect::<Vec<_>>().join(", ");
     if add {
@@ -269,13 +228,10 @@ pub fn stage_name(stage: Stage) -> String {
     .into()
 }
 
-/// How many people were typed: a whole number from 1; anything else lets diarization decide.
 pub fn parse_speakers(text: &str) -> Option<u32> {
     text.trim().parse::<u32>().ok().filter(|n| *n >= 1)
 }
 
-/// The choices of the options window. A stage that needs another one is off and unavailable
-/// while that one is off.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Draft {
     pub diarize: bool,
@@ -300,7 +256,6 @@ impl Draft {
         draft
     }
 
-    /// Diarization needs its model.
     pub fn can_diarize(&self) -> bool {
         self.model
     }
@@ -313,10 +268,7 @@ impl Draft {
         self.index && self.topics
     }
 
-    /// Switches off what its prerequisite no longer allows.
     pub fn normalize(&mut self) {
-        // Diarization without a model is not switched off here: the choice is saved as it is
-        // (a model chosen later brings it back) and the run leaves it out.
         if !self.index {
             self.topics = false;
         }
@@ -337,34 +289,20 @@ impl Draft {
     }
 }
 
-// ---------------------------------------------------------------- availability
-
-/// What the Dialog pane shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pane {
-    /// Never analysed: the «Распознать» button.
     Start,
-    /// No replies yet: the progress (or the failure) of the analysis.
     Progress,
-    /// Analysed, and there is no speech in it.
     NoSpeech,
-    /// Replies: the dialog.
     Replies,
 }
 
-/// The parts of the studio and which of them are available, from the data (`readiness`) and the
-/// state of the recording's latest analysis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Availability {
     pub pane: Pane,
-    /// The chat pane works (it needs replies).
     pub chat: bool,
-    /// The search over the recording (it needs the index).
     pub search: bool,
-    /// The topics block, the topics on the seek bar and the breakdown (they need ready topics).
     pub topics: bool,
-    /// The compact analysis line over the topics: replies exist and the analysis is still
-    /// going or has failed.
     pub compact: bool,
 }
 
@@ -379,14 +317,9 @@ pub fn availability(ready: &Readiness, analysis: Option<TaskStatus>) -> Availabi
     Availability { pane, chat: ready.replies, search: ready.replies && ready.index, topics: ready.replies && ready.topics, compact: ready.replies && shown }
 }
 
-// ---------------------------------------------------------------- time
-
-/// The time left, as the interface says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Left {
-    /// No estimate yet: nothing of this kind has run before.
     Unknown,
-    /// Under a minute.
     Under,
     Minutes(u64),
 }
@@ -407,7 +340,6 @@ pub fn left_text(left: Left) -> String {
     }
 }
 
-/// «m:ss» (and «h:mm:ss» from an hour).
 pub fn clock(d: Duration) -> String {
     let s = d.as_secs();
     let (h, m, s) = (s / 3600, (s / 60) % 60, s % 60);
@@ -418,8 +350,6 @@ pub fn clock(d: Duration) -> String {
     }
 }
 
-// ---------------------------------------------------------------- the rows of the stages
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum RowState {
     Done,
@@ -427,7 +357,6 @@ pub enum RowState {
     Waiting,
     Paused,
     Cancelled,
-    /// Not part of this analysis (and the recording does not have it).
     Off,
     Failed(String),
 }
@@ -437,13 +366,9 @@ pub struct StageRow {
     pub stage: Stage,
     pub state: RowState,
     pub progress: f32,
-    /// How long it has been going (or took).
     pub elapsed: Option<Duration>,
-    /// The estimate of what is left.
     pub left: Option<Duration>,
-    /// Topics digested / topics broken down: «3 из 7».
     pub count: Option<(usize, usize)>,
-    /// The task to resume when it failed.
     pub task: Option<TaskId>,
 }
 
@@ -457,9 +382,6 @@ fn stage_ready(stage: Stage, ready: &Readiness) -> bool {
     }
 }
 
-/// The rows of the five stages of `analysis` (`tree` holds it and all its descendants): the
-/// stage's task when the analysis has one, otherwise «done» when the recording already has the
-/// stage's data and «off» when it does not.
 pub fn rows(analysis: &Task, tree: &[Task], stats: &[KindStat], ready: &Readiness, now_ms: i64) -> Vec<StageRow> {
     let find = |kind: &str| tree.iter().filter(|t| t.kind == kind).max_by_key(|t| t.id);
     let counted = |kind: &str| {
@@ -481,8 +403,6 @@ pub fn rows(analysis: &Task, tree: &[Task], stats: &[KindStat], ready: &Readines
                 _ => None,
             };
             let Some(task) = find(kind) else {
-                // The merge adds the details to the tree when it finishes: until then they are
-                // expected when the analysis was asked for them.
                 let expected = stage == Stage::Details
                     && find(stage_kind(Stage::Topics)).is_some_and(|t| !t.status.is_finished() && t.input["options"]["details"] == true);
                 let state = if expected {
@@ -503,7 +423,6 @@ pub fn rows(analysis: &Task, tree: &[Task], stats: &[KindStat], ready: &Readines
                 TaskStatus::Failed => RowState::Failed(task.error.clone().unwrap_or_default()),
                 TaskStatus::Cancelled => RowState::Cancelled,
             };
-            // Behind a failed stage the rest never starts.
             if state == RowState::Waiting && stopped {
                 state = RowState::Off;
             }
@@ -525,12 +444,10 @@ fn stage_kind(stage: Stage) -> &'static str {
     stage.kind().expect("every stage has a task kind")
 }
 
-/// The stage the analysis is at: the one running, else the first one waiting.
 pub fn current(rows: &[StageRow]) -> Option<&StageRow> {
     rows.iter().find(|r| r.state == RowState::Running).or_else(|| rows.iter().find(|r| r.state == RowState::Waiting))
 }
 
-/// The title over the rows: «Анализ: ≈ осталось N мин», or the state when it is not running.
 pub fn total_title(status: TaskStatus, total: Left) -> String {
     match status {
         TaskStatus::Failed => t!("analysis.total_failed"),
@@ -542,9 +459,6 @@ pub fn total_title(status: TaskStatus, total: Left) -> String {
     .into()
 }
 
-/// The compact line over the topics: «Анализ: темы 3 из 7 · ≈ осталось 4 мин».
-/// A stage that is running (including one restarted after an error) wins over the parent's
-/// stored status, which another part of the program keeps up to date.
 pub fn compact_title(status: TaskStatus, rows: &[StageRow], total: Left) -> String {
     if let Some(row) = rows.iter().find(|r| r.state == RowState::Running) {
         return running_title(row, total);
@@ -567,7 +481,6 @@ fn running_title(row: &StageRow, total: Left) -> String {
     }
 }
 
-/// «Анализ: ошибка — индекс: нет модели». No bare dash when the stage or the reason is missing.
 fn failed_compact(rows: &[StageRow]) -> String {
     let Some(row) = rows.iter().find(|r| matches!(r.state, RowState::Failed(_))) else {
         return t!("analysis.total_failed").into();
@@ -586,7 +499,6 @@ fn failed_compact(rows: &[StageRow]) -> String {
     t!("analysis.compact_failed", stage = text).into()
 }
 
-/// The first line of an error, cut so the collapsed row stays one line. The full text is in the details.
 pub fn short_reason(error: &str) -> String {
     let line = error.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
     const MAX: usize = 80;
@@ -597,20 +509,16 @@ pub fn short_reason(error: &str) -> String {
     format!("{short}…")
 }
 
-/// A spinner in the analysis header: something is running, or the analysis itself is queued or waiting.
 pub fn shows_spinner(status: TaskStatus, rows: &[StageRow]) -> bool {
     rows.iter().any(|r| r.state == RowState::Running) || matches!(status, TaskStatus::Running | TaskStatus::Stopping | TaskStatus::Queued | TaskStatus::Waiting)
 }
 
-/// Topics or the breakdown are being built right now (a restarted part counts).
 pub fn topics_running(tree: &[Task]) -> bool {
     tree.iter().any(|task| {
         matches!(task.status, TaskStatus::Running | TaskStatus::Stopping) && matches!(task.kind.as_str(), TOPICS_KIND | PLAN_KIND | DIGEST_KIND | MERGE_KIND | DETAILS_KIND | DETAIL_KIND)
     })
 }
 
-/// The right-hand text of a row: «идёт 1:23 · ≈ осталось 4 мин», the time a finished stage took,
-/// or the state.
 pub fn row_time_text(row: &StageRow) -> String {
     let left_part = row.left.map(|d| left_text(left(Some(d))));
     match &row.state {
@@ -630,7 +538,6 @@ pub fn row_time_text(row: &StageRow) -> String {
     }
 }
 
-/// The name of a row: the stage, with «3 из 7» while it counts.
 pub fn row_name(row: &StageRow) -> String {
     let name = stage_name(row.stage);
     match (row.count, &row.state) {
@@ -641,17 +548,10 @@ pub fn row_name(row: &StageRow) -> String {
     }
 }
 
-// ---------------------------------------------------------------- geometry
-
-/// Width of the right-hand text of a row, of its progress bar, and the gap between a row's
-/// columns.
 const TIME_W: f32 = 190.0;
 const BAR_W: f32 = 64.0;
 const COL_GAP: f32 = 8.0;
 
-/// The columns of one row, laid out from the same constants as the topics block's header: the
-/// icon and the name start where the header's icon and text do, and the right-hand text ends at
-/// the header's caret column.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RowGeom {
     pub icon: egui::Pos2,
@@ -670,8 +570,6 @@ pub fn row_geom(rect: Rect) -> RowGeom {
     RowGeom { icon: h.icon, name, bar, time }
 }
 
-// ---------------------------------------------------------------- drawing: progress
-
 fn row_icon(state: &RowState, p: Palette) -> (&'static str, Color32) {
     match state {
         RowState::Done => (icon::CHECK_CIRCLE, p.success),
@@ -684,7 +582,6 @@ fn row_icon(state: &RowState, p: Palette) -> (&'static str, Color32) {
     }
 }
 
-/// One line of text cut at `width` with an ellipsis.
 fn elided(ui: &egui::Ui, text: &str, width: f32, font: FontId, color: Color32) -> std::sync::Arc<egui::Galley> {
     egui::WidgetText::from(RichText::new(text).font(font).color(color)).into_galley(ui, Some(egui::TextWrapMode::Truncate), width.max(0.0), egui::TextStyle::Body)
 }
@@ -693,31 +590,23 @@ fn spinner_at(ui: &egui::Ui, at: egui::Pos2, color: Color32) {
     egui::Spinner::new().size(14.0).color(color).paint_at(ui, Rect::from_center_size(at + egui::vec2(7.0, 0.0), egui::vec2(14.0, 14.0)));
 }
 
-/// What the card needs to draw.
 pub struct CardView<'a> {
     pub title: &'a str,
     pub rows: &'a [StageRow],
-    /// A spinner instead of the icon in the header.
     pub running: bool,
     pub failed: bool,
 }
 
-/// A click on a failed stage: resume it, or open its details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageHit {
     Retry(TaskId),
     Details(TaskId),
 }
 
-/// The progress card: a header row (the topics block's header geometry) and, when open, a row
-/// per stage. `fold` is `None` for a card that cannot be folded (no caret, always open), else
-/// the open flag a click on the header toggles. Returns a click on a failed stage.
 pub fn card(ui: &mut egui::Ui, view: &CardView, fold: Option<&mut bool>, p: Palette) -> Option<StageHit> {
     let mut retry = None;
     let mut fold = fold;
     let open = fold.as_ref().is_none_or(|open| **open);
-    // A frameless fill with the border painted over the final rect, like the topics block: a
-    // frame stroke would inset the header by a pixel.
     let card = egui::Frame::new()
         .fill(p.card)
         .corner_radius(CornerRadius::same(8))
@@ -764,7 +653,6 @@ pub fn card(ui: &mut egui::Ui, view: &CardView, fold: Option<&mut bool>, p: Pale
     retry
 }
 
-/// One stage row. A failed one: «Повторить» resumes it, a click anywhere else opens its details.
 fn row_ui(ui: &mut egui::Ui, row: &StageRow, p: Palette) -> Option<StageHit> {
     let (rect, row_resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), topics::HEADER_H), Sense::click());
     let g = row_geom(rect);
@@ -780,14 +668,12 @@ fn row_ui(ui: &mut egui::Ui, row: &StageRow, p: Palette) -> Option<StageHit> {
     let mut retry = None;
     match &row.state {
         RowState::Failed(error) => {
-            // The name and the error share the room of the name and the bar columns.
             let text = if error.trim().is_empty() { row_name(row) } else { format!("{} — {}", row_name(row), error.trim()) };
             let width = g.bar.right() - g.name.left();
             let galley = elided(ui, &text, width, FontId::proportional(13.0), p.danger);
             let area = Rect::from_min_max(g.name.min, egui::pos2(g.bar.right(), rect.bottom()));
             ui.painter_at(area).galley(egui::pos2(area.left(), rect.center().y - galley.size().y / 2.0), galley, p.danger);
             if !error.trim().is_empty() {
-                // The full error in a tooltip.
                 topics::text_tip(&ui.interact(area, ui.id().with(("analysis-error", row.stage as usize)), Sense::hover()), error.trim(), &super::mentions::Roster::default());
             }
             let button = ui
@@ -821,9 +707,6 @@ fn row_ui(ui: &mut egui::Ui, row: &StageRow, p: Palette) -> Option<StageHit> {
     retry
 }
 
-// ---------------------------------------------------------------- drawing: menu and windows
-
-/// A menu entry; a disabled one is dimmed, does nothing and says why on hover.
 fn entry(ui: &mut egui::Ui, glyph: &str, label: &str, enabled: bool, why: Option<Why>, p: Palette) -> bool {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::click());
     let resp = resp.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Default });
@@ -839,8 +722,6 @@ fn entry(ui: &mut egui::Ui, glyph: &str, label: &str, enabled: bool, why: Option
     enabled && resp.clicked()
 }
 
-/// The label of a stage entry: «Заново: говорящие…» / «Добавить: индекс» (the speakers ask for
-/// a number, hence the ellipsis).
 pub fn menu_label(stage: Stage, offer: Option<Offer>) -> String {
     let name = stage_name(stage).to_lowercase();
     let mut label = match offer {
@@ -853,7 +734,6 @@ pub fn menu_label(stage: Stage, offer: Option<Offer>) -> String {
     label
 }
 
-/// «в очереди: индекс» / «идёт: индекс 40%» for a stage of the running analysis.
 pub fn live_label(stage: Stage, live: Live) -> String {
     let name = stage_name(stage).to_lowercase();
     match live {
@@ -866,7 +746,6 @@ pub fn live_label(stage: Stage, live: Live) -> String {
     }
 }
 
-/// The state of the running names search: «Имена говорящих: идёт 40 %».
 pub fn names_label(live: NamesLive) -> String {
     match live {
         NamesLive::Queued => t!("analysis.menu_names_queued").into(),
@@ -875,7 +754,6 @@ pub fn names_label(live: NamesLive) -> String {
     }
 }
 
-/// The popup of the «⋯» button; returns the chosen command.
 pub fn menu_popup(button: &egui::Response, items: &[MenuItem], p: Palette) -> Option<Command> {
     egui::Popup::menu(button)
         .show(|ui| {
@@ -924,15 +802,12 @@ pub fn menu_popup(button: &egui::Response, items: &[MenuItem], p: Palette) -> Op
         .and_then(|r| r.inner)
 }
 
-/// How a window ended.
 pub enum Outcome<T> {
     Open,
     Cancel,
     Run(T),
 }
 
-/// The options window of an analysis: the stages to run and how many people speak. `restart`
-/// warns that the current analysis is erased.
 pub struct OptionsWindow {
     pub restart: bool,
     pub draft: Draft,
@@ -961,7 +836,6 @@ impl OptionsWindow {
                     ui.add(egui::Label::new(RichText::new(t!("analysis.options_restart_warn")).size(12.0).color(p.danger)).wrap());
                     ui.add_space(6.0);
                 }
-                // Recognition is always part of an analysis.
                 ui.add_enabled(false, egui::Checkbox::new(&mut true, t!("analysis.opt_recognition")));
                 ui.horizontal(|ui| {
                     ui.add_enabled_ui(draft.can_diarize(), |ui| {
@@ -1002,8 +876,6 @@ impl OptionsWindow {
     }
 }
 
-/// The confirmation of a restart of one stage: lists what will be rebuilt; the speakers ask
-/// for the number of people.
 pub struct ConfirmWindow {
     pub stage: Stage,
     pub add: bool,
@@ -1015,7 +887,6 @@ impl ConfirmWindow {
         ConfirmWindow { stage, add, speakers: defaults.speakers.map(|n| n.to_string()).unwrap_or_default() }
     }
 
-    /// What the restart would do now.
     pub fn plan(&self, ready: &Readiness, defaults: &AnalysisOptions, diarization_model: bool) -> Plan {
         let speakers = if self.stage == Stage::Diarize { parse_speakers(&self.speakers) } else { defaults.speakers };
         plan(self.stage, ready, defaults, diarization_model, speakers)
@@ -1083,7 +954,6 @@ mod tests {
             assert_eq!(offer(stage, &Readiness::default(), true), Offer::Unavailable(Why::NoReplies), "{stage:?} needs replies");
             assert_eq!(offer(stage, &ALL, true), Offer::Redo, "{stage:?} exists");
         }
-        // Replies only: speakers and the index can be added, topics and details wait for theirs.
         let bare = ready(true, false, false, false, false);
         assert_eq!(offer(Stage::Diarize, &bare, true), Offer::Add);
         assert_eq!(offer(Stage::Index, &bare, true), Offer::Add);
@@ -1111,7 +981,6 @@ mod tests {
         let stages: Vec<Command> = idle.iter().skip(1).take(Stage::ALL.len()).map(|i| i.command).collect();
         assert_eq!(stages, Stage::ALL.map(Command::Stage));
         assert_eq!(idle.last().unwrap().command, Command::Names);
-        // An entry the data does not allow keeps its reason.
         let bare = menu(&ready(true, false, false, false, false), &[], false, true, None, true);
         let topics = bare.iter().find(|i| i.command == Command::Stage(Stage::Topics)).unwrap();
         assert!(!topics.enabled);
@@ -1121,17 +990,13 @@ mod tests {
 
     #[test]
     fn the_names_item_follows_the_run() {
-        // Without speakers the item says why it cannot start.
         let bare = menu(&ready(true, false, true, true, true), &[], false, true, None, true);
         let names = bare.last().unwrap();
         assert_eq!((names.command, names.enabled, names.why), (Command::Names, false, Some(Why::NoSpeakers)));
-        // Without the analysis model too.
         let no_model = menu(&ALL, &[], false, true, None, false);
         assert_eq!((no_model.last().unwrap().enabled, no_model.last().unwrap().why), (false, Some(Why::NoNamesModel)));
-        // Idle: the item starts a run.
         let idle = menu(&ALL, &[], false, true, None, true);
         assert_eq!((idle.last().unwrap().command, idle.last().unwrap().enabled, idle.last().unwrap().why), (Command::Names, true, None));
-        // Running: the item shows the progress and a stop row follows; there is no second start.
         let mut running = task(5, "speaker-names", TaskStatus::Running, None);
         running.progress = 0.4;
         let items = menu(&ALL, &[], false, true, Some(&running), true);
@@ -1141,14 +1006,12 @@ mod tests {
         assert_ne!(names_label(NamesLive::Queued), names_label(NamesLive::Paused));
         let stop = items.last().unwrap();
         assert_eq!((stop.command, stop.enabled), (Command::StopNames, true));
-        // Queued and paused runs are shown too.
         for (status, live) in [(TaskStatus::Queued, NamesLive::Queued), (TaskStatus::Paused, NamesLive::Paused)] {
             let t = task(6, "speaker-names", status, None);
             let items = menu(&ALL, &[], false, true, Some(&t), true);
             let names = items.iter().find(|i| i.command == Command::Names).unwrap();
             assert_eq!(names.names, Some(live), "{status:?}");
         }
-        // A finished run leaves the item ready to start again.
         for status in [TaskStatus::Done, TaskStatus::Failed, TaskStatus::Cancelled] {
             let t = task(7, "speaker-names", status, None);
             let items = menu(&ALL, &[], false, true, Some(&t), true);
@@ -1161,8 +1024,6 @@ mod tests {
         items.iter().find(|item| item.command == Command::Stage(stage)).unwrap()
     }
 
-    /// The flat task list is what [`mediaa_queue::Snapshot`] holds. A stage in that analysis
-    /// is queued or running; «Добавить» is only a stage the run left out.
     #[test]
     fn the_menu_reads_the_running_analysis() {
         let analysis = task(1, "analysis", TaskStatus::Running, None);
@@ -1191,7 +1052,6 @@ mod tests {
         assert_ne!(queued, added);
         assert!(!queued.contains(&added));
 
-        // The same rule for the other states of a stage: the menu says what the run is doing.
         let row = |stage, state| StageRow { stage, state, progress: 0.0, elapsed: None, left: None, count: None, task: None };
         let rows = [
             row(Stage::Diarize, RowState::Paused),
@@ -1215,30 +1075,23 @@ mod tests {
     #[test]
     fn a_restart_rebuilds_the_stage_and_every_later_enabled_one() {
         let defaults = AnalysisOptions::default();
-        // The recording has everything: the index restart rebuilds the index, the topics and the details.
         let p = plan(Stage::Index, &ALL, &defaults, true, None);
         assert_eq!(p.stages, [Stage::Index, Stage::Topics, Stage::Details]);
         let p = plan(Stage::Transcribe, &ALL, &defaults, true, None);
         assert_eq!(p.stages, Stage::ALL);
         let p = plan(Stage::Details, &ALL, &defaults, true, None);
         assert_eq!(p.stages, [Stage::Details]);
-        // Without the diarization model the speakers drop out of a full restart.
         let p = plan(Stage::Transcribe, &ALL, &defaults, false, None);
         assert_eq!(p.stages, [Stage::Transcribe, Stage::Index, Stage::Topics, Stage::Details]);
-        // What the recording lacks and the default switches off is not added to the chain.
         let off = AnalysisOptions { diarize: false, speakers: None, index: true, topics: false, details: false };
         let bare = ready(true, false, true, false, false);
         assert_eq!(plan(Stage::Index, &bare, &off, true, None).stages, [Stage::Index]);
-        // Adding the topics also adds the details when the default asks for them.
         assert_eq!(plan(Stage::Topics, &bare, &defaults, true, None).stages, [Stage::Topics, Stage::Details]);
-        // The details need the topics: a default with topics off but details on cannot add them alone.
         let odd = AnalysisOptions { topics: false, details: true, ..defaults };
         assert_eq!(plan(Stage::Index, &bare, &odd, true, None).stages, [Stage::Index]);
-        // The typed number of people goes to the diarization options.
         let p = plan(Stage::Diarize, &bare, &defaults, true, Some(3));
         assert_eq!(p.options.speakers, Some(3));
         assert_eq!(p.stages[0], Stage::Diarize);
-        // Stages before the restarted one keep their data and do not switch their dependants off.
         let p = plan(Stage::Topics, &ready(true, false, true, true, true), &off, true, None);
         assert!(p.options.index && p.options.topics);
         assert_eq!(p.stages, [Stage::Topics, Stage::Details]);
@@ -1259,7 +1112,6 @@ mod tests {
     fn the_options_keep_their_dependencies() {
         let mut draft = Draft::new(&AnalysisOptions::default(), true);
         assert!(draft.diarize && draft.index && draft.topics && draft.details);
-        // Index off: topics and details go off and cannot be switched on.
         draft.index = false;
         draft.normalize();
         assert!(!draft.topics && !draft.details && !draft.can_topics() && !draft.can_details());
@@ -1268,13 +1120,11 @@ mod tests {
         assert!(draft.can_topics() && !draft.can_details(), "the topics stay off until chosen again");
         draft.topics = true;
         assert!(draft.can_details());
-        // No diarization model: unavailable, but the choice is kept as it is (the run leaves it out).
         let draft = Draft::new(&AnalysisOptions::default(), false);
         assert!(draft.diarize && !draft.can_diarize());
         assert!(draft.options().diarize, "saved as chosen");
         let no_model = mediaa_core::agent::ModelChoices { diarization: None, ..Default::default() };
         assert!(!draft.options().resolved(&no_model).diarize, "but not run without a model");
-        // The number of people is parsed, and used only with diarization.
         let mut draft = Draft::new(&AnalysisOptions::default(), true);
         draft.speakers = " 3 ".into();
         assert_eq!(draft.options().speakers, Some(3));
@@ -1285,7 +1135,6 @@ mod tests {
         draft.speakers = "2".into();
         draft.diarize = false;
         assert_eq!(draft.options().speakers, None);
-        // The saved choice comes back as it was.
         let saved = AnalysisOptions { diarize: true, speakers: Some(4), index: true, topics: false, details: false };
         assert_eq!(Draft::new(&saved, true).options(), saved);
     }
@@ -1299,7 +1148,6 @@ mod tests {
             assert_eq!(availability(&Readiness::default(), Some(status)).pane, Pane::Progress, "{status:?}");
         }
         assert_eq!(availability(&Readiness::default(), Some(TaskStatus::Done)).pane, Pane::NoSpeech);
-        // Replies: dialog and chat, the compact line while the analysis goes on or has failed.
         let replies = ready(true, false, false, false, false);
         let running = availability(&replies, Some(TaskStatus::Running));
         assert_eq!(running.pane, Pane::Replies);
@@ -1308,12 +1156,10 @@ mod tests {
         assert!(!availability(&replies, Some(TaskStatus::Done)).compact);
         assert!(!availability(&replies, Some(TaskStatus::Cancelled)).compact);
         assert!(!availability(&replies, None).compact);
-        // Each capability appears with its data.
         let indexed = availability(&ready(true, false, true, false, false), None);
         assert!(indexed.search && !indexed.topics);
         let topics = availability(&ready(true, false, true, true, false), None);
         assert!(topics.topics);
-        // Topics without replies (the recognition is being rebuilt) are hidden.
         assert!(!availability(&ready(false, false, false, true, true), Some(TaskStatus::Running)).topics);
     }
 
@@ -1403,7 +1249,6 @@ mod tests {
 
     #[test]
     fn rows_of_earlier_data_failures_and_counts() {
-        // A restart from the index: the recognition is not in the tree but its data is there.
         let analysis = task(1, "analysis", TaskStatus::Running, None);
         let index = task(2, "index", TaskStatus::Done, Some(1));
         let topics = task(3, TOPICS_KIND, TaskStatus::Running, Some(1));
@@ -1429,7 +1274,6 @@ mod tests {
         assert_eq!(compact_title(TaskStatus::Running, &rows, Left::Minutes(4)).matches('4').count(), 1);
         assert!(compact_title(TaskStatus::Running, &rows, Left::Minutes(4)).contains(&stage_name(Stage::Topics).to_lowercase()));
 
-        // A failed index: its error is the row's, what waits behind it never starts.
         let failed_analysis = task(1, "analysis", TaskStatus::Failed, None);
         let mut index = task(2, "index", TaskStatus::Failed, Some(1));
         index.error = Some("нет модели".into());
@@ -1469,7 +1313,6 @@ mod tests {
                 assert_ne!(a, b);
             }
         }
-        // The total line says the state when it is not running.
         assert_eq!(total_title(TaskStatus::Running, Left::Minutes(4)), total_title(TaskStatus::Queued, Left::Minutes(4)));
         assert!(total_title(TaskStatus::Running, Left::Minutes(4)).contains('4'));
         assert_ne!(total_title(TaskStatus::Failed, Left::Unknown), total_title(TaskStatus::Cancelled, Left::Unknown));
@@ -1484,11 +1327,9 @@ mod tests {
         assert_eq!(g.name.left(), h.text.left(), "the name starts where the header's text does");
         assert_eq!(g.time.right(), h.caret.right(), "the right text ends at the caret column");
         assert_eq!(g.bar.center().y, rect.center().y);
-        // The columns are one gap apart, in order.
         assert!((g.bar.left() - g.name.right() - COL_GAP).abs() < 1e-6);
         assert!((g.time.left() - g.bar.right() - COL_GAP).abs() < 1e-6);
         assert_eq!((g.bar.width(), g.time.width()), (BAR_W, TIME_W));
-        // The same in every state: the geometry takes no state. A narrow row does not invert.
         let narrow = row_geom(Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(120.0, topics::HEADER_H)));
         for r in [narrow.name, narrow.bar, narrow.time] {
             assert!(r.width() >= 0.0, "{r:?}");

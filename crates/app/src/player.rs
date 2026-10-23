@@ -1,7 +1,3 @@
-//! Media playback engine shared by the library viewer and the agent's studio: a frame decoder
-//! and (if the file has sound) an audio decoder feeding the default output device, both
-//! restarted on seek or speed change. Drawing is up to the caller.
-
 use crossbeam_channel::{Receiver, TryRecvError};
 use mediaa_core::Frame;
 use mediaa_media::preview::{decode_audio, preview_frames, PreviewFrame};
@@ -11,14 +7,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Widest decoded video frame (keeps 4K clips smooth).
 const VIDEO_WIDTH: u32 = 1920;
-/// Audio queued ahead of the device before the decoder waits.
 const AUDIO_AHEAD: f64 = 0.5;
 
-/// Video / animation playback: a frame decoder and (if the file has sound) an audio decoder
-/// feeding the default output device, both restarted on seek or speed change. The clock
-/// starts once both have data, so picture and sound begin together.
 pub struct Player {
     path: PathBuf,
     duration: f64,
@@ -27,7 +18,6 @@ pub struct Player {
     speed: f64,
     volume: f32,
     paused: bool,
-    /// Position at `anchor`; `None` anchor = waiting for the decoders.
     pos: f64,
     anchor: Option<Instant>,
     frames: Option<Receiver<PreviewFrame>>,
@@ -36,12 +26,10 @@ pub struct Player {
     audio: Option<Arc<AudioOut>>,
     cancel: Arc<AtomicBool>,
     dragging: bool,
-    /// Clicks on a reply, a word or a time. The transport bar uses [`Player::jump`] and ignores this.
     links: bool,
 }
 
 impl Player {
-    /// `picture`: false for audio files (sound only, the clock follows the sound decoder).
     pub fn new(path: &Path, duration: f64, has_audio: bool, looping: bool, picture: bool) -> Player {
         let audio = if has_audio {
             AudioOut::open().map_err(|e| log::warn!("audio output: {e:#}")).ok().map(Arc::new)
@@ -78,7 +66,6 @@ impl Player {
         if self.duration > 0.0 { t.min(self.duration) } else { t }
     }
 
-    /// (Re)starts both decoders at `at` seconds; the clock waits for them.
     fn restart(&mut self, at: f64) {
         self.cancel.store(true, Ordering::Relaxed);
         self.cancel = Arc::new(AtomicBool::new(false));
@@ -105,7 +92,6 @@ impl Player {
             let c = cancel.clone();
             let _ = std::thread::Builder::new().name("viewer-audio".into()).spawn(move || {
                 let res = decode_audio(&path, at, speed, rate, cancel, move |samples| {
-                    // Back-pressure: stay a little ahead of the device.
                     while out.queued_secs() > AUDIO_AHEAD {
                         if c.load(Ordering::Relaxed) {
                             return false;
@@ -122,19 +108,16 @@ impl Player {
         }
     }
 
-    /// Whether a click in the dialog, the topics or the chat may move playback.
     pub fn set_links(&mut self, on: bool) {
         self.links = on;
     }
 
-    /// Moves to `t` when [`Player::set_links`] is on. A click while sync is off does nothing.
     pub fn seek(&mut self, t: f64) {
         if self.links {
             self.jump(t);
         }
     }
 
-    /// Moves to `t` whatever sync says (the transport bar, opening a recording at a time).
     pub fn jump(&mut self, t: f64) {
         self.restart(t);
     }
@@ -142,7 +125,7 @@ impl Player {
     pub fn toggle_pause(&mut self) {
         if self.paused && self.duration > 0.0 && self.position() >= self.duration - 0.05 {
             self.paused = false;
-            self.restart(0.0); // replay from the start
+            self.restart(0.0);
             return;
         }
         self.pos = self.position();
@@ -155,9 +138,7 @@ impl Player {
         }
     }
 
-    /// Advances playback; returns the frame to show now, if it changed.
     pub fn update(&mut self) -> Option<Frame> {
-        // Start the clock once the first frame (and some sound) is there.
         if self.anchor.is_none() {
             let mut video_done = false;
             if self.pending.is_none() {
@@ -184,7 +165,6 @@ impl Player {
         let pos = self.position();
         let mut latest = None;
         if !self.picture {
-            // Sound only: stop at the end (or start over for looping media).
             if self.duration > 0.0 && pos >= self.duration - 0.02 && !self.paused {
                 (self.pos, self.paused) = (self.duration, true);
                 if let Some(a) = &self.audio {
@@ -198,7 +178,6 @@ impl Player {
                 match self.frames.as_ref().map(|rx| rx.try_recv()) {
                     Some(Ok(f)) => self.pending = Some(f),
                     Some(Err(TryRecvError::Disconnected)) => {
-                        // All frames shown: stop at the end, or start over (animations).
                         if self.duration <= 0.0 {
                             self.duration = pos;
                         }
@@ -223,7 +202,6 @@ impl Player {
         latest
     }
 
-
     pub fn duration(&self) -> f64 {
         self.duration
     }
@@ -240,7 +218,6 @@ impl Player {
         self.speed
     }
 
-    /// Playback speed (sound keeps its pitch); restarts the decoders at the current position.
     pub fn set_speed(&mut self, speed: f64) {
         if self.speed != speed {
             let at = self.position();
@@ -253,7 +230,6 @@ impl Player {
         self.volume
     }
 
-    /// 0..=1.
     pub fn set_volume(&mut self, volume: f32) {
         self.volume = volume.clamp(0.0, 1.0);
         if let Some(a) = &self.audio {
@@ -261,8 +237,6 @@ impl Player {
         }
     }
 
-    /// While a timeline is dragged: the clock follows it, the decoders restart at
-    /// [`Player::end_scrub`].
     pub fn scrub(&mut self, t: f64) {
         (self.pos, self.anchor, self.dragging) = (t, Some(Instant::now()), true);
     }
@@ -280,4 +254,3 @@ impl Drop for Player {
         self.cancel.store(true, Ordering::Relaxed);
     }
 }
-

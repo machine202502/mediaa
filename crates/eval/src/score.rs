@@ -1,11 +1,7 @@
-//! Mechanical checks, and the shape of the judge's answer. No model is called here.
-
 use crate::cases::{Fact, TurnSpec};
 use mediaa_agent::assistant::{bad_citations, citations, Recording};
 use serde_json::{json, Value};
 
-/// How far outside an expected interval a cited time may sit and still count (seconds).
-/// The same window the agent uses when it checks that a citation points at a real reply.
 pub const SLOP_SECONDS: f64 = 15.0;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -14,7 +10,6 @@ pub struct JudgeVerdict {
     pub reason: String,
 }
 
-/// What one answer scored. `steps`, `forced` and `seconds` are filled by the runner.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnScore {
     pub question: String,
@@ -34,9 +29,6 @@ pub struct TurnScore {
 }
 
 impl TurnScore {
-    /// Share of cited times that point at a real reply and sit inside an expected interval.
-    /// `None` when the turn was given no interval: it is not counted. No citations where an
-    /// interval was expected scores 0.
     pub fn precision(&self) -> Option<f64> {
         if !self.wanted_interval {
             None
@@ -48,13 +40,11 @@ impl TurnScore {
     }
 }
 
-/// One repeat of a case, summed across its turns. Citation precision is the mean of the turns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepeatScores {
     pub facts_hit: usize,
     pub facts_total: usize,
     pub forbidden_hits: usize,
-    /// Mean of the turns that were given an interval. `None` when none of them were.
     pub citation_precision: Option<f64>,
     pub judge: Option<f64>,
     pub steps: usize,
@@ -70,17 +60,18 @@ pub fn score_turn(
     forced: bool,
     seconds: f64,
 ) -> TurnScore {
+    let answer = crate::visible::shown(answer, recording);
     let mut missed = Vec::new();
     let mut facts_hit = 0;
     for fact in &spec.facts {
-        if fact_found(answer, fact) {
+        if fact_found(&answer, fact) {
             facts_hit += 1;
         } else {
             missed.push(fact.text.clone());
         }
     }
-    let cites = citations(answer);
-    let bad = bad_citations(answer, recording);
+    let cites = citations(&answer);
+    let bad = bad_citations(&answer, recording);
     let mut remaining = bad.clone();
     let mut precise = 0;
     let mut cited = Vec::new();
@@ -103,7 +94,7 @@ pub fn score_turn(
         facts_hit,
         facts_total: spec.facts.len(),
         missed,
-        forbidden: forbidden_found(answer, &spec.forbidden),
+        forbidden: forbidden_found(&answer, &spec.forbidden),
         cited,
         precise,
         bad_citations: bad,
@@ -162,7 +153,6 @@ fn forbidden_found(answer: &str, forbidden: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// JSON Schema of the judge's answer. The grammar forces this shape; the prompt's wording is separate.
 pub fn judge_schema() -> Value {
     json!({
         "type": "object",
@@ -231,7 +221,6 @@ mod tests {
         }
     }
 
-    /// A reply from `start` to `end` seconds. Citations near it are real.
     fn recording(start: f64, end: f64) -> Recording {
         Recording {
             duration: end + 30.0,
@@ -292,7 +281,6 @@ mod tests {
 
     #[test]
     fn citations_must_be_real_and_inside_the_interval() {
-        // Reply 1:40–1:50. Interval 1:40–1:42, so ±15 s ends at 1:57.
         let turn = spec(vec![], vec![(100.0, 102.0)], &[]);
         let rec = recording(100.0, 110.0);
         let edge = scored(&turn, "Сказано [1:57].", &rec);
@@ -318,6 +306,41 @@ mod tests {
             (silent.precision().unwrap() - 0.0).abs() < 1e-9,
             "an expected interval and no citation scores 0"
         );
+    }
+
+    #[test]
+    fn a_speaker_label_is_scored_as_the_name_the_user_sees() {
+        let mut rec = recording(100.0, 110.0);
+        rec.names.insert(0, "Антон".into());
+        rec.names.insert(1, "Анна".into());
+        let spec = spec(
+            vec![
+                fact("Антон", &["Антон"]),
+                fact("Анна", &["Анна"]),
+                fact("не назван", &["не назван"]),
+            ],
+            vec![(100.0, 110.0)],
+            &[],
+        );
+        let turn = scored(
+            &spec,
+            "@s1 сказал [1:40], а @s2#3 — [1:40]. Третьего не назван.",
+            &rec,
+        );
+        assert_eq!(turn.facts_hit, 3, "{turn:?}");
+        assert!(turn.bad_citations.is_empty(), "{turn:?}");
+    }
+
+    #[test]
+    fn forbidden_text_is_matched_after_the_labels_are_replaced() {
+        let mut rec = recording(0.0, 10.0);
+        rec.names.insert(0, "Антон".into());
+        let raw_label = spec(vec![], vec![], &["@s1"]);
+        let turn = scored(&raw_label, "@s1 сказал", &rec);
+        assert!(turn.forbidden.is_empty(), "{turn:?}");
+        let shown_fallback = spec(vec![], vec![], &["Говорящий 2"]);
+        let turn = scored(&shown_fallback, "@s2 сказал", &rec);
+        assert_eq!(turn.forbidden, ["Говорящий 2"]);
     }
 
     #[test]

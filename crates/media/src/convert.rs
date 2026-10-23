@@ -1,6 +1,3 @@
-//! Conversions between popular formats (video ⇄ video, video ⇄ animation, image → image) with
-//! quality / size settings and optional audio removal, plus muxing of recordings.
-
 use crate::filters;
 use crate::info::{probe, MediaInfo};
 use crate::job;
@@ -12,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::thread::JoinHandle;
 
-/// Video files people use most: MP4 (everywhere), MOV (Apple), MKV, WebM (web), AVI (legacy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VideoFormat {
     Mp4,
@@ -53,7 +49,6 @@ impl VideoFormat {
     }
 }
 
-/// Still image formats: JPEG and PNG (everywhere), WebP (web), BMP and TIFF.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StillFormat {
     Jpeg,
@@ -86,13 +81,11 @@ impl StillFormat {
         }
     }
 
-    /// Lossy formats take a quality setting.
     pub fn has_quality(self) -> bool {
         matches!(self, StillFormat::Jpeg | StillFormat::Webp)
     }
 }
 
-/// What a file is converted into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Target {
     Video(VideoFormat),
@@ -120,9 +113,6 @@ impl Target {
         }
     }
 
-    /// Targets for a file of `kind`: videos and animations become videos or animations (the
-    /// same format too — to compress, resize or drop the sound) or an image of their first
-    /// frame, videos also sound only; images become images, audio becomes audio.
     pub fn for_kind(kind: MediaKind) -> Vec<Target> {
         let moving = VideoFormat::ALL.map(Target::Video).into_iter().chain(AnimFormat::ALL.map(Target::Anim));
         let still = StillFormat::ALL.map(Target::Still);
@@ -136,7 +126,6 @@ impl Target {
     }
 }
 
-/// How hard the encoder works: a faster conversion or a smaller file at the same quality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Effort {
     Fast,
@@ -164,7 +153,6 @@ impl Effort {
         }
     }
 
-    /// libwebp `compression_level` (0–6).
     fn webp_level(self) -> &'static str {
         match self {
             Effort::Fast => "2",
@@ -173,7 +161,6 @@ impl Effort {
         }
     }
 
-    /// FLAC `compression_level` (0–12).
     fn flac_level(self) -> &'static str {
         match self {
             Effort::Fast => "2",
@@ -182,7 +169,6 @@ impl Effort {
         }
     }
 
-    /// oxipng preset (0–6).
     fn png_preset(self) -> u8 {
         match self {
             Effort::Fast => 1,
@@ -192,34 +178,21 @@ impl Effort {
     }
 }
 
-/// Palette sizes offered for PNG (fewer colours = smaller file; lossy).
 pub const PNG_COLORS: [u16; 5] = [256, 128, 64, 32, 16];
 
-/// Frame-rate caps offered for video.
 pub const VIDEO_FPS: [u32; 4] = [60, 30, 24, 15];
 
-/// How the output is made.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConvertSettings {
-    /// 1–100: video / JPEG / WebP image quality (lower = smaller file).
     pub quality: u8,
-    /// Encoder effort: video, WebP, PNG, FLAC.
     pub effort: Effort,
-    /// Downscale to this height (aspect kept, never upscaled); videos and images.
     pub max_height: Option<u32>,
-    /// Video targets: frame-rate cap (never raised).
     pub max_fps: Option<u32>,
-    /// Video targets: leave the sound out.
     pub remove_audio: bool,
-    /// Animation targets.
     pub anim: AnimSettings,
-    /// Sound bitrate in kbit/s: lossy audio targets and the sound of videos.
     pub audio_kbps: u32,
-    /// Mix the sound down to one channel (about half the size of lossless sound).
     pub mono: bool,
-    /// PNG: reduce to a palette of this many colours (lossy); `None` keeps every colour.
     pub png_colors: Option<u16>,
-    /// WebP image: lossless instead of `quality`.
     pub webp_lossless: bool,
 }
 
@@ -240,8 +213,6 @@ impl Default for ConvertSettings {
     }
 }
 
-/// Output path in `out_dir`: titled `title`, or after the input (its MediaA title or file
-/// name), stamped with the current time (see `naming`).
 pub fn output_path(input: &Path, target: Target, title: Option<&str>, out_dir: &Path) -> PathBuf {
     let title = title
         .map(str::trim)
@@ -267,12 +238,10 @@ fn webp_output(output: Output, quality: u8, effort: Effort) -> Output {
         .set_format_opt("loop", "0")
 }
 
-/// Sound bitrate argument, clamped to what the encoders accept.
 fn bitrate(kbps: u32) -> String {
     format!("{}k", kbps.clamp(32, 320))
 }
 
-/// Video encoder and container settings for `format` (`[v]` = the filtered picture).
 fn video_output(out: Output, format: VideoFormat, s: &ConvertSettings, audio: bool) -> Output {
     let out = out.set_format(format.muxer()).add_stream_map("[v]");
     let out = match s.max_fps {
@@ -316,7 +285,6 @@ fn video_output(out: Output, format: VideoFormat, s: &ConvertSettings, audio: bo
     }
 }
 
-/// Sound-only output (`map`) in `format`; `kbps` for the lossy ones.
 pub(crate) fn audio_output(out: Output, map: &str, format: AudioFormat, kbps: u32) -> Output {
     let out = out.add_stream_map(map.to_string());
     match format {
@@ -328,12 +296,10 @@ pub(crate) fn audio_output(out: Output, map: &str, format: AudioFormat, kbps: u3
     }
 }
 
-/// Still image encoder settings for `format` (`[v]` = the filtered picture, one frame).
 fn still_output(out: Output, format: StillFormat, s: &ConvertSettings) -> Output {
     let out = out.set_format("image2").set_format_opt("update", "1").add_stream_map("[v]").set_max_video_frames(1);
     match format {
         StillFormat::Jpeg => out.set_video_codec("mjpeg").set_video_qscale(filters::qscale(s.quality)),
-        // Fast here: oxipng recompresses it afterwards.
         StillFormat::Png => out.set_video_codec("png").set_video_codec_opt("compression_level", "1"),
         StillFormat::Webp => out
             .set_video_codec("libwebp")
@@ -391,7 +357,6 @@ fn build_context(input: Input, output: &Path, target: Target, s: &ConvertSetting
     Ok(ctx)
 }
 
-/// Lossless PNG recompression with oxipng (typically 10–40 % smaller than FFmpeg's output).
 fn optimize_png(path: &Path, effort: Effort) -> anyhow::Result<()> {
     let mut opts = oxipng::Options::from_preset(effort.png_preset());
     opts.strip = oxipng::StripChunks::Safe;
@@ -400,7 +365,6 @@ fn optimize_png(path: &Path, effort: Effort) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Converts `input` into `output`. A partial output is removed on failure or cancellation.
 pub fn convert(
     input: &Path,
     output: &Path,
@@ -412,7 +376,6 @@ pub fn convert(
     convert_part(input, output, target, settings, None, on_progress, cancel)
 }
 
-/// Converts `input` (or, for `window = Some((start, length))` in µs, just that part of it).
 fn convert_part(
     input: &Path,
     output: &Path,
@@ -427,12 +390,10 @@ fn convert_part(
     }
     let animated_webp = formats::is_webp_path(input) && formats::webp_is_animated(input)?;
     let encoded = if animated_webp {
-        // FFmpeg's webp decoder handles still images only; decode frames in Rust instead.
         webp_frames_input(input).and_then(|(source, info, producer)| {
             let r = build_context(source.into(), output, target, settings, &info)
                 .and_then(|ctx| job::run(ctx, info.duration_us, on_progress, cancel));
             let produced = producer.join().map_err(|_| anyhow::anyhow!("webp decoder panicked"))?;
-            // A producer error is the root cause when the encode failed too.
             r.and(produced)
         })
     } else {
@@ -459,12 +420,8 @@ fn convert_part(
     result
 }
 
-/// Length of the trial piece [`estimate_size`] encodes out of longer files.
 const SAMPLE_US: i64 = 5_000_000;
 
-/// Approximate output size in bytes: images (and short or seek-less files) are converted
-/// whole into a temporary file; longer files only a [`SAMPLE_US`] piece from the first third,
-/// scaled up by duration.
 pub fn estimate_size(input: &Path, target: Target, settings: &ConvertSettings, cancel: &AtomicBool) -> anyhow::Result<u64> {
     let dir = tempfile::tempdir()?;
     let output = dir.path().join(format!("estimate.{}", target.extension()));
@@ -479,8 +436,6 @@ pub fn estimate_size(input: &Path, target: Target, settings: &ConvertSettings, c
     })
 }
 
-/// Decodes an animated WebP with `image-webp` and feeds its frames (with their own delays)
-/// into FFmpeg through a [`FramePushSource`].
 fn webp_frames_input(
     path: &Path,
 ) -> anyhow::Result<(FramePushSource, MediaInfo, JoinHandle<anyhow::Result<()>>)> {
@@ -504,7 +459,7 @@ fn webp_frames_input(
             for _ in 0..decoder.num_frames() {
                 let delay = i64::from(decoder.read_frame(&mut buf)?.max(1));
                 if handle.push(&buf, pts, Some(delay)).is_err() {
-                    break; // job stopped (cancelled or failed); its error is reported
+                    break;
                 }
                 pts += delay;
             }
@@ -514,7 +469,6 @@ fn webp_frames_input(
     Ok((source, info, producer))
 }
 
-/// Mixes the WAV tracks of an audio recording into one file of `format`.
 pub fn encode_audio_recording(
     tracks: &[PathBuf],
     output: &Path,
@@ -542,8 +496,6 @@ pub fn encode_audio_recording(
     result
 }
 
-/// Combines a recorded video track with zero or more WAV tracks (mixed together) into the
-/// final container. The video is stream-copied; audio is encoded to AAC.
 pub fn mux_recording(
     video: &Path,
     audio_tracks: &[PathBuf],

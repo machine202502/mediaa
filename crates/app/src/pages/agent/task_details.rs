@@ -1,7 +1,3 @@
-//! The details of any task: everything the queue stored, a hint for the failures we know,
-//! and the program log around the moment it finished. The text and the hint are pure; the window
-//! only draws them. It copies and closes — it does not download or retry.
-
 use super::analysis::clock;
 use super::queue;
 use super::task_label;
@@ -15,30 +11,21 @@ use rust_i18n::t;
 use serde_json::Value;
 use std::path::PathBuf;
 
-/// The gap between the lines and the buttons of the window.
 const GAP: f32 = 8.0;
-/// How far around the failure the log excerpt reaches.
 const LOG_BEFORE_SECS: i64 = 120;
 const LOG_AFTER_SECS: i64 = 15;
-/// The excerpt stays short enough for the window.
 const LOG_MAX_BYTES: usize = 12_000;
 const LOG_FALLBACK_RECORDS: usize = 40;
-/// When nothing was written in the time window, keep this many records on each side of the closest one.
 const LOG_NEAR: usize = 4;
-/// A wgpu adapter dump is one record and would fill the window. The task's own line is kept whole.
 const LOG_RECORD_CHARS: usize = 240;
 
-/// What to do about a failure we recognise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hint {
-    /// The model file is missing or was never downloaded.
     ModelMissing,
     OutOfMemory,
-    /// No network, or the proxy refused the connection.
     Network,
 }
 
-/// A known failure, from the error text (the engine's wording and the usual IO / HTTP phrases).
 pub fn hint_for(error: &str) -> Option<Hint> {
     let e = error.to_lowercase();
     if model_missing(&e) {
@@ -73,8 +60,6 @@ fn network_problem(e: &str) -> bool {
         .any(|needle| e.contains(needle))
 }
 
-/// What the window and the copied text say about the task. Field labels stay outside: the
-/// caller translates them, so this value can be compared as data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Facts {
     pub label: String,
@@ -92,25 +77,18 @@ pub struct Facts {
     pub progress: String,
     pub stats: String,
     pub tool: String,
-    /// Why a topic detail stopped early (`result.cut`), already in the user's language.
     pub cut: String,
-    /// Why the watchdog interrupted the run (`detail.hang`), empty once the task has finished.
     pub hang: String,
-    /// The names a speaker-names run accepted, one per line.
     pub names: String,
-    /// The evidence a speaker-names run kept, one report per line.
     pub evidence: String,
-    /// How much of the recording a speaker-names run read.
     pub read: String,
 }
 
 pub fn facts_of(task: &Task, stats: &Stats, now_ms: i64, locale: &str) -> Facts {
-    // A running task is not over: whatever `finished_ms` an earlier attempt left is not its end.
     let finished = if matches!(task.status, TaskStatus::Running | TaskStatus::Stopping) { None } else { task.finished_ms };
     Facts {
         label: task_label::label_in(locale, &task.kind, &task.title),
         status: status_text(task.status, locale),
-        // Why it waits or why it was cancelled, in the user's language; a real failure otherwise.
         error: {
             let note = queue::note_text(task.note.as_ref(), locale);
             if note.is_empty() { task.error.clone().unwrap_or_default() } else { note }
@@ -123,7 +101,6 @@ pub fn facts_of(task: &Task, stats: &Stats, now_ms: i64, locale: &str) -> Facts 
         models: stats.models.join(", "),
         started: stamp(task.started_ms),
         finished: stamp(finished),
-        // A running task counts up to now, not to its start.
         duration: if task.started_ms.is_some() { clock(elapsed(task, now_ms)) } else { String::new() },
         progress: format!("{} %", (task.progress.clamp(0.0, 1.0) * 100.0).round() as i32),
         stats: queue::stats_text(stats),
@@ -141,7 +118,6 @@ pub fn facts_of(task: &Task, stats: &Stats, now_ms: i64, locale: &str) -> Facts 
     }
 }
 
-/// The accepted names of a speaker-names result: «@s1 — Антон» per line.
 fn names_text(result: Option<&Value>) -> String {
     let list = |key: &str| result.and_then(|r| r.get(key)).and_then(Value::as_array).cloned().unwrap_or_default();
     list("names")
@@ -155,7 +131,6 @@ fn names_text(result: Option<&Value>) -> String {
         .join("\n")
 }
 
-/// The evidence the run kept: «[0:05] @s1 — Антон (self, high): Меня зовут Антон.» per line.
 fn evidence_text(result: Option<&Value>, locale: &str) -> String {
     let list = |key: &str| result.and_then(|r| r.get(key)).and_then(Value::as_array).cloned().unwrap_or_default();
     list("evidence")
@@ -190,7 +165,6 @@ fn sure_text(sure: &str, locale: &str) -> String {
     }
 }
 
-/// «прочитано 12 из 27 мин», and whether the run stopped before the end.
 fn read_text(result: Option<&Value>, locale: &str) -> String {
     let Some(result) = result else { return String::new() };
     let (Some(read), Some(total)) = (result.get("read_secs").and_then(Value::as_f64), result.get("total_secs").and_then(Value::as_f64)) else {
@@ -205,8 +179,6 @@ fn read_text(result: Option<&Value>, locale: &str) -> String {
     }
 }
 
-/// The note of a topic detail that stopped before the model finished. The agent stores it in
-/// English, in a few fixed shapes; each part is translated, anything else is shown as it came.
 pub fn cut_text(result: Option<&Value>, locale: &str) -> String {
     let Some(note) = result.and_then(|r| r.get("cut")).and_then(Value::as_str) else { return String::new() };
     note.split(": ").map(|part| cut_part(part.trim(), locale)).collect::<Vec<_>>().join(": ")
@@ -264,7 +236,6 @@ fn json_str(value: Option<&Value>) -> String {
     }
 }
 
-/// `options` when the task has them, otherwise the input's other fields (speakers, topic).
 fn options_text(input: &Value) -> String {
     if let Some(options) = input.get("options").filter(|v| !v.is_null()) {
         return serde_json::to_string(options).unwrap_or_default();
@@ -282,12 +253,10 @@ fn stamp(ms: Option<i64>) -> String {
     local_time(ms.unwrap_or(0)).filter(|_| ms.is_some()).map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string()).unwrap_or_default()
 }
 
-/// `ms` since the epoch as local wall time (the clock the log file uses).
 pub fn local_time(ms: i64) -> Option<NaiveDateTime> {
     chrono::DateTime::from_timestamp_millis(ms).map(|dt| dt.with_timezone(&chrono::Local).naive_local())
 }
 
-/// The copied text: the same facts the window shows, then the hint and the log excerpt.
 pub fn report_text(facts: &Facts, hint: &str, log: &str, locale: &str) -> String {
     let line = |key: &str, value: &str| {
         let label = field_label(key, locale);
@@ -366,12 +335,10 @@ pub fn hint_text(hint: Hint, locale: &str) -> String {
     .into()
 }
 
-/// `data/logs/mediaa.log` — the file [`mediaa_core::logging`] writes.
 pub fn program_log_path() -> PathBuf {
     mediaa_core::paths::logs_dir().join("mediaa.log")
 }
 
-/// The current log and, when it was rotated, the previous file before it.
 pub fn read_program_log() -> String {
     let path = program_log_path();
     let current = std::fs::read_to_string(&path).unwrap_or_default();
@@ -394,7 +361,6 @@ fn records_of(log: &str) -> Vec<Record> {
         if line.is_empty() {
             continue;
         }
-        // A new record starts with a timestamp; the lines of a multi-line error stay with it.
         if line_time(line).is_some() || out.is_empty() {
             out.push(Record { time: line_time(line), text: line.to_string() });
         } else if let Some(last) = out.last_mut() {
@@ -409,9 +375,6 @@ fn line_time(line: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(head, "%Y-%m-%d %H:%M:%S%.3f").ok()
 }
 
-/// The log around `around` (local time), preferring the record of `task_id`. Without a time,
-/// the records that name the task, or the tail. An empty time window shows the records closest
-/// to the failure, not the head of a long tail of startup lines.
 pub fn log_excerpt(log: &str, task_id: TaskId, around: Option<NaiveDateTime>) -> String {
     let records = records_of(log);
     let mark = format!("task {task_id} ");
@@ -428,7 +391,6 @@ pub fn log_excerpt(log: &str, task_id: TaskId, around: Option<NaiveDateTime>) ->
     tail_text(&text, LOG_MAX_BYTES)
 }
 
-/// Records around the timestamp closest to `around`. Untimed logs fall back to the tail.
 fn nearest(records: &[Record], around: NaiveDateTime) -> Vec<&Record> {
     let Some(idx) = records
         .iter()
@@ -471,15 +433,11 @@ fn tail_text(text: &str, max: usize) -> String {
     text[text.find('\n').map(|i| i + 1).unwrap_or(0)..].to_string()
 }
 
-/// What the window asks the page to do. Copy and close only.
 pub enum Cmd {
     Close,
     CopyFailed(String),
 }
 
-/// The details window. `copied` is the «Скопировано» mark; it keeps its place either way.
-/// `stats` is the task and everything under it (a composite's own counters are often empty).
-/// `now_ms` is the page's clock: a running task's duration counts up to it.
 pub fn show(ctx: &egui::Context, task: &Task, stats: &Stats, now_ms: i64, log: &str, copied: &mut bool, roster: &super::mentions::Roster) -> Option<Cmd> {
     let mut open = true;
     let mut cmd = None;
@@ -561,7 +519,6 @@ pub fn show(ctx: &egui::Context, task: &Task, stats: &Stats, now_ms: i64, log: &
                             Err(e) => cmd = Some(Cmd::CopyFailed(format!("{e:#}"))),
                         }
                     }
-                    // The mark keeps its width, so «Скопировать» does not shift when it appears.
                     let mark = t!("details.copied").to_string();
                     let width = ui.fonts_mut(|f| f.layout_no_wrap(mark.clone(), FontId::proportional(13.0), p.text).size().x);
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::hover());
@@ -581,7 +538,6 @@ fn field(ui: &mut egui::Ui, label: &str, value: &str) {
     field_value(ui, label, value, None);
 }
 
-/// `roster` renders `@sN` in the value (a topic title, a chat question).
 fn field_value(ui: &mut egui::Ui, label: &str, value: &str, roster: Option<&super::mentions::Roster>) {
     let value = if value.is_empty() { "—" } else { value };
     let text = format!("{label}: {value}");
@@ -660,13 +616,10 @@ mod tests {
         let mut t = task("");
         t.status = TaskStatus::Running;
         t.finished_ms = None;
-        // Started at 1 s; the window asks at 90 s: the time it has been running, not «0:00».
         assert_eq!(facts_of(&t, &t.stats, 90_000, "ru").duration, "1:29");
-        // A stamp left by an earlier attempt is not this run's end.
         t.finished_ms = Some(2_000);
         let running = facts_of(&t, &t.stats, 90_000, "ru");
         assert_eq!((running.duration.as_str(), running.finished.as_str()), ("1:29", ""));
-        // A finished task keeps the time it took.
         t.status = TaskStatus::Done;
         t.finished_ms = Some(4_000);
         assert_eq!(facts_of(&t, &t.stats, 90_000, "ru").duration, "0:03");
@@ -689,7 +642,6 @@ mod tests {
             "{}",
             facts_of(&t, &t.stats, 5_000, "en").hang
         );
-        // A task that finished, or one that never hung, has no note.
         t.detail = Value::Null;
         assert_eq!(facts_of(&t, &t.stats, 5_000, "ru").hang, "");
     }
@@ -719,7 +671,6 @@ mod tests {
         let report = report_text(&facts_of(&t, &t.stats, 5_000, "en"), "", "", "en");
         assert!(report.contains(&en), "{report}");
 
-        // The other shapes the agent writes, and an unknown one as it came.
         t.result = Some(json!({
             "cut": "the first answer was cut at line 40: hit the context window of 8192 tokens"
         }));
@@ -754,12 +705,10 @@ mod tests {
         assert!(facts.read.contains("12") && facts.read.contains("27"), "{}", facts.read);
         let report = report_text(&facts, "", "", "ru");
         assert!(report.contains(&facts.evidence) && report.contains(&facts.read), "{report}");
-        // The early stop is said in the window's language, or not at all.
         t.result.as_mut().unwrap()["stopped_early"] = json!(false);
         let en = facts_of(&t, &t.stats, 5_000, "en");
         assert!(en.read.contains("12") && en.read.contains("27"), "{}", en.read);
         assert!(!en.read.contains(&t!("details.read_early", locale = "en").to_string()), "{}", en.read);
-        // Every other task has no such fields.
         let plain = task("");
         let facts = facts_of(&plain, &plain.stats, 5_000, "ru");
         assert!(facts.names.is_empty() && facts.evidence.is_empty() && facts.read.is_empty());
@@ -779,7 +728,6 @@ mod tests {
         assert_eq!(hint_for("the model ran out of memory"), Some(Hint::OutOfMemory));
         assert_eq!(hint_for("proxy \"http://127.0.0.1:9\": connection timed out"), Some(Hint::Network));
         assert_eq!(hint_for("the grammar was rejected"), None);
-        // A missing file wins over a proxy mentioned in the same chain.
         assert_eq!(hint_for("proxy set, but model.onnx not found"), Some(Hint::ModelMissing));
     }
 

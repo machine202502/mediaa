@@ -1,11 +1,3 @@
-//! Live recording sessions.
-//!
-//! Each frame source (screen, region, or one of several windows) gets its own capture thread
-//! that pushes timestamped RGBA frames into an FFmpeg job (`FramePushSource` → libx264 →
-//! Matroska scratch file). Audio sources write WAV tracks. On stop the scratch files are turned
-//! into the final outputs: muxed with AAC audio for MP4/MKV, or converted with a two-stage
-//! palette for GIF / libwebp for animated WebP.
-
 use crate::convert::{self, ConvertSettings, Target};
 use crate::filters;
 use crossbeam_channel::{Receiver, Sender};
@@ -28,27 +20,19 @@ pub struct RecordingRequest {
     pub output: OutputKind,
     pub fps: u32,
     pub video_quality: u8,
-    /// Downscale the recording to this height (aspect kept); `None` keeps the source size.
     pub max_height: Option<u32>,
-    /// With several sources: put the (same) sound into every file instead of only the first.
     pub audio_in_every_file: bool,
-    /// Audio recordings (`OutputKind::Audio`, no sources): bitrate of lossy formats, kbit/s.
     pub audio_kbps: u32,
     pub anim: AnimSettings,
     pub out_dir: PathBuf,
-    /// Scratch directory for this session; created now, removed when the session ends.
     pub work_dir: PathBuf,
-    /// Title of the output files (`<title>_<start date>.<ext>`, see `naming`).
     pub title: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
-    /// A non-fatal problem (e.g. one audio device failed); recording continues.
     Warning(String),
-    /// Capture failed; the session stopped by itself. Call `stop(true)` to keep what was recorded.
     CaptureFailed(String),
-    /// Post-processing after stop, 0..=1.
     Finalizing(f32),
     Finished(Vec<PathBuf>),
     Cancelled,
@@ -99,7 +83,6 @@ impl Control {
         self.cv.notify_all();
     }
 
-    /// Sleeps up to `timeout` (or while paused). Returns `false` once stopping.
     fn wait(&self, timeout: Duration) -> bool {
         let guard = self.state.lock().expect("state lock");
         let (guard, _) = self
@@ -134,14 +117,11 @@ pub struct RecordingSession {
     out_dir: PathBuf,
     work_dir: PathBuf,
     title: String,
-    /// When recording started: the date stamp of the output names.
     started: chrono::DateTime<chrono::Local>,
     events_tx: Sender<SessionEvent>,
     events_rx: Receiver<SessionEvent>,
 }
 
-/// Scratch encode: final-quality H.264 for video outputs, lossless RGB H.264 for animations
-/// (so palette generation sees the exact screen colours).
 fn scratch_output(path: &Path, kind: OutputKind, quality: u8, max_height: Option<u32>, size: (u32, u32), fps: u32) -> (String, Output) {
     let out = Output::from(path.to_string_lossy().into_owned())
         .set_format("matroska")
@@ -166,7 +146,7 @@ fn scratch_output(path: &Path, kind: OutputKind, quality: u8, max_height: Option
     }
 }
 
-#[allow(clippy::too_many_arguments)] // plain data handed to a thread
+#[allow(clippy::too_many_arguments, reason = "plain data handed to a thread")]
 fn capture_loop(
     factory: SourceFactory,
     control: Arc<Control>,
@@ -257,7 +237,6 @@ impl RecordingSession {
             for (i, mut src) in req.audio.into_iter().enumerate() {
                 let path = req.work_dir.join(format!("audio-{i}.wav"));
                 let paused = control.audio_paused.clone();
-                // Same timeline as the video slots, so audio and video stay aligned.
                 let ctl = control.clone();
                 let clock: Clock = Arc::new(move || ctl.active_time());
                 let mut opened: Option<AudioTrack> = None;
@@ -355,7 +334,6 @@ impl RecordingSession {
         Ok(session)
     }
 
-    /// What the session produces (audio-only sessions have no picture).
     pub fn output(&self) -> OutputKind {
         self.output
     }
@@ -376,7 +354,6 @@ impl RecordingSession {
         self.control.state.lock().expect("state lock").paused
     }
 
-    /// Recorded time, excluding pauses.
     pub fn elapsed(&self) -> Duration {
         self.control.active_time()
     }
@@ -396,9 +373,6 @@ impl RecordingSession {
         !self.tracks.is_empty()
     }
 
-    /// Stops capture. With `save`, outputs are produced on a background thread and reported
-    /// through [`events`](Self::events) (`Finalizing…`, then `Finished` or `Failed`);
-    /// without it everything is discarded and `Cancelled` is sent.
     pub fn stop(self, save: bool, cancel: Arc<AtomicBool>) -> JoinHandle<()> {
         std::thread::Builder::new()
             .name("finalize".into())
@@ -421,7 +395,6 @@ impl RecordingSession {
             .expect("spawn finalize thread")
     }
 
-    /// Stops all threads and returns `(name, scratch file)` for captures that produced frames.
     fn shutdown(&mut self) -> Vec<(String, PathBuf)> {
         self.control.stop();
         let mut done = Vec::new();
@@ -472,7 +445,6 @@ impl RecordingSession {
         let mut outputs = Vec::new();
         for (i, (name, scratch)) in videos.iter().enumerate() {
             let with_audio = !wavs.is_empty() && (i == 0 || self.audio_in_every_file);
-            // The "(audio)" mark only matters when one file of the set has the sound.
             let mark = with_audio && !self.audio_in_every_file;
             let title = linked_title(&self.title, i, videos.len(), name, mark);
             let out = naming::media_path(&self.out_dir, &title, self.started, self.output.extension());
@@ -482,7 +454,6 @@ impl RecordingSession {
             };
             match self.output {
                 OutputKind::Video(container) => {
-                    // Several sources: the sound goes into the first file only.
                     let tracks: &[PathBuf] = if with_audio { &wavs } else { &[] };
                     convert::mux_recording(scratch, tracks, &out, container, &mut progress, cancel)?
                 }
@@ -502,9 +473,6 @@ impl RecordingSession {
     }
 }
 
-/// Title of output `i` of `n`: one source keeps the plain title; several sources share it,
-/// are numbered and named after their source, and the file carrying the sound says so —
-/// e.g. `Recording … [1 of 2] - Display 1 (audio)`.
 pub fn linked_title(title: &str, i: usize, n: usize, source: &str, with_audio: bool) -> String {
     if n <= 1 {
         return title.to_string();

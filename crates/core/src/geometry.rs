@@ -1,8 +1,3 @@
-//! Integer pixel geometry plus the interactive selection editor used by the region overlay.
-//!
-//! The overlay converts pointer positions to *image pixels* before calling into
-//! [`SelectionEditor`], so all logic here is DPI-independent and unit-testable.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -17,7 +12,6 @@ impl Point {
     }
 }
 
-/// Axis-aligned rectangle; `w`/`h` are never negative.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Rect {
     pub x: i32,
@@ -31,7 +25,6 @@ impl Rect {
         Self { x, y, w, h }
     }
 
-    /// Rectangle spanned by two arbitrary corners (inclusive of both pixels' top-left corners).
     pub fn from_points(a: Point, b: Point) -> Self {
         let x0 = a.x.min(b.x);
         let y0 = a.y.min(b.y);
@@ -68,13 +61,11 @@ impl Rect {
         (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
     }
 
-    /// Clamps the rectangle into `bounds`, keeping as much of it as possible.
     pub fn clamp_to(&self, bounds: &Rect) -> Rect {
         self.intersect(bounds)
             .unwrap_or(Rect::new(bounds.x, bounds.y, 0, 0))
     }
 
-    /// Shrinks width/height to even numbers (required by yuv420p video encoders).
     pub fn even(&self) -> Rect {
         Rect::new(self.x, self.y, self.w & !1, self.h & !1)
     }
@@ -83,7 +74,6 @@ impl Rect {
         Rect::new(self.x + dx, self.y + dy, self.w, self.h)
     }
 
-    /// Scales all coordinates by `factor` (e.g. logical points to physical pixels).
     pub fn scale(&self, factor: f64) -> Rect {
         let x0 = (f64::from(self.x) * factor).round() as i32;
         let y0 = (f64::from(self.y) * factor).round() as i32;
@@ -93,7 +83,6 @@ impl Rect {
     }
 }
 
-/// Parts of a selection that can be grabbed with the mouse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Handle {
     Move,
@@ -124,19 +113,15 @@ impl Handle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Drag {
-    /// Drawing a brand new selection from an anchor point.
     Creating { anchor: Point },
-    /// Moving or resizing the existing selection.
     Editing { handle: Handle, origin: Point, start: Rect },
 }
 
-/// Lightshot-style selection state: draw a rectangle, then move/resize it with handles.
 #[derive(Debug, Clone)]
 pub struct SelectionEditor {
     bounds: Rect,
     selection: Option<Rect>,
     drag: Option<Drag>,
-    /// Pointer tolerance (in pixels) for grabbing edges and corners.
     pub grab_radius: i32,
 }
 
@@ -154,12 +139,10 @@ impl SelectionEditor {
         self.bounds
     }
 
-    /// Current selection (may be empty while the user is still dragging).
     pub fn selection(&self) -> Option<Rect> {
         self.selection
     }
 
-    /// Selection that is large enough to be used.
     pub fn usable_selection(&self) -> Option<Rect> {
         self.selection.filter(|r| r.w >= 2 && r.h >= 2)
     }
@@ -177,7 +160,6 @@ impl SelectionEditor {
         self.set_selection(Some(self.bounds));
     }
 
-    /// Which handle would be grabbed at `p`, if any.
     pub fn hit_test(&self, p: Point) -> Option<Handle> {
         let r = self.usable_selection()?;
         let g = self.grab_radius;
@@ -212,7 +194,6 @@ impl SelectionEditor {
         )
     }
 
-    /// Mouse button pressed at `p`.
     pub fn press(&mut self, p: Point) {
         let p = self.clamp_point(p);
         self.drag = Some(match (self.hit_test(p), self.selection) {
@@ -228,7 +209,6 @@ impl SelectionEditor {
         });
     }
 
-    /// Pointer moved to `p` while the button is held.
     pub fn drag_to(&mut self, p: Point) {
         let p = self.clamp_point(p);
         match self.drag {
@@ -269,14 +249,12 @@ impl SelectionEditor {
                 if handle.moves_bottom() {
                     y1 += dy;
                 }
-                // Dragging an edge past the opposite one flips the rectangle, like most editors.
                 let r = Rect::from_points(Point::new(x0, y0), Point::new(x1, y1));
                 self.selection = Some(r.clamp_to(&self.bounds));
             }
         }
     }
 
-    /// Mouse button released.
     pub fn release(&mut self) {
         self.drag = None;
         if self.selection.is_some_and(|r| r.w < 2 || r.h < 2) {
@@ -284,7 +262,6 @@ impl SelectionEditor {
         }
     }
 
-    /// Moves the selection by keyboard arrows; `resize` grows/shrinks instead.
     pub fn nudge(&mut self, dx: i32, dy: i32, resize: bool) {
         let Some(r) = self.selection else { return };
         let b = self.bounds;
@@ -388,10 +365,9 @@ mod tests {
     fn resize_from_corner_and_flip() {
         let mut ed = SelectionEditor::new(B);
         ed.set_selection(Some(Rect::new(100, 100, 200, 100)));
-        ed.press(Point::new(300, 200)); // SE corner
+        ed.press(Point::new(300, 200));
         ed.drag_to(Point::new(350, 260));
         assert_eq!(ed.selection(), Some(Rect::new(100, 100, 250, 160)));
-        // Drag the right edge past the left one: the rectangle flips.
         ed.drag_to(Point::new(50, 260));
         assert_eq!(ed.selection(), Some(Rect::new(50, 100, 50, 160)));
         ed.release();
@@ -401,7 +377,7 @@ mod tests {
     fn edge_resize_changes_one_axis() {
         let mut ed = SelectionEditor::new(B);
         ed.set_selection(Some(Rect::new(100, 100, 200, 100)));
-        ed.press(Point::new(200, 100)); // N edge
+        ed.press(Point::new(200, 100));
         ed.drag_to(Point::new(260, 40));
         ed.release();
         assert_eq!(ed.selection(), Some(Rect::new(100, 40, 200, 160)));

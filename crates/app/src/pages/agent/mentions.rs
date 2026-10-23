@@ -1,6 +1,3 @@
-//! One way to show text the model wrote: `@sN` becomes the speaker's current name, styled the
-//! same everywhere. A rename is visible on the next frame, without regenerating the text.
-
 use crate::theme;
 use eframe::egui::{self, Color32, FontId, TextFormat};
 use rust_i18n::t;
@@ -9,14 +6,12 @@ use mediaa_core::transcript::Transcript;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// The speakers a surface can name. Empty: an `@sN` is shown as the localized default.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Roster {
     pub speakers: Vec<Who>,
 }
 
 impl Roster {
-    /// Speakers of one recording, from the names and the ids that actually speak.
     pub fn recording(names: &BTreeMap<u32, String>, ids: impl IntoIterator<Item = u32>) -> Self {
         let mut ids: Vec<u32> = ids.into_iter().collect();
         ids.extend(names.keys().copied());
@@ -30,7 +25,6 @@ impl Roster {
         }
     }
 
-    /// Speakers stored with one file. A folder store (`folder-…`) has no speakers of its own.
     pub fn of_file(ai: &Path, file_id: &str) -> Self {
         if file_id.is_empty() || file_id.starts_with("folder-") {
             return Self::default();
@@ -41,8 +35,6 @@ impl Roster {
         Self::recording(&names, ids)
     }
 
-    /// Speakers of a folder chat, one list per recording. The same name in two recordings stays
-    /// two rows: «Имя (запись)», and a mention of one of them is `@sN#R`.
     pub fn of_files(ai: &Path, files: &[PathBuf]) -> Self {
         let mut speakers = Vec::new();
         for (i, path) in files.iter().enumerate() {
@@ -66,14 +58,11 @@ impl Roster {
         t!("studio.speaker", n = index + 1).into()
     }
 
-    /// The name shown for `who`: the given name, or «Говорящий N» / «Speaker N».
     pub fn row_label(who: &Who) -> String {
         let name = if who.name.trim().is_empty() { Self::unnamed(who.index) } else { who.name.trim().to_string() };
         if who.recording.is_some() && !who.title.is_empty() { format!("{name} ({})", who.title) } else { name }
     }
 
-    /// The name without `@` for a label (`@s1`, `@s1#2`). Unknown labels use «Говорящий N».
-    /// `None` when `label` is not a speaker label.
     pub fn name_of(&self, label: &str) -> Option<String> {
         let parsed = speakers::parse_label(label)?;
         let who = self.speakers.iter().find(|w| w.index == parsed.index && w.recording == parsed.recording);
@@ -83,17 +72,14 @@ impl Roster {
         })
     }
 
-    /// `@<name>` of a speaker becomes the label the model reads.
     pub fn to_model(&self, text: &str) -> String {
         speakers::to_model(text, &self.speakers)
     }
 
-    /// Plain text with labels replaced (tooltips that measure a width, tests).
     pub fn render(&self, text: &str) -> String {
         self.runs(text).into_iter().map(|(s, _)| s).collect()
     }
 
-    /// Runs of `(text, mention)`. A mention is drawn with the accent, on the same font and size.
     pub fn runs(&self, text: &str) -> Vec<(String, bool)> {
         speakers::pieces(text, &self.speakers, Self::unnamed)
             .into_iter()
@@ -116,7 +102,6 @@ fn mention_format(base: &TextFormat, p: &theme::Palette) -> TextFormat {
     }
 }
 
-/// Appends `text` to `job`. A mention uses `base`'s font and size, so a line does not grow.
 pub fn append(job: &mut egui::text::LayoutJob, text: &str, roster: &Roster, base: TextFormat, p: &theme::Palette) {
     for (piece, mention) in roster.runs(text) {
         let format = if mention { mention_format(&base, p) } else { base.clone() };
@@ -124,7 +109,6 @@ pub fn append(job: &mut egui::text::LayoutJob, text: &str, roster: &Roster, base
     }
 }
 
-/// Lays `text` out. `truncate`: one row, cut with «…».
 #[allow(clippy::too_many_arguments)]
 pub fn galley(ui: &egui::Ui, text: &str, roster: &Roster, font: FontId, color: Color32, max_width: f32, truncate: bool, italics: bool, p: theme::Palette) -> std::sync::Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob {
@@ -140,7 +124,6 @@ pub fn galley(ui: &egui::Ui, text: &str, roster: &Roster, font: FontId, color: C
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
-/// A wrapped label. Same font metrics as a plain label of `font`.
 pub fn show(ui: &mut egui::Ui, text: &str, roster: &Roster, font: FontId, color: Color32, italics: bool, p: theme::Palette) -> egui::Response {
     let galley = galley(ui, text, roster, font, color, ui.available_width(), false, italics, p);
     ui.add(egui::Label::new(galley).wrap())
@@ -160,7 +143,6 @@ mod tests {
         assert_eq!(named.runs("сказал @s1 и @s2"), vec![("сказал ".into(), false), ("@Антон".into(), true), (" и ".into(), false), (format!("@{}", t!("studio.speaker", n = 2)), true)]);
         let renamed = Roster { speakers: vec![who(0, "Олег")] };
         assert_eq!(renamed.render("@s1"), "@Олег");
-        // The user's own spelling stays (it is not a stored label).
         assert_eq!(renamed.render("привет @Антон"), "привет @Антон");
     }
 
@@ -171,7 +153,6 @@ mod tests {
         assert_eq!(Roster::row_label(&who), "Анна (Планёрка)");
         assert_eq!(roster.render("см. @s2#3"), "см. @Анна (Планёрка)");
         assert_eq!(roster.to_model("@s2#3"), "@s2#3");
-        // The same name in two recordings is not guessed.
         assert_eq!(roster.to_model("@Анна"), "@Анна");
     }
 }

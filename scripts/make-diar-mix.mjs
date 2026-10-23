@@ -1,18 +1,3 @@
-// Builds a synthetic conversation with an exact reference for diarization measurements.
-//
-//   node scripts/make-diar-mix.mjs [MANIFEST.json] [--plan]
-//
-// The manifest names archive.org (LibriVox) files and pieces cut from them; the builder
-// downloads the source files into target/diar-src/ (not committed), cuts every piece, lays the
-// pieces on one timeline (short gaps, some overlapping starts), writes the mixed master as mono
-// 16 kHz Opus, and writes speakers.rttm and source.md. The reference is exact because every
-// piece belongs to one known reader and the layout is computed, not guessed.
-//
-// --plan writes speakers.rttm and source.md only (no downloads, no ffmpeg); it is the way to
-// inspect the planned timeline before the audio is built.
-//
-// ffmpeg must be on PATH or in FFMPEG; only the CLI is used (cutting, resampling, encoding).
-
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -22,8 +7,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DEFAULT_MANIFEST = "evals/data/librivox-mix-1/manifest.json";
 const SAMPLE_RATE = 16000;
 
-/// Places the timeline pieces on one clock. `start` is the output start in seconds,
-/// `sourceStart` where the piece begins in its source file.
 export function layout(manifest) {
   const gap = manifest.gap_seconds ?? 0.4;
   const placed = [];
@@ -54,12 +37,10 @@ export function layout(manifest) {
   return placed;
 }
 
-/// Total length of the built recording in seconds.
 export function totalSeconds(placed) {
   return placed.reduce((end, piece) => Math.max(end, piece.end), 0);
 }
 
-/// The RTTM reference by construction: one line per piece.
 export function rttm(manifest, placed) {
   return placed
     .slice()
@@ -68,7 +49,6 @@ export function rttm(manifest, placed) {
     .join("\n") + "\n";
 }
 
-/// source.md: what the recording is made of and how to rebuild it.
 export function sourceMarkdown(manifest, placed) {
   const items = Object.entries(manifest.items)
     .map(([id, item]) => `| \`${id}\` | ${item.title} | ${item.url} | ${item.license} (${item.license_url}) |`)
@@ -112,7 +92,6 @@ ${pieces}
 `;
 }
 
-/// Downloads one source file into the cache unless it is already there.
 async function download(url, out) {
   if (fs.existsSync(out) && fs.statSync(out).size > 0) return;
   const response = await fetch(url);
@@ -124,7 +103,6 @@ async function download(url, out) {
   console.log(`downloaded ${path.basename(out)} (${(bytes.length / 1048576).toFixed(1)} MB)`);
 }
 
-/// Reads a 16-bit mono PCM WAV file and returns its samples.
 export function readWav(file) {
   const bytes = fs.readFileSync(file);
   if (bytes.toString("ascii", 0, 4) !== "RIFF" || bytes.toString("ascii", 8, 12) !== "WAVE") {
@@ -156,7 +134,6 @@ export function readWav(file) {
   return { rate: format.rate, samples: new Int16Array(data.buffer, data.byteOffset, data.length >> 1) };
 }
 
-/// Writes 16-bit mono PCM WAV.
 export function writeWav(file, samples, rate) {
   const header = Buffer.alloc(44);
   header.write("RIFF", 0, "ascii");

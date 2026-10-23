@@ -35,7 +35,6 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     assert_eq!(outcome, Outcome::Done);
     assert_eq!(engine.chats().len(), 3, "the search, the draft and the check");
 
-    // The queue: the answer, and under it every step of the model and every tool call.
     let q = scope.store();
     let root = q.get(scope.task()).unwrap().unwrap();
     assert_eq!((root.kind.as_str(), root.status, root.scope.as_deref()), ("chat", TaskStatus::Done, Some("rec")));
@@ -47,7 +46,6 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
         [("model-step", TaskStatus::Done), ("tool", TaskStatus::Done), ("model-step", TaskStatus::Done), ("model-step", TaskStatus::Done)]
     );
     assert!(children.iter().all(|c| c.inline && c.scope.as_deref() == Some("rec")));
-    // A model step: its call, tokens (from the answer) and model.
     let agent_model = "unsloth/Qwen3.5-4B-GGUF";
     for step in [&children[0], &children[2]] {
         assert_eq!((step.stats.model_calls, step.stats.prompt_tokens, step.stats.completion_tokens), (1, 7, 3), "{}", step.title);
@@ -58,7 +56,6 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     let check = &engine.chats()[2];
     assert!(check.json_schema.as_ref().is_some_and(|s| s.contains("changed")), "{:?}", check.json_schema);
     assert!(check.texts.iter().any(|t| t.contains("Отчёт отправляем в пятницу.")), "{:?}", check.texts);
-    // A tool: the plain label (the titles model is not used here), what it was and what it cost.
     let tool = &children[1];
     assert_eq!(tool.title, "Поиск");
     assert_eq!(tool.detail["tool"], "Поиск");
@@ -66,10 +63,8 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     assert!(tool.detail["result_chars"].as_u64().unwrap() > 0);
     assert_eq!(tool.stats.model_calls, 1);
     assert_eq!(tool.stats.models, ["ggml-org/embeddinggemma-300M-GGUF"]);
-    // The answer itself does no model work: its children do.
     assert_eq!(root.stats.model_calls, 0);
 
-    // The stored message and the pane's state tell the same story.
     let messages = t.messages(chat).unwrap();
     let answer_message = messages.last().unwrap();
     assert_eq!(answer_message.text, "В пятницу [0:10].");
@@ -90,8 +85,6 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     );
 }
 
-/// A model that writes some reasoning, waits for the stop and then goes on for a while (as a tool
-/// that cannot stop at once).
 struct Blocking;
 
 impl Brain for Blocking {
@@ -136,7 +129,6 @@ fn stop_ends_the_answer_at_once_and_what_comes_later_is_dropped() {
         let begun = Instant::now();
         run.stop(&t, chat).unwrap();
         let took = begun.elapsed();
-        // Over for the pane before the worker has even noticed.
         assert_eq!(run.live().state, State::Stopped);
         assert!(!worker.is_finished(), "the worker is still going");
         assert_eq!(worker.join().unwrap(), Outcome::Stopped);
@@ -144,8 +136,6 @@ fn stop_ends_the_answer_at_once_and_what_comes_later_is_dropped() {
     });
     assert!(stopped_in < Duration::from_millis(250), "the stop does not wait for the worker: {stopped_in:?}");
 
-    // The message keeps the timeline up to the stop, marked as stopped; what the worker wrote
-    // afterwards is nowhere.
     let messages = t.messages(chat).unwrap();
     assert_eq!(messages.len(), 1, "no second message from the worker");
     let m = &messages[0];
@@ -155,13 +145,11 @@ fn stop_ends_the_answer_at_once_and_what_comes_later_is_dropped() {
     assert_eq!(run.live().timeline.entries, m.timeline().entries, "the pane did not take the later events either");
     assert_eq!(t.chat_memory(chat).unwrap(), None, "a stopped answer saves nothing of the worker's");
 
-    // The queue: the answer and its running step are cancelled, not done or failed.
     let q = scope.store();
     assert_eq!(q.get(scope.task()).unwrap().unwrap().status, TaskStatus::Cancelled);
     let children = q.children(scope.task()).unwrap();
     assert_eq!(children.len(), 1);
     assert_eq!(children[0].status, TaskStatus::Cancelled, "{:?}", children[0]);
-    // Stopping twice does nothing more.
     run.stop(&t, chat).unwrap();
     assert_eq!(t.messages(chat).unwrap().len(), 1);
 }
@@ -230,7 +218,6 @@ fn sections_are_stored_as_they_come_and_the_closing_text_after_them() {
     let outcome = work(&run, &scope, ai, "rec", chat, &mut memory, |_, on_event| {
         on_event(&Event::AnswerText("Часть 1 [0:10].".into()));
         on_event(&Event::Say("Часть 1 [0:10].".into()));
-        // The pane can see the stored section while the answer goes on.
         seen.lock().unwrap().push((run.live().stored, t.messages(chat).unwrap().len()));
         on_event(&Event::AnswerText("Итог.".into()));
         Ok(Answer { text: "Итог.".into(), steps: vec![], forced: true })
@@ -241,7 +228,6 @@ fn sections_are_stored_as_they_come_and_the_closing_text_after_them() {
     assert_eq!(messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["Часть 1 [0:10].", "Итог."]);
     assert_eq!(messages[0].details, json!({"section": true}));
     assert_eq!(messages[1].details["forced"], true);
-    // The timeline of the closing message holds both parts; the first one is marked as stored.
     use mediaa_core::chat::TimelineEntry::Answer as AnswerEntry;
     assert_eq!(
         messages[1].timeline().entries,

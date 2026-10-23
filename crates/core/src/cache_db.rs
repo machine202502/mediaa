@@ -1,16 +1,8 @@
-//! The library's cache database (`.cache/library.db`, SQLite in WAL mode): the file index
-//! (`files`) and the thumbnail atlas slots (`thumbs`). Every change is written as it happens,
-//! touching only the affected rows. The index (UI thread) and the thumbnail worker each keep
-//! their own connection.
-
 use rusqlite::Connection;
 use std::path::Path;
 use std::time::Duration;
 
-/// Database file inside the cache folder.
 const DB_FILE: &str = "library.db";
-/// Bumped when the schema changes: a database of another version is emptied and rebuilt
-/// (it only holds what can be read from the media again).
 const SCHEMA: i64 = 1;
 
 const CREATE: &str = "
@@ -39,13 +31,10 @@ const CREATE: &str = "
     CREATE TABLE counters (key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;
 ";
 
-/// Opens (creating if needed) the cache database in `cache_dir`.
 pub fn open(cache_dir: &Path) -> anyhow::Result<Connection> {
     std::fs::create_dir_all(cache_dir)?;
     let db = Connection::open(cache_dir.join(DB_FILE))?;
     db.busy_timeout(Duration::from_secs(5))?;
-    // WAL: writers append, readers are not blocked; NORMAL: no flush to disk on every commit
-    // (a crash may lose the last changes, never corrupt the database).
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;

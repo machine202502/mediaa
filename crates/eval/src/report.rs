@@ -1,13 +1,9 @@
-//! The run report and the comparison of two runs.
-
 use crate::cases::Case;
 use crate::score::{RepeatScores, TurnScore};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// One case as the report and the comparison see it. Counts of facts are summed over repeats;
-/// forbidden hits, citation precision, the judge, steps and time are means per repeat.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Row {
     pub id: String,
@@ -17,7 +13,6 @@ pub struct Row {
     pub facts_hit: usize,
     pub facts_total: usize,
     pub forbidden_hits: f64,
-    /// `None` when no turn of the case was given an expected interval (not counted).
     pub citation_precision: Option<f64>,
     pub judge: Option<f64>,
     pub steps: f64,
@@ -218,7 +213,6 @@ or a lower judge score when both runs have one. Steps and time are shown and are
     out
 }
 
-/// Quality regressions of B against A.
 fn worse_reasons(a: &Row, b: &Row) -> Vec<&'static str> {
     let mut reasons = Vec::new();
     if b.recall() + 1e-9 < a.recall() {
@@ -369,7 +363,6 @@ fn precision_cell(value: Option<f64>) -> String {
     value.map(pct).unwrap_or_else(|| "—".into())
 }
 
-/// Mean of the precisions that were counted. `None` when every one of them was left out.
 fn mean(values: Vec<f64>) -> Option<f64> {
     if values.is_empty() {
         None
@@ -423,7 +416,6 @@ pub fn load_summary(dir: &Path) -> anyhow::Result<Summary> {
     serde_json::from_str(&text).with_context(|| format!("reading {}", path.display()))
 }
 
-/// Reads both runs and writes `compare.md` into run B.
 pub fn compare_runs(a: &Path, b: &Path) -> anyhow::Result<PathBuf> {
     let left = load_summary(a)?;
     let right = load_summary(b)?;
@@ -432,27 +424,23 @@ pub fn compare_runs(a: &Path, b: &Path) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// Writes one repeat's artifacts. `events` is already one JSON value per event, in order.
-pub fn write_repeat(
-    dir: &Path,
-    questions: &[String],
-    events: &[serde_json::Value],
-    answers: &[String],
-    turns: &[TurnScore],
-    stats: &StatsFile,
-) -> anyhow::Result<()> {
+pub struct RepeatArtifacts<'a> {
+    pub questions: &'a [String],
+    pub events: &'a [serde_json::Value],
+    pub answers: &'a [String],
+    pub shown: &'a [String],
+    pub turns: &'a [TurnScore],
+    pub stats: &'a StatsFile,
+    pub model_steps: &'a [ModelSteps],
+}
+
+pub fn write_repeat(dir: &Path, repeat: &RepeatArtifacts) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
-    let mut questions_text = String::new();
-    for (i, question) in questions.iter().enumerate() {
-        questions_text.push_str(&format!("# {}\n{question}\n\n", i + 1));
-    }
-    std::fs::write(dir.join("questions.txt"), questions_text)?;
-    let mut answers_text = String::new();
-    for (i, answer) in answers.iter().enumerate() {
-        answers_text.push_str(&format!("# {}\n{answer}\n\n", i + 1));
-    }
-    std::fs::write(dir.join("answer.txt"), answers_text)?;
-    let events_text = events
+    std::fs::write(dir.join("questions.txt"), numbered(repeat.questions))?;
+    std::fs::write(dir.join("answer.txt"), numbered(repeat.answers))?;
+    std::fs::write(dir.join("answer_shown.txt"), numbered(repeat.shown))?;
+    let events_text = repeat
+        .events
         .iter()
         .map(|e| e.to_string())
         .collect::<Vec<_>>()
@@ -465,9 +453,24 @@ pub fn write_repeat(
             format!("{events_text}\n")
         },
     )?;
+    let turns: Vec<serde_json::Value> = repeat
+        .turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let model = repeat.model_steps.get(i).cloned().unwrap_or_default();
+            serde_json::json!({
+                "seconds": t.seconds,
+                "steps": t.steps,
+                "forced": t.forced,
+                "model_steps": model.steps,
+                "calls_per_step": model.calls_per_step,
+            })
+        })
+        .collect();
     let timings = serde_json::json!({
-        "seconds": turns.iter().map(|t| t.seconds).sum::<f64>(),
-        "turns": turns.iter().map(|t| serde_json::json!({"seconds": t.seconds, "steps": t.steps, "forced": t.forced})).collect::<Vec<_>>(),
+        "seconds": repeat.turns.iter().map(|t| t.seconds).sum::<f64>(),
+        "turns": turns,
     });
     std::fs::write(
         dir.join("timings.json"),
@@ -475,13 +478,21 @@ pub fn write_repeat(
     )?;
     std::fs::write(
         dir.join("stats.json"),
-        serde_json::to_string_pretty(stats).expect("stats") + "\n",
+        serde_json::to_string_pretty(repeat.stats).expect("stats") + "\n",
     )?;
     std::fs::write(
         dir.join("scores.json"),
-        serde_json::to_string_pretty(&scores_json(turns)).expect("scores") + "\n",
+        serde_json::to_string_pretty(&scores_json(repeat.turns)).expect("scores") + "\n",
     )?;
     Ok(())
+}
+
+fn numbered(texts: &[String]) -> String {
+    let mut out = String::new();
+    for (i, text) in texts.iter().enumerate() {
+        out.push_str(&format!("# {}\n{text}\n\n", i + 1));
+    }
+    out
 }
 
 fn scores_json(turns: &[TurnScore]) -> serde_json::Value {
@@ -518,7 +529,12 @@ fn turn_json(turn: &TurnScore) -> serde_json::Value {
     })
 }
 
-/// Queue stats of one answer, plus each turn when a case has several.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ModelSteps {
+    pub steps: usize,
+    pub calls_per_step: Vec<usize>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct StatsFile {
     pub model_calls: u64,
@@ -695,11 +711,18 @@ mod tests {
         let events = vec![serde_json::json!({"turn": 1, "event": "step", "tool": "search"})];
         write_repeat(
             dir.path(),
-            &["Как зовут?".into()],
-            &events,
-            &["Назаров [1:40].".into()],
-            &[turn],
-            &stats,
+            &RepeatArtifacts {
+                questions: &["Как зовут?".into()],
+                events: &events,
+                answers: &["@s1 сказал [1:40].".into()],
+                shown: &["@Антон сказал [1:40].".into()],
+                turns: &[turn],
+                stats: &stats,
+                model_steps: &[ModelSteps {
+                    steps: 3,
+                    calls_per_step: vec![1, 0],
+                }],
+            },
         )
         .unwrap();
         let questions = std::fs::read_to_string(dir.path().join("questions.txt")).unwrap();
@@ -713,7 +736,15 @@ mod tests {
         assert_eq!(scores["turns"][0]["judge"]["score"], 70);
         assert!(std::fs::read_to_string(dir.path().join("answer.txt"))
             .unwrap()
-            .contains("Назаров"));
+            .contains("@s1"));
+        assert!(std::fs::read_to_string(dir.path().join("answer_shown.txt"))
+            .unwrap()
+            .contains("@Антон"));
+        let timings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join("timings.json")).unwrap())
+                .unwrap();
+        assert_eq!(timings["turns"][0]["model_steps"], 3);
+        assert_eq!(timings["turns"][0]["calls_per_step"], serde_json::json!([1, 0]));
         let saved =
             stats_from_file(&std::fs::read_to_string(dir.path().join("stats.json")).unwrap());
         assert_eq!(saved.model_calls, 2);

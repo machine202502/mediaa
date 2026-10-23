@@ -1,11 +1,8 @@
-//! Minimal file + stderr logger (`mediaa.log` in the data directory).
-
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::io::Write;
 use std::path::Path;
 use std::sync::Mutex;
 
-/// Logs bigger than this are rotated to `mediaa.log.1` at startup.
 const MAX_LOG_BYTES: u64 = 2 * 1024 * 1024;
 
 struct FileLogger {
@@ -22,7 +19,6 @@ impl Log for FileLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        // FFmpeg chatter goes through `log` too; keep only warnings from it.
         if record.target().starts_with("ffmpeg") && record.level() > Level::Warn {
             return;
         }
@@ -52,7 +48,6 @@ impl Log for FileLogger {
     }
 }
 
-/// Installs the global logger. Safe to call once; later calls are ignored.
 pub fn init(dir: &Path, level: LevelFilter) {
     let _ = std::fs::create_dir_all(dir);
     let path = dir.join("mediaa.log");

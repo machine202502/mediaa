@@ -1,7 +1,3 @@
-//! Validation of model files on disk: a model is a weights file or a folder holding weights
-//! (safetensors, GGUF, ONNX or PyTorch). Safetensors are checked in full (header and every
-//! tensor's bytes in range); GGUF and ONNX by their file signature.
-
 use anyhow::{bail, Context};
 use std::path::{Path, PathBuf};
 
@@ -11,7 +7,6 @@ fn is_weights(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).is_some_and(|e| WEIGHTS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
-/// Checks one weights file; returns its size.
 pub fn check_file(path: &Path) -> anyhow::Result<u64> {
     let size = std::fs::metadata(path).with_context(|| format!("{} not found", path.display()))?.len();
     anyhow::ensure!(size > 0, "{} is empty", path.display());
@@ -31,7 +26,6 @@ pub fn check_file(path: &Path) -> anyhow::Result<u64> {
             anyhow::ensure!((2..=3).contains(&version), "{}: GGUF version {version} is not supported", path.display());
         }
         "onnx" => {
-            // ModelProto starts with field 1 (ir_version, varint): tag byte 0x08.
             let mut head = [0u8; 1];
             std::io::Read::read_exact(&mut std::fs::File::open(path)?, &mut head)?;
             anyhow::ensure!(head[0] == 0x08, "{}: not an ONNX model", path.display());
@@ -41,7 +35,6 @@ pub fn check_file(path: &Path) -> anyhow::Result<u64> {
     Ok(size)
 }
 
-/// Checks a model file or folder; returns the weights files and their total size.
 pub fn check(path: &Path) -> anyhow::Result<(Vec<PathBuf>, u64)> {
     let files: Vec<PathBuf> = if path.is_dir() {
         let mut found = Vec::new();

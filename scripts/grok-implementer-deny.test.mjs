@@ -1,6 +1,3 @@
-// The implementer's command guard matches scripts/subagent.sh --deny.
-// Run: node --test scripts/grok-implementer-deny.test.mjs
-
 import test from "node:test";
 import assert from "node:assert/strict";
 import { denialReason } from "./grok-implementer-deny.mjs";

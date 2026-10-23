@@ -1,6 +1,3 @@
-//! Scheduler scenarios and the store features the queue page already depends on.
-//! The script runner commits chunk numbers 1, 2, 3, … and keeps its counters per (task, generation).
-
 use mediaa_queue::state::{self, Op};
 use mediaa_queue::*;
 use proptest::prelude::*;
@@ -89,8 +86,6 @@ fn next_step(
     attempts: i64,
     ctx: &mut dyn RunCtx,
 ) -> std::result::Result<Step, String> {
-    // A stuck model call: the first attempt reports a hang, the retry (after the model was
-    // unloaded) goes on — as a real one does when the fresh load works.
     let hang = script.hang && attempts <= 1;
     if st.hold_left > 0 {
         st.hold_left -= 1;
@@ -838,8 +833,6 @@ fn a_hang_goes_back_to_its_cursor_and_a_late_write_is_ignored() {
         )
         .unwrap();
     sched.tick().unwrap();
-    // The second chunk is committed, the model call after it hangs: the task goes back to the
-    // queue at its cursor at once, with the reason in its details.
     sched.tick().unwrap();
     let after = task(&sched, id);
     assert_eq!(
@@ -867,14 +860,12 @@ fn a_hang_goes_back_to_its_cursor_and_a_late_write_is_ignored() {
     assert!(!rejected.accepted, "the stuck call cannot write any more");
     assert_eq!(cursor_u32(&task(&sched, id).cursor), 2);
 
-    // The retry (the model was unloaded) finishes, and the note goes with the finished task.
     sched.tick().unwrap();
     let done = task(&sched, id);
     assert_eq!(done.status, Status::Done);
     assert!(done.error.is_none());
     assert_eq!(done.detail.get("hang"), None);
 
-    // A hang of a stopping task is settled by the runner's report instead of holding the slot.
     let again = sched
         .enqueue(
             job("transcribe", "hang2", &script(1, 1, 0, true, false, 0))
@@ -948,8 +939,6 @@ fn a_crash_continues_from_the_last_chunk() {
         .any(|event| event.kind == EventKind::Done && event.scope.as_deref() == Some("rec")));
 }
 
-/// An answer is one run. Its inline model steps are not a composite, so a crash requeues it
-/// and the next claim continues.
 #[test]
 fn an_answer_with_inline_steps_is_still_one_run() {
     let clock = Arc::new(FakeClock::new(1_000));
@@ -1645,7 +1634,6 @@ fn check_invariants(
             }
         }
         cursors.insert(task.id, task.cursor.clone());
-        // Заново clears the start but keeps attempts. A pause before the next claim is paused with no start.
         let needs_start = matches!(task.status, Status::Running | Status::Stopping)
             || (matches!(task.status, Status::Done | Status::Failed) && task.attempts > 0);
         if needs_start && task.started_ms.is_none() {
@@ -1808,8 +1796,6 @@ fn quiet(sched: &Scheduler) -> bool {
 }
 
 fn drain(sched: &Scheduler, clock: &FakeClock) {
-    // A hang ignores the stop flag and holds its slot until the stale reap. That reap can start
-    // the next hang in the same tick, so cancel-and-reap has to run once per stuck task.
     for _ in 0..12 {
         for _ in 0..40 {
             let paused: Vec<TaskId> = sched

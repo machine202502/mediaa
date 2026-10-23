@@ -1,22 +1,17 @@
-//! Quality runs of the MediaA agent: ask as the app does, score without a model, write a report.
-
 mod cases;
 mod diarize;
 mod report;
 mod run;
 mod score;
+mod visible;
 
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
-/// Who scores an answer besides the mechanical checks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Judge {
-    /// Mechanical checks only.
     None,
-    /// The agent's own local model.
     Agent,
-    /// An engine model spec (`owner/repo` or a path).
     Spec(String),
 }
 
@@ -30,7 +25,6 @@ impl Judge {
     }
 }
 
-/// `mediaa-eval run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunArgs {
     pub cases: PathBuf,
@@ -49,7 +43,6 @@ usage:
   mediaa-eval diarize --data DIR [--models DIR]
   mediaa-eval compare <run A> <run B>";
 
-/// The workspace root: the directory that has `Cargo.toml` and `crates/`.
 pub fn repo_root() -> PathBuf {
     let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let mut dir = start.clone();
@@ -63,7 +56,6 @@ pub fn repo_root() -> PathBuf {
     }
 }
 
-/// An absolute path, or a path that already exists, stays. Anything else is under `root`.
 pub fn locate(root: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() || path.exists() {
         path.to_path_buf()

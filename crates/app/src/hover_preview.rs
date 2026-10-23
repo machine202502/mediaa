@@ -1,6 +1,3 @@
-//! YouTube-style hover preview of a library video / animation: frames are decoded in the
-//! background (downscaled, at most ~15 fps), played muted in a loop and can be scrubbed.
-
 use crossbeam_channel::Receiver;
 use eframe::egui;
 use mediaa_media::preview::{preview_frames, preview_interval, PreviewFrame};
@@ -12,11 +9,8 @@ use std::time::{Duration, Instant};
 
 const WIDTH: u32 = 480;
 const MAX_FPS: f64 = 15.0;
-/// Memory bound: long clips get sparser frames instead of more.
 const MAX_FRAMES: u32 = 180;
 
-/// One decoding run: from `from` seconds until `until` (the clip end, or where the first run
-/// began). `to` is the time of its newest frame so far.
 #[derive(Debug, Clone, Copy)]
 struct Pass {
     from: f64,
@@ -25,26 +19,21 @@ struct Pass {
     done: bool,
 }
 
-/// Message from the decoder thread: a frame of pass `.0`, or `None` when that pass ended.
 type Msg = (usize, Option<PreviewFrame>);
 
 pub struct HoverPreview {
     path: PathBuf,
     rx: Receiver<Msg>,
     cancel: Arc<AtomicBool>,
-    /// Decoded frames, sorted by time.
     frames: Vec<(f64, egui::TextureHandle)>,
     passes: Vec<Pass>,
     interval: f64,
     duration: Option<f64>,
     resume: f64,
-    /// Playback origin: the position is `origin.elapsed()` modulo the clip length.
     origin: Instant,
 }
 
 impl HoverPreview {
-    /// Starts playback at `resume` seconds (where the user left it last time): the decoder
-    /// seeks there first and fills in the beginning of the clip afterwards, for the loop.
     fn start(ctx: &egui::Context, path: &Path, duration: Option<f64>, resume: f64) -> Self {
         let interval = preview_interval(duration, MAX_FPS, MAX_FRAMES);
         let resume = resume.max(0.0);
@@ -90,7 +79,6 @@ impl HoverPreview {
         }
     }
 
-    /// Uploads decoded frames (a few per UI frame, so hovering never stalls the UI).
     fn poll(&mut self, ctx: &egui::Context) {
         for (pass, frame) in self.rx.try_iter().take(6) {
             let p = &mut self.passes[pass];
@@ -107,13 +95,11 @@ impl HoverPreview {
         }
     }
 
-    /// Clip length used for looping and the timeline.
     pub fn length(&self) -> f64 {
         let decoded = self.frames.last().map_or(0.0, |(t, _)| t + self.interval);
         self.duration.unwrap_or(decoded.max(self.resume + self.interval)).max(decoded).max(0.1)
     }
 
-    /// Current position in seconds (loops).
     pub fn position(&self) -> f64 {
         self.origin.elapsed().as_secs_f64() % self.length()
     }
@@ -123,7 +109,6 @@ impl HoverPreview {
         self.origin = Instant::now() - Duration::from_secs_f64(t);
     }
 
-    /// Whether the frame for `pos` has been decoded already.
     fn covered(&self, pos: f64) -> bool {
         let slack = self.interval * 1.5;
         self.passes
@@ -131,8 +116,6 @@ impl HoverPreview {
             .any(|p| pos >= p.from - 1e-6 && (pos <= p.to + slack || (p.done && pos <= p.until)))
     }
 
-    /// Frame to show now, `None` until the decoder has reached the position (the tile then
-    /// keeps its still thumbnail instead of racing through the clip).
     pub fn frame(&self) -> Option<&egui::TextureHandle> {
         let pos = self.position();
         if !self.covered(pos) {
@@ -153,8 +136,6 @@ impl Drop for HoverPreview {
     }
 }
 
-/// Index of the frame to show at `pos`: the last one starting at or before it (the first one
-/// before any has started; `None` without frames). `times` is sorted.
 fn frame_at(times: &[f64], pos: f64) -> Option<usize> {
     if times.is_empty() {
         return None;
@@ -162,8 +143,6 @@ fn frame_at(times: &[f64], pos: f64) -> Option<usize> {
     Some(times.partition_point(|t| *t <= pos).saturating_sub(1))
 }
 
-/// The one preview playing at a time (the hovered tile), and where each clip was left so
-/// hovering it again continues from there.
 #[derive(Default)]
 pub struct Previews {
     current: Option<HoverPreview>,
@@ -171,7 +150,6 @@ pub struct Previews {
 }
 
 impl Previews {
-    /// Preview of `path`, started if another (or none) is playing.
     pub fn play(&mut self, ctx: &egui::Context, path: &Path, duration: Option<f64>) -> &mut HoverPreview {
         if self.current.as_ref().is_none_or(|p| p.path != path) {
             self.stop();
@@ -184,7 +162,6 @@ impl Previews {
         p
     }
 
-    /// Stops the preview, remembering its position.
     pub fn stop(&mut self) {
         if let Some(p) = self.current.take() {
             self.resume.insert(p.path.clone(), p.position());
@@ -205,7 +182,6 @@ mod tests {
         previews.play(&ctx, a, Some(10.0)).seek(4.0);
         previews.stop();
         previews.play(&ctx, b, Some(10.0)).seek(7.0);
-        // Switching tiles also remembers the previous one.
         let pos = previews.play(&ctx, a, Some(10.0)).position();
         assert!((4.0..4.5).contains(&pos), "{pos}");
         let pos = previews.play(&ctx, b, Some(10.0)).position();
@@ -217,7 +193,6 @@ mod tests {
     fn only_decoded_stretches_count_as_ready() {
         use super::{HoverPreview, Pass};
         let ctx = eframe::egui::Context::default();
-        // Resumed at 4 s: the first pass decoded 4.0..=5.0, the second (0..4) nothing yet.
         let mut pv = HoverPreview::start(&ctx, Path::new("missing.mp4"), Some(10.0), 4.0);
         pv.interval = 0.1;
         pv.passes = vec![

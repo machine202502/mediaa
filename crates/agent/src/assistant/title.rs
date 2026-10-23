@@ -1,8 +1,3 @@
-//! The title of a chat, written once by the small model of the role «Заголовки» after the
-//! chat's first message, as a task of the queue (`chat-title`). Until it is ready the chat is
-//! called «Новый чат»; if the model cannot write one, the first message (trimmed, capitalised)
-//! is the title. A title is never changed afterwards and there is no renaming.
-
 use crate::prompts;
 use crate::scope::Scope;
 use mediaa_core::agent::{AgentSettings, ModelRole};
@@ -14,22 +9,16 @@ use serde_json::json;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Characters of the first message that name a chat when the model cannot.
 const FALLBACK_CHARS: usize = 48;
-/// Tokens a title may take. A title is a few words; the rest is spare so the line finishes
-/// (the prompt asks for the brevity, nothing cuts the text).
 const TITLE_TOKENS: u32 = 128;
-/// Context window of the titles model: a title needs the first message only.
 const TITLE_CONTEXT: u32 = 2048;
 
-/// The title of a chat task in the queue (the answer, the chat title): the start of the question.
 pub fn task_title(question: &str) -> String {
     let q = question.split_whitespace().collect::<Vec<_>>().join(" ");
     let head: String = q.chars().take(40).collect();
     format!("{head}{}", if q.chars().count() > 40 { "…" } else { "" })
 }
 
-/// The first message as a title: spaces collapsed, cut at a word, the first letter capital.
 pub fn fallback_title(question: &str) -> String {
     let q = question.split_whitespace().collect::<Vec<_>>().join(" ");
     let cut: String = q.chars().take(FALLBACK_CHARS).collect();
@@ -42,8 +31,6 @@ fn capitalised(text: &str) -> String {
     chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 
-/// The title out of what the model wrote: its first line without quotes, a final full stop or
-/// reasoning, in one line; `None` when nothing is left.
 pub fn clean_title(raw: &str) -> Option<String> {
     let text = split_thinking(raw).1;
     let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
@@ -57,13 +44,9 @@ pub fn clean_title(raw: &str) -> Option<String> {
     Some(capitalised(line))
 }
 
-/// Asks the titles model for the title of a chat that begins with `question`.
-/// Returns the title and the text the model returned (the error quotes it when there is no title).
 fn ask_model(scope: &Scope, settings: &AgentSettings, question: &str, cancel: &AtomicBool) -> anyhow::Result<(Option<String>, String)> {
     let source = settings.models.get(ModelRole::Titles).as_ref().ok_or_else(|| anyhow::anyhow!("no model for titles chosen (Agent → Models)"))?;
     let model = crate::models::local_spec(source)?;
-    // A title is seen by the user, not by the recording: it follows the interface language,
-    // even when the first message is in another language.
     let language = settings.language_name();
     let request = ChatRequest {
         model,
@@ -77,7 +60,6 @@ fn ask_model(scope: &Scope, settings: &AgentSettings, question: &str, cancel: &A
         device: Some(settings.devices.get(ModelRole::Titles)),
         priority: Some(Priority::Interactive),
         hf_token: super::hf_token(settings),
-        // The titles model is small: thinking spends the whole budget and no title is written.
         enable_thinking: false,
         ..ChatRequest::default()
     };
@@ -85,10 +67,6 @@ fn ask_model(scope: &Scope, settings: &AgentSettings, question: &str, cancel: &A
     Ok((clean_title(&answer.content), answer.content))
 }
 
-/// Writes the title of chat `chat` (the store `store` in `ai_dir`), the task of `scope`: from
-/// the model, or from the first message when the model fails. The task records the model's
-/// call in its stats; it is finished with the title (failed, with the title set all the same,
-/// when the model could not write one). Returns the title that was set (`None`: stopped).
 pub fn work(scope: &Scope, settings: &AgentSettings, ai_dir: &Path, store: &str, chat: ChatId, question: &str, cancel: &AtomicBool) -> Option<String> {
     let written = ask_model(scope, settings, question, cancel);
     if cancel.load(Ordering::Relaxed) {
@@ -152,25 +130,19 @@ mod tests {
         assert_eq!(title.as_deref(), Some("Приветствие"));
         let t = Transcript::open(ai, "rec").unwrap();
         assert_eq!(t.chat_title(chat).unwrap().as_deref(), Some("Приветствие"));
-        // The request: the titles model, the placeholders' data, interactive.
         let chats = engine.chats();
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0].model, "unsloth/Qwen3-0.6B-GGUF");
         assert!(!chats[0].enable_thinking, "a title is a short service call: the model does not think");
         assert_eq!(chats[0].max_tokens, TITLE_TOKENS);
-        // The question is Russian, the interface is English: the title follows the interface.
         assert!(chats[0].texts[1].contains("Write its title in English") && chats[0].texts[1].contains("првиет"), "{:?}", chats[0].texts);
-        // The queue: a finished chat-title task with the call in its stats.
         let task = scope.store().get(scope.task()).unwrap().unwrap();
         assert_eq!((task.kind.as_str(), task.status, task.inline), ("chat-title", TaskStatus::Done, true));
         assert_eq!((task.stats.model_calls, task.stats.models.clone()), (1, vec!["unsloth/Qwen3-0.6B-GGUF".to_string()]));
         assert_eq!(task.result.as_ref().unwrap()["title"], "Приветствие");
-        // Once: a second title does not replace the first.
         assert!(!t.set_chat_title(chat, "Другое").unwrap());
     }
 
-    /// The title is written for the user, so the interface language decides it, not the
-    /// language of the first message.
     #[test]
     fn the_title_follows_the_interface_language() {
         let dir = tempfile::tempdir().unwrap();
@@ -203,7 +175,6 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Failed);
         assert_eq!(task.error.as_deref(), Some("the model wrote no title: \"  \"; the title is the first message"));
 
-        // No titles model chosen: the same.
         let mut settings = AgentSettings::default();
         settings.models.titles = None;
         let (scope, chat) = start(ai, &engine, "как дела");
@@ -224,8 +195,6 @@ mod tests {
         assert_eq!(scope.store().get(scope.task()).unwrap().unwrap().status, TaskStatus::Cancelled);
     }
 
-    /// The titles model (Qwen3-0.6B) names three first messages, thinking off.
-    /// `MEDIAA_TEST_MODELS` is the models folder. `cargo test -p mediaa-agent titles_model_names_three_questions -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn titles_model_names_three_questions() {

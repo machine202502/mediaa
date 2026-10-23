@@ -1,7 +1,3 @@
-//! One state of the engine for the whole Agent section: a background poller asks for its health,
-//! status and downloaded models every [`POLL_EVERY`] and keeps the last answer or error. Every
-//! page reads it; no page asks the engine on its own.
-
 use crate::theme;
 use crossbeam_channel::Receiver;
 use eframe::egui::{self, RichText};
@@ -11,11 +7,8 @@ use rust_i18n::t;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// How often the engine is asked while it runs.
 pub const POLL_EVERY: Duration = Duration::from_secs(3);
 
-/// What the engine answered: its description, the loaded and waiting models, and the models it
-/// has downloaded.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Snapshot {
     pub health: Health,
@@ -25,17 +18,13 @@ pub struct Snapshot {
 
 #[derive(Default)]
 pub struct EngineState {
-    /// The last answer, or why there is none.
     answer: Option<Result<Snapshot, String>>,
     run: Option<Receiver<Result<Snapshot, String>>>,
     next: Option<Instant>,
-    /// Ask again as soon as the current request finishes.
     refresh: bool,
 }
 
 impl EngineState {
-    /// Collects a finished answer and starts the next request when it is time. Called every
-    /// frame; never waits for the engine.
     pub(super) fn tick(&mut self, engine: &Arc<dyn Engine>, ctx: &egui::Context) {
         if let Some(rx) = &self.run {
             match rx.try_recv() {
@@ -72,12 +61,10 @@ impl EngineState {
         }
     }
 
-    /// Asks again now (after a download or a delete, for instance).
     pub fn refresh_now(&mut self) {
         self.refresh = true;
     }
 
-    /// The last successful answer (kept while the next one is on its way).
     pub fn snapshot(&self) -> Option<&Snapshot> {
         match &self.answer {
             Some(Ok(s)) => Some(s),
@@ -93,12 +80,10 @@ impl EngineState {
         self.snapshot().map(|s| &s.status)
     }
 
-    /// Models the engine has downloaded; empty while it is not reachable.
     pub fn models(&self) -> &[ModelInfo] {
         self.snapshot().map_or(&[], |s| s.models.as_slice())
     }
 
-    /// Why the engine did not answer (or did not answer correctly).
     pub fn error(&self) -> Option<&str> {
         match &self.answer {
             Some(Err(e)) => Some(e),
@@ -106,17 +91,14 @@ impl EngineState {
         }
     }
 
-    /// No answer yet: the first request is still on its way.
     pub fn loading(&self) -> bool {
         self.answer.is_none()
     }
 
-    /// True when the engine has answered at least once and is reachable now.
     pub fn online(&self) -> bool {
         self.snapshot().is_some()
     }
 
-    /// What every page shows while the models are not reachable; `true` when they are not.
     pub fn offline_hint(&self, ui: &mut egui::Ui) -> bool {
         if self.online() {
             return false;
@@ -135,18 +117,14 @@ impl EngineState {
     }
 }
 
-/// Gigabytes with one decimal (`1.5`), as the pages print sizes.
 pub fn gb(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / f64::from(1u32 << 30))
 }
 
-/// «Скачивание N из M ГБ».
 pub fn download_text(done: u64, total: u64) -> String {
     t!("agent.downloading", done = gb(done), total = gb(total)).into()
 }
 
-/// The download's bar: its fill (0…1) and its text. Nothing downloaded yet: an empty bar and
-/// «скачивание…» instead of a size.
 pub fn download_bar(done: u64, total: u64) -> (f32, String) {
     if total == 0 {
         return (0.0, t!("agent.downloading_wait").into());

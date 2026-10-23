@@ -1,7 +1,3 @@
-//! Placement of the area-picker panels (tool column + action bar) around a selection:
-//! both stay fully on screen and never overlap each other.
-
-/// Axis-aligned rectangle in screen points.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RectF {
     pub x: f32,
@@ -34,7 +30,6 @@ pub struct PanelLayout {
     pub actions: RectF,
 }
 
-/// Distance kept from the selection and from the screen edges.
 pub const GAP: f32 = 10.0;
 
 fn clamp_into(r: RectF, screen: &RectF) -> RectF {
@@ -43,8 +38,6 @@ fn clamp_into(r: RectF, screen: &RectF) -> RectF {
     RectF::new(r.x.clamp(screen.x + GAP, max_x), r.y.clamp(screen.y + GAP, max_y), r.w, r.h)
 }
 
-/// Positions for the tool column (`tools` = its size, `None` when there are no tools) and the
-/// action bar of size `actions`, next to `sel`, inside `screen`.
 pub fn place_panels(screen: RectF, sel: RectF, tools: Option<(f32, f32)>, actions: (f32, f32)) -> PanelLayout {
     let (aw, ah) = actions;
     let fits_right = |w: f32| sel.right() + GAP + w <= screen.right() - GAP;
@@ -52,7 +45,6 @@ pub fn place_panels(screen: RectF, sel: RectF, tools: Option<(f32, f32)>, action
     let fits_below = sel.bottom() + GAP + ah <= screen.bottom() - GAP;
     let fits_above = sel.y - GAP - ah >= screen.y + GAP;
 
-    // Tool column candidates: outside right, outside left, inside the right edge.
     let tool_candidates: Vec<Option<RectF>> = match tools {
         None => vec![None],
         Some((tw, th)) => {
@@ -69,7 +61,6 @@ pub fn place_panels(screen: RectF, sel: RectF, tools: Option<(f32, f32)>, action
         }
     };
 
-    // Action bar rows: below, above, inside the bottom edge, inside the top edge.
     let mut rows = Vec::new();
     if fits_below {
         rows.push(sel.bottom() + GAP);
@@ -81,8 +72,6 @@ pub fn place_panels(screen: RectF, sel: RectF, tools: Option<(f32, f32)>, action
     rows.push(sel.y + GAP);
 
     for tools_rect in &tool_candidates {
-        // Align the bar to the selection edge on the tools' side, then to the other edge,
-        // then next to the tool column itself (corners of the screen).
         let tools_on_right = tools_rect.is_some_and(|t| t.x >= sel.x + sel.w / 2.0);
         let mut xs = if tools_on_right { vec![sel.right() - aw, sel.x] } else { vec![sel.x, sel.right() - aw] };
         let mut ys = rows.clone();
@@ -100,7 +89,6 @@ pub fn place_panels(screen: RectF, sel: RectF, tools: Option<(f32, f32)>, action
         }
     }
 
-    // Nothing fits side by side (tiny screen): stack the bar under the tool column.
     let tools_rect = tool_candidates[0];
     let y = tools_rect.map_or(sel.bottom() + GAP, |t| t.bottom() + GAP);
     PanelLayout {
@@ -160,7 +148,6 @@ mod tests {
 
     #[test]
     fn tall_narrow_selection_does_not_overlap() {
-        // The tool column is taller than the selection; the bar must not slide under it.
         let sel = RectF::new(700.0, 300.0, 80.0, 60.0);
         let l = place_panels(SCREEN, sel, Some(TOOLS), ACTIONS);
         check(&l);

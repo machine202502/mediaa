@@ -1,8 +1,3 @@
-<#
-.SYNOPSIS
-  Release build of MediaA for Windows -> dist\windows\mediaa.exe
-  (a single file; the app links FFmpeg and the C runtime statically).
-#>
 . "$PSScriptRoot\env.ps1"
 cargo build --release -p mediaa
 if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }

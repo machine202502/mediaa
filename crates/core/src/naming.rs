@@ -1,30 +1,18 @@
-//! Media file names: `<title>_<YYYY-MM-DD>_<HH-MM-SS>[-N].<ext>`.
-//!
-//! The title is what the user sees and may change (several files can share it); the date stamp
-//! (plus a counter when two files were made in the same second) keeps the file name unique.
-//! The library only lists files following this pattern.
-
 use chrono::{DateTime, Local, NaiveDateTime};
 use std::path::{Path, PathBuf};
 
-/// Date part of a media file name.
 const STAMP_FORMAT: &str = "%Y-%m-%d_%H-%M-%S";
-/// Length of a stamp without the counter (`2026-10-14_03-28-08`).
 const STAMP_LEN: usize = 19;
-/// Longest title kept in a file name (characters).
 pub const MAX_TITLE: usize = 120;
 
-/// A media file name split into its parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaName {
     pub title: String,
     pub taken: NaiveDateTime,
-    /// Counter that keeps names made in the same second apart (`None` = first one).
     pub counter: Option<u32>,
 }
 
 impl MediaName {
-    /// The stamp as written in the file name (`2026-10-14_03-28-08` or `…-2`).
     pub fn stamp(&self) -> String {
         let date = self.taken.format(STAMP_FORMAT);
         match self.counter {
@@ -38,10 +26,7 @@ impl MediaName {
     }
 }
 
-/// Splits a file stem (no extension) into title and stamp; `None` if it does not follow the
-/// `<title>_<YYYY-MM-DD>_<HH-MM-SS>[-N]` pattern.
 pub fn parse_stem(stem: &str) -> Option<MediaName> {
-    // Optional counter after the time.
     let (base, counter) = match stem.rsplit_once('-') {
         Some((b, n)) if !n.is_empty() && n.len() <= 6 && n.bytes().all(|c| c.is_ascii_digit()) && b.len() >= STAMP_LEN + 2 => {
             match parse_tail(b) {
@@ -55,7 +40,6 @@ pub fn parse_stem(stem: &str) -> Option<MediaName> {
     Some(MediaName { title: title.to_string(), taken, counter })
 }
 
-/// `"<title>_<stamp>"` → (title, date) when `base` ends with a valid stamp after a non-empty title.
 fn parse_tail(base: &str) -> Option<(&str, NaiveDateTime)> {
     if base.len() < STAMP_LEN + 2 || !base.is_char_boundary(base.len() - STAMP_LEN) {
         return None;
@@ -69,12 +53,10 @@ fn parse_tail(base: &str) -> Option<(&str, NaiveDateTime)> {
     Some((title, taken))
 }
 
-/// Parses a media file path (`None` for files that do not follow the naming pattern).
 pub fn parse_path(path: &Path) -> Option<MediaName> {
     parse_stem(path.file_stem()?.to_str()?)
 }
 
-/// Makes arbitrary text (a window title, a name typed by the user) safe for a file name.
 pub fn sanitize(text: &str, max_chars: usize) -> String {
     let cleaned: String = text
         .chars()
@@ -86,7 +68,6 @@ pub fn sanitize(text: &str, max_chars: usize) -> String {
         .collect();
     let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     let truncated: String = collapsed.chars().take(max_chars).collect();
-    // Windows forbids trailing dots/spaces.
     let trimmed = truncated.trim_end_matches(['.', ' ']).to_string();
     if trimmed.is_empty() {
         "untitled".to_string()
@@ -95,8 +76,6 @@ pub fn sanitize(text: &str, max_chars: usize) -> String {
     }
 }
 
-/// First free `dir/<title>_<stamp>[-N].ext` for a file made at `taken` (`skip` = a path that
-/// may be reused, the file being renamed).
 fn free_path(dir: &Path, title: &str, taken: NaiveDateTime, ext: &str, skip: Option<&Path>) -> PathBuf {
     let ext = ext.trim_start_matches('.');
     let mut name = MediaName { title: sanitize(title, MAX_TITLE), taken, counter: None };
@@ -109,17 +88,14 @@ fn free_path(dir: &Path, title: &str, taken: NaiveDateTime, ext: &str, skip: Opt
     }
 }
 
-/// Path for a new media file titled `title`, made `at` (unique in `dir`).
 pub fn media_path(dir: &Path, title: &str, at: DateTime<Local>, ext: &str) -> PathBuf {
     free_path(dir, title, at.naive_local(), ext, None)
 }
 
-/// Renames a media file to `title`, keeping its date stamp; returns the new path.
 pub fn rename(path: &Path, title: &str) -> anyhow::Result<PathBuf> {
     let name = parse_path(path).ok_or_else(|| anyhow::anyhow!("{} is not a MediaA file name", path.display()))?;
     let dir = path.parent().unwrap_or(Path::new("."));
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
-    // Same title: keep the exact name (and its counter).
     if sanitize(title, MAX_TITLE) == name.title {
         return Ok(path.to_path_buf());
     }
@@ -170,7 +146,6 @@ mod tests {
         ] {
             assert_eq!(parse_stem(bad), None, "{bad}");
         }
-        // A title that itself ends in a number is not mistaken for a counter.
         assert_eq!(parse_stem("Take-2_2026-10-13_09-05-07").unwrap().title, "Take-2");
         assert_eq!(parse_path(Path::new("/m/Rec [1 of 2]_2026-10-13_09-05-07.mp4")).unwrap().title, "Rec [1 of 2]");
     }
@@ -191,7 +166,6 @@ mod tests {
         assert_eq!(b2.file_name().unwrap(), "My_2026-10-14_01-00-00.mp4", "same title, different files");
         assert_eq!(rename(&a2, "My").unwrap(), a2, "unchanged title: unchanged name");
 
-        // Same title and second: the counter keeps them apart.
         let c = media_path(dir.path(), "Other", at(), "png");
         std::fs::write(&c, b"c").unwrap();
         assert_eq!(rename(&c, "My").unwrap().file_name().unwrap(), "My_2026-10-13_09-05-07-2.png");

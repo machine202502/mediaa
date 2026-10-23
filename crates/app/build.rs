@@ -1,10 +1,3 @@
-//! Embeds the app icon into the Windows executable (Explorer, taskbar, Alt+Tab).
-//!
-//! Windows: llama.cpp's Vulkan backend is linked against the Vulkan loader that GPU drivers
-//! install. Loading the loader only when llama.cpp first uses it keeps MediaA starting on
-//! machines without one — it then runs models on the CPU; `mediaa_engine::llm` checks for the
-//! loader first.
-
 #[path = "src/icon.rs"]
 #[allow(dead_code)]
 mod icon;

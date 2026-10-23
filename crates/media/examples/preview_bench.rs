@@ -1,5 +1,3 @@
-//! Dev helper: `cargo run --release -p mediaa-media --example preview_bench -- <file> [width] [interval]`
-//! times the preview frame decoder (frames delivered and how far ahead of real time it runs).
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
@@ -15,7 +13,6 @@ fn main() -> anyhow::Result<()> {
     mediaa_media::preview::preview_frames(&path, width, interval, 0.0, &AtomicBool::new(false), &mut |f| {
         n += 1;
         last = f.at;
-        // Lag: frame decoded later than its play time (would stall the preview).
         worst_lag = worst_lag.max(t.elapsed().as_secs_f64() - f.at);
         true
     })?;

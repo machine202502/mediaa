@@ -1,6 +1,3 @@
-// Discovery of Grok's built-in subagents for the log mirror.
-// Run: node --test scripts/grok-builtin-log.test.mjs
-
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

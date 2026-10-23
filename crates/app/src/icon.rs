@@ -1,7 +1,3 @@
-//! The MediaA icon, drawn procedurally (no binary assets): a blue→cyan tile with a lens ring
-//! and play triangle (screen/video recording) and a four-pointed sparkle (AI agent).
-//! Shared by the window, the tray and the Windows `.exe` resource (see `build.rs`).
-
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
@@ -13,7 +9,6 @@ fn rounded_box_sdf(px: f32, py: f32, c: f32, half: f32, r: f32) -> f32 {
     qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
 }
 
-/// Signed distance to a triangle (negative inside).
 fn triangle_sdf(p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f32 {
     let edge = |p0: (f32, f32), p1: (f32, f32)| {
         let (ex, ey) = (p1.0 - p0.0, p1.1 - p0.1);
@@ -35,11 +30,9 @@ fn triangle_sdf(p: (f32, f32), a: (f32, f32), b: (f32, f32), c: (f32, f32)) -> f
     }
 }
 
-/// Coverage (0..1) of a four-pointed sparkle (astroid) of radius `r` at `(cx, cy)`.
 fn sparkle(px: f32, py: f32, cx: f32, cy: f32, r: f32) -> f32 {
     let (dx, dy) = ((px - cx).abs() / r, (py - cy).abs() / r);
     let v = dx.powf(2.0 / 3.0) + dy.powf(2.0 / 3.0);
-    // Edge width ≈ 1.5 px regardless of the sparkle size.
     let e = 1.5 / r;
     1.0 - smoothstep(1.0 - e, 1.0 + e, v)
 }
@@ -48,7 +41,6 @@ fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
 }
 
-/// RGBA8 pixels of a `size`×`size` icon.
 pub fn rgba(size: u32) -> Vec<u8> {
     let n = size as f32;
     let aa = 0.8;
@@ -66,17 +58,14 @@ pub fn rgba(size: u32) -> Vec<u8> {
             if tile <= 0.0 {
                 continue;
             }
-            // Diagonal gradient: deep blue (bottom-left) → blue → cyan (top-right).
             let t = ((px - py) / n * 0.5 + 0.5).clamp(0.0, 1.0);
             let mut rgb = if t < 0.5 { mix(deep, blue, t * 2.0) } else { mix(blue, cyan, (t - 0.5) * 2.0) };
 
-            // Lens ring (recording) slightly left/below the centre.
             let (lx, ly) = (n * 0.44, n * 0.56);
             let d = (px - lx).hypot(py - ly);
             let ring_r = n * 0.25;
             let ring_w = n * 0.055;
             let ring = 1.0 - smoothstep(ring_w - aa, ring_w + aa, (d - ring_r).abs());
-            // Play triangle inside the ring.
             let s = n * 0.11;
             let tri = triangle_sdf(
                 (px, py),
@@ -85,7 +74,6 @@ pub fn rgba(size: u32) -> Vec<u8> {
                 (lx + s * 1.05, ly),
             );
             let play = 1.0 - smoothstep(-aa, aa, tri);
-            // AI sparkle top-right with a small companion.
             let spark = sparkle(px, py, n * 0.74, n * 0.27, n * 0.16).max(sparkle(px, py, n * 0.86, n * 0.46, n * 0.065));
 
             let w = ring.max(play).max(spark);
@@ -99,18 +87,13 @@ pub fn rgba(size: u32) -> Vec<u8> {
     out
 }
 
-/// Small menu badges marking the main tray actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Badge {
-    /// Blue dashed-corner square: screen area.
     Area,
-    /// Red dot: start recording.
     Record,
-    /// Red square: stop recording.
     Stop,
 }
 
-/// RGBA pixels of a `size`×`size` menu badge.
 pub fn badge(kind: Badge, size: u32) -> Vec<u8> {
     let n = size as f32;
     let c = n / 2.0;
@@ -125,7 +108,6 @@ pub fn badge(kind: Badge, size: u32) -> Vec<u8> {
                 Badge::Record => (1.0 - smoothstep(-aa, aa, (px - c).hypot(py - c) - n * 0.34), red),
                 Badge::Stop => (1.0 - smoothstep(-aa, aa, rounded_box_sdf(px, py, c, n * 0.3, n * 0.06)), red),
                 Badge::Area => {
-                    // Outline of a square, drawn only near its corners (selection marks).
                     let d = rounded_box_sdf(px, py, c, n * 0.36, n * 0.04).abs() - n * 0.05;
                     let near_corner = (px - c).abs() > n * 0.14 && (py - c).abs() > n * 0.14;
                     (if near_corner { 1.0 - smoothstep(-aa, aa, d) } else { 0.0 }, blue)
@@ -139,7 +121,6 @@ pub fn badge(kind: Badge, size: u32) -> Vec<u8> {
     out
 }
 
-/// The app icon with a red "recording" dot (white rim) in the bottom-right corner, for the tray.
 pub fn rgba_recording(size: u32) -> Vec<u8> {
     let mut out = rgba(size);
     let n = size as f32;
@@ -171,7 +152,6 @@ mod tests {
         let px = super::rgba(n);
         assert_eq!(px.len(), (n * n * 4) as usize);
         assert_eq!(px[3], 0, "corner is transparent");
-        // Centre of the play triangle is white.
         let (x, y) = ((0.44 * n as f32) as u32, (0.56 * n as f32) as u32);
         let i = ((y * n + x) * 4) as usize;
         assert!(px[i] > 240 && px[i + 1] > 240 && px[i + 2] > 240 && px[i + 3] == 255);
@@ -198,7 +178,6 @@ mod tests {
     }
 }
 
-/// Dev helper: `MEDIAA_ICON_PNG=icon.png cargo test -p mediaa export_icon_png` writes a preview.
 #[cfg(test)]
 #[test]
 fn export_icon_png() {

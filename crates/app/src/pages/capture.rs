@@ -1,9 +1,3 @@
-//! Screenshot page.
-//!
-//! | action tiles                         |
-//! | After capture | Displays  (same height) |
-//! | Windows                              |
-
 use super::{header, tile};
 use crate::app::App;
 use crate::overlay::Purpose;
@@ -97,7 +91,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             theme::hint(ui, t!("shot.no_windows"));
         }
         let mut capture = None;
-        // Full width, so the scrollbar sits at the right edge of the card.
         egui::ScrollArea::vertical().max_height(190.0).auto_shrink([false, true]).id_salt("shot-windows").show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             for w in &app.windows {

@@ -1,6 +1,5 @@
 One topic of the recording ({{ start }} – {{ end }}).
 The topic: {{ title }} — {{ summary }}
-{# Small models drift into English unless told. #}
 Write everything in {{ language }}.
 {% if parts %}
 It joins these subtopics: {% for part in parts %}{{ part.start }}–{{ part.end }} {{ part.title }}{% if not loop.last %}; {% endif %}{% endfor %}

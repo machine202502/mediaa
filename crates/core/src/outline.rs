@@ -1,44 +1,24 @@
-//! The outline of a recording: chapters with a title and a digest (summary, decisions, action
-//! items, open questions, topics, quotes), one per topic of the dialog. Topics are found by the
-//! meaning of the chunk embeddings ([`semantic_boundaries`]) and digested by a language model in
-//! the background (`mediaa_agent::outline`); summary questions are answered from it cheaply and
-//! consistently, and it is the map of a long recording.
-
 use crate::library::human_duration;
 use crate::transcript::{Reply, Transcript};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// Words of dialog per chapter window (~8–10 minutes of conversation).
 pub const WINDOW_WORDS: usize = 1200;
 
-/// Chunks compared on each side of a boundary between topics.
 pub const BOUNDARY_K: usize = 2;
-/// On a long recording the means cover one chunk more (smoother boundaries).
 pub const BOUNDARY_K_LONG: usize = 3;
-/// From this many chunks on the recording counts as long.
 pub const BOUNDARY_LONG_CHUNKS: usize = 30;
-/// A boundary's dip must be deeper than the mean dip plus this many σ.
 pub const BOUNDARY_SIGMA: f64 = 0.5;
-/// The shortest topic, seconds of speech: a shorter piece is merged with a neighbour.
 pub const MIN_TOPIC_SECONDS: f64 = 120.0;
-/// A quote's time must point within this many seconds of a reply.
 pub const QUOTE_NEAR_SECONDS: f64 = 15.0;
-/// A reply must contain this share of a quote's words for the quote to count as checked.
 pub const QUOTE_MATCH: f64 = 0.6;
-/// Quotes kept for one topic.
 pub const MAX_QUOTES: usize = 3;
 
-/// A line of a detail prompt lasts at most this many seconds (it is cut at a sentence end).
 pub const FINE_LINE_SECONDS: f64 = 25.0;
-/// A line of a detail prompt has at most this many words.
 pub const FINE_LINE_WORDS: usize = 60;
-/// The lines at a detail item's time must share this much of its words with it (a detail item
-/// is a paraphrase, so the share is lower than a quote's).
 pub const DETAIL_MATCH: f64 = 0.3;
 
-/// What the model writes about a window.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Digest {
     pub title: String,
@@ -51,25 +31,20 @@ pub struct Digest {
     pub questions: Vec<String>,
     #[serde(default)]
     pub topics: Vec<String>,
-    /// Key lines of the topic in the speakers' words, with their times (checked against the replies).
     #[serde(default)]
     pub quotes: Vec<Quote>,
-    /// The pieces a long merged topic is made of, in order (empty for an ordinary topic).
     #[serde(default)]
     pub parts: Vec<Part>,
-    /// The detailed breakdown of the topic (empty until its `topic-detail` task has run).
     #[serde(default)]
     pub sections: Vec<Section>,
 }
 
-/// A line quoted from the recording: when it was said and what.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Quote {
     pub time: f64,
     pub text: String,
 }
 
-/// A piece of a long merged topic: its span and the title of its own digest.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Part {
     pub start: f64,
@@ -77,20 +52,15 @@ pub struct Part {
     pub title: String,
 }
 
-/// A section of the detailed breakdown of a topic: what it is and how its items are laid out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SectionKind {
-    /// A plain list of points (the usual one).
     #[default]
     List,
-    /// Numbered steps, in order.
     Steps,
-    /// A piece of prose.
     Text,
 }
 
-/// One section of [`Digest::sections`]: a titled piece of the topic with its items.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Section {
     pub title: String,
@@ -100,19 +70,13 @@ pub struct Section {
     pub items: Vec<Item>,
 }
 
-/// One item of a [`Section`]: what was said and, when the recording confirms it, when.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub text: String,
-    /// The start of the line that says this, checked like a quote but against the fine lines of
-    /// the topic ([`verified_detail_time`]); `None` when the model's time could not be
-    /// confirmed (the item itself stays).
     #[serde(default)]
     pub time: Option<f64>,
 }
 
-/// JSON Schema of [`Digest`] for constrained generation. How many list entries is bounded;
-/// the texts are not: a `maxLength` cuts a word, and the prompts ask for the brevity.
 pub const DIGEST_SCHEMA: &str = r#"{
   "type": "object",
   "properties": {
@@ -138,18 +102,13 @@ pub const DIGEST_SCHEMA: &str = r#"{
   "required": ["title", "summary", "decisions", "actions", "questions", "topics"]
 }"#;
 
-/// How many sections and items an answer may hold. The character counts are what a full answer
-/// is budgeted for (`mediaa_agent::outline`), not a limit: the schema does not cut a text.
 pub const SECTIONS_MAX: usize = 6;
 pub const SECTION_ITEMS_MAX: usize = 8;
 pub const SECTION_TITLE_CHARS: usize = 60;
 pub const SECTION_TEXT_CHARS: usize = 200;
-/// How many points one window may hold, and the characters a point is budgeted for.
 pub const POINTS_MAX: usize = 15;
 pub const POINT_TEXT_CHARS: usize = 200;
 
-/// JSON Schema of the detailed breakdown of a topic (`Digest.sections`), for constrained
-/// generation. Counts are bounded; the texts are not ([`DIGEST_SCHEMA`]).
 pub fn sections_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -183,7 +142,6 @@ pub fn sections_schema() -> serde_json::Value {
     })
 }
 
-/// JSON Schema of the points of one window of a long topic, for constrained generation.
 pub fn points_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -212,8 +170,6 @@ pub struct Chapter {
     pub digest: Digest,
 }
 
-/// A window of the dialog for one model call: its time and its text, one reply per line as
-/// `[mm:ss] Name: text`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Window {
     pub start: f64,
@@ -221,21 +177,16 @@ pub struct Window {
     pub text: String,
 }
 
-/// One topic of the boundary plan: from the start of its first chunk to the start of the next
-/// topic (the last one ends with the recording).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PlanTopic {
     pub start: f64,
     pub end: f64,
 }
 
-/// The line of a reply in a prompt: `[mm:ss] @sN: text` (or without a speaker).
 pub fn line(reply: &Reply) -> String {
     line_text(reply.start, reply.speaker, &reply.text())
 }
 
-/// One line of a detail prompt: a piece of a reply cut at a sentence end, at most
-/// [`FINE_LINE_SECONDS`] of speech or [`FINE_LINE_WORDS`] words, with the time of its first word.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FineLine {
     pub start: f64,
@@ -251,15 +202,10 @@ fn line_text(start: f64, speaker: Option<u32>, text: &str) -> String {
     }
 }
 
-/// Cuts the replies into short lines for the detail prompts: by sentence ends, so that a line
-/// lasts at most [`FINE_LINE_SECONDS`] seconds or has at most [`FINE_LINE_WORDS`] words (a
-/// monologue of minutes becomes many lines, each with its own time). A new reply always starts a
-/// new line.
 pub fn fine_lines(replies: &[Reply]) -> Vec<FineLine> {
     let mut out: Vec<FineLine> = Vec::new();
     for reply in replies {
         let mut line: Vec<&crate::transcript::Word> = Vec::new();
-        // Words up to here end with a sentence end (the preferred place to cut).
         let mut sentence = 0;
         for word in &reply.words {
             line.push(word);
@@ -291,8 +237,6 @@ fn push_fine_line(out: &mut Vec<FineLine>, speaker: Option<u32>, words: &[&crate
     out.push(FineLine { start: first.start, end: last.end, words: words.len(), text: line_text(first.start, speaker, &text) });
 }
 
-/// Groups fine lines into windows of about `max_words` words (the lines themselves are never
-/// cut), for the points of a long topic.
 pub fn windows_of_lines(lines: &[FineLine], max_words: usize) -> Vec<Window> {
     let mut out: Vec<Window> = Vec::new();
     let mut words = 0;
@@ -313,8 +257,6 @@ pub fn windows_of_lines(lines: &[FineLine], max_words: usize) -> Vec<Window> {
     out
 }
 
-/// Cuts the dialog into windows of about `max_words` words at reply ends (a longer reply is
-/// a window of its own). Speakers are the labels `@sN`.
 pub fn windows(replies: &[Reply], max_words: usize) -> Vec<Window> {
     let mut out: Vec<Window> = Vec::new();
     let mut words = 0;
@@ -337,12 +279,10 @@ pub fn windows(replies: &[Reply], max_words: usize) -> Vec<Window> {
     out
 }
 
-/// A chunk of the dialog with its embedding, for finding where topics change.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChunkVector {
     pub start: f64,
     pub end: f64,
-    /// As stored by the embedding model (cosine similarity is used, so the length does not matter).
     pub embedding: Vec<f32>,
 }
 
@@ -362,7 +302,6 @@ fn mean(vectors: &[ChunkVector]) -> Vec<f64> {
     mean
 }
 
-/// Cosine similarity of two vectors; 0 when one of them has no length.
 pub fn cosine(a: &[f64], b: &[f64]) -> f64 {
     let (mut dot, mut na, mut nb) = (0.0, 0.0, 0.0);
     for (x, y) in a.iter().zip(b) {
@@ -373,20 +312,10 @@ pub fn cosine(a: &[f64], b: &[f64]) -> f64 {
     if na == 0.0 || nb == 0.0 { 0.0 } else { dot / (na.sqrt() * nb.sqrt()) }
 }
 
-/// Seconds of speech in `chunks[from..to]`: the durations of the chunks (chunks overlap a
-/// little where a long turn was split, so this is a slight over-count).
 fn speech_seconds(chunks: &[ChunkVector], from: usize, to: usize) -> f64 {
     chunks[from..to].iter().map(|c| (c.end - c.start).max(0.0)).sum()
 }
 
-/// Starts of topics as indices into `chunks` (without 0): where one topic ends and the next
-/// begins.
-///
-/// TextTiling over the chunk embeddings: the similarity of the mean embeddings of `k` chunks on
-/// each side of every boundary, the depth of the dip against the nearest similarity peaks on
-/// both sides, and a boundary wherever the dip is deeper than the mean depth plus
-/// [`BOUNDARY_SIGMA`] σ. Pieces shorter than [`MIN_TOPIC_SECONDS`] of speech are then merged with
-/// the neighbour across the boundary with the higher similarity.
 pub fn semantic_boundaries(chunks: &[ChunkVector]) -> Vec<usize> {
     let n = chunks.len();
     let k = if n >= BOUNDARY_LONG_CHUNKS { BOUNDARY_K_LONG } else { BOUNDARY_K };
@@ -394,7 +323,6 @@ pub fn semantic_boundaries(chunks: &[ChunkVector]) -> Vec<usize> {
         return Vec::new();
     }
     let similarity = boundary_similarities(chunks);
-    // Depth of the dip: how far it falls below the nearest peak on each side (TextTiling).
     let mut depth = vec![0.0; n];
     for i in 1..n {
         let mut l = i;
@@ -415,9 +343,6 @@ pub fn semantic_boundaries(chunks: &[ChunkVector]) -> Vec<usize> {
     merge_short_topics(chunks, &similarity, starts)
 }
 
-/// The similarity of the mean embeddings of `k` chunks on each side of every chunk boundary,
-/// the same curve [`semantic_boundaries`] reads: `similarity[i]` is the boundary before chunk
-/// `i`, index 0 is unused (0). A topic boundary is a dip in this curve.
 pub fn boundary_similarities(chunks: &[ChunkVector]) -> Vec<f64> {
     let n = chunks.len();
     let k = if n >= BOUNDARY_LONG_CHUNKS { BOUNDARY_K_LONG } else { BOUNDARY_K };
@@ -430,7 +355,6 @@ pub fn boundary_similarities(chunks: &[ChunkVector]) -> Vec<f64> {
     similarity
 }
 
-/// Merges every piece shorter than [`MIN_TOPIC_SECONDS`] with the neighbour it resembles more.
 fn merge_short_topics(chunks: &[ChunkVector], similarity: &[f64], starts: Vec<usize>) -> Vec<usize> {
     let n = chunks.len();
     let mut cuts: Vec<usize> = std::iter::once(0).chain(starts).chain(std::iter::once(n)).collect();
@@ -441,7 +365,6 @@ fn merge_short_topics(chunks: &[ChunkVector], similarity: &[f64], starts: Vec<us
             if speech_seconds(chunks, a, b) >= MIN_TOPIC_SECONDS {
                 continue;
             }
-            // The first and the last piece have only one neighbour; otherwise the closer one wins.
             let with_left = match (a, b == n) {
                 (_, true) => true,
                 (0, false) => false,
@@ -458,8 +381,6 @@ fn merge_short_topics(chunks: &[ChunkVector], similarity: &[f64], starts: Vec<us
     cuts.into_iter().filter(|&c| c > 0 && c < n).collect()
 }
 
-/// Seconds of a time as the model writes it in a quote — `m:ss`, `mm:ss`, `h:mm:ss` (also
-/// `[m:ss]` and spaces). `None` when it is not such a time.
 pub fn clock_time(text: &str) -> Option<f64> {
     let t = text.trim().trim_matches(|c: char| c == '[' || c == ']' || c.is_whitespace());
     if t.is_empty() {
@@ -472,7 +393,6 @@ pub fn clock_time(text: &str) -> Option<f64> {
     let mut total = 0.0;
     for (i, part) in parts.iter().enumerate() {
         let v: f64 = part.trim().parse().ok().filter(|v: &f64| v.is_finite() && *v >= 0.0)?;
-        // Minutes and seconds of a clock time stay below 60.
         if i > 0 && v >= 60.0 {
             return None;
         }
@@ -488,15 +408,12 @@ fn quote_words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The start of the reply that says `text` near `time`: a reply within [`QUOTE_NEAR_SECONDS`]
-/// of `time` whose own words contain most of the words of `text` ([`QUOTE_MATCH`]); `None`
-/// when there is no such reply. The rule shared by quotes and the times of detail items.
 fn said_near(time: f64, text: &str, replies: &[Reply]) -> Option<f64> {
     let words = quote_words(text);
     if words.is_empty() {
         return None;
     }
-    let mut best: Option<(f64, f64, f64)> = None; // share, -distance, reply start
+    let mut best: Option<(f64, f64, f64)> = None;
     for reply in replies {
         let distance = if time < reply.start {
             reply.start - time
@@ -521,24 +438,17 @@ fn said_near(time: f64, text: &str, replies: &[Reply]) -> Option<f64> {
     best.map(|(_, _, start)| start)
 }
 
-/// Checks a time written by the model against the replies the same way a quote is checked:
-/// `Some(start of the reply)` when the reply near `time` says `text`, else `None`.
 pub fn verified_time(time: f64, text: &str, replies: &[Reply]) -> Option<f64> {
     said_near(time, text, replies)
 }
 
-/// Checks a detail item's time against the fine lines of its topic: `Some(start of the line)`
-/// when a line within [`QUOTE_NEAR_SECONDS`] of `time` says the item — its own text shares at
-/// least [`DETAIL_MATCH`] of the item's words, or, when no line does, a line with its
-/// neighbours does (an item may cover a sentence or two); else `None`. The line that says the
-/// words wins over a neighbour of it.
 pub fn verified_detail_time(time: f64, text: &str, lines: &[FineLine]) -> Option<f64> {
     let words = quote_words(text);
     if words.is_empty() {
         return None;
     }
     let share = |said: &HashSet<String>| words.iter().filter(|w| said.contains(*w)).count() as f64 / words.len() as f64;
-    let mut own: Option<(f64, f64, f64)> = None; // share, -distance, line start
+    let mut own: Option<(f64, f64, f64)> = None;
     let mut near: Option<(f64, f64, f64)> = None;
     for (i, line) in lines.iter().enumerate() {
         let distance = if time < line.start {
@@ -559,7 +469,6 @@ pub fn verified_detail_time(time: f64, text: &str, lines: &[FineLine]) -> Option
     own.or(near).map(|(_, _, start)| start)
 }
 
-/// Keeps the better match: the higher share, then the closer line.
 fn best_match(best: &mut Option<(f64, f64, f64)>, share: f64, distance: f64, start: f64) {
     if share < DETAIL_MATCH {
         return;
@@ -570,9 +479,6 @@ fn best_match(best: &mut Option<(f64, f64, f64)>, share: f64, distance: f64, sta
     }
 }
 
-/// Checks the model's quotes against the replies: a quote stays only if a reply within
-/// [`QUOTE_NEAR_SECONDS`] of its time contains most of its words ([`QUOTE_MATCH`]); its time
-/// becomes the start of that reply. At most [`MAX_QUOTES`] stay.
 pub fn verified_quotes(quotes: &[Quote], replies: &[Reply]) -> Vec<Quote> {
     let mut out: Vec<Quote> = Vec::new();
     for quote in quotes {
@@ -590,7 +496,6 @@ pub fn verified_quotes(quotes: &[Quote], replies: &[Reply]) -> Vec<Quote> {
 }
 
 impl Transcript {
-    /// Stores chapter `idx` (replacing it).
     pub fn put_chapter(&self, idx: usize, chapter: &Chapter) -> anyhow::Result<()> {
         self.db.execute(
             "INSERT OR REPLACE INTO chapters (idx, start, end_, data) VALUES (?1, ?2, ?3, ?4)",
@@ -608,7 +513,6 @@ impl Transcript {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Forgets the outline (before building it again).
     pub fn clear_chapters(&self) -> anyhow::Result<()> {
         self.db.execute("DELETE FROM chapters", [])?;
         Ok(())
@@ -625,8 +529,6 @@ mod tests {
         Reply { start, end: words.last().map_or(start, |w| w.end), speaker, words }
     }
 
-    /// A monologue of `words` words, `step` seconds per word; with `stops`, a sentence end every
-    /// ten words.
     fn monologue(words: usize, step: f64, stops: bool) -> Reply {
         let words: Vec<Word> = (0..words)
             .map(|i| Word {
@@ -653,15 +555,12 @@ mod tests {
 
     #[test]
     fn a_long_monologue_is_cut_into_fine_lines() {
-        // 100 words, half a second each, a sentence end every ten words: the 25-second limit cuts
-        // at the sentence end of the fiftieth word, so the next line starts at 25 s.
         let lines = fine_lines(&[monologue(100, 0.5, true)]);
         assert_eq!(lines.len(), 2, "{lines:#?}");
         assert_eq!(lines.iter().map(|l| l.words).collect::<Vec<_>>(), [50, 50]);
         assert_eq!((lines[0].start, lines[1].start), (0.0, 25.0));
         assert!(lines[0].text.starts_with("[00:00] @s1: слово0 "), "{}", lines[0].text);
         assert!(lines[1].text.starts_with("[00:25] @s1: слово50"), "{}", lines[1].text);
-        // Without a sentence end the word limit cuts the line.
         let lines = fine_lines(&[monologue(100, 0.1, false)]);
         assert_eq!(lines.iter().map(|l| l.words).collect::<Vec<_>>(), [60, 40]);
         assert_eq!(lines[1].start, 6.0);
@@ -670,13 +569,11 @@ mod tests {
 
     #[test]
     fn a_detail_item_gets_the_time_of_the_line_that_says_it() {
-        // Two lines: 0:00–0:24.9 and 0:25–0:49.9.
         let lines = fine_lines(&[monologue(100, 0.5, true)]);
         assert_eq!(verified_detail_time(30.0, "слово55 слово56", &lines), Some(25.0), "the middle of the monologue");
         assert_eq!(verified_detail_time(70.0, "слово55 слово56", &lines), None, "too far from the line");
         assert_eq!(verified_detail_time(30.0, "погода на даче", &lines), None, "not said there");
         assert_eq!(verified_detail_time(30.0, "", &lines), None);
-        // The lines are grouped into windows without cutting them.
         let windows = windows_of_lines(&lines, 60);
         assert_eq!(windows.len(), 2);
         assert_eq!((windows[0].start, windows[1].start), (0.0, 25.0));
@@ -690,7 +587,6 @@ mod tests {
 
     #[test]
     fn boundaries_where_the_meaning_dips() {
-        // Three groups of six chunks with orthogonal meanings: boundaries after chunks 6 and 12.
         let mut chunks = Vec::new();
         for (range, v) in [(0..6, [1.0_f32, 0.0]), (6..12, [0.0, 1.0]), (12..18, [-1.0, 0.0])] {
             for j in range {
@@ -698,25 +594,20 @@ mod tests {
             }
         }
         assert_eq!(semantic_boundaries(&chunks), [6, 12]);
-        // The same curve the boundaries come from: a dip at each cut, a peak inside a topic.
         let similarity = boundary_similarities(&chunks);
         assert!(similarity[6] < 0.1 && similarity[12] < 0.1, "{similarity:?}");
         assert!(similarity[2] > 0.99 && similarity[8] > 0.99, "{similarity:?}");
-        // One meaning throughout: no boundaries.
         let flat: Vec<ChunkVector> = (0..12).map(|i| chunk(f64::from(i) * 60.0, [1.0, 0.0])).collect();
         assert!(semantic_boundaries(&flat).is_empty());
-        // Too short to compare k chunks on each side.
         assert!(semantic_boundaries(&chunks[..4]).is_empty());
         assert!(semantic_boundaries(&[]).is_empty());
     }
 
     #[test]
     fn a_short_topic_merges_with_the_closer_neighbour() {
-        // Five chunks of topic A, one short chunk between A and C, five of C.
         let mut chunks: Vec<ChunkVector> = (0..5).map(|i| chunk(f64::from(i) * 60.0, [1.0, 0.0])).collect();
         chunks.push(chunk(300.0, [0.866, 0.5]));
         chunks.extend((0..5).map(|i| chunk(360.0 + f64::from(i) * 60.0, [0.0, 1.0])));
-        // The lone chunk is closer to A than to C, so it joins A; the remaining boundary is at 6.
         assert_eq!(semantic_boundaries(&chunks), [6]);
     }
 
@@ -730,15 +621,14 @@ mod tests {
         let quote = |time: f64, text: &str| Quote { time, text: text.into() };
         let kept = verified_quotes(
             &[
-                quote(29.0, "Графики сделает Ира до четверга"), // a little off, like the model rounds
-                quote(30.0, "погода на даче была отличная"),    // not said there
-                quote(600.0, "давайте обсудим отчёт"),          // no reply near
+                quote(29.0, "Графики сделает Ира до четверга"),
+                quote(30.0, "погода на даче была отличная"),
+                quote(600.0, "давайте обсудим отчёт"),
             ],
             &replies,
         );
         assert_eq!(kept, [Quote { time: 30.0, text: "Графики сделает Ира до четверга".into() }], "time of the reply start");
         assert!(verified_quotes(&[quote(0.0, "")], &replies).is_empty());
-        // A detail item's time follows the same rule: confirmed → the reply start, else none.
         assert_eq!(verified_time(29.0, "графики сделает Ира", &replies), Some(30.0));
         assert_eq!(verified_time(10.0, "графики сделает Ира", &replies), None, "too far from the reply");
         assert_eq!(verified_time(30.0, "погода на даче", &replies), None, "not said there");
@@ -762,7 +652,6 @@ mod tests {
         assert_eq!(all.iter().map(|c| c.digest.title.as_str()).collect::<Vec<_>>(), ["первое", "второе снова"]);
         t.clear_chapters().unwrap();
         assert!(t.chapters().unwrap().is_empty());
-        // The schema parses as JSON and names every field of the digest.
         let schema: serde_json::Value = serde_json::from_str(DIGEST_SCHEMA).unwrap();
         assert_eq!(schema["required"].as_array().unwrap().len(), 6);
         assert_eq!(schema["properties"]["quotes"]["maxItems"], 3);
@@ -770,8 +659,6 @@ mod tests {
         assert!(d.decisions.is_empty() && d.quotes.is_empty() && d.parts.is_empty() && d.sections.is_empty());
         let d: Digest = serde_json::from_str(r#"{"title":"t","summary":"s","parts":[{"start":0.0,"end":60.0,"title":"p"}]}"#).unwrap();
         assert_eq!(d.parts, [Part { start: 0.0, end: 60.0, title: "p".into() }]);
-        // Sections and their items round-trip; a section without a kind is a list, an item
-        // without a time is unconfirmed.
         let d: Digest = serde_json::from_str(
             r#"{"title":"t","summary":"s","sections":[{"title":"Сроки","items":[{"text":"графики к четвергу","time":30.0},{"text":"без времени"}]},{"title":"Шаги","kind":"steps","items":[]}]}"#,
         )
@@ -786,7 +673,6 @@ mod tests {
         assert_eq!(schema["properties"]["sections"]["items"]["properties"]["items"]["maxItems"], SECTION_ITEMS_MAX);
         assert_eq!(points_schema()["required"], serde_json::json!(["points"]));
         assert_eq!(points_schema()["properties"]["points"]["maxItems"], POINTS_MAX);
-        // A text the model writes has no maxLength: that cut a word. A time is a clock, not prose.
         let digest: serde_json::Value = serde_json::from_str(DIGEST_SCHEMA).unwrap();
         for key in ["title", "summary"] {
             assert!(digest["properties"][key].get("maxLength").is_none(), "{key}");

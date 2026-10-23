@@ -1,14 +1,3 @@
-//! Queue: the work of the library (`.ai/queue.db`) as a tree — the analysis of recordings with
-//! its stages and their parts, chat answers with their model steps and tools — with status,
-//! progress and time, and the actions on it (pause, resume, cancel, start over, remove; on a
-//! composite they act on its whole subtree). Model calls, tokens and the model are in the
-//! details, which any row opens. Also what the engine is doing: the memory it uses, the models
-//! it keeps in memory and the requests that wait for it (a download, memory, a free slot).
-//!
-//! The decisions (the flat list of rows, their texts, the geometry, which actions a row offers)
-//! are pure functions on `mediaa_queue` data, tested without a window; the drawing follows
-//! them.
-
 use super::super::header;
 use super::super::library::library_dir;
 use super::analysis::{clock, left, left_text};
@@ -31,26 +20,17 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// How often the list is re-read while the page is open.
 const REFRESH: Duration = Duration::from_secs(1);
 
-// ---------------------------------------------------------------- what is read
-
-/// One reading of the queue: the top-level tasks of the filter with everything below them.
 #[derive(Default)]
 struct Snapshot {
-    /// Ids of the top-level tasks, in the queue's order.
     tops: Vec<TaskId>,
-    /// The top-level tasks and all their descendants.
     tasks: Vec<Task>,
     kind_stats: Vec<KindStat>,
-    /// Recordings (scopes) that have top-level tasks: key and the name to show.
     scopes: Vec<(String, String)>,
-    /// Why a task is waiting, already turned into the user's language.
     waits: HashMap<TaskId, String>,
 }
 
-/// Reads the queue for `filter`.
 fn read(store: &dyn Store, filter: &Filter) -> anyhow::Result<Snapshot> {
     let everything = store.top_level(&Filter::default())?;
     let tops = if filter.scope.is_none() && filter.group == KindGroup::All { everything.clone() } else { store.top_level(filter)? };
@@ -61,7 +41,6 @@ fn read(store: &dyn Store, filter: &Filter) -> anyhow::Result<Snapshot> {
     Ok(Snapshot { tops: tops.iter().map(|t| t.id).collect(), tasks, kind_stats: store.kind_stats()?, scopes: scopes_of(&everything), waits: HashMap::new() })
 }
 
-/// The sentence for a waiting reason from the snapshot.
 pub fn wait_label(reason: &WaitReason) -> String {
     match reason {
         WaitReason::Dependency => t!("queue.wait_dependency").into(),
@@ -79,8 +58,6 @@ fn fill_waits(snap: &mut Snapshot, views: &[queue::TaskView]) {
     snap.waits = views.iter().filter_map(|view| view.wait.as_ref().map(|reason| (view.task.id, wait_label(reason)))).collect();
 }
 
-/// The recordings that have work in the queue: the key and the name (the file of its analysis, or
-/// the start of the key when there is no analysis of it).
 fn scopes_of(tops: &[Task]) -> Vec<(String, String)> {
     let mut names: BTreeMap<String, Option<String>> = BTreeMap::new();
     for task in tops {
@@ -96,21 +73,14 @@ fn scopes_of(tops: &[Task]) -> Vec<(String, String)> {
     scopes
 }
 
-// ---------------------------------------------------------------- the rows
-
-/// A row of the tree on screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Row {
-    /// Index into the flat list of tasks.
     pub index: usize,
     pub depth: usize,
-    /// Direct children.
     pub children: usize,
     pub open: bool,
 }
 
-/// The rows to show: the top-level tasks in their order, each followed (when open) by its
-/// children by id and, below them, theirs.
 pub fn flatten(tasks: &[Task], tops: &[TaskId], open: &HashSet<TaskId>) -> Vec<Row> {
     let mut children: HashMap<TaskId, Vec<usize>> = HashMap::new();
     for (i, task) in tasks.iter().enumerate() {
@@ -123,7 +93,6 @@ pub fn flatten(tasks: &[Task], tops: &[TaskId], open: &HashSet<TaskId>) -> Vec<R
     }
     let by_id: HashMap<TaskId, usize> = tasks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
     let mut rows = Vec::new();
-    // A stack of (index, depth), the next sibling on top.
     let mut stack: Vec<(usize, usize)> = tops.iter().rev().filter_map(|id| by_id.get(id)).map(|&i| (i, 0)).collect();
     while let Some((index, depth)) = stack.pop() {
         let kids = children.get(&tasks[index].id).map_or(&[][..], Vec::as_slice);
@@ -136,7 +105,6 @@ pub fn flatten(tasks: &[Task], tops: &[TaskId], open: &HashSet<TaskId>) -> Vec<R
     rows
 }
 
-/// «7 из 12»: the done children of a composite and all of them.
 pub fn count_text(task: &Task, tasks: &[Task]) -> Option<String> {
     let kids: Vec<&Task> = tasks.iter().filter(|t| t.parent == Some(task.id)).collect();
     if kids.is_empty() {
@@ -146,7 +114,6 @@ pub fn count_text(task: &Task, tasks: &[Task]) -> Option<String> {
     Some(t!("analysis.of", done = done, total = kids.len()).into())
 }
 
-/// What the task and everything below it used.
 pub fn subtree_stats(task: &Task, tasks: &[Task]) -> Stats {
     let mut total = Stats::default();
     let mut stack = vec![task.id];
@@ -159,13 +126,11 @@ pub fn subtree_stats(task: &Task, tasks: &[Task]) -> Stats {
     total
 }
 
-/// A model as the page names it: the file or the id, without the folder and the context size.
 fn short_model(model: &str) -> &str {
     let name = model.split_once('#').map_or(model, |(name, _)| name);
     name.rsplit(['/', '\\']).next().unwrap_or(name)
 }
 
-/// «вызовов: 3 · токены: 1240 / 85 · Qwen3.5-4B»; empty when nothing was called.
 pub fn stats_text(stats: &Stats) -> String {
     if stats.model_calls == 0 && stats.prompt_tokens == 0 && stats.completion_tokens == 0 {
         return String::new();
@@ -178,8 +143,6 @@ pub fn stats_text(stats: &Stats) -> String {
     text
 }
 
-/// A tool's row: its name and short arguments, and how much it returned; `None` for a task that
-/// is not a tool call.
 pub fn tool_text(detail: &Value) -> Option<String> {
     let tool = detail.get("tool")?.as_str()?;
     let args = detail.get("args").and_then(Value::as_str).unwrap_or_default();
@@ -190,8 +153,6 @@ pub fn tool_text(detail: &Value) -> Option<String> {
     Some(text)
 }
 
-/// The time column: «идёт 1:23 · ≈ осталось 4 мин» while it runs, the estimate while it waits,
-/// the duration when it is over. A chat task has no estimate to show (`estimated` is false).
 pub fn time_text(task: &Task, elapsed: Duration, estimate: Option<Duration>, estimated: bool) -> String {
     let left_part = || left_text(left(estimate));
     match task.status {
@@ -220,7 +181,6 @@ pub fn time_text(task: &Task, elapsed: Duration, estimate: Option<Duration>, est
     }
 }
 
-/// Everything a row says, as text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RowTexts {
     pub label: String,
@@ -237,8 +197,6 @@ pub fn row_texts(task: &Task, tasks: &[Task], kind_stats: &[KindStat], now_ms: i
         label: task_label::label(&task.kind, &task.title),
         count: count_text(task, tasks),
         time: time_text(task, queue::elapsed(task, now_ms), estimate, estimated),
-        // Why it waits or why it was cancelled comes first: it is newer than a failure left by
-        // an earlier attempt.
         error: if note.is_empty() {
             task.error.as_ref().map(|e| e.trim().to_string()).filter(|e| !e.is_empty())
         } else {
@@ -247,7 +205,6 @@ pub fn row_texts(task: &Task, tasks: &[Task], kind_stats: &[KindStat], now_ms: i
     }
 }
 
-/// The note of a task in the user's language, empty when there is none.
 pub fn note_text(note: Option<&queue::Note>, locale: &str) -> String {
     match note {
         Some(queue::Note::PausedBy { title }) => {
@@ -261,7 +218,6 @@ pub fn note_text(note: Option<&queue::Note>, locale: &str) -> String {
     }
 }
 
-/// Why the watchdog interrupted a run: what stopped answering and for how long.
 pub fn hang_text(resource: queue::Resource, idle_s: u64, locale: &str) -> String {
     let what = match resource {
         queue::Resource::Speech => t!("queue.hang_speech", locale = locale).to_string(),
@@ -277,9 +233,6 @@ pub fn hang_text(resource: queue::Resource, idle_s: u64, locale: &str) -> String
     t!("queue.hang_note", what = what.as_str(), idle = idle.as_str(), locale = locale).to_string()
 }
 
-// ---------------------------------------------------------------- actions
-
-/// What the row offers (they act on the task's whole subtree).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Actions {
     pub pause: bool,
@@ -293,15 +246,11 @@ pub fn actions(task: &Task) -> Actions {
     let chat = matches!(task.kind.as_str(), "chat" | "chat-answer");
     let active = matches!(task.status, TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting);
     let stopping = task.status == TaskStatus::Stopping;
-    // Inline work belongs to the program that asked for it. A chat answer is stopped from its
-    // own chat (and can be cancelled here); it is not paused or started over from the row.
     let own = !task.inline && !chat;
     Actions {
         pause: own && active,
         resume: own && task.status == TaskStatus::Paused,
         cancel: !task.inline && !task.status.is_finished() && (own || chat) && (active || stopping || task.status == TaskStatus::Paused),
-        // «Начать заново» only after a failure or a cancel. A running, waiting or finished task
-        // is not started over from the row.
         restart: own && matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled),
         remove: task.parent.is_none() && (task.status.is_finished() || own),
     }
@@ -340,26 +289,17 @@ fn run(sched: &Scheduler, op: &Op) -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------- geometry
-
-/// Height of a row.
 const ROW_H: f32 = 28.0;
-/// The gap between the columns of a row — one constant for all of them.
 const GAP: f32 = 8.0;
-/// Shift of a row's start per level of the tree.
 const INDENT: f32 = 18.0;
 const CHEVRON_W: f32 = 16.0;
 const ICON_W: f32 = 18.0;
 const BAR_W: f32 = 80.0;
 const COUNT_W: f32 = 54.0;
 const TIME_W: f32 = 236.0;
-/// Side of an action button.
 const ACTION: f32 = theme::ICON_BUTTON - 2.0;
-/// Actions per row: pause or continue, cancel, start over, remove.
 const SLOTS: usize = 4;
 
-/// The columns of one row. Everything right of the label sits at the same place in every row,
-/// whatever the depth or the state; only the start of a row moves with its depth.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Geom {
     pub chevron: Rect,
@@ -397,22 +337,16 @@ pub fn geom(row: Rect, depth: usize) -> Geom {
     Geom { chevron, icon, label, bar, count, time, actions }
 }
 
-// ---------------------------------------------------------------- the page
-
 #[derive(Default)]
 pub struct QueueUi {
-    /// The library the last reading came from.
     dir: Option<PathBuf>,
-    /// Events already applied from the host's feed.
     seen: usize,
     error: Option<String>,
     snapshot: Snapshot,
     read: Option<Instant>,
     group: KindGroup,
     scope: Option<String>,
-    /// Composites whose children are shown.
     open: HashSet<TaskId>,
-    /// The task whose details window is open, and the log excerpt taken when it opened.
     details: Option<TaskId>,
     details_log: String,
     details_copied: bool,
@@ -454,7 +388,6 @@ fn elided(ui: &egui::Ui, text: &str, width: f32, font: FontId, color: egui::Colo
     super::mentions::galley(ui, text, roster, font, color, width, true, false, p)
 }
 
-/// Text in a column: left-aligned, cut with an ellipsis; `right` aligns it to the column's end.
 #[allow(clippy::too_many_arguments)]
 fn column_text(ui: &egui::Ui, rect: Rect, text: &str, font: FontId, color: egui::Color32, right: bool, roster: &super::mentions::Roster, p: Palette) {
     if text.is_empty() || rect.width() <= 0.0 {
@@ -467,11 +400,9 @@ fn column_text(ui: &egui::Ui, rect: Rect, text: &str, font: FontId, color: egui:
 
 struct RowClick {
     op: Option<Op>,
-    /// The row was clicked (not one of its buttons, and not its chevron).
     details: Option<TaskId>,
 }
 
-/// A click on the row itself: the chevron folds the children, anything else opens the details.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowIntent {
     Fold,
@@ -486,8 +417,6 @@ pub fn row_intent(has_children: bool, on_chevron: bool) -> RowIntent {
     }
 }
 
-/// One row of the tree. Returns the operation a button of it asked for, or a request to open
-/// the details of the task.
 #[allow(clippy::too_many_arguments)]
 fn row_ui(ui: &mut egui::Ui, row: Row, snap: &Snapshot, open: &mut HashSet<TaskId>, now: i64, ai: &std::path::Path, rosters: &mut HashMap<String, super::mentions::Roster>, p: Palette) -> RowClick {
     let task = &snap.tasks[row.index];
@@ -515,12 +444,10 @@ fn row_ui(ui: &mut egui::Ui, row: Row, snap: &Snapshot, open: &mut HashSet<TaskI
     }
     let weak = matches!(task.status, TaskStatus::Done | TaskStatus::Cancelled | TaskStatus::Queued | TaskStatus::Waiting | TaskStatus::Paused);
     let label_color = if weak && task.status != TaskStatus::Queued { p.text_weak } else { p.text };
-    // A failed task says why in its label column, in red (the whole text is in the hint).
     match shown_error {
         Some(error) => column_text(ui, g.label, &format!("{} — {error}", texts.label), FontId::proportional(13.0), p.danger, false, &roster, p),
         None => column_text(ui, g.label, &texts.label, FontId::proportional(13.0), label_color, false, &roster, p),
     }
-    // The progress bar: the same place in every row.
     if matches!(task.status, TaskStatus::Running | TaskStatus::Stopping | TaskStatus::Paused | TaskStatus::Queued | TaskStatus::Waiting) && task.progress > 0.0 {
         painter.rect_filled(g.bar, CornerRadius::same(3), p.border);
         let fill = Rect::from_min_size(g.bar.min, egui::vec2(g.bar.width() * task.progress.clamp(0.0, 1.0), g.bar.height()));
@@ -534,7 +461,6 @@ fn row_ui(ui: &mut egui::Ui, row: Row, snap: &Snapshot, open: &mut HashSet<TaskI
         time = if time.is_empty() { wait.clone() } else { format!("{time} · {wait}") };
     }
     column_text(ui, g.time, &time, FontId::proportional(11.5), p.text_weak, true, &roster, p);
-    // Hints of the parts that may be cut.
     let status_resp = ui.interact(g.icon, ui.id().with(("queue-status", task.id)), Sense::hover());
     let mut status_tip = status_label(task.status).1;
     if let Some(wait) = snap.waits.get(&task.id) {
@@ -547,7 +473,6 @@ fn row_ui(ui: &mut egui::Ui, row: Row, snap: &Snapshot, open: &mut HashSet<TaskI
         full = format!("{full}\n{error}");
     }
     topics::text_tip(&label_resp, &full, &roster);
-    // The buttons: four fixed slots; one that does not apply leaves its place empty.
     let offered = actions(task);
     let buttons: [Option<(&str, String, Op)>; SLOTS] = [
         if offered.pause {
@@ -568,8 +493,6 @@ fn row_ui(ui: &mut egui::Ui, row: Row, snap: &Snapshot, open: &mut HashSet<TaskI
             op = Some(wanted);
         }
     }
-    // Any row opens its details. The chevron of a composite still folds it; a button does
-    // only what it says.
     let mut details = None;
     if resp.clicked() && op.is_none() {
         let on_chevron = resp.interact_pointer_pos().is_some_and(|p| g.chevron.contains(p));
@@ -633,7 +556,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
 
     let mut op = None;
     let mut refilter = false;
-    // The filters and «remove finished»: always there, so nothing moves when they matter.
     ui.horizontal(|ui| {
         let groups = [(KindGroup::All, t!("queue.filter_all").to_string()), (KindGroup::Analysis, t!("queue.filter_analysis").to_string()), (KindGroup::Chat, t!("queue.filter_chat").to_string())];
         refilter |= theme::segmented(ui, &mut state.group, &groups);
@@ -723,7 +645,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Draws the details window.
 fn task_window(ctx: &egui::Context, task: &Task, stats: &Stats, log: &str, copied: &mut bool, open: &mut Option<TaskId>, ai: &std::path::Path) -> Option<String> {
     let roster = task.scope.as_deref().map(|id| super::mentions::Roster::of_file(ai, id)).unwrap_or_default();
     match task_details::show(ctx, task, stats, now_ms(), log, copied, &roster) {
@@ -740,13 +661,11 @@ fn gb(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / f64::from(1u32 << 30))
 }
 
-/// Memory taken against its budget: the bar's fill and `4.1 / 8.0 GB`.
 fn memory_bar(used: u64, max: u64) -> (f32, String) {
     let fill = if max == 0 { 1.0 } else { (used as f64 / max as f64).clamp(0.0, 1.0) as f32 };
     (fill, format!("{} / {} GB", gb(used), gb(max)))
 }
 
-/// Per kind of work: (kind, jobs running, its limit, jobs waiting).
 fn slots(status: &slots::Status, budget: &Budget) -> Vec<(WorkKind, u32, u32, usize)> {
     WorkKind::ALL
         .iter()
@@ -757,8 +676,6 @@ fn slots(status: &slots::Status, budget: &Budget) -> Vec<(WorkKind, u32, u32, us
         .collect()
 }
 
-/// A loaded model: its file name, where it runs, its size, how many jobs use it, and — while it
-/// is idle — for how long and when it is unloaded.
 fn model_line(m: &LoadedModel) -> String {
     let path = m.model.rsplit_once('#').map_or(m.model.as_str(), |(p, _)| p);
     let name = Path::new(path).file_name().map_or(path.into(), |n| n.to_string_lossy());
@@ -781,7 +698,6 @@ fn model_line(m: &LoadedModel) -> String {
     parts.join(" · ")
 }
 
-/// Why a request waits for the engine.
 fn reason_label(reason: &str) -> String {
     match reason {
         "downloading" => t!("queue.reason_downloading").into(),
@@ -792,7 +708,6 @@ fn reason_label(reason: &str) -> String {
     }
 }
 
-/// A waiting request: its model (the engine may not know it yet) and why it waits.
 fn waiting_line(ui: &mut egui::Ui, w: &WaitingModel) {
     let name = w.model.clone().unwrap_or_else(|| t!("queue.a_job").to_string());
     ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
@@ -808,7 +723,6 @@ fn waiting_line(ui: &mut egui::Ui, w: &WaitingModel) {
     ui.end_row();
 }
 
-/// The engine's memory and models, and the slots of each kind of work.
 fn runtime_card(ui: &mut egui::Ui, engine: &EngineState, state: &slots::Status, budget: &Budget) {
     theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -902,7 +816,6 @@ mod tests {
         assert!(s.contains(&(WorkKind::Agent, 1, 2, 0)) && s.contains(&(WorkKind::WebSearch, 2, 2, 1)) && s.contains(&(WorkKind::Transcription, 0, 1, 1)), "{s:?}");
         let line = model_line(&engine.loaded[0]);
         assert!(line.starts_with("Qwen3-Q4_K_M.gguf · ") && line.contains(" · 3.0 GB · ") && line.ends_with('2'), "{line}");
-        // An idle model says for how long and when it goes.
         let mut idle = engine.loaded[0].clone();
         idle.users = 0;
         idle.idle = Duration::from_secs(83);
@@ -924,7 +837,6 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    /// The store, its scheduler, the analysis root, its children and the fake clock.
     type Tree = (Arc<dyn Store>, Arc<Scheduler>, TaskId, Vec<TaskId>, Arc<FakeClock>);
 
     fn tree() -> Tree {
@@ -972,7 +884,7 @@ mod tests {
     }
 
     fn task(kind: &str, status: TaskStatus) -> Task {
-        let (store, ..) = tree(); // clock is last and unused
+        let (store, ..) = tree();
         let id = store.enqueue(NewTask::new(kind, "x", &json!({})).resource(Resource::Llm)).unwrap();
         let mut t = store.get(id).unwrap().unwrap();
         t.status = status;
@@ -1042,8 +954,6 @@ mod tests {
         let texts = row_texts(&t, std::slice::from_ref(&t), &[], 0, "ru");
         assert_eq!(texts.label, task_label::label("topic-digest", "#3"));
         assert_eq!(texts.error.as_deref(), Some("модель упала"));
-        // A note is newer than a failure left by an earlier attempt, and it is in the window's
-        // language.
         t.note = Some(queue::pause_note("Индекс: rec"));
         assert_eq!(
             row_texts(&t, std::slice::from_ref(&t), &[], 0, "ru").error.as_deref(),
@@ -1092,13 +1002,11 @@ mod tests {
         assert!(paused.resume && paused.cancel && !paused.restart);
         assert!(a("index", TaskStatus::Cancelled).restart);
         assert!(!a("index", TaskStatus::Queued).restart);
-        // Inline chat work is not steered from the row; a finished one can be removed.
         let mut chat = task("chat", TaskStatus::Running);
         chat.inline = true;
         assert_eq!(actions(&chat), Actions::default());
         chat.status = TaskStatus::Done;
         assert_eq!(actions(&chat), Actions { remove: true, ..Actions::default() });
-        // A queued chat answer can be cancelled here, not paused or started over.
         let mut answer = task("chat-answer", TaskStatus::Running);
         answer.inline = false;
         let offered = actions(&answer);
@@ -1107,7 +1015,6 @@ mod tests {
         assert!(actions(&answer).cancel && !actions(&answer).resume);
         answer.status = TaskStatus::Done;
         assert_eq!(actions(&answer), Actions { remove: true, ..Actions::default() });
-        // A child is not removed on its own.
         let mut child = task("index", TaskStatus::Done);
         child.parent = Some(1);
         assert!(!actions(&child).remove);
@@ -1116,7 +1023,6 @@ mod tests {
     #[test]
     fn the_actions_of_a_composite_reach_its_subtree() {
         let (store, sched, root, kids, _clock) = tree();
-        // Pause is this task only. A sibling that can still run keeps the composite going.
         run(&sched, &Op::Pause(kids[0])).unwrap();
         assert_eq!(store.get(kids[0]).unwrap().unwrap().status, TaskStatus::Paused);
         assert_eq!(store.get(kids[1]).unwrap().unwrap().status, TaskStatus::Queued);
@@ -1141,11 +1047,9 @@ mod tests {
         assert_eq!((a.bar, a.count, a.time, a.actions), (b.bar, b.count, b.time, b.actions));
         assert_eq!(b.chevron.left() - a.chevron.left(), 3.0 * INDENT);
         assert!(a.label.right() <= a.bar.left() && a.bar.right() < a.count.left() && a.count.right() < a.time.left() && a.time.right() < a.actions[0].left());
-        // The gaps between neighbouring columns are the same constant.
         assert_eq!(a.count.left() - a.bar.right(), GAP);
         assert_eq!(a.time.left() - a.count.right(), GAP);
         assert_eq!(a.actions[0].left() - a.time.right(), GAP);
-        // A narrow row only squeezes the label.
         let narrow = geom(Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, ROW_H)), 5);
         assert!(narrow.label.width() >= 0.0);
     }

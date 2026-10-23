@@ -1,11 +1,3 @@
-//! Library page, laid out like a phone gallery: media tiles in a grid, newest first, split by
-//! day. Tiles show the picture large with its format, file size, dimensions, duration and an
-//! audio mark; videos and animations play muted on hover with a draggable looping timeline.
-//!
-//! The data comes from the library index (`.cache/library.db` in the media folder), kept
-//! current by a background scan and a file watcher; results are shown in large chunks as the
-//! page is scrolled.
-
 use super::header;
 use crate::app::App;
 use crate::hover_preview::Previews;
@@ -23,40 +15,26 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Horizontal padding of the name / actions strip.
 const STRIP_PAD: i8 = 8;
-/// Narrowest tile (the main tools and "⋯" fit with room to spare). The grid uses as many
-/// columns as fit at this width and stretches them to fill the row exactly.
 const MIN_TILE: f32 = 200.0;
-/// Tile frame stroke, drawn outside its content.
 const TILE_BORDER: f32 = 1.0;
 const GAP: f32 = 10.0;
-/// Media area height relative to the tile width.
 const MEDIA_ASPECT: f32 = 0.62;
-/// Height of the strip at the bottom of the media where the timeline can be dragged.
 const SCRUB_ZONE: f32 = 26.0;
-/// Results shown per chunk; the next chunk loads when the end of the page comes into view.
 const CHUNK: usize = 300;
-/// Safety-net full re-read of the folder while the library is shown.
 const RESCAN_EVERY: Duration = Duration::from_secs(60);
 
 pub struct LibraryUi {
     index: Option<LibraryIndex>,
     watcher: Option<LibraryWatcher>,
-    /// Folder listing being read in the background (see `refresh`).
     scan: Option<crossbeam_channel::Receiver<Vec<mediaa_core::library::LibraryEntry>>>,
-    /// Paths changed while the listing was read (applied again on top of it).
     changed_while_scanning: Vec<PathBuf>,
     last_scan: Instant,
     query: Query,
-    /// Last query result: (index version, query, entry positions).
     hits: Option<(u64, Query, Vec<usize>)>,
-    /// How many results are shown (grows chunk by chunk while scrolling).
     limit: usize,
     confirm_delete: Option<PathBuf>,
-    /// File being renamed and the title being typed.
     renaming: Option<(PathBuf, String)>,
-    /// Tile under the pointer (previous frame / being collected this frame).
     hovered: Option<PathBuf>,
     hover_next: Option<PathBuf>,
     previews: Previews,
@@ -86,20 +64,15 @@ impl Default for LibraryUi {
     }
 }
 
-/// Folder the library shows (`MEDIAA_DEV_LIBRARY=<dir>` replaces it, to check sample media).
 pub fn library_dir(settings: &Settings) -> PathBuf {
     std::env::var_os("MEDIAA_DEV_LIBRARY").map_or_else(|| settings.media_dir.clone(), PathBuf::from)
 }
 
 impl LibraryUi {
-    /// The media viewer covers the window (notifications wait until it closes).
     pub fn viewer_open(&self) -> bool {
         self.viewer.is_some()
     }
 
-    /// Re-reads the whole folder in the background (opening the stored index of a new folder
-    /// if it changed). For startup, the Refresh button and a new library folder; single files
-    /// MediaA writes go through [`LibraryUi::file_changed`].
     pub fn refresh(&mut self, settings: &Settings) {
         let dir = library_dir(settings);
         if self.index.as_ref().is_none_or(|i| i.dir() != dir) {
@@ -118,7 +91,6 @@ impl LibraryUi {
         self.last_scan = Instant::now();
     }
 
-    /// Files MediaA created, changed, renamed (old and new path, stored together) or deleted.
     pub fn files_changed(&mut self, paths: &[PathBuf]) {
         if let Some(index) = self.index.as_mut() {
             index.refresh_paths(paths);
@@ -128,9 +100,6 @@ impl LibraryUi {
         }
     }
 
-    /// Opens the index and its watcher on first use, applies the background listing and
-    /// and watched changes (the index stores every change itself).
-    /// After a full scan, returns the folder and the file names now in it.
     fn poll(&mut self, settings: &Settings, ctx: &egui::Context) -> Option<(PathBuf, HashSet<String>)> {
         if self.index.as_ref().is_none_or(|i| i.dir() != library_dir(settings)) {
             self.refresh(settings);
@@ -152,8 +121,6 @@ impl LibraryUi {
             }
             rescan = c.rescan;
         }
-        // Lost watcher events (or a watcher that stopped, which Windows may not report): read the
-        // folder again now, and every RESCAN_EVERY anyway while the library is shown.
         if (rescan || self.last_scan.elapsed() > RESCAN_EVERY) && self.scan.is_none() {
             if rescan {
                 self.watcher = None;
@@ -166,7 +133,6 @@ impl LibraryUi {
             match rx.try_recv() {
                 Ok(listing) => {
                     index.apply_scan(listing);
-                    // Changes seen after the listing started may be missing from it.
                     index.refresh_paths(&std::mem::take(&mut self.changed_while_scanning));
                     self.scan = None;
                     scanned = Some((index.dir().to_path_buf(), index.entries().iter().map(|e| e.name.clone()).collect()));
@@ -178,13 +144,12 @@ impl LibraryUi {
         scanned
     }
 
-    /// Positions (in the index) of the entries to show, recomputed only when needed.
     fn hits(&mut self) -> Vec<usize> {
         let Some(index) = self.index.as_ref() else { return Vec::new() };
         let fresh = self.hits.as_ref().is_some_and(|(v, q, _)| *v == index.version() && *q == self.query);
         if !fresh {
             if self.hits.as_ref().is_none_or(|(_, q, _)| *q != self.query) {
-                self.limit = CHUNK; // new search / filter: start from the top chunk
+                self.limit = CHUNK;
             }
             self.hits = Some((index.version(), self.query.clone(), index.query(&self.query)));
         }
@@ -212,19 +177,14 @@ enum Action {
     AskRename(PathBuf, String),
 }
 
-/// A tool for one library file. New tools only need a line in [`tools`]: the "⋯" menu lists
-/// them all, `main` ones also get a button on the tile.
 struct Tool {
     icon: &'static str,
     label: String,
     action: Action,
-    /// Shown on the tile itself (keep these few: they must fit a minimal tile).
     main: bool,
-    /// Destructive: last in the menu, in red.
     danger: bool,
 }
 
-/// Most `main` tools on a tile (checked by a test; [`MIN_TILE`] is made to fit them and "⋯").
 const MAIN_TOOLS: usize = 4;
 const _: () = assert!(
     MIN_TILE >= (MAIN_TOOLS + 1) as f32 * theme::ICON_BUTTON + 2.0 * STRIP_PAD as f32 + 2.0 * TILE_BORDER,
@@ -252,7 +212,6 @@ fn tools(e: &LibraryEntry) -> Vec<Tool> {
     list
 }
 
-/// The tools row of a tile: the main tools on the left, "⋯" with every tool on the right.
 fn tools_strip(ui: &mut egui::Ui, all: &[Tool]) -> Option<Action> {
     let mut action = None;
     ui.horizontal(|ui| {
@@ -272,11 +231,9 @@ fn tools_strip(ui: &mut egui::Ui, all: &[Tool]) -> Option<Action> {
     action
 }
 
-/// Every tool with its label in `popup` (a menu); returns the chosen one's action.
 fn tools_menu(popup: egui::Popup<'_>, tools: &[Tool]) -> Option<Action> {
     popup
         .show(|ui| {
-            // Wide enough for the longest label.
             let widest = tools
                 .iter()
                 .map(|t| ui.fonts_mut(|f| f.layout_no_wrap(t.label.clone(), egui::FontId::proportional(13.5), Color32::WHITE).size().x))
@@ -312,12 +269,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         app.thumbs.retain(&dir, names);
     }
 
-    // The visible width, before anything can widen the page: the grid is fitted to it.
     let view_w = ui.available_width();
     header(ui, &t!("lib.title"), "");
     let total = app.lib.index.as_ref().map_or(0, LibraryIndex::len);
-    // Filters, then search / sort / actions: one line when it fits, otherwise two (the
-    // second wraps too), never wider than the window.
     if view_w >= TOOLBAR_ONE_LINE {
         ui.horizontal(|ui| {
             kind_filter(app, ui);
@@ -343,13 +297,11 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         });
         return;
     }
-    // The current chunk of results (cloned: tiles need `app` mutably).
     let shown: Vec<LibraryEntry> = {
         let entries = app.lib.index.as_ref().map(LibraryIndex::entries).unwrap_or_default();
         hits.iter().take(app.lib.limit).map(|&i| entries[i].clone()).collect()
     };
 
-    // Dev: `MEDIAA_DEV_VIEW=<name part>` opens that file in the viewer once (UI checks).
     if !app.lib.dev_viewed {
         app.lib.dev_viewed = true;
         if let Some(e) = std::env::var("MEDIAA_DEV_VIEW").ok().and_then(|n| shown.iter().find(|e| !n.is_empty() && e.name.contains(&n))) {
@@ -361,7 +313,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let avail = view_w.min(ui.available_width());
     let (cols, tile_w) = grid_columns(avail);
     let refs: Vec<&LibraryEntry> = shown.iter().collect();
-    // Day dividers only make sense when sorted by date.
     let groups: Vec<(Option<chrono::NaiveDate>, Vec<&LibraryEntry>)> = if app.lib.query.sort.by_date() {
         library::group_by_day(&refs).into_iter().map(|(d, l)| (Some(d), l)).collect()
     } else {
@@ -385,7 +336,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(GAP - ui.spacing().item_spacing.y);
         }
     }
-    // End of the chunk in view: load the next one.
     if hits.len() > app.lib.limit {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(avail, 40.0), Sense::hover());
         egui::Spinner::new().paint_at(ui, Rect::from_center_size(rect.center(), egui::vec2(20.0, 20.0)));
@@ -415,12 +365,10 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Index details from what the media decoder reports.
 fn details_of(i: &mediaa_media::info::MediaInfo) -> Details {
     Details { width: i.width, height: i.height, duration_secs: i.duration_secs(), audio: i.has_audio() }
 }
 
-/// "Today", "Yesterday" or a full date in the UI language.
 fn day_label(day: chrono::NaiveDate) -> String {
     let today = chrono::Local::now().date_naive();
     if day == today {
@@ -434,7 +382,6 @@ fn day_label(day: chrono::NaiveDate) -> String {
     t!("lib.date", day = day.day(), month = month, year = day.year()).into()
 }
 
-/// A thin line across the page with the date in the middle.
 fn date_divider(ui: &mut egui::Ui, text: &str) {
     let p = theme::palette(ui);
     ui.add_space(6.0);
@@ -449,7 +396,6 @@ fn date_divider(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-/// Dark rounded label drawn over the media; `anchor` picks the corner it grows from.
 fn overlay_badge(painter: &egui::Painter, pos: Pos2, anchor: egui::Align2, text: String) {
     let galley = painter.layout_no_wrap(text, FontId::proportional(11.0), Color32::WHITE);
     let size = galley.size() + egui::vec2(10.0, 4.0);
@@ -458,7 +404,6 @@ fn overlay_badge(painter: &egui::Painter, pos: Pos2, anchor: egui::Align2, text:
     painter.galley(rect.min + egui::vec2(5.0, 2.0), galley, Color32::WHITE);
 }
 
-/// UV rectangle that crops a `tex`-sized picture to fill `target` (like `object-fit: cover`).
 fn cover_uv(tex: egui::Vec2, target: egui::Vec2) -> Rect {
     let (ta, a) = (tex.x / tex.y.max(1.0), target.x / target.y.max(1.0));
     if ta > a {
@@ -470,7 +415,6 @@ fn cover_uv(tex: egui::Vec2, target: egui::Vec2) -> Rect {
     }
 }
 
-/// Window content width from which filters and tools share one line.
 const TOOLBAR_ONE_LINE: f32 = 900.0;
 
 fn kind_filter(app: &mut App, ui: &mut egui::Ui) {
@@ -487,8 +431,6 @@ fn kind_filter(app: &mut App, ui: &mut egui::Ui) {
     );
 }
 
-/// Search, sort, refresh, open folder and the file count; the search box narrows in small
-/// windows.
 fn toolbar_tools(app: &mut App, ui: &mut egui::Ui, total: usize, view_w: f32) {
     ui.add(
         egui::TextEdit::singleline(&mut app.lib.query.search)
@@ -513,8 +455,6 @@ fn toolbar_tools(app: &mut App, ui: &mut egui::Ui, total: usize, view_w: f32) {
     theme::hint(ui, t!("lib.count", n = total));
 }
 
-/// Columns and tile width for a row `avail` wide: as many minimal tiles as fit (at least one),
-/// stretched so that the tiles and the gaps between them fill the row exactly, never more.
 fn grid_columns(avail: f32) -> (usize, f32) {
     let cols = (((avail + GAP) / (MIN_TILE + GAP)).floor() as usize).max(1);
     let tile_w = ((avail - GAP * (cols - 1) as f32) / cols as f32).floor().max(1.0);
@@ -522,13 +462,11 @@ fn grid_columns(avail: f32) -> (usize, f32) {
 }
 
 fn tile(app: &mut App, ui: &mut egui::Ui, e: &LibraryEntry, width: f32, previewing: &mut bool) -> Option<Action> {
-    // The frame stroke (1 px each side) is outside the content: keep the whole tile `width` wide.
     let width = width - 2.0 * TILE_BORDER;
     let p = theme::palette(ui);
     let mut action = None;
     let mut media_resp = None;
     let mut name_resp: Option<egui::Response> = None;
-    // Thumbnails only for tiles on screen; details from the index, computed once if missing.
     let tile_rect = Rect::from_min_size(ui.cursor().min, egui::vec2(width, width * MEDIA_ASPECT + 70.0));
     let data = if ui.is_rect_visible(tile_rect) { app.thumbs.get(e, e.details.is_none()) } else { Default::default() };
     let info: Option<Details> = e.details.or_else(|| data.info.as_ref().map(details_of));
@@ -537,14 +475,12 @@ fn tile(app: &mut App, ui: &mut egui::Ui, e: &LibraryEntry, width: f32, previewi
             app.lib.set_details(&e.path, d);
         }
     }
-    // Hovered (last frame): show the real file name instead of the title.
     let hovered = app.lib.hovered.as_ref() == Some(&e.path);
     let shown = egui::Frame::new()
         .fill(p.card)
         .stroke(Stroke::new(TILE_BORDER, p.border))
         .corner_radius(CornerRadius::same(10))
         .show(ui, |ui| ui.vertical(|ui| {
-            // Exactly `width`: nothing inside may widen the tile (the row must fit the window).
             ui.set_width(width);
             ui.set_max_width(width);
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -555,10 +491,7 @@ fn tile(app: &mut App, ui: &mut egui::Ui, e: &LibraryEntry, width: f32, previewi
             let top = CornerRadius { nw: 10, ne: 10, sw: 0, se: 0 };
             painter.rect_filled(rect, top, p.card_hover);
 
-            // Hover preview for videos and animations.
-            // Hover preview: pictures that move. Audio plays in the viewer (double-click).
             let playable = matches!(e.kind, MediaKind::Video | MediaKind::Animation);
-            // Dev: `MEDIAA_DEV_PREVIEW=<name part>` plays that tile as if hovered (UI checks).
             let dev = std::env::var("MEDIAA_DEV_PREVIEW").is_ok_and(|n| !n.is_empty() && e.name.contains(&n));
             let active = resp.hovered() || resp.dragged() || dev;
             let mut texture = data.texture.clone();
@@ -606,11 +539,9 @@ fn tile(app: &mut App, ui: &mut egui::Ui, e: &LibraryEntry, width: f32, previewi
             }
             if loading {
                 let spinner = Rect::from_center_size(rect.center(), egui::vec2(28.0, 28.0));
-                // Painted only: placing a widget here would move the layout cursor (the tile jumps).
                 egui::Spinner::new().color(Color32::WHITE).paint_at(ui, spinner);
             }
 
-            // Info over the media: format · size on top, dimensions · duration · audio below.
             let pad = 7.0;
             overlay_badge(&painter, rect.left_top() + egui::vec2(pad, pad), egui::Align2::LEFT_TOP, e.extension());
             overlay_badge(&painter, rect.right_top() + egui::vec2(-pad, pad), egui::Align2::RIGHT_TOP, human_size(e.size));
@@ -620,7 +551,6 @@ fn tile(app: &mut App, ui: &mut egui::Ui, e: &LibraryEntry, width: f32, previewi
             }
             if e.kind != MediaKind::Image {
                 let mut text = String::from(icon::PLAY);
-                // While playing: the current time instead of the duration.
                 if let Some(d) = playing_at.map(f64::floor).or_else(|| info.and_then(|i| i.duration_secs)) {
                     text = format!("{text} {}", human_duration(d));
                 }
@@ -643,7 +573,6 @@ fn tile(app: &mut App, ui: &mut egui::Ui, e: &LibraryEntry, width: f32, previewi
                 action = Some(Action::View(e.path.clone(), e.kind, info));
             }
 
-            // Name and actions under the media.
             egui::Frame::new().inner_margin(egui::Margin::symmetric(STRIP_PAD, 6)).show(ui, |ui| {
                 let inner = width - 2.0 * f32::from(STRIP_PAD);
                 ui.set_width(inner);
@@ -656,8 +585,6 @@ fn tile(app: &mut App, ui: &mut egui::Ui, e: &LibraryEntry, width: f32, previewi
                 }
             });
         }));
-    // Right click on the media or the name: the same menu at the pointer. (No click area over the
-    // whole tile: it would sit on top of the buttons and take their clicks.)
     if let Some(target) = media_resp.into_iter().chain(name_resp).reduce(|a, b| a.union(b)) {
         if let Some(a) = tools_menu(egui::Popup::context_menu(&target), &tools(e)) {
             action = Some(a);
@@ -743,9 +670,6 @@ fn delete_dialog(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-
-/// Rename: only the title changes; the date stamp in the file name stays (so equal titles are
-/// fine). The resulting file name is shown while typing.
 fn rename_dialog(app: &mut App, ctx: &egui::Context) {
     let Some((path, mut title)) = app.lib.renaming.clone() else { return };
     let Some(current) = naming::parse_path(&path) else {
@@ -834,7 +758,6 @@ mod tests {
         harness.run();
         assert!(matches!(harness.state(), Some(Action::AskRename(_, t)) if t == "A"), "the item's action is returned");
         assert!(harness.query_by_label(&rename).is_none(), "menu closes after a choice");
-        // Main tools act straight from the tile.
         harness.get_by_label(&rust_i18n::t!("lib.reveal")).click();
         harness.run();
         assert!(matches!(harness.state(), Some(Action::Reveal(_))));

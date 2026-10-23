@@ -1,8 +1,3 @@
-//! Platform-independent core of MediaA.
-//!
-//! Everything here is testable without a display or FFmpeg: settings, selection geometry,
-//! frame pacing, file naming, frame utilities, audio track writing, the media library index and its thumbnail cache.
-
 pub mod agent;
 pub mod annotate;
 pub mod audio;

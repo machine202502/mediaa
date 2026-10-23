@@ -1,11 +1,6 @@
-//! Dev helper: `cargo run -p mediaa-platform --example snap -- out.png [window-title-substring | pid:N]`
-//! saves a screenshot of the primary display (or of the first window whose title or app matches);
-//! `--cursor` instead of a title grabs the primary display as a recording frame (with cursor).
-//! `--record` after the title grabs the window through its recording source instead.
 use mediaa_core::source::FrameSource;
 
 fn main() -> anyhow::Result<()> {
-    // Physical pixels everywhere, like the app (winit makes it per-monitor DPI aware).
     #[cfg(windows)]
     // SAFETY: process-wide setting, called before any window or capture exists.
     unsafe {
@@ -23,13 +18,11 @@ fn main() -> anyhow::Result<()> {
             mediaa_platform::screen::MonitorSource::new(m.id, None, true)?.grab()?
         }
         Some(title) => {
-            // `pid:N` picks the window of that process (another copy of the app may be open).
             let pid: Option<u32> = title.strip_prefix("pid:").and_then(|p| p.parse().ok());
             let w = mediaa_platform::screen::windows()?
                 .into_iter()
                 .find(|w| pid.map_or(w.title.contains(title) || w.app.contains(title), |p| w.pid == p))
                 .ok_or_else(|| {
-                    // Never list other windows when asked for one process: their titles are private.
                     if let Some(p) = pid {
                         return anyhow::anyhow!("no window of process {p}");
                     }

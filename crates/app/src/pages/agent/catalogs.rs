@@ -1,7 +1,3 @@
-//! Catalogs: the virtual tree of the Agent section in a resizable side bar (folders and files
-//! with virtual names and colours, drag and drop, context menus) and the files opened from it
-//! in tabs (`egui_dock`), like an editor: many tabs, scrolling, close / close others / close all.
-
 use crate::app::App;
 use crate::tab_strip::TAB_HEIGHT;
 use crate::theme;
@@ -27,18 +23,14 @@ use rust_i18n::t;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-/// Hidden root of the tree (database ids start at 1): dropping onto it means the top level.
 const ROOT: NodeId = 0;
 
-/// Colours offered for folders and files (`0xRRGGBB`).
 pub const COLORS: [u32; 8] = [0xe5484d, 0xf76b15, 0xffc53d, 0x46a758, 0x12a594, 0x3e63dd, 0x8e4ec6, 0xd6409f];
-
 
 fn rgb(c: u32) -> Color32 {
     Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
 }
 
-/// What the tree asked for (applied after it is drawn).
 enum Cmd {
     NewFolder(Option<NodeId>),
     AddFiles(Option<NodeId>, bool),
@@ -46,15 +38,12 @@ enum Cmd {
     Color(NodeId, Option<u32>),
     Delete(NodeId),
     Open(NodeId),
-    /// Open a file at a time (a search hit).
     OpenAt(NodeId, f64),
-    /// The chat over a folder's recordings.
     FolderChat(NodeId),
     Reveal(PathBuf),
 }
 
 pub struct CatalogsUi {
-    /// The catalogs of the library's `.ai` folder (reopened when the library folder changes).
     store: Option<(PathBuf, Result<Catalogs, String>)>,
     selected: Option<NodeId>,
     dock: DockState<Tab>,
@@ -86,7 +75,6 @@ impl CatalogsUi {
         }
     }
 
-    /// Folder new items go into: the selected folder, the selected file's folder or the top.
     fn target_folder(&self, cat: &Catalogs) -> Option<NodeId> {
         let n = cat.node(self.selected?)?;
         if n.is_folder() {
@@ -97,25 +85,18 @@ impl CatalogsUi {
     }
 }
 
-// ------------------------------------------------------------------ search
-
-/// Hits shown for a catalog search.
 const CATALOG_HITS: usize = 12;
-/// Characters of a hit's text shown in the side bar.
 const HIT_CHARS: usize = 240;
 
 type Found = (Vec<(NodeId, FileHit)>, Trace);
 
-/// The search over the recordings of the selected folder (or of all catalogs).
 #[derive(Default)]
 struct Search {
     text: String,
     running: Option<Receiver<Result<Found, String>>>,
-    /// Results of the last search (`None`: the tree is shown).
     results: Option<Result<Found, String>>,
 }
 
-/// Files the search covers: the selected folder's subtree, else every file; the folder's name.
 fn scope(cat: &Catalogs, selected: Option<NodeId>) -> (Option<String>, Vec<(NodeId, PathBuf)>) {
     let folder = selected.and_then(|id| cat.node(id)).filter(|n| n.is_folder());
     let ids: Vec<NodeId> = match folder {
@@ -126,7 +107,6 @@ fn scope(cat: &Catalogs, selected: Option<NodeId>) -> (Option<String>, Vec<(Node
     (folder.map(|f| f.name.clone()), files)
 }
 
-/// `text` cut to about `max` characters at a word end.
 fn shortened(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();
@@ -135,8 +115,6 @@ fn shortened(text: &str, max: usize) -> String {
     format!("{}…", cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head))
 }
 
-/// The search field and, after a search, the hits; returns whether hits are shown instead of
-/// the tree.
 fn search_ui(ui: &mut egui::Ui, search: &mut Search, cat: &Catalogs, selected: Option<NodeId>, services: Option<&super::Services>, cmds: &RefCell<Vec<Cmd>>) -> bool {
     let p = theme::palette(ui);
     let (folder, files) = scope(cat, selected);
@@ -228,8 +206,6 @@ fn search_ui(ui: &mut egui::Ui, search: &mut Search, cat: &Catalogs, selected: O
     true
 }
 
-// ------------------------------------------------------------------ side bar (tree)
-
 pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     let p = theme::palette(ui);
     let media_dir = super::super::library::library_dir(&app.settings);
@@ -299,7 +275,6 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                     DirPosition::After(n) => siblings.iter().position(|&s| s == n).map_or(siblings.len(), |i| i + 1),
                 };
                 for id in dnd.source.into_iter().filter(|&n| n != ROOT) {
-                    // Moving down within the same folder: the node's old slot no longer counts.
                     let old = siblings.iter().position(|&s| s == id);
                     let at = if old.is_some_and(|o| o < index) { index - 1 } else { index };
                     match cat.move_node(id, parent, at) {
@@ -312,7 +287,6 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
             }
             Action::Activate(act) => cmds.borrow_mut().extend(act.selected.into_iter().map(Cmd::Open)),
             Action::Drag(dnd) => {
-                // A folder cannot be dropped into itself: hide the marker.
                 let target = dnd.target;
                 if target != ROOT && dnd.source.iter().any(|&s| cat.subtree(s).contains(&target)) {
                     dnd.remove_drop_marker(ui);
@@ -326,8 +300,6 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Adds the children of `parent` (and below) to the tree.
-/// A tree label cut with "…" when the side bar is narrower than it.
 fn truncated(text: RichText) -> impl FnMut(&mut egui::Ui) {
     move |ui| {
         ui.add(egui::Label::new(text.clone()).selectable(false).truncate());
@@ -341,7 +313,6 @@ fn file_icon(path: &Path) -> &'static str {
     }
 }
 
-/// `inherited`: the colour of the nearest coloured folder above (uncoloured nodes take it).
 fn build(b: &mut TreeViewBuilder<'_, NodeId>, cat: &Catalogs, parent: Option<NodeId>, cmds: &RefCell<Vec<Cmd>>, inherited: Option<u32>, text: Color32) {
     for n in cat.children(parent) {
         let own = n.color.or(inherited);
@@ -356,7 +327,6 @@ fn build(b: &mut TreeViewBuilder<'_, NodeId>, cat: &Catalogs, parent: Option<Nod
             }
             NodeKind::File { path, hard } => {
                 let ic = file_icon(path);
-                // Links are marked: the file lives elsewhere and stays when the node goes.
                 let mark = if *hard { "" } else { "  ↗" };
                 let label = RichText::new(format!("{ic}  {}{mark}", n.name)).color(color);
                 let path = path.clone();
@@ -436,7 +406,6 @@ fn run(app: &mut App, cmd: Cmd) {
             let mut res = Ok(());
             if let Some(files) = rfd::FileDialog::new().add_filter(t!("agent.catalog_files"), &mediaa_core::catalogs::accepted_extensions()).pick_files() {
                 for f in files {
-                    // Video only with sound: the agent works with what is said.
                     let added = match mediaa_media::info::has_sound(&f) {
                         Ok(true) => cat.add_file(parent, &f, hard).map(|_| ()),
                         Ok(false) => Err(anyhow::anyhow!("{}", t!("agent.no_sound", name = f.file_name().unwrap_or_default().to_string_lossy()))),
@@ -482,7 +451,6 @@ fn run(app: &mut App, cmd: Cmd) {
     }
 }
 
-/// Rename and delete confirmations.
 pub fn dialogs(app: &mut App, ctx: &egui::Context) {
     let media_dir = super::super::library::library_dir(&app.settings);
     if let Some((id, mut name)) = app.agent.catalogs.rename.clone() {
@@ -565,21 +533,15 @@ pub fn dialogs(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-// ------------------------------------------------------------------ tabs
-
-/// A file opened from the tree.
 pub struct Tab {
     node: NodeId,
     path: PathBuf,
     body: Body,
 }
 
-/// What a tab shows.
 enum Body {
     Studio(Box<Studio>),
-    /// The chat over a folder's recordings.
     Chat(Box<Chat>),
-    /// The file cannot be opened: why.
     Missing(String),
 }
 
@@ -599,7 +561,6 @@ fn open_tab(state: &mut CatalogsUi, id: NodeId) {
     state.dock.push_to_focused_leaf(Tab { node: id, path, body });
 }
 
-/// Opens (or shows) the chat over the recordings of folder `id` and its subfolders.
 fn open_folder_chat(state: &mut CatalogsUi, id: NodeId) {
     let Some((ai, Ok(cat))) = state.store.as_ref() else { return };
     if let Some(at) = state.dock.find_tab_from(|t| t.node == id) {
@@ -614,7 +575,6 @@ fn open_folder_chat(state: &mut CatalogsUi, id: NodeId) {
 enum TabCmd {
     CloseOthers(NodeId),
     Open(PathBuf),
-    /// A recording at a time (a citation in a folder's chat).
     OpenAt(PathBuf, f64),
     Reveal(PathBuf),
     Analyse { path: PathBuf, from: Option<Stage>, options: AnalysisOptions, remember: bool },
@@ -623,21 +583,14 @@ enum TabCmd {
     FindNames(PathBuf),
 }
 
-/// The width of every tab in the dock: short titles are padded, long ones are cut.
 const TAB_WIDTH: f32 = 180.0;
 
-/// The room a title gets inside [`TAB_WIDTH`]: the tab minus the tab button's 2×8 px text spacing
-/// and the 24 px close button.
 const TAB_TITLE_WIDTH: f32 = TAB_WIDTH - 16.0 - 24.0;
 
-/// Width egui_dock reserves at the right end of a tab row for its "close all" button.
 const CLOSE_ALL_WIDTH: f32 = 24.0;
 
-/// The shortest scroll handle, as for the chat tabs ([`theme::tab_row_scroll`]).
 const MIN_HANDLE: f32 = 12.0;
 
-/// The bar under a recording tab row: where the track and the handle are, and how far the tabs
-/// are pushed out of view.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ScrollBar {
     track: egui::Rect,
@@ -645,9 +598,6 @@ struct ScrollBar {
     overflow: f32,
 }
 
-/// The bar of a row `rect` wide holding `tabs` tabs, `None` when they fit. The strip is the
-/// [`theme::TAB_SCROLL_BAR`] under the [`TAB_HEIGHT`] tall row: the tab bar is that much taller
-/// and gives the strip back as its bottom inner margin, so the row never moves (see [`tabs`]).
 fn scroll_bar_of(rect: egui::Rect, tabs: usize, spacing: f32, scroll: f32) -> Option<ScrollBar> {
     if tabs == 0 {
         return None;
@@ -655,7 +605,6 @@ fn scroll_bar_of(rect: egui::Rect, tabs: usize, spacing: f32, scroll: f32) -> Op
     let available = (rect.width() - CLOSE_ALL_WIDTH).max(0.0);
     let actual = tabs as f32 * TAB_WIDTH + (tabs - 1) as f32 * spacing;
     let overflow = actual - available;
-    // Under one point is floating-point noise during tab drawing, as in egui_dock itself.
     if overflow <= 1.0 {
         return None;
     }
@@ -672,18 +621,13 @@ fn scroll_bar_of(rect: egui::Rect, tabs: usize, spacing: f32, scroll: f32) -> Op
     Some(ScrollBar { track, handle, overflow })
 }
 
-/// Draws, and lets the user drag, the thin bar under every tab row. egui_dock's own bar is
-/// 7.5 px, drawn only on overflow, and it takes its space only then — so it is turned off in
-/// [`tabs`] and this paints the chat tabs' bar in the strip that is always reserved instead.
 fn tab_scroll_bar(ui: &mut egui::Ui, dock: &mut DockState<Tab>, spacing: f32) {
     let p = theme::palette(ui);
     for (path, leaf) in dock.iter_leaves_mut() {
-        // DockArea::show_inside draws the main surface only; windows have stale rects.
         if !path.surface.is_main() {
             continue;
         }
         let Some(bar) = scroll_bar_of(leaf.rect, leaf.tabs.len(), spacing, leaf.scroll) else {
-            // The tabs fit (or were closed): there is nothing hidden to scroll back to.
             leaf.scroll = 0.0;
             continue;
         };
@@ -695,14 +639,12 @@ fn tab_scroll_bar(ui: &mut egui::Ui, dock: &mut DockState<Tab>, spacing: f32) {
             leaf.scroll = (leaf.scroll - resp.drag_delta().x * bar.overflow / travel)
                 .clamp(-bar.overflow, 0.0);
         }
-        // The handle has moved with the scroll this frame.
         let handle = scroll_bar_of(leaf.rect, leaf.tabs.len(), spacing, leaf.scroll)
             .map_or(bar.handle, |bar| bar.handle);
         ui.painter().rect_filled(handle, egui::CornerRadius::same(2), p.text_weak);
     }
 }
 
-/// The full title of a tab: the catalog node's name (or the file name), with the folder chat icon.
 fn tab_title(cat: &Catalogs, tab: &Tab) -> String {
     let name = cat.node(tab.node).map_or_else(|| tab.path.file_name().unwrap_or_default().to_string_lossy().into_owned(), |n| n.name.clone());
     match tab.body {
@@ -711,9 +653,7 @@ fn tab_title(cat: &Catalogs, tab: &Tab) -> String {
     }
 }
 
-/// One row of [`tab_title`], cut to [`TAB_TITLE_WIDTH`] by egui itself (its glyph widths) with `…`.
 fn tab_title_job(full: &str) -> egui::text::LayoutJob {
-    // The placeholder colour is replaced by egui_dock's active/inactive tab colour.
     let format = egui::TextFormat { font_id: egui::FontId::proportional(13.0), color: Color32::PLACEHOLDER, ..Default::default() };
     let mut job = egui::text::LayoutJob::single_section(full.to_owned(), format);
     job.wrap.max_width = TAB_TITLE_WIDTH;
@@ -727,7 +667,6 @@ struct Tabs<'a> {
     cat: &'a Catalogs,
     services: Option<super::Services>,
     cmds: Vec<TabCmd>,
-    /// For laying the title out ourselves: egui_dock discards a `LayoutJob`'s own wrapping.
     ctx: egui::Context,
 }
 
@@ -802,14 +741,11 @@ fn translations() -> egui_dock::Translations {
     tr
 }
 
-/// The open files; a hint while there are none.
 pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
     let media_dir = super::super::library::library_dir(&app.settings);
     if app.agent.catalogs.catalogs(&media_dir).is_err() {
         return;
     }
-    // Dev: `MEDIAA_DEV_OPEN=<name part>` opens the first such file (or a folder's chat) once
-    // (UI checks).
     if !app.agent.catalogs.dev_opened {
         app.agent.catalogs.dev_opened = true;
         let state = &mut app.agent.catalogs;
@@ -826,7 +762,6 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
     let services = app.agent.services();
     let CatalogsUi { store, dock, .. } = &mut app.agent.catalogs;
     let Some((_, Ok(cat))) = store.as_ref() else { return };
-    // Tabs of nodes removed meanwhile go too.
     dock.retain_tabs(|t| cat.node(t.node).is_some());
     if dock.iter_all_tabs().next().is_none() {
         ui.centered_and_justified(|ui| theme::hint(ui, t!("agent.open_hint")));
@@ -834,9 +769,7 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
     }
     let mut viewer = Tabs { cat, services, cmds: Vec::new(), ctx: ui.ctx().clone() };
     let mut style = egui_dock::Style::from_egui(ui.style());
-    // No maximum width in egui_dock: the title is cut to the tab's width instead (see `tab_title_job`).
     style.tab.minimum_width = Some(TAB_WIDTH);
-    // The row keeps its 24 px and gives the 3 px strip under it to our bar (see `tab_scroll_bar`).
     style.tab_bar.height = TAB_HEIGHT + theme::TAB_SCROLL_BAR;
     style.tab_bar.inner_margin = egui::Margin { bottom: theme::TAB_SCROLL_BAR as i8, ..egui::Margin::ZERO };
     style.tab_bar.show_scroll_bar_on_overflow = false;
@@ -848,7 +781,6 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
         .show_leaf_collapse_buttons(false)
         .show_inside(ui, &mut viewer);
     tab_scroll_bar(ui, dock, tab_spacing);
-    // Only the tabs in view play.
     for (_, tab) in dock.iter_all_tabs_mut() {
         if let Body::Studio(s) = &mut tab.body {
             if !s.drawn {
@@ -862,7 +794,6 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
             TabCmd::CloseOthers(keep) => {
                 let dock = &mut app.agent.catalogs.dock;
                 dock.retain_tabs(|t| t.node == keep);
-                // The tab the command came from is the one shown.
                 if let Some(at) = dock.find_tab_from(|t| t.node == keep) {
                     let _ = dock.set_active_tab(at);
                     dock.set_focused_node_and_surface(at.node_path());
@@ -885,7 +816,6 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
             }
             TabCmd::Analyse { path, from, options, remember } => {
                 if remember {
-                    // The choice is the default for the next analysis.
                     app.settings.agent.analysis = options.enforced();
                     app.settings_changed();
                 }
@@ -928,9 +858,6 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Starts the analysis of `path` (or, with `from`, rebuilds it from that stage) with the stages of
-/// `options` (what cannot run is switched off). It continues in the background; the studio shows
-/// its progress.
 fn analyse(app: &App, path: &Path, from: Option<Stage>, options: AnalysisOptions) -> anyhow::Result<()> {
     let agent = &app.settings.agent;
     anyhow::ensure!(agent.models.speech_recognition.is_some(), "{}", t!("studio.no_recognizer"));
@@ -967,7 +894,6 @@ mod tests {
         let (name, files) = scope(&cat, None);
         assert!(name.is_none());
         assert_eq!(files.len(), 2);
-        // A selected file means everything.
         assert_eq!(scope(&cat, Some(b)).1.len(), 2);
     }
 
@@ -996,7 +922,6 @@ mod tests {
 
     #[test]
     fn no_bar_while_the_tabs_fit() {
-        // 4 × 180 fits 900 − 24 with room to spare.
         assert_eq!(scroll_bar_of(row(50.0, 900.0), 4, 0.0, 0.0), None);
         assert_eq!(scroll_bar_of(row(50.0, 900.0), 0, 0.0, 0.0), None);
     }
@@ -1009,7 +934,6 @@ mod tests {
         assert_eq!(bar.track.top(), 50.0 + TAB_HEIGHT, "under the tabs, not in them");
         assert_eq!(bar.track.height(), theme::TAB_SCROLL_BAR);
         assert_eq!(bar.overflow, 6.0 * TAB_WIDTH - (900.0 - CLOSE_ALL_WIDTH));
-        // The handle is the visible part of the row, as egui_dock sizes it.
         assert!((bar.handle.width() - 900.0 * 876.0 / 1080.0).abs() < 0.01);
         assert_eq!(bar.handle.top(), bar.track.top());
     }

@@ -1,11 +1,11 @@
-//! One run: ask the agent the way the app does, then score each answer.
-
 use crate::cases::{Case, Suite, TurnSpec};
-use crate::report::{save_summary, write_repeat, StatsFile, Summary, TurnStats};
+use crate::report::{
+    save_summary, write_repeat, ModelSteps, RepeatArtifacts, StatsFile, Summary, TurnStats,
+};
 use crate::score::{
     judge_schema, parse_judge, repeat_from_turns, score_turn, JudgeVerdict, RepeatScores,
 };
-use crate::{locate, repo_root, Judge, RunArgs};
+use crate::{locate, repo_root, visible, Judge, RunArgs};
 use anyhow::Context;
 use mediaa_agent::assistant::title::task_title;
 use mediaa_agent::assistant::{ask, hf_token, Event, Memory, Recording, StepRecord, Turn};
@@ -136,13 +136,16 @@ fn run_repeat(case: &Case, repeat: usize, ctx: &Ctx, run_dir: &Path) -> anyhow::
     let mut questions = Vec::new();
     let mut events = Vec::new();
     let mut answers = Vec::new();
+    let mut shown_answers = Vec::new();
     let mut scores = Vec::new();
     let mut stats = Vec::new();
+    let mut model_steps = Vec::new();
     let mut errors = Vec::new();
     for (i, spec) in case.turns.iter().enumerate() {
         eprintln!("Q: {}", spec.question);
         questions.push(spec.question.clone());
         let asked = ask_turn(ctx, spec, &history, &mut memory, i + 1);
+        let raw = asked.raw;
         let shown = asked.shown;
         eprintln!(
             "A ({}, {} steps{}): {}",
@@ -197,12 +200,14 @@ fn run_repeat(case: &Case, repeat: usize, ctx: &Ctx, run_dir: &Path) -> anyhow::
         } else {
             history.push(Turn {
                 question: spec.question.clone(),
-                answer: shown.clone(),
+                answer: raw.clone(),
             });
         }
         events.extend(asked.events);
-        answers.push(shown);
+        answers.push(raw);
+        shown_answers.push(shown);
         stats.push(asked.stats);
+        model_steps.push(asked.model_steps);
         scores.push(score);
     }
     let calls = sum_stats(&stats);
@@ -215,7 +220,18 @@ fn run_repeat(case: &Case, repeat: usize, ctx: &Ctx, run_dir: &Path) -> anyhow::
         turns: stats,
     };
     let dir = run_dir.join(&case.id).join(repeat.to_string());
-    write_repeat(&dir, &questions, &events, &answers, &scores, &file)?;
+    write_repeat(
+        &dir,
+        &RepeatArtifacts {
+            questions: &questions,
+            events: &events,
+            answers: &answers,
+            shown: &shown_answers,
+            turns: &scores,
+            stats: &file,
+            model_steps: &model_steps,
+        },
+    )?;
     if !errors.is_empty() {
         std::fs::write(dir.join("error.txt"), errors.join("\n") + "\n")?;
     }
@@ -228,11 +244,13 @@ fn run_repeat(case: &Case, repeat: usize, ctx: &Ctx, run_dir: &Path) -> anyhow::
 
 struct Asked {
     events: Vec<Value>,
+    raw: String,
     shown: String,
     steps: usize,
     forced: bool,
     seconds: f64,
     stats: TurnStats,
+    model_steps: ModelSteps,
     error: Option<String>,
 }
 
@@ -250,11 +268,13 @@ fn ask_turn(
         Err(e) => {
             return Asked {
                 events,
+                raw: String::new(),
                 shown: String::new(),
                 steps: 0,
                 forced: false,
                 seconds: started.elapsed().as_secs_f64(),
                 stats: TurnStats::default(),
+                model_steps: ModelSteps::default(),
                 error: Some(format!("{e:#}")),
             };
         }
@@ -272,30 +292,32 @@ fn ask_turn(
         &spec.question,
         &cancel,
         &mut |event| {
-            // The numbers under the chat's status line are for its interface, not for an eval.
             if !matches!(event, Event::Metrics(_)) {
                 events.push(event_json(turn, event));
             }
         },
     );
-    let stats = read_stats(&ctx.queue_dir, scope.task()).unwrap_or_else(|e| {
+    let (stats, model_steps) = read_turn(&ctx.queue_dir, scope.task()).unwrap_or_else(|e| {
         eprintln!("queue stats: {e:#}");
-        TurnStats::default()
+        (TurnStats::default(), ModelSteps::default())
     });
     let seconds = started.elapsed().as_secs_f64();
     match result {
         Ok(answer) => {
             scope.finish(&json!({ "steps": answer.steps.len() }));
-            let shown = shown_answer(&events, &answer.text);
+            let raw = shown_answer(&events, &answer.text);
+            let shown = visible::shown(&raw, &ctx.recording);
             let steps = answer.steps.len();
             let forced = answer.forced;
             Asked {
                 events,
+                raw,
                 shown,
                 steps,
                 forced,
                 seconds,
                 stats,
+                model_steps,
                 error: None,
             }
         }
@@ -303,18 +325,19 @@ fn ask_turn(
             scope.fail(&format!("{e:#}"));
             Asked {
                 events,
+                raw: String::new(),
                 shown: String::new(),
                 steps: 0,
                 forced: false,
                 seconds,
                 stats,
+                model_steps,
                 error: Some(format!("{e:#}")),
             }
         }
     }
 }
 
-/// The queue can be busy for a moment (a bench on the same machine). A few tries, then the error.
 fn begin_scope(
     dir: &Path,
     engine: &Arc<dyn Engine>,
@@ -344,19 +367,48 @@ fn begin_scope(
     Err(last.expect("the loop ran"))
 }
 
-fn read_stats(dir: &Path, id: TaskId) -> anyhow::Result<TurnStats> {
+fn read_turn(dir: &Path, id: TaskId) -> anyhow::Result<(TurnStats, ModelSteps)> {
     let store = mediaa_agent::run::open_store(dir)?;
+    let mut tasks = store.subtree(id)?;
+    tasks.sort_by_key(|task| task.id);
     let mut total = mediaa_queue::Stats::default();
-    for task in store.subtree(id)? {
+    for task in &tasks {
         total.add(&task.stats);
     }
-    Ok(TurnStats {
+    let stats = TurnStats {
         model_calls: total.model_calls,
         prompt_tokens: total.prompt_tokens,
         completion_tokens: total.completion_tokens,
         model_ms: total.model_ms,
         models: total.models,
-    })
+    };
+    let model_steps = rounds(tasks.iter().map(|t| (t.kind.as_str(), t.title.as_str(), t.created_ms)));
+    Ok((stats, model_steps))
+}
+
+fn rounds<'a>(tasks: impl IntoIterator<Item = (&'a str, &'a str, i64)>) -> ModelSteps {
+    let mut tasks: Vec<(&str, &str, i64)> = tasks.into_iter().collect();
+    tasks.sort_by_key(|(_, _, created_ms)| *created_ms);
+    let mut rounds = ModelSteps::default();
+    for (kind, title, _) in tasks {
+        match kind {
+            "model-step" if is_number(title) => {
+                rounds.steps += 1;
+                rounds.calls_per_step.push(0);
+            }
+            "tool" => {
+                if let Some(calls) = rounds.calls_per_step.last_mut() {
+                    *calls += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    rounds
+}
+
+fn is_number(title: &str) -> bool {
+    !title.is_empty() && title.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn sum_stats(turns: &[TurnStats]) -> TurnStats {
@@ -375,7 +427,6 @@ fn sum_stats(turns: &[TurnStats]) -> TurnStats {
     total
 }
 
-/// Sections sent with `say`, then the closing text: what the chat stores and the next turn reads.
 fn shown_answer(events: &[Value], final_text: &str) -> String {
     let mut parts = Vec::new();
     for event in events {
@@ -625,5 +676,29 @@ mod tests {
         assert_eq!(events[1]["status"], "found");
         assert_eq!(shown_answer(&events, "Итог."), "Раздел [1:40].\n\nИтог.");
         assert_eq!(shown_answer(&[], ""), "");
+    }
+
+    #[test]
+    fn tool_calls_are_counted_into_the_model_step_that_asked_for_them() {
+        let tasks = [
+            ("chat", "как зовут", 1),
+            ("tool", "search", 5),
+            ("model-step", "1", 10),
+            ("tool", "search", 11),
+            ("tool", "search", 12),
+            ("model-step", "Проверка ответа", 13),
+            ("model-step", "2", 20),
+            ("tool", "read", 21),
+            ("model-step", "3", 30),
+        ];
+        assert_eq!(
+            rounds(tasks),
+            ModelSteps {
+                steps: 3,
+                calls_per_step: vec![2, 1, 0],
+            }
+        );
+        let empty: [(&str, &str, i64); 0] = [];
+        assert_eq!(rounds(empty), ModelSteps::default());
     }
 }

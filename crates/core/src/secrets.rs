@@ -1,21 +1,15 @@
-//! API keys live in the OS keychain (Windows Credential Manager, macOS Keychain, Secret Service),
-//! not in `settings.toml`: one entry per provider, named by its id, and one for the web search
-//! service.
-
 use crate::agent::AgentSettings;
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 const SERVICE: &str = "MediaA";
 
-/// Where keys are kept: the OS keychain, or memory in tests.
 pub trait Store: Send {
     fn get(&self, id: &str) -> anyhow::Result<Option<String>>;
     fn set(&mut self, id: &str, key: &str) -> anyhow::Result<()>;
     fn delete(&mut self, id: &str) -> anyhow::Result<()>;
 }
 
-/// The OS keychain.
 pub struct Keychain;
 
 fn entry(id: &str) -> anyhow::Result<keyring::Entry> {
@@ -43,10 +37,8 @@ impl Store for Keychain {
     }
 }
 
-/// Keys of the providers, written to the store only when they change.
 pub struct Keys<S: Store> {
     store: S,
-    /// What the store holds, by provider id.
     known: HashMap<String, String>,
 }
 
@@ -55,7 +47,6 @@ impl<S: Store> Keys<S> {
         Keys { store, known: HashMap::new() }
     }
 
-    /// Puts the stored keys into `entries` (id, key).
     pub fn fill(&mut self, entries: Vec<(String, &mut String)>) {
         for (id, key) in entries {
             match self.store.get(&id) {
@@ -70,7 +61,6 @@ impl<S: Store> Keys<S> {
         }
     }
 
-    /// Stores changed keys of `entries` (id, key) and deletes those no longer there (or cleared).
     pub fn sync(&mut self, entries: &[(String, String)]) -> anyhow::Result<()> {
         let now: HashMap<&str, &str> = entries.iter().filter(|(_, k)| !k.is_empty()).map(|(i, k)| (i.as_str(), k.as_str())).collect();
         let gone: Vec<String> = self.known.keys().filter(|id| !now.contains_key(id.as_str())).cloned().collect();
@@ -95,7 +85,6 @@ fn with_keychain<R>(f: impl FnOnce(&mut Keys<Keychain>) -> R) -> R {
     f(guard.get_or_insert_with(|| Keys::new(Keychain)))
 }
 
-/// The keychain entry of the web search service's key.
 const WEB_KEY: &str = "web-search";
 
 fn entries_mut(agent: &mut AgentSettings) -> Vec<(String, &mut String)> {
@@ -110,12 +99,10 @@ fn entries(agent: &AgentSettings) -> Vec<(String, String)> {
     e
 }
 
-/// Fills the agent's keys from the OS keychain.
 pub fn load(agent: &mut AgentSettings) {
     with_keychain(|k| k.fill(entries_mut(agent)));
 }
 
-/// Writes the agent's keys to the OS keychain.
 pub fn save(agent: &AgentSettings) -> anyhow::Result<()> {
     with_keychain(|k| k.sync(&entries(agent)))
 }
@@ -126,7 +113,6 @@ mod tests {
     use crate::agent::{Provider, ProviderKind};
     use std::sync::Arc;
 
-    /// Memory store that counts writes.
     #[derive(Clone, Default)]
     struct Memory(Arc<Mutex<(HashMap<String, String>, usize)>>);
 
@@ -165,7 +151,6 @@ mod tests {
         keys.sync(&entries(&agent)).unwrap();
         assert_eq!(memory.0.lock().unwrap().1, 3, "unchanged keys are not rewritten");
 
-        // A new session reads them back.
         let mut loaded = agent.clone();
         loaded.providers.iter_mut().for_each(|p| p.api_key.clear());
         loaded.web.api_key.clear();
@@ -173,7 +158,6 @@ mod tests {
         keys.fill(entries_mut(&mut loaded));
         assert_eq!(loaded, agent);
 
-        // Removing a provider removes its key; clearing a key removes it too.
         loaded.providers.truncate(1);
         loaded.providers[0].api_key.clear();
         loaded.web.api_key.clear();
@@ -181,7 +165,6 @@ mod tests {
         assert!(memory.0.lock().unwrap().0.is_empty());
     }
 
-    /// The real OS keychain: `cargo test -p mediaa-core -- --ignored`.
     #[test]
     #[ignore]
     fn os_keychain() {

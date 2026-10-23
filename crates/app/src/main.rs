@@ -1,4 +1,3 @@
-// No console window in release builds on Windows.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
@@ -15,7 +14,6 @@ mod hover_preview;
 mod viewer;
 mod tray;
 
-// Translations from `locales/*.toml`, compiled into the binary.
 rust_i18n::i18n!("locales", fallback = "en");
 
 use eframe::egui;
@@ -26,7 +24,6 @@ fn main() -> eframe::Result<()> {
     mediaa_core::logging::init(&paths::logs_dir(), log::LevelFilter::Info);
     log::info!("MediaA {} starting", env!("CARGO_PKG_VERSION"));
     mediaa_media::init();
-    // Scratch files of sessions that crashed more than a day ago.
     let removed = paths::remove_stale_entries(&paths::work_dir(), Duration::from_secs(24 * 3600));
     if removed > 0 {
         log::info!("removed {removed} stale scratch entries");

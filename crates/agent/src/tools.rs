@@ -1,15 +1,8 @@
-//! Exact tools for the agent: small models get arithmetic and time math wrong, so they call
-//! these instead of computing in their head.
-
-/// evalexpr functions that live under `math::`.
 const MATH_FUNCTIONS: [&str; 9] = ["sqrt", "cbrt", "abs", "pow", "ln", "log10", "log2", "exp", "hypot"];
 
-/// Evaluates an arithmetic expression (`+ - * / % ^`, parentheses, `min`, `max`, `floor`,
-/// `round`, `sqrt`…). Integers stay exact; the result is formatted without float noise.
 pub fn calculate(expression: &str) -> anyhow::Result<String> {
     let expr = expression.trim();
     anyhow::ensure!(!expr.is_empty(), crate::prompts::render("errors/empty_expression.j2", ()));
-    // Models write `sqrt(2)` as often as evalexpr's `math::sqrt(2)`: accept both.
     let mut code = expr.replace("math::", "");
     for f in MATH_FUNCTIONS {
         code = code.replace(&format!("{f}("), &format!("math::{f}("));
@@ -27,8 +20,6 @@ pub fn calculate(expression: &str) -> anyhow::Result<String> {
     })
 }
 
-/// Seconds of a time as people and transcripts write it: `5:59`, `1:02:30`, `[12:30`, `@5:59`,
-/// `75.5` (plain seconds), `1:05,5`. `None` when it is not a time.
 pub fn parse_time(text: &str) -> Option<f64> {
     let t = text.trim().trim_matches(|c| matches!(c, '[' | ']' | '@' | ' ')).replace(',', ".");
     if t.is_empty() {
@@ -41,7 +32,6 @@ pub fn parse_time(text: &str) -> Option<f64> {
     let mut total = 0.0;
     for (i, part) in parts.iter().enumerate() {
         let v: f64 = part.trim().parse().ok().filter(|v: &f64| v.is_finite() && *v >= 0.0)?;
-        // Minutes and seconds of a clock time stay below 60.
         if i > 0 && v >= 60.0 {
             return None;
         }
@@ -50,7 +40,6 @@ pub fn parse_time(text: &str) -> Option<f64> {
     Some(total)
 }
 
-/// `m:ss` or `h:mm:ss` (fractions of a second dropped).
 pub fn format_time(seconds: f64) -> String {
     let s = seconds.max(0.0).floor() as u64;
     let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
@@ -61,7 +50,6 @@ pub fn format_time(seconds: f64) -> String {
     }
 }
 
-/// The time between two times (either order): seconds and as a clock time.
 pub fn between(from: &str, to: &str) -> anyhow::Result<(f64, String)> {
     let a = parse_time(from).ok_or_else(|| anyhow::anyhow!(crate::prompts::render("errors/not_a_clock_time.j2", minijinja::context! { time => from })))?;
     let b = parse_time(to).ok_or_else(|| anyhow::anyhow!(crate::prompts::render("errors/not_a_clock_time.j2", minijinja::context! { time => to })))?;

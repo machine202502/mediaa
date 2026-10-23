@@ -1,18 +1,11 @@
-//! X11 recording source: one persistent connection and a MIT-SHM segment the X server copies
-//! each frame into (what FFmpeg's `x11grab` does), plus the real cursor picture from XFixes.
-//! `xcap`'s X11 capture opens a new connection and converts pixel by pixel for every frame,
-//! which is far too slow for recording.
-
 use anyhow::{anyhow, bail, Context as _};
 use mediaa_core::cursor::CursorImage;
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
 use xcb::{shm, x, xfixes, Connection};
 
-/// What is recorded: an area of the root window, or a window.
 #[derive(Debug, Clone, Copy)]
 pub enum Target {
-    /// Area of the root window in root coordinates.
     Area(Rect),
     Window(u32),
 }
@@ -27,12 +20,10 @@ pub struct X11Source {
     mem: *mut u8,
     mem_len: usize,
     with_cursor: bool,
-    /// Last cursor picture, by XFixes serial (converted only when the cursor changes).
     cursor: Option<(u32, CursorImage)>,
 }
 
 impl X11Source {
-    /// Runs on X11 sessions only (not Wayland, where X sees just XWayland windows).
     pub fn available() -> bool {
         std::env::var_os("WAYLAND_DISPLAY").is_none()
             && std::env::var("XDG_SESSION_TYPE").map_or(true, |t| t != "wayland")
@@ -63,12 +54,10 @@ impl X11Source {
         };
         anyhow::ensure!(size.0 >= 16 && size.1 >= 16, "area is too small to record");
         let with_cursor = with_cursor && conn.active_extensions().any(|e| e == xcb::Extension::XFixes) && {
-            // XFixes must be told the client's version before its requests are accepted.
             let v = conn.send_request(&xfixes::QueryVersion { client_major_version: 4, client_minor_version: 0 });
             conn.wait_for_reply(v).is_ok()
         };
 
-        // Shared memory segment for the largest frame we will ask for.
         let mem_len = (size.0 * size.1 * 4) as usize;
         // SAFETY: plain System V shared memory calls; the segment is marked for removal right
         // after the X server attached it, so it disappears with the last detach.
@@ -94,11 +83,10 @@ impl X11Source {
             bail!("MIT-SHM attach failed: {e}");
         }
         let mut s = Self { conn, root, target, name, size, seg, mem, mem_len, with_cursor, cursor: None };
-        s.grab().context("first X11 frame")?; // fail now (and fall back), not mid-recording
+        s.grab().context("first X11 frame")?;
         Ok(s)
     }
 
-    /// Captures `w`×`h` of `drawable` at `(x, y)` into the shared segment; returns the bytes.
     fn shm_get(&self, drawable: x::Drawable, x: i16, y: i16, w: u16, h: u16) -> anyhow::Result<&[u8]> {
         let cookie = self.conn.send_request(&shm::GetImage {
             drawable,
@@ -117,7 +105,6 @@ impl X11Source {
         Ok(unsafe { std::slice::from_raw_parts(self.mem, len.min(self.mem_len)) })
     }
 
-    /// Draws the XFixes cursor; `origin` = top-left of the frame in root coordinates.
     fn draw_cursor(&mut self, frame: &mut Frame, origin: (i32, i32)) {
         let Ok(c) = self.conn.wait_for_reply(self.conn.send_request(&xfixes::GetCursorImage {})) else { return };
         let serial = c.cursor_serial();
@@ -131,12 +118,10 @@ impl X11Source {
     }
 }
 
-/// X window by id (a stale id only makes requests fail).
 fn window(id: u32) -> x::Window {
     <x::Window as xcb::XidNew>::new(id)
 }
 
-/// XFixes cursor: premultiplied ARGB words → straight RGBA.
 fn cursor_image(c: &xfixes::GetCursorImageReply) -> CursorImage {
     let data = c.cursor_image().iter().flat_map(|&p| {
         let a = (p >> 24) as u8;
@@ -149,7 +134,6 @@ fn cursor_image(c: &xfixes::GetCursorImageReply) -> CursorImage {
     }
 }
 
-/// BGRX (X11 ZPixmap, little endian) → opaque RGBA.
 fn bgrx_to_rgba(src: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(src.len());
     for p in src.as_chunks::<4>().0 {
@@ -175,7 +159,6 @@ impl FrameSource for X11Source {
                 (Frame::new(w, h, bgrx_to_rgba(data)), (r.x, r.y))
             }
             Target::Window(id) => {
-                // The window may have been resized or moved since the last frame.
                 let win = window(id);
                 let g = self.conn.wait_for_reply(self.conn.send_request(&x::GetGeometry { drawable: x::Drawable::Window(win) }))?;
                 let (cw, ch) = (u32::from(g.width()).min(w), u32::from(g.height()).min(h));
@@ -215,7 +198,6 @@ mod tests {
         assert_eq!(bgrx_to_rgba(&[1, 2, 3, 0, 10, 20, 30, 7]), [3, 2, 1, 255, 30, 20, 10, 255]);
     }
 
-    /// Runs where an X server is available (CI uses Xvfb); skipped otherwise.
     #[test]
     fn records_the_root_window_when_x11_is_there() {
         if !X11Source::available() {

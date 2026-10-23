@@ -1,5 +1,3 @@
-//! Settings page: appearance & language, folders, hotkeys, about.
-
 use super::header;
 use crate::app::App;
 use crate::{hotkeys, i18n, theme};
@@ -66,7 +64,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 }
                 ui.add(egui::Label::new(dir.to_string_lossy()).truncate());
             });
-            // Conversions: the library folder unless a folder of their own is chosen.
             let media = app.settings.media_dir.clone();
             let convert_dir = &mut app.settings.convert_dir;
             theme::row(ui, &t!("settings.convert_dir"), |ui| {
@@ -96,7 +93,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             let hk = &mut app.settings.hotkeys;
             let mut hk_changed = false;
             hk_changed |= ui.checkbox(&mut hk.enabled, t!("settings.hotkeys_enable")).changed();
-            // Click a field, then press the combination (Esc cancels); × clears it.
             let cap_id = egui::Id::new("hotkey-capture");
             let capturing: Option<usize> = ui.data(|d| d.get_temp(cap_id));
             let mut start = None;
@@ -175,8 +171,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             }
     });
 
-    // Recording started by the global hotkey or from the tray (incl. its screen-area picker)
-    // has its own settings.
     ui.add_space(8.0);
     ui.label(RichText::new(format!("{}  {}", icon::KEYBOARD, t!("settings.hotkey_record"))).strong().size(15.0));
     theme::card(ui).show(ui, |ui| {
@@ -193,7 +187,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     if crate::pages::record::profile_editor(ui, &mut app.settings, RecordProfile::Hotkey, &app.mic_devices, None, &mut refresh_mics) {
         changed.set(true);
     }
-    // Audio recordings from the hotkey / tray have their own settings as well.
     ui.add_space(4.0);
     ui.label(RichText::new(format!("{}  {}", icon::MICROPHONE, t!("settings.hotkey_audio"))).strong());
     ui.add_space(2.0);
@@ -212,8 +205,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Reads a key press while a hotkey field is capturing: `Some(Some(combo))` = captured,
-/// `Some(None)` = cancelled (Esc), `None` = keep waiting.
 fn capture_combo(ui: &egui::Ui) -> Option<Option<String>> {
     let (events, modifiers) = ui.input(|i| (i.events.clone(), i.modifiers));
     for e in events {
@@ -226,14 +217,12 @@ fn capture_combo(ui: &egui::Ui) -> Option<Option<String>> {
             }
         }
     }
-    // egui does not report PrintScreen; it is polled from the OS instead.
     if mediaa_platform::keys::print_screen_down() {
         return Some(hotkeys::combo_from_token(modifiers, "PRINTSCREEN"));
     }
     None
 }
 
-/// Display recorded by the hotkey / tray: primary, the one under the cursor, or a fixed one.
 fn screen_combo(ui: &mut egui::Ui, value: &mut ScreenChoice, monitors: &[MonitorInfo]) -> bool {
     let label = |c: &ScreenChoice| match c {
         ScreenChoice::Primary => t!("settings.screen_primary").to_string(),

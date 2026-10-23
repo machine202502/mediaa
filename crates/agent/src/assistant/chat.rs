@@ -1,16 +1,3 @@
-//! A chat answer as a task of the queue, seen from two sides: the thread that writes it and the
-//! pane that shows it.
-//!
-//! The worker runs the answer with [`work`]: every event of the answer is applied to the shared
-//! [`Live`] state (the timeline growing downward, what the model waits for, the scan), sections of
-//! a long answer are stored as messages as they come, and at the end the answer is stored with
-//! its timeline and steps in its `details` and the queue task is finished.
-//!
-//! The pane reads [`Run::live`] every frame and stops the answer with [`Run::stop`]: at once, with
-//! no wait for the worker. The stop closes the state: whatever the worker still produces
-//! afterwards (it may take a while to notice, a web page is still being read) is dropped, and
-//! the message of the stopped answer keeps the timeline up to the stop.
-
 use super::{Answer, Event, Memory, Metrics, StepRecord, WaitReason};
 use crate::scope::Scope;
 use mediaa_core::chat::{Author, ChatId, Timeline, STEP_RUNNING};
@@ -21,7 +8,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-/// How far an answer has got.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
     Running,
@@ -30,33 +16,21 @@ pub enum State {
     Failed(String),
 }
 
-/// An answer as the pane shows it, built from the events.
 #[derive(Debug, Clone)]
 pub struct Live {
-    /// Steps, reasoning and parts of the answer so far, in order.
     pub timeline: Timeline,
-    /// What the model waits for (until any other event comes).
     pub waiting: Option<WaitReason>,
-    /// Parts of the recording a running scan has read, of all.
     pub scanning: Option<(usize, usize)>,
-    /// The context fill and the speed of the current (or last) step.
     pub metrics: Option<Metrics>,
-    /// The tool steps that are over, with their arguments and results.
     pub steps: Vec<StepRecord>,
-    /// Sections of the answer stored as messages so far (the pane re-reads the chat when this
-    /// grows).
     pub stored: usize,
-    /// Corrections of the user the answer has taken (their messages are in the chat).
     pub steers_taken: usize,
     pub state: State,
-    /// The answer continues after the process was restarted (the pane says so, once).
     pub continuing: bool,
-    /// Nothing more is accepted: the answer is over (or was stopped).
     closed: bool,
 }
 
 impl Live {
-    /// The pane stopped the answer: later events from the chunk are dropped.
     pub fn close(&mut self) {
         self.closed = true;
     }
@@ -77,10 +51,7 @@ impl Live {
         Live { timeline: Timeline::default(), waiting: None, scanning: None, metrics: None, steps: Vec::new(), stored: 0, steers_taken: 0, state: State::Running, continuing: false, closed: false }
     }
 
-    /// Takes one event of the answer.
     pub fn apply(&mut self, event: &Event) {
-        // `work` closes the state before the ending event, so that one still counts.
-        // Anything after the answer has already ended is dropped.
         if !matches!(self.state, State::Running) {
             return;
         }
@@ -126,7 +97,6 @@ impl Live {
         }
     }
 
-    /// The details of the answer's message.
     fn details(&self, forced: bool, stopped: bool) -> serde_json::Value {
         let mut details = json!({ "steps": self.steps, "forced": forced, "timeline": self.timeline.to_value() });
         if let Some(metrics) = self.metrics {
@@ -139,10 +109,8 @@ impl Live {
     }
 }
 
-/// An answer being written: shared by the thread that writes it and the pane that shows it.
 #[derive(Clone)]
 pub struct Run {
-    /// Set to stop the answer (the models and tools look at it).
     pub cancel: Arc<AtomicBool>,
     live: Arc<Mutex<Live>>,
     task: TaskId,
@@ -150,24 +118,18 @@ pub struct Run {
 }
 
 impl Run {
-    /// The run of the answer that is the task of `scope`.
     pub fn new(scope: &Scope) -> Run {
         Run { cancel: Arc::new(AtomicBool::new(false)), live: Arc::new(Mutex::new(Live::new())), task: scope.task(), store: scope.store().clone() }
     }
 
-    /// The answer so far.
     pub fn live(&self) -> MutexGuard<'_, Live> {
         self.live.lock().expect("live answer lock")
     }
 
-    /// Whether the answer is over, however it ended.
     pub fn finished(&self) -> bool {
         self.live().state != State::Running
     }
 
-    /// The user stops the answer. It ends here and now: the state is closed (what the worker
-    /// produces from now on is dropped), the queue task is cancelled and the answer is stored
-    /// with the timeline up to the stop, marked as stopped. Does not wait for the worker.
     pub fn stop(&self, t: &Transcript, chat: ChatId) -> anyhow::Result<()> {
         self.cancel.store(true, Ordering::Relaxed);
         let mut live = self.live();
@@ -183,21 +145,13 @@ impl Run {
     }
 }
 
-/// How an answer ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     Done,
-    /// Stopped by the user; the pane has stored what there was.
     Stopped,
     Failed(String),
 }
 
-/// Writes the answer of `run`, the task of `scope`, into the chat `chat` of the transcript store
-/// `store` in `ai_dir`. `ask` is the work (`assistant::ask` or `ask_folder` with everything but
-/// the memory and the event sink); it hears the events, which also go to [`Run::live`]. Sections
-/// are stored as messages as they come; at the end the answer is stored with its steps and
-/// timeline, the chat's memory is saved (also after a failure, not after a stop) and the task is
-/// finished, failed or (if it was stopped) left as the stop made it.
 pub fn work(
     run: &Run,
     scope: &Scope,
@@ -207,8 +161,6 @@ pub fn work(
     memory: &mut Memory,
     ask: impl FnOnce(&mut Memory, &mut (dyn FnMut(&Event) + Send)) -> anyhow::Result<Answer>,
 ) -> Outcome {
-    // The sink owns a handle of its own: it may be called from another thread (the waiting is
-    // reported by a watcher).
     let sections = Transcript::open(ai_dir, store);
     let live = run.live.clone();
     let mut sink = move |event: &Event| {
@@ -227,7 +179,6 @@ pub fn work(
     let answered = ask(memory, &mut sink);
     drop(sink);
 
-    // Stopped: the pane has the say; our result and our memory are dropped.
     if run.cancel.load(Ordering::Relaxed) {
         scope.cancel();
         return Outcome::Stopped;
@@ -241,7 +192,6 @@ pub fn work(
         Ok(t) => t,
         Err(e) => return fail(scope, &mut live, format!("{e:#}")),
     };
-    // What the chat learned is kept even when the answer failed.
     let saved = serde_json::to_string(memory).map_err(anyhow::Error::from).and_then(|m| t.set_chat_memory(chat, &m));
     match (answered, saved) {
         (Ok(answer), saved) => {

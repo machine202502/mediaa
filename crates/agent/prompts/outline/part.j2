@@ -1,7 +1,6 @@
 {% if parts > 1 %}Part {{ number }} of {{ parts }} of one topic of the recording ({{ start }} – {{ end }}).
 {% else %}One topic of the recording ({{ start }} – {{ end }}).
 {% endif %}
-{# Small models drift into English unless told. #}
 Write everything in {{ language }}.
 {% if previous %}
 {% if number > 1 %}The previous part of this topic was about: {{ previous }}

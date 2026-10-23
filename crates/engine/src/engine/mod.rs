@@ -1,9 +1,3 @@
-//! The engine of MediaA: models are loaded on demand under a memory budget, downloaded from
-//! Hugging Face when missing, and run in this process.
-//!
-//! [`Engine`] is what the rest of the app talks to; [`LocalEngine`] is the one implementation
-//! that runs the models (a fake for tests is in [`crate::testing`]).
-
 pub mod downloads;
 pub mod error;
 pub mod models;
@@ -27,76 +21,43 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Download progress in bytes, callable from the downloading threads.
 pub type ProgressCallback = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
-/// What the app needs from the engine. Every call is blocking; callers that run on the UI
-/// thread put them on a worker thread.
 pub trait Engine: Send + Sync + 'static {
-    /// What the engine is and which GPUs it sees.
     fn health(&self) -> Health;
-    /// Loaded models, waiting requests and the memory budget.
     fn status(&self) -> Status;
-    /// Sets the memory budget models are kept loaded under, including how long an idle model stays.
     fn set_budget(&self, budget: Budget);
-    /// Specs of models that waiting work needs (`owner/repo`, `owner/repo/file` or a path).
-    /// An idle loaded model that matches one is unloaded last when memory runs short.
-    /// An empty list clears the set.
     fn set_wanted(&self, _specs: &[String]) {}
-    /// A call with `model` is stuck: unload it so the next attempt starts from a fresh load
-    /// instead of waiting for the lock it holds. `model` is what the engine named to the pulse
-    /// ([`mediaa_core::pulse::using`]) when the call began.
     fn forget_loaded(&self, _model: &str) {}
-    /// Answers `request`; `on_text` gets the answer as it is produced (returning `false` stops),
-    /// and a set `cancel` stops the model at the next token.
     fn chat(&self, request: &ChatRequest, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError>;
-    /// Like [`Engine::chat`], but the model reasons first (see [`Thinking`]): the text starts
-    /// with `<think>`, the reasoning is streamed and kept in the answer.
     fn chat_thinking(&self, request: &ChatRequest, thinking: Thinking, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError>;
-    /// Embeddings of `request.input`, in the order of the inputs. A set `cancel` stops the call
-    /// before the next input (and while it waits for the model).
     fn embeddings(&self, request: &EmbeddingsRequest, cancel: &AtomicBool) -> Result<Vec<Vec<f32>>, EngineError>;
-    /// The documents by relevance to the query, most relevant first. A set `cancel` stops the
-    /// call before the next document (and while it waits for the model).
     fn rerank(&self, request: &RerankRequest, cancel: &AtomicBool) -> Result<Vec<RerankResult>, EngineError>;
-    /// Loads the voice activity model and opens a session at `offset` seconds.
     fn vad_open(&self, model: &str, offset: f64, hf_token: Option<&str>) -> Result<Box<dyn VadSession>, EngineError>;
-    /// Recognises one piece of speech that starts `offset` seconds into the recording.
     fn recognize(&self, model: &str, offset: f64, samples: &[f32], hf_token: Option<&str>) -> Result<Phrase, EngineError>;
-    /// Who speaks when in the whole recording, with the mean voice of each speaker.
     fn diarize(&self, request: &DiarizeRequest, samples: &[f32]) -> Result<Diarization, EngineError>;
-    /// The models downloaded to the engine's models folder.
     fn models(&self) -> Result<Vec<ModelInfo>, EngineError>;
-    /// What a model spec is, without downloading it: files, format, roles it fits and problems.
     fn inspect(&self, spec: &str, hf_token: Option<&str>) -> Result<ModelInspect, EngineError>;
-    /// Downloads a model, reporting bytes done and total; returns the path of the model.
     fn pull(&self, spec: &str, hf_token: Option<&str>, on_progress: ProgressCallback) -> Result<PathBuf, EngineError>;
-    /// Deletes a downloaded model.
     fn delete_model(&self, spec: &str) -> Result<(), EngineError>;
-    /// Loads the model in `role`'s way and returns the bytes it takes.
     fn check_model(&self, spec: &str, role: ModelRole, hf_token: Option<&str>) -> Result<ModelCheck, EngineError>;
 }
 
-/// The engine itself: models are loaded on demand under the budget and downloaded when missing.
 pub struct LocalEngine {
     runtime: Runtime,
     models_dir: PathBuf,
-    /// The budget as the app set it, in bytes (the scheduler keeps GB).
     budget: Mutex<Budget>,
     downloads: Downloads,
-    /// Stops the keep-alive thread. The thread holds its own clone and exits after [`Drop`].
     stop: Arc<AtomicBool>,
 }
 
 impl LocalEngine {
-    /// `models_dir`: where Hugging Face models are downloaded to. It is created when missing.
     pub fn new(models_dir: PathBuf, budget: Budget) -> LocalEngine {
         let _ = std::fs::create_dir_all(&models_dir);
         let runtime = Runtime::new(&models_dir, to_budget(budget), budget.keep_alive);
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let scheduler = runtime.scheduler().clone();
-        // Unloads idle models when their keep-alive runs out, even if nobody asks for one.
         let _ = std::thread::Builder::new().name("model-keepalive".into()).spawn(move || {
             while !thread_stop.load(Ordering::Relaxed) {
                 scheduler.sweep_wait(&thread_stop);
@@ -105,13 +66,10 @@ impl LocalEngine {
         LocalEngine { runtime, models_dir, budget: Mutex::new(budget), downloads: Downloads::default(), stop }
     }
 
-    /// Where downloaded models live.
     pub fn models_dir(&self) -> &Path {
         &self.models_dir
     }
 
-    /// Checks the spec and downloads a Hugging Face model that is not on disk yet; progress is
-    /// shown in [`Engine::status`].
     fn ensure(&self, source: &ModelSource, hf_token: Option<&str>) -> Result<(), EngineError> {
         let ModelSource::HuggingFace { repo } = source else { return Ok(()) };
         if hub::is_downloaded(&self.models_dir, repo) {
@@ -120,13 +78,10 @@ impl LocalEngine {
         self.download(repo, hf_token, None).map(drop)
     }
 
-    /// Downloads a Hugging Face spec into the models folder, reporting bytes to the status and
-    /// to `on_progress`.
     fn download(&self, repo: &str, hf_token: Option<&str>, on_progress: Option<ProgressCallback>) -> Result<PathBuf, EngineError> {
         let provider = hf_provider(hf_token);
         let id = self.downloads.start(repo);
         let downloads = self.downloads.clone();
-        // `download` may report from several threads: the sink is shared and only sends.
         let result = hub::download(&self.models_dir, repo, provider.as_ref(), move |done, total| {
             downloads.progress(id, done, total);
             if let Some(on_progress) = &on_progress {
@@ -137,13 +92,11 @@ impl LocalEngine {
         result.map_err(EngineError::classify)
     }
 
-    /// The file or folder of a model, downloading a Hugging Face one when missing.
     fn source_path(&self, source: &ModelSource, hf_token: Option<&str>) -> Result<PathBuf, EngineError> {
         match source {
             ModelSource::Local { path } => Ok(path.clone()),
             ModelSource::HuggingFace { repo } => {
                 self.ensure(source, hf_token)?;
-                // A spec with a file part has a folder of its own (`hub::model_dir`), the file inside.
                 let (_, file) = hub::split_spec(repo);
                 let dir = hub::model_dir(&self.models_dir, repo);
                 Ok(file.map_or_else(|| dir.clone(), |file| dir.join(file)))
@@ -154,7 +107,6 @@ impl LocalEngine {
 }
 
 impl LocalEngine {
-    /// A chat answer, with reasoning first when `thinking` is set.
     fn chat_with(&self, request: &ChatRequest, thinking: Option<Thinking>, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError> {
         let mut call = request.clone().into_call()?;
         call.generate.think_tokens = thinking.map(|t| t.budget);
@@ -414,7 +366,6 @@ impl Engine for LocalEngine {
                 let gguf = gguf.ok_or_else(no_gguf).map_err(|e| EngineError::model_unsupported(format!("{e:#}")))?;
                 Reranker::load(&gguf, false).and_then(|reranker| reranker.score("question", "answer").map(drop))
             }
-            // Speech synthesis has no runtime yet: the files on disk are all there is to check.
             ModelRole::Speech => Ok(()),
             ModelRole::Agent | ModelRole::Titles => {
                 let gguf = gguf.ok_or_else(no_gguf).map_err(|e| EngineError::model_unsupported(format!("{e:#}")))?;
@@ -429,7 +380,6 @@ impl Engine for LocalEngine {
     }
 }
 
-/// The real voice activity session: sherpa-onnx's stateful detector.
 struct RealVad(speech::Vad);
 
 impl Drop for LocalEngine {
@@ -461,8 +411,6 @@ fn hf_provider(token: Option<&str>) -> Option<Provider> {
     })
 }
 
-/// The files of a model folder (or the one file of a model file), paths relative to it. The
-/// completion marker of a download is internal and not listed.
 fn walk_files(root: &Path) -> Result<Vec<ModelFile>, EngineError> {
     if root.is_file() {
         let name = root.file_name().and_then(|name| name.to_str()).unwrap_or_default().to_string();
@@ -536,7 +484,6 @@ mod tests {
         assert_eq!(engine.health().models_dir, engine.models_dir().display().to_string());
     }
 
-    /// A downloaded repository on disk, as `hub::download` leaves it.
     fn downloaded(root: &Path, repo: &str, files: &[&str]) -> PathBuf {
         let dir = hub::model_dir(root, repo);
         std::fs::create_dir_all(&dir).unwrap();
@@ -550,11 +497,9 @@ mod tests {
     #[test]
     fn a_file_spec_resolves_into_the_folder_its_download_made() {
         let root = tempfile::tempdir().unwrap();
-        // Where `hub::download` puts one file of a repository: a folder of its own.
         let dir = downloaded(root.path(), "csukuangfj/vad/silero_vad.onnx", &["silero_vad.onnx"]);
         assert_eq!(dir, hub::model_dir(root.path(), "csukuangfj/vad/silero_vad.onnx"));
         let engine = LocalEngine::new(root.path().to_path_buf(), Budget::default());
-        // No network: the completion marker is already there.
         let spec = ModelSource::HuggingFace { repo: "csukuangfj/vad/silero_vad.onnx".into() };
         assert_eq!(engine.source_path(&spec, None).unwrap(), dir.join("silero_vad.onnx"));
         let repo = downloaded(root.path(), "csukuangfj/other", &["model.onnx"]);

@@ -1,41 +1,25 @@
-//! Speaker labels the model reads and writes (`@s1`, `@s2`, …) and the names the user sees.
-//!
-//! A speaker index is 0-based in the transcript. The model always sees `@sN` (`N = index + 1`).
-//! The same index exists in every recording of a folder, so a folder label is `@sN#R` with the
-//! recording's 1-based number. Stored model text keeps the label; a name is substituted only
-//! when the text is shown, so a rename is visible without regenerating anything.
-
-/// One speaker the user can mention.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Who {
-    /// 0-based index inside its recording.
     pub index: u32,
-    /// 1-based recording number in a folder (`None` for a single recording).
     pub recording: Option<u32>,
-    /// The name the user gave, or empty when the speaker is still unnamed.
     pub name: String,
-    /// Recording title. Shown next to the name when a folder makes names ambiguous.
     pub title: String,
 }
 
-/// A model label: `@sN` or `@sN#R`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Parsed {
     pub index: u32,
     pub recording: Option<u32>,
 }
 
-/// `@sN` for a 0-based index.
 pub fn label(index: u32) -> String {
     format!("@s{}", index + 1)
 }
 
-/// `@sN#R` for a speaker of recording `recording` (1-based).
 pub fn folder_label(index: u32, recording: u32) -> String {
     format!("@s{}#{recording}", index + 1)
 }
 
-/// `@sN`, `sN`, `@sN#R` or `sN#R`. Names and bare numbers are not labels.
 pub fn parse_label(text: &str) -> Option<Parsed> {
     let s = text.trim().trim_start_matches('@');
     let (num, rec) = match s.split_once('#') {
@@ -59,23 +43,19 @@ pub fn parse_label(text: &str) -> Option<Parsed> {
     Some(Parsed { index: n - 1, recording })
 }
 
-/// What the user sees for a speaker: `@Name`, `@Name (title)` in a folder, or the localized default.
 pub fn shown(name: &str, unnamed: &str, title: &str) -> String {
     let name = if name.trim().is_empty() { unnamed } else { name.trim() };
     if title.is_empty() { format!("@{name}") } else { format!("@{name} ({title})") }
 }
 
-/// A piece of text: plain, or a mention (styled the same everywhere it is shown).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Piece<'a> {
     Text(&'a str),
-    /// `live` is false when `text` is the user's own spelling (`@Антон`), which does not follow a rename.
     Mention { text: String, live: bool },
 }
 
 enum Tok<'a> {
     Text(&'a str),
-    /// `typed` is the user's `@Name` slice. `None` is a model label, rendered with the current name.
     Speaker { index: u32, recording: Option<u32>, typed: Option<&'a str> },
 }
 
@@ -87,7 +67,6 @@ fn boundary_after(text: &str, at: usize) -> bool {
     text[at..].chars().next().is_none_or(|c| !c.is_alphanumeric() && c != '_')
 }
 
-/// `@sN` or `@sN#R` starting at `at` (the `@`). The end is exclusive.
 fn model_label_at(text: &str, at: usize) -> Option<(usize, Parsed)> {
     let rest = text.get(at + 1..)?;
     let b = rest.as_bytes();
@@ -145,8 +124,6 @@ fn prefix_len(text: &str, chars: usize) -> Option<usize> {
     (n == chars).then_some(text.len())
 }
 
-/// Match strings that point at exactly one speaker. Longer strings win, so «Говорящий 12»
-/// is not eaten by «Говорящий 1». A name shared by two speakers is skipped.
 fn unique_names(speakers: &[Who]) -> Vec<(String, u32, Option<u32>)> {
     let mut keys: Vec<(String, u32, Option<u32>)> = Vec::new();
     for w in speakers {
@@ -219,8 +196,6 @@ fn resolve(speakers: &[Who], index: u32, recording: Option<u32>) -> Option<&Who>
     }
 }
 
-/// Splits `text` into plain runs and mentions. `unnamed(index)` is the localized default
-/// («Говорящий N» / «Speaker N») for a speaker who has no name.
 pub fn pieces<'a>(text: &'a str, speakers: &[Who], unnamed: impl Fn(u32) -> String) -> Vec<Piece<'a>> {
     tokens(text, speakers)
         .into_iter()
@@ -237,9 +212,6 @@ pub fn pieces<'a>(text: &'a str, speakers: &[Who], unnamed: impl Fn(u32) -> Stri
         .collect()
 }
 
-/// The same text with speaker names written as the labels the model uses.
-/// `@sN` and `@sN#R` stay. `@<name>` becomes `@sN` (or `@sN#R` when the name belongs to one
-/// recording of a folder). A name shared by two speakers is left as typed.
 pub fn to_model(text: &str, speakers: &[Who]) -> String {
     let mut out = String::new();
     for t in tokens(text, speakers) {
@@ -252,8 +224,6 @@ pub fn to_model(text: &str, speakers: &[Who]) -> String {
     out
 }
 
-/// Rewrites bare `@sN` in one recording's tool result to `@sN#R`, so a folder model can tell
-/// the same index in two recordings apart. A label that already has `#R` is kept.
 pub fn tag_recording(text: &str, recording: u32) -> String {
     let mut out = String::new();
     for t in tokens(text, &[]) {
@@ -266,12 +236,9 @@ pub fn tag_recording(text: &str, recording: u32) -> String {
     out
 }
 
-/// The `@…` token the caret is inside, if the user is typing a mention.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Query {
-    /// Byte index of the `@`.
     pub at: usize,
-    /// What was typed after the `@`, up to the caret.
     pub query: String,
 }
 
@@ -280,8 +247,6 @@ fn char_floor(text: &str, at: usize) -> usize {
     (0..=at).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0)
 }
 
-/// `cursor` is a byte index. The query has no whitespace; an `@` that is not a token boundary
-/// (an address) is not a mention.
 pub fn mention_query(text: &str, cursor: usize) -> Option<Query> {
     let cursor = char_floor(text, cursor);
     let head = &text[..cursor];
@@ -296,8 +261,6 @@ pub fn mention_query(text: &str, cursor: usize) -> Option<Query> {
     Some(Query { at: rel, query: query.to_string() })
 }
 
-/// Row indexes of speakers matching `query` (empty shows everyone). Matches the name the user
-/// sees, the recording title, and the model label.
 pub fn matching(speakers: &[Who], query: &str, unnamed: impl Fn(u32) -> String) -> Vec<usize> {
     let q = query.trim().trim_start_matches('@').to_lowercase();
     speakers
@@ -319,8 +282,6 @@ pub fn matching(speakers: &[Who], query: &str, unnamed: impl Fn(u32) -> String) 
         .collect()
 }
 
-/// Replaces the `@query` at `at` with `insertion` and a trailing space (unless one is already there).
-/// Returns the new text and the caret byte index.
 pub fn insert(text: &str, at: usize, query: &str, insertion: &str) -> (String, usize) {
     let end = (at + '@'.len_utf8() + query.len()).min(text.len());
     let rest = &text[end..];
@@ -337,12 +298,10 @@ pub fn insert(text: &str, at: usize, query: &str, insertion: &str) -> (String, u
     (out, caret)
 }
 
-/// The mention list opened by `@` in the chat input. Pure, so the keys can be tested without egui.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Popup {
     pub at: usize,
     pub selected: usize,
-    /// The `@` the user dismissed with Escape. It stays closed until the token changes.
     pub dismissed: Option<usize>,
 }
 
@@ -357,7 +316,6 @@ impl Popup {
         matches!(query, Some(q) if count > 0 && self.dismissed != Some(q.at))
     }
 
-    /// Follows the caret. A new `@` starts the selection at the first row.
     pub fn update(&mut self, query: Option<&Query>, count: usize) {
         let Some(q) = query.filter(|q| count > 0 && self.dismissed != Some(q.at)) else {
             return;
@@ -425,7 +383,6 @@ mod tests {
         assert_eq!(to_model("ask @Speaker 2 please", &speakers), "ask @s2 please");
         assert_eq!(to_model("@антон, @s1", &speakers), "@s1, @s1");
         assert_eq!(to_model("почта a@anton.ru и @s1", &speakers), "почта a@anton.ru и @s1");
-        // A longer default is not cut short.
         let many = vec![who(0, ""), who(11, "")];
         assert_eq!(to_model("@Говорящий 12", &many), "@s12");
         assert_eq!(to_model("@Говорящий 1", &many), "@s1");
@@ -443,7 +400,6 @@ mod tests {
         let after = vec![who(0, "Олег")];
         let live = pieces("привет @s1", &after, unnamed);
         assert_eq!(live, vec![Piece::Text("привет "), Piece::Mention { text: "@Олег".into(), live: true }]);
-        // The user's own message keeps the spelling they typed.
         let typed = pieces("привет @Антон", &after, unnamed);
         assert_eq!(typed, vec![Piece::Text("привет @Антон")]);
     }
@@ -452,7 +408,6 @@ mod tests {
     fn folder_labels_need_the_recording() {
         let speakers = vec![folder(1, 3, "Анна", "Планёрка"), folder(1, 4, "Анна", "Стендап"), folder(0, 3, "", "Планёрка")];
         assert_eq!(to_model("@s2#3 сказала", &speakers), "@s2#3 сказала");
-        // The same name in two recordings is left as typed.
         assert_eq!(to_model("@Анна", &speakers), "@Анна");
         assert_eq!(tag_recording("[#3 0:10] @s2: да\n@s1#9 уже", 3), "[#3 0:10] @s2#3: да\n@s1#9 уже");
         let live = pieces("см. @s2#3 и @s1#3", &speakers, unnamed);

@@ -1,11 +1,5 @@
-//! Errors of the engine: a `kind` a caller can match on and a message for a person.
-
 use std::fmt;
 
-/// A failed engine call: the kind from the engine's contract and a message for a person.
-///
-/// Kinds: `bad_request`, `not_found`, `model_unsupported`, `out_of_memory`, `cancelled` and
-/// `internal`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineError {
     pub kind: &'static str,
@@ -41,7 +35,6 @@ impl EngineError {
         EngineError::new("internal", message)
     }
 
-    /// The kind for an error of the library, by what it says.
     pub fn classify(error: anyhow::Error) -> EngineError {
         let message = format!("{error:#}");
         let lower = message.to_lowercase();

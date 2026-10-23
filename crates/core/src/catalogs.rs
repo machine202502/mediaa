@@ -1,16 +1,9 @@
-//! Virtual catalogs of the Agent section: a tree of folders and files kept in
-//! `<media>/.ai/catalogs.db`. Names, colours and the layout are virtual — they never touch the
-//! files on disk. A file node either links to a file where it is (`hard = false`) or owns a
-//! copy in `<media>/.ai/files` (`hard = true`), which is deleted with the node.
-
 use anyhow::{bail, Context};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 pub type NodeId = i64;
 
-/// Extensions catalogs take: audio and video (the caller also makes sure a video has sound,
-/// see `mediaa_media::info::has_sound`).
 pub fn accepted_extensions() -> Vec<&'static str> {
     [&crate::formats::VIDEO_EXTENSIONS[..], &crate::formats::AUDIO_EXTENSIONS].concat()
 }
@@ -21,7 +14,6 @@ pub fn accepts(path: &Path) -> bool {
         .is_some_and(|e| accepted_extensions().contains(&e.to_ascii_lowercase().as_str()))
 }
 
-/// The Agent data folder of a library.
 pub fn ai_dir(media_dir: &Path) -> PathBuf {
     media_dir.join(".ai")
 }
@@ -37,7 +29,6 @@ pub struct Node {
     pub id: NodeId,
     pub parent: Option<NodeId>,
     pub name: String,
-    /// `0xRRGGBB`; `None` = the theme's text colour.
     pub color: Option<u32>,
     pub kind: NodeKind,
     position: i64,
@@ -54,12 +45,10 @@ const SCHEMA: i64 = 1;
 pub struct Catalogs {
     dir: PathBuf,
     db: Connection,
-    /// Every node, siblings in their order.
     nodes: Vec<Node>,
 }
 
 impl Catalogs {
-    /// Opens (creating if needed) the catalogs of the library whose `.ai` folder is `dir`.
     pub fn open(dir: &Path) -> anyhow::Result<Catalogs> {
         std::fs::create_dir_all(dir)?;
         let db = Connection::open(dir.join("catalogs.db"))?;
@@ -67,7 +56,6 @@ impl Catalogs {
         db.pragma_update(None, "foreign_keys", true)?;
         let version: i64 = db.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version != SCHEMA {
-            // The tree is user data: refuse to guess with an unknown schema.
             if version != 0 {
                 bail!("{} has schema {version}, expected {SCHEMA}", dir.join("catalogs.db").display());
             }
@@ -110,7 +98,6 @@ impl Catalogs {
         Ok(())
     }
 
-    /// Every node (siblings in their order).
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
@@ -119,7 +106,6 @@ impl Catalogs {
         self.nodes.iter().find(|n| n.id == id)
     }
 
-    /// The file a file node shows (`None` for folders).
     pub fn file_path(&self, id: NodeId) -> Option<&Path> {
         match &self.node(id)?.kind {
             NodeKind::File { path, .. } => Some(path.as_path()),
@@ -127,12 +113,10 @@ impl Catalogs {
         }
     }
 
-    /// Children of `parent` (`None`: the top level) in their order.
     pub fn children(&self, parent: Option<NodeId>) -> Vec<&Node> {
         self.nodes.iter().filter(|n| n.parent == parent).collect()
     }
 
-    /// `id` and everything under it.
     pub fn subtree(&self, id: NodeId) -> Vec<NodeId> {
         let mut out = vec![id];
         let mut i = 0;
@@ -167,8 +151,6 @@ impl Catalogs {
         Ok(id)
     }
 
-    /// Adds `source` under `parent`, named after it. `hard`: copy it into `.ai/files` (under a
-    /// name that does not clash) and own the copy; otherwise only link to it.
     pub fn add_file(&mut self, parent: Option<NodeId>, source: &Path, hard: bool) -> anyhow::Result<NodeId> {
         self.check_parent(parent)?;
         anyhow::ensure!(source.is_file(), "{} is not a file", source.display());
@@ -198,7 +180,6 @@ impl Catalogs {
         Ok(id)
     }
 
-    /// Virtual name only: the file on disk keeps its name.
     pub fn rename(&mut self, id: NodeId, name: &str) -> anyhow::Result<()> {
         anyhow::ensure!(!name.trim().is_empty(), "empty name");
         self.db.execute("UPDATE nodes SET name = ?1 WHERE id = ?2", params![name.trim(), id])?;
@@ -210,7 +191,6 @@ impl Catalogs {
         self.reload()
     }
 
-    /// Moves `id` into `parent` at `index` among its children (a folder never into itself).
     pub fn move_node(&mut self, id: NodeId, parent: Option<NodeId>, index: usize) -> anyhow::Result<()> {
         self.check_parent(parent)?;
         if let Some(p) = parent {
@@ -227,7 +207,6 @@ impl Catalogs {
         self.reload()
     }
 
-    /// Deletes `id` with everything under it; copies owned by hard file nodes are deleted too.
     pub fn delete(&mut self, id: NodeId) -> anyhow::Result<()> {
         let owned: Vec<PathBuf> = self
             .subtree(id)
@@ -246,13 +225,11 @@ impl Catalogs {
         self.reload()
     }
 
-    /// Whether the node table holds `id` (for callers that keep ids around).
     pub fn exists(&self, id: NodeId) -> bool {
         self.db.query_row("SELECT 1 FROM nodes WHERE id = ?1", [id], |_| Ok(())).optional().ok().flatten().is_some()
     }
 }
 
-/// `dir/name`, or `dir/stem-2.ext`, `-3`… if taken.
 fn unique_path(dir: &Path, name: &str) -> PathBuf {
     let first = dir.join(name);
     if !first.exists() {
@@ -327,6 +304,18 @@ mod tests {
         assert!(c.move_node(a, Some(a), 0).is_err());
         c.move_node(x, None, 1).unwrap();
         assert_eq!(names(&c, None), ["A", "X"]);
+    }
+
+    #[test]
+    fn a_store_of_another_schema_is_refused_instead_of_guessed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ai = ai_dir(dir.path());
+        std::fs::create_dir_all(&ai).unwrap();
+        let db = Connection::open(ai.join("catalogs.db")).unwrap();
+        db.pragma_update(None, "user_version", SCHEMA + 1).unwrap();
+        drop(db);
+        let err = Catalogs::open(&ai).err().expect("another schema is refused").to_string();
+        assert!(err.contains("schema"), "the tree is user data, it is not guessed at: {err}");
     }
 
     #[test]

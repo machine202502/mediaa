@@ -1,6 +1,3 @@
-//! Compact blue themes (dark + light): one palette per mode applied to egui's visuals,
-//! plus small styled-widget helpers shared by all pages.
-
 use eframe::egui::{
     self, Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Visuals,
 };
@@ -63,13 +60,8 @@ pub fn palette(ui: &egui::Ui) -> Palette {
     }
 }
 
-/// Height of the horizontal bar under a tab row. Reserved even when the bar is hidden,
-/// so the row does not grow when the tabs stop fitting.
 pub const TAB_SCROLL_BAR: f32 = 3.0;
 
-/// Solid (not floating) horizontal scroll for every tab row: a 3 px muted bar in the
-/// palette, with its strip of space always taken. Call on the `Ui` that owns the
-/// `ScrollArea`, before showing it. Only that `Ui` is restyled.
 pub fn tab_row_scroll(ui: &mut egui::Ui) {
     let p = palette(ui);
     let mut scroll = egui::style::ScrollStyle::solid();
@@ -77,7 +69,6 @@ pub fn tab_row_scroll(ui: &mut egui::Ui) {
     scroll.bar_inner_margin = 0.0;
     scroll.bar_outer_margin = 0.0;
     scroll.handle_min_length = 12.0;
-    // Handle colour is the inactive widget fill; the track is `extreme_bg_color`.
     scroll.foreground_color = false;
     ui.style_mut().spacing.scroll = scroll;
     let visuals = ui.visuals_mut();
@@ -118,7 +109,6 @@ fn visuals(p: &Palette, dark: bool) -> Visuals {
         state.bg_fill = fill;
         state.weak_bg_fill = fill;
         state.bg_stroke = Stroke::new(1.0, stroke);
-        // Also the colour of `RichText::strong()` (for `active`), so keep it readable.
         state.fg_stroke = Stroke::new(1.0, p.text);
         state.corner_radius = r;
         state.expansion = 0.0;
@@ -127,16 +117,12 @@ fn visuals(p: &Palette, dark: bool) -> Visuals {
     v
 }
 
-/// Dark visuals, used by surfaces that must stay dark regardless of the theme
-/// (the area-selection toolbars float over arbitrary screen content).
 pub fn dark_visuals() -> Visuals {
     visuals(&DARK, true)
 }
 
-/// System fonts with the symbols the built-in ones lack (`⧸`, arrows, math in file names).
 const SYMBOL_FONTS: [&str; 4] = ["Segoe UI Symbol", "Noto Sans Symbols 2", "Apple Symbols", "DejaVu Sans"];
 
-/// The first system font of [`SYMBOL_FONTS`] found.
 fn symbol_font() -> Option<Vec<u8>> {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
@@ -183,7 +169,6 @@ pub fn apply_preference(ctx: &egui::Context, pref: ThemePreference) {
     });
 }
 
-/// Rounded surface for grouping controls.
 pub fn card(ui: &egui::Ui) -> egui::Frame {
     let p = palette(ui);
     egui::Frame::new()
@@ -193,7 +178,6 @@ pub fn card(ui: &egui::Ui) -> egui::Frame {
         .inner_margin(Margin::same(12))
 }
 
-/// Section title inside a card.
 pub fn section(ui: &mut egui::Ui, icon: &str, title: &str) {
     let p = palette(ui);
     ui.horizontal(|ui| {
@@ -212,7 +196,6 @@ fn sized(btn: egui::Button<'static>) -> egui::Button<'static> {
     btn.corner_radius(CornerRadius::same(6)).min_size(egui::vec2(0.0, 28.0))
 }
 
-/// Filled accent button for primary actions.
 pub fn primary(ui: &egui::Ui, icon: &str, text: &str) -> egui::Button<'static> {
     let p = palette(ui);
     sized(
@@ -230,16 +213,12 @@ pub fn secondary(icon: &str, text: &str) -> egui::Button<'static> {
     sized(egui::Button::new(format!("{icon}  {text}")))
 }
 
-/// Title size of every popup. Page sections keep the 18 px heading; a popup's bar uses the body size.
 pub const POPUP_TITLE: f32 = 13.0;
 
-/// The title line of a popup that has no egui title bar (a confirmation). Same size as the window bar
-/// [`with_compact_title`] gives to `egui::Window`.
 pub fn popup_title(ui: &mut egui::Ui, title: &str) {
     ui.label(egui::RichText::new(title).size(POPUP_TITLE));
 }
 
-/// Runs `f` while popup title bars use [`POPUP_TITLE`] instead of the page heading, then restores it.
 pub fn with_compact_title<R>(ctx: &egui::Context, f: impl FnOnce() -> R) -> R {
     let mut previous = FontId::new(18.0, FontFamily::Proportional);
     ctx.all_styles_mut(|style| {
@@ -266,9 +245,6 @@ impl Drop for RestoreHeading<'_> {
     }
 }
 
-/// Small square icon button with a tooltip.
-/// A menu entry: icon and label across the menu's width, highlighted under the pointer
-/// (accent tint; red tint for `danger`) with a hand cursor.
 pub fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, danger: bool) -> egui::Response {
     let p = palette(ui);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
@@ -287,24 +263,17 @@ pub fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, danger: bool) -> eg
     resp
 }
 
-/// Side of [`icon_button`].
 pub const ICON_BUTTON: f32 = 26.0;
 
 pub fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
     icon_button_sized(ui, icon, tooltip, ICON_BUTTON)
 }
 
-/// [`icon_button`] in a box of the given side — for rows whose height must not change when the
-/// button appears (a smaller box keeps the row's geometry).
 pub fn icon_button_sized(ui: &mut egui::Ui, icon: &str, tooltip: &str, side: f32) -> egui::Response {
     icon_face(ui, icon, tooltip, side).on_hover_text(tooltip)
 }
 
-/// The same square as [`icon_button_sized`] without a tooltip, so the caller can attach one
-/// without a shadow.
 pub fn icon_face(ui: &mut egui::Ui, icon: &str, label: &str, side: f32) -> egui::Response {
-    // Painted by hand at a fixed size: egui buttons that show their frame only on hover grow
-    // by the frame stroke, which nudges the whole row sideways.
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
     if ui.is_rect_visible(rect) {
         let p = palette(ui);
@@ -332,7 +301,6 @@ pub fn icon_face(ui: &mut egui::Ui, icon: &str, label: &str, side: f32) -> egui:
     resp
 }
 
-/// Segmented control: a row of mutually exclusive options.
 pub fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, String)]) -> bool {
     let p = palette(ui);
     let mut changed = false;
@@ -362,29 +330,22 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options:
     changed
 }
 
-/// Two-column row: fixed-width label on the left, control on the right.
 pub fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.horizontal(|ui| {
         let p = palette(ui);
-        // Narrow columns get a narrower label column.
         let label_w = (ui.available_width() * 0.34).clamp(70.0, 118.0);
         ui.add_sized([label_w, 24.0], egui::Label::new(egui::RichText::new(label).color(p.text_weak)).truncate());
-        // Wrapping, so long texts and wide controls wrap instead of widening the card.
         ui.horizontal_wrapped(|ui| add(ui)).inner
     })
     .inner
 }
 
-/// Narrowest column of a side-by-side card (label + slider + value fit); below two of them
-/// the sections are stacked vertically.
 pub const COLUMN_MIN: f32 = 330.0;
 
 pub fn is_wide(ui: &egui::Ui) -> bool {
     ui.available_width() >= 2.0 * COLUMN_MIN + ui.spacing().item_spacing.x
 }
 
-/// One card with two sections: side by side when there is room (a single card, so both halves
-/// share its height naturally), stacked with a separator when the window is narrow.
 pub fn split_card(ui: &mut egui::Ui, left: impl FnOnce(&mut egui::Ui), right: impl FnOnce(&mut egui::Ui)) {
     card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -401,10 +362,6 @@ pub fn split_card(ui: &mut egui::Ui, left: impl FnOnce(&mut egui::Ui), right: im
     });
 }
 
-
-/// Two separate cards side by side with exactly the same height (that of the taller one, in
-/// the same frame — both contents are laid out before either card is painted); stacked
-/// vertically when the window is narrow.
 pub fn equal_cards(
     ui: &mut egui::Ui,
     _id: &str,
@@ -430,7 +387,6 @@ pub fn equal_cards(
         pb.content_ui.set_width(pb.content_ui.available_width());
         left(&mut pa.content_ui);
         right(&mut pb.content_ui);
-        // Pad the shorter card (`set_min_height` would measure from the cursor, not the top).
         let (ha, hb) = (pa.content_ui.min_rect().height(), pb.content_ui.min_rect().height());
         let h = ha.max(hb);
         pa.content_ui.add_space(h - ha);
@@ -442,7 +398,6 @@ pub fn equal_cards(
 
 #[cfg(test)]
 mod tests {
-    /// The tab-row bar is a solid 3 px strip in the palette, not a floating overlay.
     #[test]
     fn tab_row_scroll_is_thin_solid_and_muted() {
         let mut harness = egui_kittest::Harness::new_ui(|ui| {
@@ -458,7 +413,6 @@ mod tests {
         harness.run();
     }
 
-    /// Windows always has Segoe UI Symbol: file names with `⧸` render.
     #[cfg(windows)]
     #[test]
     fn a_symbol_font_is_found() {

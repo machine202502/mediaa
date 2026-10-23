@@ -1,15 +1,10 @@
-//! FFmpeg filtergraph descriptions and encoder parameters. Pure functions, so the exact
-//! graphs are unit-tested without running FFmpeg.
-
 use mediaa_core::settings::{AnimSettings, GifDither};
 
-/// Maps the UI quality (1–100) to an x264 CRF (100 → 16 ≈ visually lossless, 1 → 40).
 pub fn crf_for_quality(quality: u8) -> u32 {
     let q = u32::from(quality.clamp(1, 100));
     40 - (q - 1) * 24 / 99
 }
 
-/// Optional downscale to a height that never upscales and keeps the aspect ratio.
 fn scale_step(max_height: Option<u32>) -> String {
     match max_height {
         Some(h) => format!(",scale=w=-1:h='min({h},ih)':flags=lanczos"),
@@ -26,8 +21,6 @@ fn dither_option(d: GifDither) -> &'static str {
     }
 }
 
-/// High-quality GIF: per-clip palette (`palettegen`, motion-weighted) applied with `paletteuse`.
-/// Output label `[v]`.
 pub fn gif_graph(a: &AnimSettings) -> String {
     format!(
         "[0:v]fps={fps}{scale},split[a][b];[a]palettegen=max_colors={colors}:stats_mode=diff[p];\
@@ -39,7 +32,6 @@ pub fn gif_graph(a: &AnimSettings) -> String {
     )
 }
 
-/// Animated WebP: resample to the target fps and optional height. Output label `[v]`.
 pub fn webp_graph(a: &AnimSettings) -> String {
     format!(
         "[0:v]fps={}{}[v]",
@@ -48,21 +40,16 @@ pub fn webp_graph(a: &AnimSettings) -> String {
     )
 }
 
-/// Video for conversion: optional downscale to `max_height` (aspect kept, never upscaled), even
-/// dimensions (yuv420p requirement) without dropping pixels.
 pub fn convert_video_graph(max_height: Option<u32>) -> String {
     let scale = max_height.map_or(String::new(), |h| format!("scale=w=-2:h='min({h},ih)':flags=lanczos,"));
     format!("[0:v]{scale}pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p[v]")
 }
 
-/// Still image: optional downscale, then the encoder's pixel format.
 pub fn still_graph(max_height: Option<u32>, pix_fmt: &str) -> String {
     let scale = max_height.map_or(String::new(), |h| format!("scale=w=-1:h='min({h},ih)':flags=lanczos,"));
     format!("[0:v]{scale}format={pix_fmt}[v]")
 }
 
-/// Still image reduced to a palette of `colors` (keeps transparency): much smaller PNGs, like
-/// pngquant. Output `[v]` is `pal8`.
 pub fn palette_graph(max_height: Option<u32>, colors: u16) -> String {
     let scale = max_height.map_or(String::new(), |h| format!("scale=w=-1:h='min({h},ih)':flags=lanczos,"));
     format!(
@@ -72,26 +59,21 @@ pub fn palette_graph(max_height: Option<u32>, colors: u16) -> String {
     )
 }
 
-/// Maps quality (1–100) to a VP9 CRF (100 → 15, 1 → 55).
 pub fn vp9_crf(quality: u8) -> u32 {
     let q = u32::from(quality.clamp(1, 100));
     55 - (q - 1) * 40 / 99
 }
 
-/// Maps quality (1–100) to an FFmpeg `qscale` (MPEG-4 / MJPEG: 100 → 2 best, 1 → 31).
 pub fn qscale(quality: u8) -> i32 {
     let q = i32::from(quality.clamp(1, 100));
     31 - (q - 1) * 29 / 99
 }
 
-/// x264 preset for a live encode of `width`×`height` at `fps`: `veryfast`, or `superfast` above
-/// 1440p60 worth of pixels so the encoder keeps up in real time.
 pub fn live_preset(width: u32, height: u32, fps: u32) -> &'static str {
     let rate = u64::from(width) * u64::from(height) * u64::from(fps);
     if rate > 2560 * 1440 * 60 { "superfast" } else { "veryfast" }
 }
 
-/// Output size of the live encode: `max_height` applied like `scratch_graph` does.
 pub fn scaled_size(width: u32, height: u32, max_height: Option<u32>) -> (u32, u32) {
     match max_height {
         Some(h) if h < height => (((u64::from(width) * u64::from(h) / u64::from(height)) as u32) & !1, h),
@@ -99,8 +81,6 @@ pub fn scaled_size(width: u32, height: u32, max_height: Option<u32>) -> (u32, u3
     }
 }
 
-/// Graph for the live-recording encode: optional downscale to `max_height` (aspect kept, width
-/// rounded to even, never upscaled), then conversion to the encoder's pixel format.
 pub fn scratch_graph(pix_fmt: &str, max_height: Option<u32>) -> String {
     match max_height {
         Some(h) => format!("[0:v]scale=w=-2:h='min({h},ih)':flags=lanczos,format={pix_fmt}[v]"),
@@ -108,7 +88,6 @@ pub fn scratch_graph(pix_fmt: &str, max_height: Option<u32>) -> String {
     }
 }
 
-/// Audio graph for `n` audio-only inputs (indices `0..n`). Output label `[a]`.
 pub fn audio_only_mix_graph(n: usize) -> String {
     match n {
         0 | 1 => "[0:a]aresample=async=1[a]".to_string(),
@@ -119,7 +98,6 @@ pub fn audio_only_mix_graph(n: usize) -> String {
     }
 }
 
-/// Audio graph for `n` audio inputs located at input indices `1..=n`. Output label `[a]`.
 pub fn audio_mix_graph(n: usize) -> Option<String> {
     match n {
         0 => None,

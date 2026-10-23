@@ -1,19 +1,12 @@
-//! "Check models": every role in turn — the engine downloads a model if missing and tries it
-//! for the role, provider models are looked up with the provider's key.
-
 use crate::assistant::hf_token;
 use crate::providers;
 use mediaa_core::agent::{AgentSettings, ModelRole, ModelSource};
 use mediaa_engine::{role_name, Engine, ModelInspect};
 
-/// Why a role is fine.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ready {
-    /// The engine loaded the model and ran it once (its size).
     Ran { bytes: u64 },
-    /// Served by a provider.
     Provider,
-    /// Optional role left unset.
     NotUsed,
 }
 
@@ -24,7 +17,6 @@ pub enum Status {
     Failed(String),
 }
 
-/// Why a model does not fit `role`, from what `inspect` found.
 fn unfit(role: ModelRole, inspect: &ModelInspect) -> String {
     let key = match role {
         ModelRole::SpeechRecognition => "sherpa",
@@ -39,22 +31,16 @@ fn unfit(role: ModelRole, inspect: &ModelInspect) -> String {
         .unwrap_or_else(|| format!("the model does not fit the {} role", role_name(role)))
 }
 
-/// Asks the engine to download the model (if a Hugging Face one) and try it for the role.
 fn check_local(engine: &dyn Engine, role: ModelRole, source: &ModelSource, token: Option<&str>) -> Status {
     let spec = match crate::models::local_spec(source) {
         Ok(spec) => spec,
         Err(e) => return Status::Failed(format!("{e:#}")),
     };
-    // Inspection tells the format and the roles a model fits without downloading it: a model
-    // that cannot work in this role fails here, not after a multi-gigabyte download.
     match engine.inspect(&spec, token) {
-        // Speech synthesis has no runtime in the engine yet: its files are all there is to try.
         Ok(inspect) if role != ModelRole::Speech && !inspect.roles.iter().any(|fits| fits == role_name(role)) => {
             return Status::Failed(unfit(role, &inspect))
         }
         Ok(_) => {}
-        // A local path that cannot be listed or a repository that cannot be reached: the
-        // engine's check reports the real problem.
         Err(e) => log::info!("checking {spec} without inspection: {e:#}"),
     }
     match engine.check_model(&spec, role, token) {
@@ -82,8 +68,6 @@ fn check_role(agent: &AgentSettings, engine: &dyn Engine, role: ModelRole, token
     }
 }
 
-/// Checks every role in order, reporting each status change through `report`. Returns
-/// whether every role is ready.
 pub fn check_all(agent: &AgentSettings, engine: &dyn Engine, report: impl Fn(ModelRole, Status) + Send + Sync + 'static) -> bool {
     let token = hf_token(agent);
     let mut ok = true;
@@ -107,7 +91,6 @@ mod tests {
     fn roles_without_network() {
         let dir = tempfile::tempdir().unwrap();
         let chat = ModelSource::Local { path: dir.path().join("chat.gguf") };
-        // A repository the engine cannot run and a folder with a speaker embedding model.
         let bad = ModelSource::HuggingFace { repo: "bad/model".into() };
         let wrong_role = ModelSource::Local { path: dir.path().join("embedding.onnx") };
         let voice = ModelSource::Local { path: dir.path().join("voice.onnx") };

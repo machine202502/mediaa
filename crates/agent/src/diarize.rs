@@ -1,8 +1,3 @@
-//! The `diarize` queue task: who speaks when in a recording whose phrases are already
-//! recognised, written onto the dialog's replies. Its own task after `transcribe`, so the
-//! replies are usable before it and its failure (or a missing model) only loses speakers: the
-//! task then finishes with a warning, and the index and topics still run.
-
 use crate::run::{Host, Stage, Work};
 use crate::scope::Scope;
 use crate::transcribe::SAMPLE_RATE;
@@ -19,45 +14,21 @@ use std::sync::{Arc, Mutex};
 
 pub const KIND: &str = "diarize";
 
-/// Speaker segmentation for diarization (engine model spec).
 pub const SEGMENTATION_MODEL: &str = "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/model.onnx";
 
-/// How much sound one chunk of diarization covers. Chunking is what lets a stopped task go on
-/// from the next chunk instead of the start; the engine runs one native call per chunk and the
-/// cursor keeps its result. The length is measured on `evals/data` (see
-/// `diarization_chunking_on_eval_data`): a chunk short enough to lose little on a stop and long
-/// enough for the clustering of one chunk to be as right as the clustering of the whole.
 pub const CHUNK_SECONDS: f64 = 480.0;
-/// How much neighbouring chunks share: the boundary speech is diarized twice, so the linking
-/// across chunks has turns to compare, and no speech is lost at a seam.
 pub const OVERLAP_SECONDS: f64 = 15.0;
-/// Two found speakers that talk at the same time in the overlap of two chunks are one person;
-/// less coincidence than this is noise of the segmentation.
 const OVERLAP_LINK_SECONDS: f64 = 1.0;
-/// How close the mean voices of two chunks must be (cosine) to be one speaker. Lower than
-/// [`mediaa_engine::speech::DEFAULT_MERGE_THRESHOLD`]: the voice of one speaker is averaged
-/// over one chunk rather than the whole recording, so it varies more (measured, see
-/// `diarization_chunking_on_eval_data`).
 pub const LINK_THRESHOLD: f32 = 0.75;
-/// How many seconds of speech a speaker of the linked chunks needs to stand on its own; a
-/// shorter one goes to its nearest voice (the short-speaker rule of the engine's merge). Above
-/// the engine's [`mediaa_engine::speech::MIN_SPEAKER_SECONDS`]: chunks leave more short
-/// fragments than the whole recording. Measured on `evals/data` (see
-/// `diarization_short_speakers_after_chunks_on_eval_data`): at 3 s librivox-mix-1 drops from
-/// 8 found speakers to 6 and its DER from 11.6 % to 10.9 %, while pikhoya-1 keeps its 3.8 s
-/// speaker (3 of 3); 5 s already loses that speaker.
 pub const LINK_MIN_SECONDS: f64 = 3.0;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Input {
     pub path: PathBuf,
-    /// How many people speak when known.
     #[serde(default)]
     pub speakers: Option<u32>,
 }
 
-/// One chunk of diarization as the cursor keeps it: the sound's range in the recording, the
-/// turns found in it (times in the recording) and the mean voice of each speaker of the chunk.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Chunk {
     pub start: f64,
@@ -66,7 +37,6 @@ pub struct Chunk {
     pub voices: Vec<ChunkVoice>,
 }
 
-/// The mean voice of one speaker of a chunk, as the cursor keeps it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChunkVoice {
     pub embedding: Vec<f32>,
@@ -74,8 +44,6 @@ pub struct ChunkVoice {
 }
 
 impl Chunk {
-    /// A chunk of `[start, end)` seconds of the recording holding what the engine found in its
-    /// samples (turns are local to the chunk; they are moved to the recording here).
     pub fn new(start: f64, end: f64, found: Diarization) -> Chunk {
         Chunk {
             start,
@@ -86,20 +54,16 @@ impl Chunk {
     }
 }
 
-/// The cursor of the task: the chunks finished so far, in order.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct Cursor {
     #[serde(default)]
     chunks: Vec<Chunk>,
 }
 
-/// The ranges of sound diarization is done in: chunks of `chunk` seconds that share `overlap`
-/// seconds, covering `total` seconds. Empty for no sound.
 pub fn plan(total: f64, chunk: f64, overlap: f64) -> Vec<(f64, f64)> {
     if total <= 0.0 || chunk <= 0.0 || !total.is_finite() || !chunk.is_finite() {
         return Vec::new();
     }
-    // `max`/`min` also turn a NaN overlap into a number, so the loop always advances.
     let overlap = overlap.max(0.0).min(chunk / 2.0);
     let mut ranges = Vec::new();
     let mut start = 0.0;
@@ -113,16 +77,10 @@ pub fn plan(total: f64, chunk: f64, overlap: f64) -> Vec<(f64, f64)> {
     }
 }
 
-/// The turns and speakers of the whole recording from the results of its chunks: the overlap
-/// duplicates are dropped (a stretch of sound belongs to the later chunk), then the voices of
-/// different chunks are linked — first the pairs that talk at once in an overlap, then by mean
-/// voice (the same merge as one chunk, see [`mediaa_engine::speech::merge_voices`]). A known
-/// speaker count is reached by merging the closest voices.
 pub fn link(chunks: &[Chunk], threshold: f32, min_seconds: f64, speakers: Option<u32>) -> Diarization {
     if chunks.is_empty() {
         return Diarization::default();
     }
-    // Each chunk's speakers keep their own numbers in the whole-recording numbering.
     let mut bases = Vec::with_capacity(chunks.len());
     let mut base = 0usize;
     for chunk in chunks {
@@ -133,7 +91,6 @@ pub fn link(chunks: &[Chunk], threshold: f32, min_seconds: f64, speakers: Option
     let mut turns = Vec::new();
     let mut voices = Vec::with_capacity(base);
     for (index, chunk) in chunks.iter().enumerate() {
-        // The later chunk owns the sound of the overlap; this one stops where the next begins.
         let own_end = chunks.get(index + 1).map_or(chunk.end, |next| next.start);
         let mut seconds = vec![0.0_f64; chunk.voices.len()];
         for turn in &chunk.turns {
@@ -161,10 +118,6 @@ pub fn link(chunks: &[Chunk], threshold: f32, min_seconds: f64, speakers: Option
     }
 }
 
-/// Pairs of speakers (in the whole-recording numbering) that talk at the same time in the
-/// overlap of two neighbouring chunks. The chunks diarize the same sound there, so the
-/// coincidence of their turns is evidence that the two speakers are one person — stronger than
-/// the mean voices when a speaker has little speech.
 fn overlap_links(chunks: &[Chunk], bases: &[usize]) -> Vec<(usize, usize)> {
     let mut links = Vec::new();
     for index in 0..chunks.len().saturating_sub(1) {
@@ -196,7 +149,6 @@ fn overlap_links(chunks: &[Chunk], bases: &[usize]) -> Vec<(usize, usize)> {
                 }
             }
         }
-        // One person per pair: the strongest coincidences first.
         pairs.sort_by(|one, other| other.0.total_cmp(&one.0));
         let (mut used_left, mut used_right) = (BTreeSet::new(), BTreeSet::new());
         for (_, a, b) in pairs {
@@ -211,8 +163,6 @@ fn overlap_links(chunks: &[Chunk], bases: &[usize]) -> Vec<(usize, usize)> {
     links
 }
 
-/// Decodes `[start, end)` seconds of `path` as mono samples at [`SAMPLE_RATE`]. Decoding starts
-/// at `start` and is stopped once the chunk is full; a cancel of the task stops it at once.
 fn decode_range(path: &Path, start: f64, end: f64, cancel: &Arc<AtomicBool>) -> anyhow::Result<Vec<f32>> {
     let want = (((end - start).max(0.0)) * f64::from(SAMPLE_RATE)).round() as usize;
     let samples = Arc::new(Mutex::new(Vec::<f32>::with_capacity(want)));
@@ -247,8 +197,6 @@ fn decode_range(path: &Path, start: f64, end: f64, cancel: &Arc<AtomicBool>) -> 
 pub struct Diarize {
     ai_dir: PathBuf,
     settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>,
-    /// Lengths of one chunk and of the share of neighbouring chunks; the constants above in
-    /// the app, shorter in tests.
     chunk_seconds: f64,
     overlap_seconds: f64,
 }
@@ -281,7 +229,6 @@ impl Stage for Diarize {
         if cancel.load(Ordering::Relaxed) {
             return Ok(Work::Stopped);
         }
-        // The chunks cover the recognised speech; the silence after it needs no speakers.
         let total = phrases.iter().map(|phrase| phrase.end).fold(0.0_f64, f64::max);
         let ranges = plan(total, self.chunk_seconds, self.overlap_seconds);
         let mut cursor: Cursor =
@@ -295,7 +242,6 @@ impl Stage for Diarize {
             let request = DiarizeRequest {
                 segmentation: SEGMENTATION_MODEL.to_string(),
                 embedding: model,
-                // One chunk does not know how many people speak; the chunks are linked at the end.
                 speakers: None,
                 clustering_threshold: None,
                 merge_threshold: None,
@@ -304,8 +250,6 @@ impl Stage for Diarize {
             };
             let scope = Scope::attach(host.store.clone(), task.id, host.engine.clone(), task.scope.clone());
             let engine = scope.engine();
-            // The engine's diarize call has no cancel of its own: decoding stops at once, and a
-            // stop during the call is noticed when it returns — the chunk is not kept then.
             let found = match engine.diarize(&request, &samples) {
                 Ok(found) => found,
                 Err(_) if cancel.load(Ordering::Relaxed) => return Ok(Work::Stopped),
@@ -323,8 +267,6 @@ impl Stage for Diarize {
                 cursor.chunks.len(),
                 ranges.len()
             );
-            // Even the last chunk is checkpointed on its own: a stop after it costs the link
-            // only, not an engine call of several minutes.
             let progress = (end / total).clamp(0.0, 1.0) as f32;
             return Ok(Work::More {
                 cursor: serde_json::to_value(&cursor)?,
@@ -332,7 +274,6 @@ impl Stage for Diarize {
                 progress,
             });
         }
-        // Every chunk is in the cursor: link the speakers across them, then build the replies.
         if cancel.load(Ordering::Relaxed) {
             return Ok(Work::Stopped);
         }
@@ -359,11 +300,6 @@ mod tests {
     use mediaa_engine::testing::FakeEngine;
     use mediaa_engine::Engine;
 
-    /// Runs the real diarization on every `evals/data/*/audio.opus` and prints the found speaker
-    /// count against the reference, DER (collar 0.25 s, overlaps counted), «clones» and time.
-    /// The baseline lives in the task's artifacts; this is a measurement, not a threshold.
-    ///
-    /// `bash scripts/live-test.sh LOG mediaa-agent diarization_quality_on_eval_data`
     #[test]
     #[ignore]
     fn diarization_quality_on_eval_data() {
@@ -377,9 +313,6 @@ mod tests {
         }
     }
 
-    /// When two speakers talk at once, the diarization turns themselves overlap. Building the
-    /// replies must then keep every recognised word (a word of the overlap goes to one speaker,
-    /// but it is never dropped) and both speakers.
     #[test]
     fn overlapped_speech_keeps_every_word_in_the_replies() {
         use mediaa_core::transcript::{replies, Phrase, Turn, Word};
@@ -392,21 +325,15 @@ mod tests {
                 words: chunk.iter().map(|&(start, text)| Word { text: text.to_string(), start, end: start + 0.4 }).collect(),
             })
             .collect();
-        // Speaker 0 talks for 10 s, speaker 1 starts 2 s before they finish: 8–10 s is a real
-        // overlap of the turns.
         let turns = [Turn { start: 0.0, end: 10.0, speaker: 0 }, Turn { start: 8.0, end: 15.0, speaker: 1 }];
         let replies = replies(&phrases, &turns);
         let kept: Vec<&str> = replies.iter().flat_map(|reply| reply.words.iter().map(|word| word.text.as_str())).collect();
         assert_eq!(kept, words.iter().map(|&(_, text)| text).collect::<Vec<_>>(), "no word of the overlap is lost");
         let speakers: BTreeSet<u32> = replies.iter().filter_map(|reply| reply.speaker).collect();
         assert_eq!(speakers, BTreeSet::from([0, 1]));
-        // Words only speaker 1 talks (after the overlap) belong to speaker 1.
         assert!(replies.iter().filter(|reply| reply.speaker == Some(1)).flat_map(|reply| &reply.words).any(|word| word.text == "g"));
     }
 
-    /// How much speech a speaker needs to keep a voice of their own: the defaults' clustering and
-    /// merge with `MIN_SPEAKER_SECONDS` from 2 to 8 s, merged in memory (one engine run per
-    /// recording). `bash scripts/live-test.sh LOG mediaa-agent diarization_short_speakers_on_eval_data`
     #[test]
     #[ignore]
     fn diarization_short_speakers_on_eval_data() {
@@ -444,8 +371,6 @@ mod tests {
         }
     }
 
-    /// The voice models compared for 14.4 step 3, the clustering cut heights and the merge
-    /// thresholds of the grid. One engine run per model × clustering; merging is in memory.
     const GRID_MODELS: [&str; 3] = [
         "csukuangfj/speaker-embedding-models/wespeaker_en_voxceleb_resnet34_LM.onnx",
         "csukuangfj/speaker-embedding-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
@@ -469,10 +394,6 @@ mod tests {
         folders
     }
 
-    /// Measures the model × clustering × merge grid on `evals/data`: found speakers, DER,
-    /// clones and time for every combination. Downloads the models it needs.
-    ///
-    /// `bash scripts/live-test.sh LOG mediaa-agent diarization_model_grid_on_eval_data`
     #[test]
     #[ignore]
     fn diarization_model_grid_on_eval_data() {
@@ -527,21 +448,12 @@ mod tests {
         }
     }
 
-    /// The production path (chunks and linking) against the whole-recording one: found speakers,
-    /// DER, clones and time for chunk lengths of 5, 8 and 10 minutes (`None`: no chunking). The
-    /// 14.4 baseline on one engine call per recording: librivox-mix-1 6 of 4 speakers, DER
-    /// 11.4 %, no clones; pikhoya-1 3 of 3.
-    ///
-    /// `bash scripts/live-test.sh LOG mediaa-agent diarization_chunking_on_eval_data`
     #[test]
     #[ignore]
     fn diarization_chunking_on_eval_data() {
         let settings = AgentSettings::default();
         let engine = crate::live::engine();
         let data = eval_data();
-        // The whole recording is the baseline of 14.4. The chosen link threshold is compared
-        // with the whole-recording one; the measured 0.85 and the 30 s overlap lose a speaker
-        // of pikhoya-1 (see `tuning.log` of 14.6).
         let mut grid = vec![(None, mediaa_engine::speech::DEFAULT_MERGE_THRESHOLD, None)];
         for merge in [LINK_THRESHOLD, mediaa_engine::speech::DEFAULT_MERGE_THRESHOLD] {
             grid.push((Some(CHUNK_SECONDS), merge, None));
@@ -576,16 +488,6 @@ mod tests {
         }
     }
 
-    /// How short a speaker of the linked chunks may be to still count as one: the short-speaker
-    /// rule ("goes to the nearest voice") with thresholds of 2, 3, 5, 8 and 12 s of speech and
-    /// with 1 % of the speech of the recording. The chunks are diarized once per recording and
-    /// linked in memory, so the table costs two engine runs. It chose [`LINK_MIN_SECONDS`] = 3 s
-    /// over the engine's 2 s; from 5 s the 3.8 s speaker of pikhoya-1 is gone (3 of 3 → 2 of 3).
-    /// The speech of the 1 % rule is counted over all turns of the chunks (the overlap twice) —
-    /// with 15 s of overlap on a 10-minute recording that moves the threshold by a tenth of a
-    /// second.
-    ///
-    /// `bash scripts/live-test.sh LOG mediaa-agent diarization_short_speakers_after_chunks_on_eval_data`
     #[test]
     #[ignore]
     fn diarization_short_speakers_after_chunks_on_eval_data() {
@@ -625,8 +527,6 @@ mod tests {
         }
     }
 
-    /// The chunks of the recording: `chunk` seconds each, `overlap` seconds shared, and the whole
-    /// recording covered.
     #[test]
     fn chunks_overlap_and_cover_the_whole_recording() {
         let ranges = plan(100.0, 30.0, 5.0);
@@ -635,11 +535,9 @@ mod tests {
         assert_eq!(plan(10.0, 30.0, 5.0), [(0.0, 10.0)], "a recording shorter than a chunk is one chunk");
         assert!(plan(0.0, 30.0, 5.0).is_empty());
         assert!(plan(10.0, 0.0, 5.0).is_empty());
-        // The largest allowed overlap (half a chunk) still moves forward and ends.
         assert_eq!(plan(20.0, 10.0, 50.0), [(0.0, 10.0), (5.0, 15.0), (10.0, 20.0)]);
     }
 
-    /// One chunk of one speaker: `voice` talks over `turns` (times in the recording).
     fn one_voice(start: f64, end: f64, voice: [f32; 2], turns: &[(f64, f64)]) -> Chunk {
         Chunk {
             start,
@@ -667,8 +565,6 @@ mod tests {
         assert_eq!(found.voices.len(), 2, "{found:?}");
         assert_eq!(found.turns.iter().map(|turn| turn.speaker).collect::<Vec<_>>(), [0, 1]);
 
-        // Voices this close are one person at the app's link threshold, and still two at the
-        // whole-recording one: 0.75 was chosen over 0.80 on `evals/data` (14.6).
         let close = vec![
             one_voice(0.0, 60.0, [1.0, 0.0], &[(0.0, 30.0)]),
             one_voice(60.0, 120.0, [0.78, 0.626], &[(60.0, 90.0)]),
@@ -677,9 +573,6 @@ mod tests {
         assert_eq!(link(&close, mediaa_engine::speech::DEFAULT_MERGE_THRESHOLD, 0.0, None).voices.len(), 2);
     }
 
-    /// The short-speaker rule after linking: a voice of one chunk that is too short to stand on
-    /// its own goes to its nearest voice. The threshold is `LINK_MIN_SECONDS`, measured on
-    /// `evals/data`: 3.8 s of pikhoya-1's third speaker stays, a fragment of 2.2 s does not.
     #[test]
     fn a_short_voice_of_one_chunk_goes_to_its_nearest_voice() {
         let chunks = vec![
@@ -700,23 +593,17 @@ mod tests {
 
     #[test]
     fn talking_at_once_in_the_overlap_links_the_chunks_whatever_the_voices_say() {
-        // The same seconds of sound are in both chunks: their mean voices are far apart (the
-        // person talked little in one of them), but they speak in the very same time there.
         let chunks = vec![
             one_voice(0.0, 50.0, [1.0, 0.0], &[(14.0, 50.0)]),
             one_voice(40.0, 100.0, [0.0, 1.0], &[(40.0, 60.0)]),
         ];
         let found = link(&chunks, LINK_THRESHOLD, 0.0, None);
         assert_eq!(found.voices.len(), 1, "{found:?}");
-        // The overlap is owned by the later chunk: the first chunk stops at 40 s, and the
-        // 40–60 s of the second is not laid over its own copy.
         assert_eq!(
             found.turns,
             [Turn { start: 14.0, end: 40.0, speaker: 0 }, Turn { start: 40.0, end: 60.0, speaker: 0 }]
         );
 
-        // The same chunks, but the speakers do not talk together: the voices decide, and they
-        // are too far apart.
         let apart = vec![
             one_voice(0.0, 50.0, [1.0, 0.0], &[(0.0, 20.0)]),
             one_voice(40.0, 100.0, [0.0, 1.0], &[(40.0, 60.0)]),
@@ -724,7 +611,6 @@ mod tests {
         assert_eq!(link(&apart, LINK_THRESHOLD, 0.0, None).voices.len(), 2);
     }
 
-    /// A short silent PCM WAV the media decoder can read.
     fn wav(path: &Path, seconds: f64) {
         let rate = 8_000u32;
         let data = (seconds * f64::from(rate)) as u32 * 2;
@@ -745,7 +631,6 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
-    /// A library with a `seconds`-long WAV, its transcript (one word per second) and its queue.
     fn library(seconds: f64) -> (tempfile::TempDir, PathBuf, Arc<dyn mediaa_queue::Store>) {
         let tmp = tempfile::tempdir().unwrap();
         let ai = tmp.path().join(".ai");
@@ -769,7 +654,6 @@ mod tests {
         (tmp, media, store)
     }
 
-    /// The stage with short chunks and the settings it reads.
     fn short_chunks(ai: &Path, chunk: f64, overlap: f64) -> (Diarize, AgentSettings) {
         let settings = AgentSettings::default();
         let current = settings.clone();
@@ -809,7 +693,6 @@ mod tests {
         let ranges = plan(10.0, 3.0, 0.5);
         assert_eq!(ranges.len(), 4);
 
-        // An uninterrupted run: the replies every other run must give.
         let (first, media, store) = library(10.0);
         let ai = first.path().join(".ai");
         let id = transcript::file_id(&media).unwrap();
@@ -822,7 +705,6 @@ mod tests {
         assert_eq!(fake.diarizes().len(), ranges.len(), "one engine call per chunk");
         let uninterrupted = Transcript::open(&ai, &id).unwrap().dialog().unwrap();
 
-        // A run stopped after its first chunk, then started again from the cursor.
         let (second, media, store) = library(10.0);
         let ai = second.path().join(".ai");
         let fake = FakeEngine::new();
@@ -837,11 +719,9 @@ mod tests {
             }
             other => panic!("the first chunk: {other:?}"),
         }
-        // The pause: the queue raises the stop flag before the next chunk starts.
         cancel.store(true, Ordering::Relaxed);
         assert!(matches!(stage.chunk(&task, &cancel, &host).unwrap(), Work::Stopped));
         assert_eq!(fake.diarizes().len(), 1, "a stopped task asks the engine for nothing");
-        // Started again: the cursor keeps the finished chunk.
         cancel.store(false, Ordering::Relaxed);
         let result = run_to_end(&stage, &mut task, &host, &cancel);
         assert_eq!(fake.diarizes().len(), ranges.len(), "the finished chunk is not diarized again");
@@ -851,11 +731,6 @@ mod tests {
         assert_eq!(resumed, uninterrupted, "a stop and a restart change nothing in the replies");
     }
 
-    /// The 27-minute video of the capture bench, diarized in chunks by the real engine: the task
-    /// is paused after its second chunk, the scheduler is dropped (a process end), the queue is
-    /// opened again and the task goes on. Chunks 1–2 are not diarized again.
-    ///
-    /// `bash scripts/live-test.sh LOG mediaa-agent diarize_a_long_video_in_chunks_across_a_restart`
     #[test]
     #[ignore]
     fn diarize_a_long_video_in_chunks_across_a_restart() {
@@ -868,8 +743,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ai = tmp.path().join(".ai");
         let id = transcript::file_id(video).unwrap();
-        // The recording's speech, as a transcript would give it: this test is about the chunks
-        // and the restart, not recognition.
         {
             let mut transcript = Transcript::open(&ai, &id).unwrap();
             let phrases: Vec<mediaa_core::transcript::Phrase> = (0..(duration / 5.0).max(1.0) as usize)
@@ -914,8 +787,6 @@ mod tests {
             sched.tick().unwrap();
             if chunks_of(&sched) >= 2 {
                 sched.pause(task).unwrap();
-                // A native call has no cancel: the chunk in flight ends, and the queue (already
-                // stopping) takes no checkpoint from it; nothing after it starts.
                 loop {
                     assert!(started.elapsed() < limit, "the pause did not settle");
                     sched.tick().unwrap();
@@ -934,11 +805,7 @@ mod tests {
             started.elapsed().as_secs_f64()
         );
         assert!(chunks_at_pause >= 2);
-        // Every finished chunk costs one call; the chunk that was already in flight when the
-        // pause came costs one more and is not kept (the queue accepts no checkpoint while
-        // stopping), so a resume diarizes it again.
         assert!(calls_at_pause <= chunks_at_pause as u64 + 1, "{calls_at_pause} calls for {chunks_at_pause} chunks");
-        // The process ends: the queue file stays, the in-memory runner does not.
         drop(sched);
 
         let sched = open();
@@ -956,8 +823,6 @@ mod tests {
         println!("result: {:?}", done.result);
         assert_eq!(done.status, mediaa_queue::Status::Done, "{:?}", done.error);
         assert!(chunks > chunks_at_pause, "the recording is finished");
-        // Each finished chunk costs one call; the chunk lost to the pause is the only one that
-        // costs a second call on the resume.
         assert_eq!(calls, chunks as u64 + calls_at_pause - chunks_at_pause as u64, "only the chunk lost to the pause is diarized twice");
         assert_eq!(done.result.as_ref().and_then(|result| result["reused"].as_u64()), Some(chunks as u64));
     }

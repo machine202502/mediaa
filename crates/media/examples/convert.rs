@@ -1,5 +1,3 @@
-//! Dev helper: `cargo run -p mediaa-media --example convert -- <input> <output> [--max] [--colors=N]`
-//! converts with default settings (`--max`: maximum effort, `--colors`: PNG palette); the target follows the output extension (mp4, webm, gif, mp3, png…).
 use mediaa_core::formats::{AnimFormat, AudioFormat};
 use mediaa_media::convert::{self, ConvertSettings, Effort, StillFormat, Target, VideoFormat};
 use std::sync::atomic::AtomicBool;

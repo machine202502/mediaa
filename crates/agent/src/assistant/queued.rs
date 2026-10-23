@@ -1,6 +1,3 @@
-//! Chat answers and chat titles as queue tasks. One chunk of an answer is one agent step.
-//! Tokens go through [`crate::run::Streams`], keyed by the task, and are not stored per token.
-
 use super::chat::Live;
 use super::folder::Item;
 use super::title::{self, task_title};
@@ -20,13 +17,6 @@ use std::sync::Arc;
 pub const ANSWER_KIND: &str = "chat-answer";
 pub const TITLE_KIND: &str = "chat-title";
 
-/// A crash while a step was running: recover bumps gen, then the next claim bumps it again,
-/// so the claim is three above the gen stored with the last finished step. A pause does not
-/// bump gen, so resume is only two above and does not count.
-///
-/// A crash between chunks leaves the task queued, so gen is not bumped. That one is told by
-/// the cursor (it already has steps) together with `fresh`: this process has no live stream
-/// for the task yet. A yield in the same process still has the stream, so it does not count.
 fn show_restart(noticed: bool, had_cursor: bool, gen: i64, gen_at_save: i64, fresh: bool, steps: usize) -> bool {
     if noticed {
         return false;
@@ -45,7 +35,6 @@ fn history_of(messages: &[ChatMessage]) -> Vec<Turn> {
     let mut question: Option<&str> = None;
     for m in messages {
         match m.author {
-            // A correction is not a question of the conversation: it is taken while an answer runs.
             Author::User if is_steer(m) => {}
             Author::User => question = Some(&m.text),
             Author::Agent => match (question.take(), turns.last_mut()) {
@@ -61,13 +50,10 @@ fn history_of(messages: &[ChatMessage]) -> Vec<Turn> {
     turns
 }
 
-/// Whether the message is a correction the user sent for the answer running at that moment.
 fn is_steer(m: &ChatMessage) -> bool {
     m.details.get("steer").and_then(|s| s.get("task")).and_then(Value::as_i64).is_some()
 }
 
-/// The corrections of the answer `answer` that it has not taken yet, in the order the user sent
-/// them: the index of each message in `messages` and its text.
 pub fn pending_steers(messages: &[ChatMessage], answer: i64, taken: usize) -> Vec<(usize, String)> {
     messages
         .iter()
@@ -112,7 +98,6 @@ fn chat_id(task: &Task) -> Option<ChatId> {
     task.input.get("chat").and_then(Value::as_i64)
 }
 
-/// The answer task. The cursor is a [`Session`].
 pub struct AnswerStage;
 
 impl Stage for AnswerStage {
@@ -138,7 +123,6 @@ impl Stage for AnswerStage {
         if let Ok(tasks) = host.store.list() {
             super::step_title::overlay(&tasks, task.id, &mut session);
         }
-        // What was shown is the saved timeline. Tokens of a step that did not finish are dropped.
         let mut live = Live::new();
         live.timeline = Timeline::from_details(&json!({ "timeline": session.timeline }));
         live.steps = session.steps.clone();
@@ -147,7 +131,6 @@ impl Stage for AnswerStage {
         host.streams.insert(task.id, live);
         let scope = Scope::attach(host.store.clone(), task.id, host.engine.clone(), Some(store_key.clone()));
         let messages = Transcript::open(&host.ai_dir, &store_key).and_then(|t| t.messages(chat)).unwrap_or_default();
-        // What the user sent while the previous step ran: it joins the context after that step.
         let steers: Vec<String> = pending_steers(&messages, task.id, session.steers_taken).into_iter().map(|(_, text)| text).collect();
         let history = history_of(&messages);
         let streams = host.streams.clone();
@@ -217,7 +200,6 @@ impl Stage for AnswerStage {
                 if let Ok(t) = Transcript::open(&host.ai_dir, &store_key) {
                     t.add_message(chat, Author::Agent, &answer.text, &details)?;
                 }
-                // A correction that came after the last step becomes the chat's next question.
                 if let Err(e) = ask_pending(host, task, chat, &store_key, session.steers_taken) {
                     log::warn!("the next question after the answer was not started: {e:#}");
                 }
@@ -227,8 +209,6 @@ impl Stage for AnswerStage {
     }
 }
 
-/// The first correction the answer did not take becomes the chat's next question, asked at once.
-/// The corrections after it become corrections of that next answer, in order.
 fn ask_pending(host: &Host, task: &Task, chat: ChatId, store: &str, taken: usize) -> anyhow::Result<()> {
     let t = Transcript::open(&host.ai_dir, store)?;
     let messages = t.messages(chat)?;
@@ -238,7 +218,6 @@ fn ask_pending(host: &Host, task: &Task, chat: ChatId, store: &str, taken: usize
     input["question"] = json!(question);
     let resource = task.resource.unwrap_or(Resource::Llm);
     let id = host.store.enqueue(answer_task(store, chat, question, input, resource, task.model.as_deref()))?;
-    // It is a question of the chat now, not a correction of the old answer.
     t.unsteer(chat, task.id, taken)?;
     if pending.len() > 1 {
         t.retag_steers(chat, task.id, id, taken)?;
@@ -252,7 +231,6 @@ fn save_memory(ai: &Path, store: &str, chat: ChatId, memory: &super::Memory) {
     }
 }
 
-/// The titles model names a chat. One chunk, the same fairness key as the chat's answers.
 pub struct TitleStage;
 
 impl Stage for TitleStage {
@@ -275,7 +253,6 @@ impl Stage for TitleStage {
     }
 }
 
-/// One phrase for a tool step. [`super::step_title::work`] finishes or fails the task itself.
 pub struct StepTitleStage;
 
 impl Stage for StepTitleStage {
@@ -289,8 +266,6 @@ impl Stage for StepTitleStage {
         let settings = (host.settings)();
         match super::step_title::work(&scope, &settings, task, cancel) {
             Some(phrase) => {
-                // The answer row may already be stored (the phrase finished after the answer).
-                // The live timeline is updated too, so a stop before the next chunk stores it.
                 super::step_title::save_phrase(&host.ai_dir, task, &phrase);
                 if let (Some(answer), Some(index)) = (task.input.get("answer").and_then(Value::as_i64), task.input.get("index").and_then(Value::as_u64)) {
                     let index = index as usize;
@@ -312,7 +287,6 @@ pub fn stages() -> Vec<Arc<dyn Stage>> {
     vec![Arc::new(AnswerStage), Arc::new(TitleStage), Arc::new(StepTitleStage)]
 }
 
-/// Fairness key of one chat: the store and the chat, so two chats do not share a turn.
 pub fn chat_key(store: &str, chat: ChatId) -> String {
     format!("{store}:{chat}")
 }
@@ -340,7 +314,6 @@ pub fn title_task(store: &str, chat: ChatId, question: &str, for_model: &str, mo
     task
 }
 
-/// Unfinished answer of `chat` in `store`, the newest one.
 pub fn running_answer<'a>(tasks: &'a [Task], store: &str, chat: ChatId) -> Option<&'a Task> {
     tasks
         .iter()
@@ -358,18 +331,12 @@ mod tests {
 
     #[test]
     fn a_restart_is_a_crash_or_a_queued_cursor_with_no_live_stream() {
-        // Crash while running: recover bumps gen, the next claim bumps it again (+3).
         assert!(show_restart(false, true, 5, 2, false, 1));
-        // The line was already shown.
         assert!(!show_restart(true, true, 5, 2, true, 1));
-        // A yield in this process: gen is only +1 and the live stream is still here.
         assert!(!show_restart(false, true, 3, 2, false, 2));
-        // A crash between chunks: the task stayed queued (gen +1) but this process has no stream.
         assert!(show_restart(false, true, 3, 2, true, 2));
-        // A new answer has no steps yet, even with no stream.
         assert!(!show_restart(false, true, 3, 2, true, 0));
         assert!(!show_restart(false, false, 1, 0, true, 0));
-        // A crash before the first step was saved.
         assert!(show_restart(false, false, 3, 0, true, 0));
     }
 
@@ -462,10 +429,8 @@ mod tests {
             t.add_message(chat, Author::User, "Ещё про бюджет.", &json!({ "steer": { "task": 5 } })).unwrap();
             chat
         };
-        // The cursor of the first step was saved before the correction came.
         let session = super::super::Session::new(Default::default());
         let cursor = serde_json::to_value(&session).unwrap();
-        // A crash: another process reads the same store and the same cursor.
         let restored: super::super::Session = serde_json::from_value(cursor).unwrap();
         let messages = Transcript::open(dir.path(), "rec").unwrap().messages(chat).unwrap();
         assert_eq!(
@@ -473,11 +438,9 @@ mod tests {
             [(2, "Ещё про бюджет.".to_string())],
             "the correction is still there after the restart"
         );
-        // The next chunk takes it and saves the count with the cursor...
         let mut taken = restored;
         taken.steers_taken += 1;
         let saved = serde_json::to_value(&taken).unwrap();
-        // ...so a second restart does not take it again.
         let again: super::super::Session = serde_json::from_value(saved).unwrap();
         assert!(super::pending_steers(&messages, 5, again.steers_taken).is_empty());
     }
@@ -518,13 +481,11 @@ mod tests {
         super::ask_pending(&host, &task, chat, "rec", 0).unwrap();
         assert_eq!(host.store.list().unwrap().len(), 1, "nothing is pending yet");
 
-        // The user sent two corrections while the answer ran; it finished before taking them.
         let t = Transcript::open(dir.path(), "rec").unwrap();
         t.add_message(chat, Author::User, "Ещё про бюджет.", &json!({ "steer": { "task": id } })).unwrap();
         t.add_message(chat, Author::User, "И про сроки.", &json!({ "steer": { "task": id } })).unwrap();
         super::ask_pending(&host, &task, chat, "rec", 0).unwrap();
 
-        // The first one is asked as the chat's next question...
         let tasks = host.store.list().unwrap();
         let next: Vec<&Task> = tasks.iter().filter(|t| t.id != id).collect();
         assert_eq!(next.len(), 1);
@@ -533,12 +494,10 @@ mod tests {
         assert_eq!(next[0].input["chat"], chat);
         assert_eq!(next[0].input["file_id"], "rec", "the recording stays with the chat");
         assert_eq!(next[0].scope.as_deref(), Some("rec"));
-        // ...the one after it becomes a correction of that next answer.
         let messages = Transcript::open(dir.path(), "rec").unwrap().messages(chat).unwrap();
         assert!(messages[2].details["steer"].is_null(), "the first correction is a question of the chat now");
         assert_eq!(messages[3].details["steer"]["task"], next[0].id);
         assert_eq!(super::pending_steers(&messages, next[0].id, 0), [(3, "И про сроки.".to_string())]);
-        // A correction is never a question of the history: it is taken by the answer it belongs to.
         assert_eq!(super::history_of(&messages).len(), 1);
     }
 }

@@ -1,7 +1,3 @@
-//! The engine the live (`#[ignore]`d) tests run models on: the models folder from
-//! `MEDIAA_TEST_MODELS`, else the app's (`mediaa_core::paths::models_dir()`), under the default
-//! budget.
-
 use mediaa_core::agent::Budget;
 use mediaa_engine::{Engine, LocalEngine};
 use std::sync::Arc;

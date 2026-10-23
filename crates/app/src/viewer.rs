@@ -1,7 +1,3 @@
-//! Full-window media viewer over a dimmed page: images can be zoomed and panned; videos and
-//! animations play with sound, adjustable speed and volume, and a draggable timeline.
-//! Closes with Esc, the close button or a click outside the media.
-
 use crate::theme;
 use crate::player::Player;
 use crossbeam_channel::Receiver;
@@ -13,7 +9,6 @@ use rust_i18n::t;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Largest image side uploaded as one texture.
 const MAX_TEXTURE: u32 = 8192;
 const SPEEDS: [f64; 6] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 
@@ -28,14 +23,12 @@ pub struct Viewer {
     kind: MediaKind,
     texture: Option<egui::TextureHandle>,
     image_rx: Option<Receiver<Frame>>,
-    /// Image zoom relative to "fit", and pan offset in points.
     zoom: f32,
     pan: Vec2,
     player: Option<Player>,
 }
 
 impl Viewer {
-    /// `duration` / `audio`: what the library knows about the file (videos and animations).
     pub fn open(path: &Path, kind: MediaKind, duration: Option<f64>, audio: bool) -> Viewer {
         let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         let mut v = Viewer { path: path.to_path_buf(), name, kind, texture: None, image_rx: None, zoom: 1.0, pan: Vec2::ZERO, player: None };
@@ -58,7 +51,6 @@ impl Viewer {
         v
     }
 
-    /// Draws the viewer over the whole window; returns what the user asked for.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<ViewerAction> {
         if let Some(rx) = &self.image_rx {
             if let Ok(f) = rx.try_recv() {
@@ -82,7 +74,6 @@ impl Viewer {
                 *ui.visuals_mut() = theme::dark_visuals();
                 ui.set_min_size(screen.size());
                 ui.painter().rect_filled(screen, CornerRadius::ZERO, Color32::from_black_alpha(232));
-                // Background: clicks that reach it are outside the media and controls.
                 let bg = ui.interact(screen, ui.id().with("backdrop"), Sense::click());
 
                 let top = Rect::from_min_max(screen.min, egui::pos2(screen.max.x, screen.min.y + 52.0));
@@ -114,10 +105,8 @@ impl Viewer {
         action
     }
 
-    /// The picture or video frame, fitted into `area`; returns where it was drawn.
     fn media(&mut self, ui: &mut egui::Ui, area: Rect) -> Option<Rect> {
         if self.kind == MediaKind::Audio {
-            // Sound only: a large note; clicking it pauses / resumes.
             let rect = Rect::from_center_size(area.center(), egui::vec2(220.0, 220.0));
             ui.painter().circle_filled(rect.center(), 110.0, Color32::from_rgb(30, 40, 60));
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon::MUSIC_NOTES, FontId::proportional(96.0), Color32::WHITE);
@@ -133,7 +122,6 @@ impl Viewer {
             return None;
         };
         let size = tex.size_vec2();
-        // Fit (small pictures up to 2×), then the user's zoom for images.
         let fit = (area.width() / size.x).min(area.height() / size.y).min(2.0);
         let shown = size * fit * self.zoom;
         let rect = Rect::from_center_size(area.center() + self.pan, shown);
@@ -148,7 +136,6 @@ impl Viewer {
             if resp.hovered() && scroll != 0.0 {
                 let factor = (scroll / 200.0).exp();
                 let new_zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-                // Keep the point under the cursor in place.
                 if let Some(cursor) = resp.hover_pos() {
                     let k = new_zoom / self.zoom;
                     self.pan = (self.pan - (cursor - area.center())) * k + (cursor - area.center());
@@ -179,7 +166,6 @@ impl Viewer {
         });
     }
 
-    /// Bottom bar: the controls fill its whole width, the slider taking what is left.
     fn controls(&mut self, ui: &mut egui::Ui, rect: Rect, action: &mut Option<ViewerAction>) {
         let width = rect.width().min(980.0) - 32.0;
         let bar = Rect::from_center_size(rect.center(), egui::vec2(width, rect.height() - 12.0));
@@ -204,7 +190,6 @@ impl Viewer {
                             if theme::icon_button(ui, icon::MAGNIFYING_GLASS_PLUS, &t!("viewer.zoom_in")).clicked() {
                                 self.zoom = (self.zoom * 1.25).min(MAX_ZOOM);
                             }
-                            // Zoom slider: 100 % in the middle, logarithmic both ways.
                             let w = ui.available_width();
                             let (resp, frac) = track_slider(ui, w, zoom_to_frac(self.zoom), "viewer-zoom");
                             if let Some(f) = frac {
@@ -227,7 +212,6 @@ impl Viewer {
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 10.0;
 
-/// Zoom (1.0 = fit) to a slider position: 0.5 is 100 %, the ends are `MIN_ZOOM` / `MAX_ZOOM`.
 fn zoom_to_frac(zoom: f32) -> f32 {
     (0.5 + zoom.clamp(MIN_ZOOM, MAX_ZOOM).ln() / (2.0 * MAX_ZOOM.ln())).clamp(0.0, 1.0)
 }
@@ -240,8 +224,6 @@ fn open_button(ui: &mut egui::Ui) -> bool {
     ui.add(theme::secondary(icon::ARROW_SQUARE_OUT, &t!("viewer.open_file"))).clicked()
 }
 
-/// Slider drawn like the video timeline (thin track, accent fill, white knob). Returns the
-/// response and the new position while it is clicked or dragged.
 fn track_slider(ui: &mut egui::Ui, width: f32, frac: f32, id: &str) -> (egui::Response, Option<f32>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width.max(40.0), 24.0), Sense::hover());
     let resp = ui.interact(rect, ui.id().with(id), Sense::click_and_drag());
@@ -274,7 +256,6 @@ fn upload(ctx: &egui::Context, reuse: Option<egui::TextureHandle>, f: &Frame) ->
     }
 }
 
-/// Play · time · timeline (fills the rest) · speed · sound · open file.
 fn player_controls(p: &mut Player, ui: &mut egui::Ui, open: &mut bool) {
     let (ic, tip) = if p.is_paused() { (icon::PLAY, t!("viewer.play")) } else { (icon::PAUSE, t!("viewer.pause")) };
     if theme::icon_button(ui, ic, &tip).clicked() {
@@ -282,7 +263,6 @@ fn player_controls(p: &mut Player, ui: &mut egui::Ui, open: &mut bool) {
     }
     let pos = p.position();
     let duration = p.duration();
-    // Whole seconds elapsed; at the very end exactly the duration.
     let shown = if duration > 0.0 && pos >= duration - 0.05 { duration } else { pos.floor() };
     let time = format!("{} / {}", human_duration(shown), human_duration(duration));
     ui.label(RichText::new(time).color(Color32::WHITE).font(FontId::monospace(12.0)));
@@ -314,8 +294,6 @@ fn player_controls(p: &mut Player, ui: &mut egui::Ui, open: &mut bool) {
             .response
             .on_hover_text(t!("viewer.speed"));
 
-        // Timeline: whatever width is left. Click to seek; dragging moves the clock and the
-        // decoders restart once at the release.
         let frac = if duration > 0.0 { (pos / duration) as f32 } else { 0.0 };
         let w = ui.available_width();
         let (resp, value) = track_slider(ui, w, frac, "viewer-timeline");

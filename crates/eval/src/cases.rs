@@ -1,19 +1,13 @@
-//! Cases from a YAML file: one recording, questions (or follow-up turns), the reference answer,
-//! the facts a good answer must contain, where the evidence is, and what must not be said.
-
 use anyhow::Context;
 use serde::Deserialize;
 use std::path::Path;
 
-/// One fact: `text` is the checklist line the judge sees, `any` is the substrings the mechanical
-/// check accepts (any one of them, case-insensitive).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fact {
     pub text: String,
     pub any: Vec<String>,
 }
 
-/// One question. A follow-up case is several of these, asked in order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnSpec {
     pub question: String,
@@ -27,7 +21,6 @@ pub struct TurnSpec {
 pub struct Case {
     pub id: String,
     pub level: String,
-    /// `fact`, `time`, `list`, `synthesis`, `attribution`, `negative`, `followup`, `trap`, …
     pub kind: String,
     pub turns: Vec<TurnSpec>,
 }

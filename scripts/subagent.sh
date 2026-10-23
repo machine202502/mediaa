@@ -1,26 +1,6 @@
 #!/usr/bin/env bash
-# Runs one task with a headless agent. DeepSeek and OpenRouter go through Claude Code;
-# Grok goes through the Grok CLI (`grok`). The lead calls this and reviews the result.
-# A run lives in target/subagents/<name>/ so that long runs can be watched and continued:
-#
-#   scripts/subagent.sh run    [--provider deepseek|openrouter|grok] [--model ID] [--effort LEVEL] [--max-turns N] [--name TITLE] TASK_FILE
-#   scripts/subagent.sh resume RUN_DIR MESSAGE_FILE [--max-turns N]
-#   scripts/subagent.sh status RUN_DIR
-#   scripts/subagent.sh list             # every run: running / finished / gone (crashed)
-#   scripts/subagent.sh ... -            # the task from stdin
-#
-# `run` is the default command: it prints the run directory first, streams the agent into
-# RUN_DIR/stream.jsonl and prints a summary at the end. `resume` sends another message to the
-# same session; `status` reports progress without starting anything.
-# Keys (never in the repository): OPENROUTER_API_KEY / DEEPSEEK_API_KEY, else
-# ~/.secrets/openrouter.key / ~/.secrets/deepseek.key. Grok uses the logged-in `grok` CLI.
-# Claude Code's `total_cost_usd` is computed with Anthropic prices and is wrong for DeepSeek:
-# see cost-* (OpenRouter prices). Grok's cost-* is xAI's estimate from `grok usage`
-# (costUsdTicks); the user pays by subscription, not that amount.
-# Grok always runs `-m grok-4.7` (resolves to grok-4.7-build). Never the fast model.
 set -euo pipefail
 
-# The repository root is the directory above this script; runs go under target/.
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 model=""
@@ -31,17 +11,39 @@ max_turns=200
 run_dir=""
 agent_pid=""
 
-usage() { sed -n '2,/^set -euo pipefail$/p' "$0" | sed '$d'; }
+usage() {
+    cat <<'USAGE'
+Runs one task with a headless agent. DeepSeek and OpenRouter go through Claude Code;
+Grok goes through the Grok CLI (`grok`). The lead calls this and reviews the result.
+A run lives in target/subagents/<name>/ so that long runs can be watched and continued:
+
+  scripts/subagent.sh run    [--provider deepseek|openrouter|grok] [--model ID] [--effort LEVEL] [--max-turns N] [--name TITLE] TASK_FILE
+  scripts/subagent.sh resume RUN_DIR MESSAGE_FILE [--max-turns N]
+  scripts/subagent.sh status RUN_DIR
+  scripts/subagent.sh list             # every run: running / finished / gone (crashed)
+  scripts/subagent.sh ... -            # the task from stdin
+
+`run` is the default command: it prints the run directory first, streams the agent into
+RUN_DIR/stream.jsonl and prints a summary at the end. `resume` sends another message to the
+same session; `status` reports progress without starting anything.
+Keys (never in the repository): OPENROUTER_API_KEY / DEEPSEEK_API_KEY, else
+~/.secrets/openrouter.key / ~/.secrets/deepseek.key. Grok uses the logged-in `grok` CLI.
+Claude Code's `total_cost_usd` is computed with Anthropic prices and is wrong for DeepSeek:
+see cost-* (OpenRouter prices). Grok's cost-* is xAI's estimate from `grok usage`
+(costUsdTicks); the user pays by subscription, not that amount.
+Grok always runs `-m grok-4.7` (resolves to grok-4.7-build). Never the fast model.
+USAGE
+}
 usage_error() { usage >&2; exit 2; }
 
-key_of() { # env var, key file
+key_of() {
     local value="${!1:-}"
     if [[ -z "$value" && -f "$2" ]]; then value="$(cat "$2")"; fi
     [[ -n "$value" ]] || { echo "no key: set $1 or put it in $2" >&2; exit 2; }
     printf '%s' "$value"
 }
 
-setup_provider() { # provider, model override; sets base, key, model
+setup_provider() {
     case "$1" in
         openrouter)
             base="https://openrouter.ai/api"
@@ -51,11 +53,9 @@ setup_provider() { # provider, model override; sets base, key, model
         deepseek)
             base="https://api.deepseek.com/anthropic"
             key="$(key_of DEEPSEEK_API_KEY "$HOME/.secrets/deepseek.key")"
-            # DeepSeek's own name of V4.1 Flash (GET https://api.deepseek.com/models lists them).
             model="${2:-deepseek-flash}"
             ;;
         grok)
-            # The flag is always grok-4.7. It resolves to grok-4.7-build. The fast model is refused.
             if [[ -n "$2" && "$2" != "grok-4.7" ]]; then
                 echo "grok provider always uses -m grok-4.7 (got $2). Never the fast model." >&2
                 exit 2
@@ -71,25 +71,19 @@ setup_provider() { # provider, model override; sets base, key, model
     esac
 }
 
-# A Windows grok.exe does not understand a Git Bash /c/... path.
 to_win() {
     if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi
 }
 
 prepare_env() {
-    # The project's build needs these (llama.cpp with Vulkan, bindgen).
     export VULKAN_SDK="${VULKAN_SDK:-C:/VulkanSDK/1.4.363.0}"
     export LIBCLANG_PATH="${LIBCLANG_PATH:-C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/Llvm/x64/bin}"
 
-    # A clean Claude environment: when started from Claude Code (the desktop app, a session), the
-    # inherited variables make the child expect the host's sign-in and send no key at all.
     local var
     while read -r var; do unset "$var"; done < <(compgen -e | grep -E '^(CLAUDE|ANTHROPIC)')
 }
 
-# One name for everything of a run — the run folder, the log subagents/<id>.md and the artifacts
-# subagents/artifacts/<id>/: <date_time>_<model>_<task>, made by subagent-log.mjs (same rules).
-make_run_dir() { # title
+make_run_dir() {
     local id n=2
     id="$(node "$repo_root/scripts/subagent-log.mjs" id "$model" "$1")"
     run_dir="$repo_root/target/subagents/$id"
@@ -98,7 +92,7 @@ make_run_dir() { # title
     printf '%s\n' "$run_dir"
 }
 
-start_claude() { # prompt, session id (empty for a new session), run dir
+start_claude() {
     local prompt="$1" session="$2" dir="$3"
     local -a args=(-p "$prompt")
     [[ -z "${SUBAGENT_DEBUG:-}" ]] || args+=(--debug)
@@ -115,7 +109,6 @@ start_claude() { # prompt, session id (empty for a new session), run dir
             "Bash(git stash:*)" "Bash(git checkout:*)" "Bash(git restore:*)" "Bash(git rm:*)"
             "Bash(cargo run:*)" "mcp__claude-in-chrome")
 
-    # Every model alias points at the chosen model, so nothing falls back to Anthropic's.
     ANTHROPIC_BASE_URL="$base" \
     ANTHROPIC_AUTH_TOKEN="$key" \
     ANTHROPIC_API_KEY="" \
@@ -133,9 +126,7 @@ start_claude() { # prompt, session id (empty for a new session), run dir
     record_pid "$dir" "$agent_pid"
 }
 
-# Headless grok cancels the whole run on any approval prompt, so this is always-approve.
-# The deny rules still apply and refuse the command; the run continues.
-start_grok() { # prompt file, session id (empty for a new session), run dir
+start_grok() {
     local prompt_file="$1" session="$2" dir="$3"
     local saved
     saved="$(cat "$dir/effort" 2>/dev/null || echo "${effort:-medium}")"
@@ -145,10 +136,7 @@ start_grok() { # prompt file, session id (empty for a new session), run dir
         --effort "$saved"
         --max-turns "$max_turns"
         --output-format streaming-json
-        # Background commands grok started must not keep the run (or fail it) after its last turn.
         --no-wait-for-background
-        # A headless grok cancels the whole run on any call that would need approval (dontAsk does
-        # not help), so it runs with always-approve and the deny rules (they still apply) fence it.
         --permission-mode bypassPermissions
         --disallowed-tools Agent
         --deny "Bash(git commit*)" --deny "Bash(git add*)" --deny "Bash(git reset*)"
@@ -171,22 +159,20 @@ start_grok() { # prompt file, session id (empty for a new session), run dir
     record_pid "$dir" "$agent_pid"
 }
 
-record_pid() { # run dir, child pid
+record_pid() {
     printf '%s\n' "$2" > "$1/pid"
     printf '%s\n' "$$" > "$1/script_pid"
     sleep 1
     [[ ! -r "/proc/$2/winpid" ]] || cat "/proc/$2/winpid" > "$1/winpid"
 }
 
-# The readable dialog in subagents/ (scripts/subagent-log.mjs), kept up to date while it runs.
-follow_log() { # run dir
+follow_log() {
     command -v node >/dev/null 2>&1 || return 0
     node "$repo_root/scripts/subagent-log.mjs" follow "$1" >/dev/null 2>&1 &
     printf '%s\n' "$!" > "$1/log_pid"
 }
 
-# The session id as soon as claude reports it (for `resume` even if everything else dies).
-wait_session() { # run dir
+wait_session() {
     local i sid
     for i in $(seq 1 60); do
         sid="$(grep -m 1 -oE '"(session_id|sessionId)":"[^"]+"' "$1/stream.jsonl" 2>/dev/null | head -n 1 | sed -E 's/^"[^"]+":"([^"]+)"$/\1/' || true)"
@@ -251,26 +237,24 @@ extract_result() { # run dir: session id and the last result line
     [[ -z "$line" ]] || printf '%s\n' "$line" > "$dir/result.json"
 }
 
-# JSON readers for when jq is missing: grep/sed, good enough for these fields.
-json_str() { # file, key
+json_str() {
     sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\(.*\)\".*/\1/p" "$1" 2>/dev/null | head -n 1 |
         sed 's/\\"/\x01/g; s/","[a-zA-Z_]*":.*//; s/\x01/"/g; s/\\n/\n/g; s/\\t/\t/g; s/\\\\/\\/g' || true
 }
 
-json_num() { # file, key
+json_num() {
     sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p" "$1" 2>/dev/null | head -n 1 || true
 }
 
-print_usage_notes() { # result.json
+print_usage_notes() {
     local notes="${1%/result.json}/usage-notes"
     [[ -f "$notes" ]] && cat "$notes"
 }
 
-print_summary() { # result.json
+print_summary() {
     local f="$1"
     if [[ ! -f "$f" ]]; then echo "(no result)"; print_usage_notes "$f"; return 0; fi
     if command -v jq >/dev/null 2>&1; then
-        # One line: a multiline program breaks when the script has CR characters.
         if jq -r '"subtype: \(.subtype // "?")\nnum_turns: \(.num_turns // "?")\nduration_ms: \(.duration_ms // "?")\nsession_id: \(.session_id // "?")" + (if .cost_note != null and .cost_note != "" then "\nmodel: \(.model // "?")\ntokens: in \(.usage.input_tokens // 0) out \(.usage.output_tokens // 0) reasoning \(.usage.reasoning_tokens // 0)\ncost: $\(.cost_usd) (\(.cost_note))" else "" end) + (if .fast_warning != null and .fast_warning != "" then "\n" + .fast_warning else "" end) + "\nresult:\n" + (.result // "")' "$f"; then
             print_usage_notes "$f"
             return 0
@@ -291,10 +275,7 @@ print_summary() { # result.json
     json_str "$f" result
 }
 
-# One meter reading. A failure is a note later, never a failed run.
-# Grok runs record the subscription %; DeepSeek runs record the balance.
-# The lead's own snapshot (no --only) records both, plus Claude limits.
-usage_snapshot() { # run dir, start|end
+usage_snapshot() {
     local dir="$1" kind="$2" name out only
     name="$(head -n 1 "$dir/name" 2>/dev/null | tr -d '\r' || true)"
     [[ -n "$name" ]] || name="$(basename "$dir")"
@@ -312,7 +293,7 @@ usage_snapshot() { # run dir, start|end
     return 0
 }
 
-append_usage_note() { # run dir
+append_usage_note() {
     local dir="$1" line
     line="$(node "$repo_root/scripts/usage.mjs" note "$dir" 2>>"$dir/stderr.log" || true)"
     if [[ -n "$line" ]]; then
@@ -323,7 +304,7 @@ append_usage_note() { # run dir
     return 0
 }
 
-pid_alive() { # pid from $!
+pid_alive() {
     [[ -n "$1" ]] || return 1
     kill -0 "$1" 2>/dev/null && return 0
     local winpid="$1" out
@@ -334,7 +315,7 @@ pid_alive() { # pid from $!
     [[ "$out" == *"$winpid"* ]]
 }
 
-last_tool() { # stream.jsonl
+last_tool() {
     local line tail name input
     line="$(grep -E '"type"[[:space:]]*:[[:space:]]*"tool_use"|"type"[[:space:]]*:[[:space:]]*"tool_call"|"sessionUpdate"[[:space:]]*:[[:space:]]*"tool_call"' "$1" 2>/dev/null | tail -n 1 || true)"
     if [[ -z "$line" ]]; then echo "last tool: (none)"; return 0; fi
@@ -378,7 +359,7 @@ spent() { # run dir (its provider file)
 }
 
 # USD of the last claude call of a run: its usage × the model's OpenRouter prices (empty if unknown).
-token_cost() { # run dir
+token_cost() {
     command -v node >/dev/null 2>&1 || return 0
     curl -s -m 20 https://openrouter.ai/api/v1/models 2>/dev/null | node -e '
         const fs = require("fs");
@@ -399,9 +380,8 @@ token_cost() { # run dir
     ' "$1" 2>/dev/null || true
 }
 
-begin_accounting() { # run dir, label
+begin_accounting() {
     local rev
-    # The state before: a commit of the working tree (nothing in git changes), else HEAD.
     rev="$(cd "$repo_root" && git stash create 2>/dev/null || true)"
     [[ -n "$rev" ]] || rev="$(cd "$repo_root" && git rev-parse HEAD)"
     printf '%s\n' "$rev" > "$1/before-$2.rev"
@@ -409,8 +389,7 @@ begin_accounting() { # run dir, label
     spent "$1" > "$1/spent-before-$2" || true
 }
 
-# changes-<label>.patch (also into the artifacts) and cost-<label>; prints a line about both.
-end_accounting() { # run dir, label
+end_accounting() {
     local dir="$1" label="$2" rev patch art before after n cost
     rev="$(cat "$dir/before-$label.rev")"
     snapshot > "$dir/files-after-$label"
@@ -439,13 +418,10 @@ end_accounting() { # run dir, label
     mkdir -p "$art" && cp "$patch" "$art/"
     local note=""
     if [[ "$(cat "$dir/provider" 2>/dev/null)" == grok ]]; then
-        # grok usage is the whole session. cost-* stays this invocation, so list's sum matches the session.
         grok_settle "$dir" || true
         cost="$(grok_invocation_cost "$dir")"
         note=" (xAI's estimate; the user pays by subscription)"
     else
-        # The run's tokens (its result line) × the model's prices from OpenRouter's public list: exact
-        # at once; the key's spending counter lags by minutes, so it is only the fallback.
         cost="$(token_cost "$dir")"
         if [[ -z "$cost" ]]; then
             before="$(cat "$dir/spent-before-$label" 2>/dev/null || true)"
@@ -458,8 +434,7 @@ end_accounting() { # run dir, label
     printf 'changed files: %s (changes-%s.patch) · cost: $%s%s\n' "$n" "$label" "$cost" "$note"
 }
 
-# Asks `grok usage` and writes result.json. The model check lives in subagent-log.mjs (grok-facts).
-grok_settle() { # run dir
+grok_settle() {
     local dir="$1" sid
     sid="$(cat "$dir/session_id" 2>/dev/null || true)"
     if [[ -n "$sid" ]]; then
@@ -468,8 +443,7 @@ grok_settle() { # run dir
     node "$repo_root/scripts/subagent-log.mjs" grok-facts "$dir"
 }
 
-# USD of this invocation: session total minus cost-* already on disk, else this turn's ticks.
-grok_invocation_cost() { # run dir
+grok_invocation_cost() {
     local dir="$1" mode session turn prev
     mode="$(cat "$dir/grok-cost-mode" 2>/dev/null || echo unknown)"
     session="$(cat "$dir/grok-usd-session" 2>/dev/null || true)"
@@ -505,9 +479,8 @@ cmd_run() {
     setup_provider "$prov" "$override"
 
     task="$(cat "$task_file")"
-    # A title for the logs and the registry: --name, else the task's first line.
     [[ -n "$name" ]] || name="$(printf '%s\n' "$task" | grep -m 1 . | cut -c1-80)"
-    make_run_dir "$name" # prints the run directory as the first line of stdout
+    make_run_dir "$name"
     local artifacts="subagents/artifacts/$(basename "$run_dir")"
     task="$task$(artifacts_note "$artifacts")"
     printf '%s\n' "$name" > "$run_dir/name"
@@ -521,8 +494,6 @@ cmd_run() {
     begin_accounting "$run_dir" run
     usage_snapshot "$run_dir" start || true
     prepare_env
-    # follow after record_pid (inside start_*): the pid file must already be this process,
-    # otherwise a previous turn's `end` looks like the run is over and the follower exits.
     if [[ "$prov" == grok ]]; then start_grok "$run_dir/task.md" "" "$run_dir"; else start_claude "$task" "" "$run_dir"; fi
     follow_log "$run_dir"
     wait_session "$run_dir"
@@ -569,8 +540,7 @@ cmd_resume() {
     finish_agent "$dir" "$label" "$rc"
 }
 
-# Result, cost, the fast-model check, then the summary. A fast model fails the run.
-finish_agent() { # run dir, accounting label, agent exit code
+finish_agent() {
     local dir="$1" label="$2" rc="$3"
     extract_result "$dir"
     end_accounting "$dir" "$label"
@@ -632,7 +602,6 @@ cmd_status() {
     return 0
 }
 
-# Every run: alive, finished or gone without a result (a crash: continue it with `resume`).
 cmd_list() {
     local dir r state
     for dir in "$repo_root"/target/subagents/*/; do

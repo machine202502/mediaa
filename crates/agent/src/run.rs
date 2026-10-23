@@ -1,9 +1,3 @@
-//! One runner for every queue kind. A chunk is a blocking function on its own thread;
-//! [`StageRunner::step`] polls it (`Busy` while it runs) and returns `Chunk`, `Done`, `Failed`
-//! or `Stopped`. The engine's cancel flag is the scheduler's stop flag, so pause and cancel
-//! reach a model on the next token. The cursor is what [`crate::run::Work::More`] returns;
-//! a run after a crash or a pause continues from it.
-
 use crate::assistant::chat::Live;
 use crate::slots::Slots;
 use mediaa_core::agent::{AgentSettings, Budget};
@@ -21,7 +15,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-/// What one chunk of a task did. The runner checkpoints `More` on the scheduler's thread.
 #[derive(Debug)]
 pub enum Work {
     More { cursor: Value, partial: Value, progress: f32 },
@@ -29,7 +22,6 @@ pub enum Work {
     Stopped,
 }
 
-/// Events the studio and the queue page both see. A cursor past the kept log is a gap: refresh.
 #[derive(Default)]
 pub struct Feed {
     inner: Mutex<FeedInner>,
@@ -52,7 +44,6 @@ impl Feed {
         }
     }
 
-    /// `(next cursor, events since cursor, missed some)`.
     pub fn since(&self, cursor: usize) -> (usize, Vec<Event>, bool) {
         let inner = self.inner.lock().expect("feed");
         let end = inner.start + inner.events.len();
@@ -62,7 +53,6 @@ impl Feed {
     }
 }
 
-/// Shared by the chunk thread and the UI. Tokens stay here, not in the queue.
 #[derive(Default)]
 pub struct Streams {
     live: Mutex<HashMap<TaskId, Live>>,
@@ -92,7 +82,6 @@ impl Streams {
     }
 }
 
-/// What a chunk needs besides the task: the store, the engine and the settings.
 #[derive(Clone)]
 pub struct Host {
     pub ai_dir: PathBuf,
@@ -103,7 +92,6 @@ pub struct Host {
     pub streams: Arc<Streams>,
 }
 
-/// One kind (or a family of kinds) of chunked work.
 pub trait Stage: Send + Sync {
     fn handles(&self, kind: &str) -> bool;
     fn chunk(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work>;
@@ -112,19 +100,13 @@ pub trait Stage: Send + Sync {
 struct Flight {
     gen: i64,
     cancel: Arc<AtomicBool>,
-    /// Closed when this flight is given up on: its chunk may not write to the queue any more.
     closed: Arc<AtomicBool>,
-    /// What the chunk's thread reports while it works (see `mediaa_core::pulse`).
     pulse: mediaa_core::pulse::Pulse,
-    /// The pulse count and the moment it was last seen to move.
     seen_beats: u64,
     seen_at: Instant,
     handle: Option<JoinHandle<std::result::Result<Work, String>>>,
 }
 
-/// The store a chunk writes through. A flight that was given up on (reaped as a hang, or
-/// detached by [`Drop for StageRunner`]) must not touch the queue file any more: the next
-/// scheduler opens it. Its write is dropped, not failed; reads stay allowed.
 struct GatedStore {
     inner: Arc<dyn Store>,
     closed: Arc<AtomicBool>,
@@ -147,16 +129,12 @@ impl Store for GatedStore {
     }
 }
 
-/// How long a dropped runner gives its chunks to finish. A call still inside native code after
-/// that is detached (see [`GatedStore`]).
 const DROP_WAIT: Duration = Duration::from_secs(5);
 
-/// Polls every stage. One flight per task; `step` returns before the chunk does.
 pub struct StageRunner {
     stages: Vec<Arc<dyn Stage>>,
     flights: HashMap<TaskId, Flight>,
     host: Host,
-    /// [`DROP_WAIT`]; a test may shorten it.
     drop_wait: Duration,
 }
 
@@ -168,12 +146,6 @@ impl StageRunner {
 
 impl Drop for StageRunner {
     fn drop(&mut self) {
-        // A chunk writes to the queue file and to the transcript. A scheduler that is gone
-        // must leave no chunk behind: the next scheduler opens the same files, and a late
-        // writer would replay a stale world (ids that are taken already, overwritten rows).
-        // The wait is bounded: a call inside native code that never returns must not keep the
-        // process alive. Such a call is detached, its writes are closed off and its model is
-        // unloaded the way the watchdog does it.
         let mut flights = std::mem::take(&mut self.flights);
         for flight in flights.values() {
             flight.cancel.store(true, Ordering::Relaxed);
@@ -211,7 +183,6 @@ impl Runner for StageRunner {
     fn step(&mut self, task: &Task, ctx: &mut dyn RunCtx) -> std::result::Result<Step, String> {
         if self.flights.get(&task.id).is_some_and(|flight| flight.gen != task.gen) {
             if let Some(flight) = self.flights.remove(&task.id) {
-                // The task was restarted: the old chunk is detached and may not write any more.
                 flight.cancel.store(true, Ordering::Relaxed);
                 flight.closed.store(true, Ordering::Relaxed);
             }
@@ -227,9 +198,6 @@ impl Runner for StageRunner {
             .and_then(|flight| flight.handle.as_ref())
             .is_some_and(|handle| !handle.is_finished());
         if running {
-            // The chunk is a blocking call of its own thread. It beats while it moves (a token,
-            // an embedding, a downloaded chunk); silence longer than the resource's stale limit
-            // is a call that will not return.
             let mut stuck: Option<(Duration, Option<String>)> = None;
             if let Some(flight) = self.flights.get_mut(&task.id) {
                 let beats = flight.pulse.beats();
@@ -253,8 +221,6 @@ impl Runner for StageRunner {
                 log::warn!("task {} {}: no sign of life for {:.0} s, the call is cancelled", task.id, task.kind, idle.as_secs_f32());
             }
             if let Some(flight) = self.flights.remove(&task.id) {
-                // Never join: the call may never return. Its store writes are dropped from here
-                // on and the transcript writes it may still make are idempotent.
                 flight.cancel.store(true, Ordering::Relaxed);
                 flight.closed.store(true, Ordering::Relaxed);
                 drop(flight.handle);
@@ -295,7 +261,6 @@ impl Runner for StageRunner {
         let handle = std::thread::Builder::new()
             .name(format!("queue-{}", owned.kind))
             .spawn(move || {
-                // The pulse of this chunk: every model call of the stage below reports on it.
                 let _pulse = attached.attach();
                 let outcome = catch_unwind(AssertUnwindSafe(|| stage.chunk(&owned, &flag, &host)));
                 match outcome {
@@ -310,8 +275,6 @@ impl Runner for StageRunner {
     }
 }
 
-/// Pools from the settings budget. Memory is the shared byte budget; a task asks for none,
-/// so the slot counts are the limit and the engine keeps the models.
 pub fn pools(budget: &Budget) -> Vec<Pool> {
     let memory = budget.gpu_bytes().saturating_add(budget.ram_bytes());
     vec![
@@ -322,13 +285,11 @@ pub fn pools(budget: &Budget) -> Vec<Pool> {
     ]
 }
 
-/// The queue file of a library's `.ai` folder. An old schema is dropped.
 pub fn open_store(ai_dir: &Path) -> anyhow::Result<Arc<dyn Store>> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     Ok(Arc::new(mediaa_queue::SqliteStore::open(&ai_dir.join("queue.db"), clock)?))
 }
 
-/// Registers every kind the app runs: speech, topics and chat.
 pub fn register_stages(
     sched: &Scheduler,
     ai_dir: &Path,
@@ -356,7 +317,6 @@ pub fn register_stages(
     sched.register(Box::new(StageRunner::new(host, stages)));
 }
 
-/// Opens the library queue, recovers runs the process left behind and forgets old history.
 pub fn open_scheduler(ai_dir: &Path, budget: &Budget) -> anyhow::Result<Arc<Scheduler>> {
     let sched = Arc::new(Scheduler::new(open_store(ai_dir)?, pools(budget)));
     sched.recover()?;
@@ -364,7 +324,6 @@ pub fn open_scheduler(ai_dir: &Path, budget: &Budget) -> anyhow::Result<Arc<Sche
     Ok(sched)
 }
 
-/// Ticks the scheduler and tells the engine which models waiting work still needs.
 pub fn spawn_host(sched: Arc<Scheduler>, engine: Arc<dyn Engine>, feed: Arc<Feed>, stop: Arc<AtomicBool>) -> std::io::Result<JoinHandle<()>> {
     let rx = sched.subscribe();
     std::thread::Builder::new().name("agent-queue".into()).spawn(move || {
@@ -395,7 +354,6 @@ pub fn spawn_host(sched: Arc<Scheduler>, engine: Arc<dyn Engine>, feed: Arc<Feed
     })
 }
 
-/// Runs until every task is finished or paused, or `limit` elapses.
 pub fn drain(sched: &Scheduler, limit: Duration) {
     let start = Instant::now();
     loop {
@@ -419,7 +377,6 @@ pub fn drain(sched: &Scheduler, limit: Duration) {
     }
 }
 
-/// History kept by the queue. The host purges with [`Scheduler::purge_history`].
 pub const QUEUE_HISTORY: Duration = HISTORY;
 
 #[cfg(test)]
@@ -467,8 +424,6 @@ mod tests {
         }
     }
 
-    /// Waits for a fact about a chunk thread (it entered a gate or a model call). The deadline
-    /// only fails a broken test; no test relies on how long anything takes.
     fn until_true(what: &str, mut ready: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
         while !ready() {
@@ -477,13 +432,10 @@ mod tests {
         }
     }
 
-    /// The chunk is inside the model call `model`. Dropping or pausing the scheduler before
-    /// this point races the chunk: it may cancel before it ever calls the engine.
     fn until_call(engine: &FakeEngine, model: &str) {
         until_true(&format!("the {model} call has started"), || engine.chats().iter().any(|chat| chat.model == model));
     }
 
-    /// One number per chunk. `block` holds the chunk whose cursor is already `at`.
     struct Count {
         block_at: Option<u64>,
         hold: Arc<AtomicBool>,
@@ -543,8 +495,6 @@ mod tests {
         assert!(done.cursor.as_u64().unwrap_or(0) >= 4, "the finished chunks were not repeated");
     }
 
-    /// A dropped scheduler takes no chunk with it: the chunk writes the last rows of its work
-    /// after the cancel, and the next scheduler opens the same queue file.
     #[test]
     fn dropping_the_scheduler_waits_for_the_chunk_to_finish() {
         struct Late { exited: Arc<AtomicBool> }
@@ -556,7 +506,6 @@ mod tests {
                 while !cancel.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(1));
                 }
-                // The write a real chunk may still make when it has seen the cancel.
                 std::thread::sleep(Duration::from_millis(150));
                 self.exited.store(true, Ordering::SeqCst);
                 Ok(Work::Stopped)
@@ -585,8 +534,6 @@ mod tests {
         }
     }
 
-    /// A call inside native code that never returns does not keep the process alive: the drop
-    /// waits no longer than its bound, then stops the chunk's writes and unloads its model.
     #[test]
     fn dropping_the_scheduler_does_not_wait_for_a_call_that_never_returns() {
         let dir = tempfile::tempdir().unwrap();
@@ -610,7 +557,6 @@ mod tests {
         engine.release_hang();
     }
 
-    /// A chunk that only leaves after the drop gave up on it may not write to the queue.
     #[test]
     fn a_detached_chunk_does_not_write_after_the_scheduler_is_dropped() {
         struct Late {
@@ -765,8 +711,6 @@ mod tests {
         assert_eq!(sched.store().get(topic_id).unwrap().unwrap().status, Status::Done);
     }
 
-    /// Pause during a model call returns within a fraction of a second. The chunk already
-    /// saved stays; the call that was in flight is done again only from there.
     #[test]
     fn pause_mid_model_call_stops_and_resume_does_not_redo_the_chunk() {
         let engine = Arc::new(FakeEngine::new());
@@ -797,11 +741,8 @@ mod tests {
         assert_eq!(engine.chats().len(), 1, "the resumed run does not call the model again");
     }
 
-    /// A model call that never returns: the runner reports a hang, the model is unloaded, the
-    /// task goes back to the queue at its cursor and the retry (on the fresh load) finishes.
     #[test]
     fn a_stuck_model_call_is_reaped_and_its_model_unloaded() {
-        // The first `hangs/model` call never returns until the test lets it go.
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path()).unwrap();
         let engine = Arc::new(FakeEngine::new());
@@ -951,7 +892,6 @@ mod tests {
         let id = sched.enqueue(answer_task("rec", chat, "Когда?", input, Resource::Llm, Some("slow/model"))).unwrap();
         until(&sched, id, |task| task.status == Status::Running);
         until_call(&engine, "slow/model");
-        // The drop waits for the chunk, so by here nothing of the old scheduler can write.
         drop(sched);
         assert!(engine.cancel_observed(), "dropping the scheduler cancels the model call");
         assert!(Transcript::open(ai, "rec").unwrap().messages(chat).unwrap().is_empty());

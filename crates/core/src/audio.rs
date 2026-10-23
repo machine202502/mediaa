@@ -1,11 +1,3 @@
-//! Audio track recording: samples from capture callbacks are written to a WAV file on a
-//! background thread (never doing file I/O inside real-time audio callbacks).
-//! The WAV files are muxed into the final video by the media crate.
-//!
-//! Every chunk is placed on the recording timeline by its arrival time: gaps (a loopback
-//! device that delivers nothing during silence, a microphone that starts late, a hiccup)
-//! are filled with silence, so all tracks stay in sync with each other and with the video.
-
 use crossbeam_channel::{Receiver, Sender};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -13,16 +5,12 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-/// Active (pause-excluded) recording time, shared with the video capture.
 pub type Clock = Arc<dyn Fn() -> Duration + Send + Sync>;
 
-/// Gaps shorter than this are treated as jitter and not padded.
 const GAP_TOLERANCE: f64 = 0.06;
 
-/// Samples with their arrival time on the recording timeline.
 type Chunk = (Duration, Vec<f32>);
 
-/// Cheap, cloneable handle given to audio callbacks.
 #[derive(Clone)]
 pub struct AudioSink {
     tx: Sender<Chunk>,
@@ -34,7 +22,6 @@ pub struct AudioSink {
 }
 
 impl AudioSink {
-    /// Queues interleaved `f32` samples that just arrived. Dropped while paused.
     pub fn push(&self, samples: &[f32]) {
         if self.paused.load(Ordering::Relaxed) || samples.is_empty() {
             return;
@@ -44,8 +31,6 @@ impl AudioSink {
     }
 }
 
-/// Frames of silence to insert before a chunk of `chunk_frames` that ended at `arrived`
-/// (seconds on the timeline), when `written` frames are already in the file.
 pub fn gap_frames(written: u64, chunk_frames: u64, arrived: f64, rate: u32) -> u64 {
     let start = arrived * f64::from(rate) - chunk_frames as f64;
     let gap = start - written as f64;
@@ -56,7 +41,6 @@ pub fn gap_frames(written: u64, chunk_frames: u64, arrived: f64, rate: u32) -> u
     }
 }
 
-/// Owns the writer thread of one WAV file.
 pub struct AudioTrack {
     path: PathBuf,
     sink: Option<AudioSink>,
@@ -65,7 +49,6 @@ pub struct AudioTrack {
 }
 
 impl AudioTrack {
-    /// Creates `path` (32-bit float WAV). `paused` and `clock` are shared with the session.
     pub fn create(
         path: &Path,
         sample_rate: u32,
@@ -86,7 +69,7 @@ impl AudioTrack {
         let join = std::thread::Builder::new()
             .name("audio-writer".into())
             .spawn(move || {
-                let mut written = 0u64; // frames
+                let mut written = 0u64;
                 for (arrived, chunk) in rx {
                     let frames = chunk.len() as u64 / ch;
                     let pad = gap_frames(written, frames, arrived.as_secs_f64(), sample_rate);
@@ -125,13 +108,10 @@ impl AudioTrack {
         &self.path
     }
 
-    /// Interleaved samples received so far (not counting inserted silence).
     pub fn samples_written(&self) -> u64 {
         self.samples.load(Ordering::Relaxed)
     }
 
-    /// Flushes and closes the WAV file. All [`AudioSink`] clones must be dropped first
-    /// (i.e. the capture stream stopped), otherwise this blocks until they are.
     pub fn finish(mut self) -> anyhow::Result<PathBuf> {
         drop(self.sink.take());
         if let Some(j) = self.join.take() {
@@ -147,7 +127,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// A clock the test moves by hand.
     fn manual_clock() -> (Clock, Arc<Mutex<Duration>>) {
         let now = Arc::new(Mutex::new(Duration::ZERO));
         let n = now.clone();
@@ -166,10 +145,10 @@ mod tests {
         let (clock, now) = manual_clock();
         let track = AudioTrack::create(&path, 48_000, 2, paused.clone(), clock).unwrap();
         let sink = track.sink();
-        *now.lock().unwrap() = Duration::from_millis(10); // 480 frames arrive after 10 ms
+        *now.lock().unwrap() = Duration::from_millis(10);
         sink.push(&[0.5; 960]);
         paused.store(true, Ordering::Relaxed);
-        sink.push(&[0.9; 480]); // dropped
+        sink.push(&[0.9; 480]);
         paused.store(false, Ordering::Relaxed);
         sink.push(&[0.5; 4]);
         drop(sink);
@@ -187,10 +166,8 @@ mod tests {
         let (clock, now) = manual_clock();
         let track = AudioTrack::create(&path, 1000, 1, Arc::new(AtomicBool::new(false)), clock).unwrap();
         let sink = track.sink();
-        // Device starts late: first 100 frames arrive at t = 0.5 s.
         *now.lock().unwrap() = Duration::from_millis(500);
         sink.push(&[1.0; 100]);
-        // Then nothing for a second (loopback during silence), next chunk at t = 1.6 s.
         *now.lock().unwrap() = Duration::from_millis(1600);
         sink.push(&[1.0; 100]);
         drop(sink);

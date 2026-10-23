@@ -1,24 +1,19 @@
-//! The mouse cursor drawn into recordings (screen capture APIs grab the screen without it).
-
 use crate::frame::Frame;
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
-/// A cursor picture and its hotspot (the pixel that points), in image pixels.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CursorImage {
     pub image: Frame,
     pub hotspot: (i32, i32),
 }
 
-/// The classic arrow (white, black outline) at `scale` × its 1x size of 12×19 px; used where
-/// the OS cursor picture is not available.
 pub fn arrow(scale: f32) -> CursorImage {
     let scale = scale.clamp(0.5, 8.0);
     let (w, h) = ((13.0 * scale).ceil() as u32, (20.0 * scale).ceil() as u32);
     let mut pixmap = Pixmap::new(w, h).expect("non-zero size");
     let mut pb = PathBuilder::new();
     let pts = [(0.0, 0.0), (0.0, 16.0), (4.0, 12.5), (7.0, 18.5), (9.5, 17.5), (6.5, 11.5), (11.5, 11.5)];
-    let off = 0.75; // keep the outline inside the image
+    let off = 0.75;
     pb.move_to(off + pts[0].0 * scale, off + pts[0].1 * scale);
     for (x, y) in &pts[1..] {
         pb.line_to(off + x * scale, off + y * scale);
@@ -38,8 +33,6 @@ pub fn arrow(scale: f32) -> CursorImage {
     CursorImage { image: Frame::new(w, h, data.collect()), hotspot: (1, 1) }
 }
 
-/// Alpha-blends `cursor` into `frame` with its hotspot at `(x, y)` (frame pixels); parts
-/// outside the frame are clipped.
 pub fn draw(frame: &mut Frame, cursor: &CursorImage, x: i32, y: i32) {
     let (w, h) = (frame.width, frame.height);
     let Some(mut canvas) = image::ImageBuffer::<image::Rgba<u8>, &mut [u8]>::from_raw(w, h, &mut frame.data[..]) else {
@@ -73,9 +66,9 @@ mod tests {
         assert_eq!(f.pixel(9, 9), [255, 0, 0, 255], "hotspot offset applied");
         assert_eq!(f.pixel(12, 12), [255, 0, 0, 255]);
         assert_eq!(f.pixel(13, 13), [0, 0, 255, 255]);
-        draw(&mut f, &c, 39, -1); // partly outside: no panic, visible part drawn
+        draw(&mut f, &c, 39, -1);
         assert_eq!(f.pixel(38, 0), [255, 0, 0, 255]);
-        draw(&mut f, &c, 500, 500); // fully outside
+        draw(&mut f, &c, 500, 500);
     }
 
     #[test]

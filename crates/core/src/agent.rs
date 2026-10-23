@@ -1,18 +1,11 @@
-//! Settings of the Agent section: LLM providers and the models used for each role.
-
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// How a provider is reached.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderKind {
-    /// Any server with the OpenAI API (`/v1/models`, `/v1/chat/completions`…) at `base_url`.
     OpenAiCompatible,
-    /// OpenRouter (`https://openrouter.ai/api/v1`).
     OpenRouter,
-    /// Hugging Face: its token (optional) and proxy are also used to download models; its
-    /// Inference Providers router serves models over the OpenAI API.
     HuggingFace,
 }
 
@@ -21,19 +14,14 @@ pub const HUGGING_FACE_ROUTER_URL: &str = "https://router.huggingface.co/v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Provider {
-    /// Stable id that model choices refer to (names can be edited).
     pub id: String,
     pub name: String,
     pub kind: ProviderKind,
-    /// API root, e.g. `http://localhost:11434/v1` (OpenAI-compatible servers only).
     pub base_url: String,
-    /// API key (Hugging Face: access token, optional). Kept in the OS keychain ([`crate::secrets`]).
     #[serde(skip)]
     pub api_key: String,
-    /// Proxy for this provider's requests (`http://`, `https://` or `socks5://`); empty: direct.
     #[serde(default)]
     pub proxy: String,
-    /// Context of its models, tokens (providers do not tell; sizes their reads and history).
     #[serde(default = "default_provider_context")]
     pub context: u32,
 }
@@ -43,7 +31,6 @@ fn default_provider_context() -> u32 {
 }
 
 impl Provider {
-    /// A new provider with a fresh id.
     pub fn new(kind: ProviderKind, name: &str) -> Provider {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         Provider {
@@ -60,7 +47,6 @@ impl Provider {
         }
     }
 
-    /// API root without a trailing slash.
     pub fn api_url(&self) -> String {
         match self.kind {
             ProviderKind::OpenRouter => OPENROUTER_URL.into(),
@@ -69,32 +55,24 @@ impl Provider {
         }
     }
 
-    /// The proxy, if one is set.
     pub fn proxy(&self) -> Option<&str> {
         Some(self.proxy.trim()).filter(|p| !p.is_empty())
     }
 }
 
-/// Where a model comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum ModelSource {
-    /// Downloaded from Hugging Face by the inference engine on first use.
     HuggingFace { repo: String },
-    /// A model file or folder on disk (the engine reads it where it is).
     Local { path: PathBuf },
-    /// Served by one of the providers (by its id).
     Provider { provider: String, model: String },
 }
 
-/// What each model is used for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModelRole {
     Embedding,
-    /// Re-orders search hits by how well they answer the question (a cross-encoder).
     Reranker,
     Agent,
-    /// Short titles for recordings, notes and chats.
     Titles,
     SpeechRecognition,
     Diarization,
@@ -112,37 +90,24 @@ impl ModelRole {
         ModelRole::Speech,
     ];
 
-    /// Roles that must have a model; the others may stay unset.
     pub fn required(self) -> bool {
         matches!(self, ModelRole::Embedding | ModelRole::Agent | ModelRole::Titles | ModelRole::SpeechRecognition)
     }
 
-    /// The Hugging Face model a role starts with.
     pub fn default_source(self) -> Option<ModelSource> {
         let hf = |repo: &str| Some(ModelSource::HuggingFace { repo: repo.into() });
         match self {
-            // EmbeddingGemma 300M (Google, 100+ languages), GGUF for llama.cpp.
             ModelRole::Embedding => hf("ggml-org/embeddinggemma-300M-GGUF"),
-            // BGE reranker v2 M3 (multilingual cross-encoder), GGUF (Q4_K_M, ~440 MB).
             ModelRole::Reranker => hf("gpustack/bge-reranker-v2-m3-GGUF"),
-            // GGUF for llama.cpp (one Q4_K_M file is downloaded).
             ModelRole::Agent => hf("unsloth/Qwen3.5-4B-GGUF"),
-            // A light model is enough for a few words.
             ModelRole::Titles => hf("unsloth/Qwen3-0.6B-GGUF"),
-            // GigaAM v3 (Sber) with punctuation, sherpa-onnx layout (CTC, ~225 MB).
             ModelRole::SpeechRecognition => hf("csukuangfj/sherpa-onnx-nemo-ctc-punct-giga-am-v3-russian-2025-12-16"),
-            // Speaker embeddings (3D-Speaker CAM++, Chinese and English), one file of a
-            // repository with many; the segmentation model comes with it. Measured best on
-            // `evals/data` and several times faster than ERes2NetV2; the table is in
-            // `workflow/dev-context.md`.
             ModelRole::Diarization => hf("csukuangfj/speaker-embedding-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"),
-            // Speech synthesis: off.
             ModelRole::Speech => None,
         }
     }
 }
 
-/// Model per role (`None`: unset).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelChoices {
@@ -152,7 +117,6 @@ pub struct ModelChoices {
     pub titles: Option<ModelSource>,
     pub speech_recognition: Option<ModelSource>,
     pub diarization: Option<ModelSource>,
-    /// Speech synthesis.
     pub speech: Option<ModelSource>,
 }
 
@@ -197,20 +161,15 @@ impl ModelChoices {
 
 }
 
-/// Where a local model should run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Device {
-    /// The GPU when it fits the budget, else the CPU.
     #[default]
     Auto,
-    /// Preferably the GPU; the CPU when the GPU cannot take it.
     Gpu,
-    /// Never the GPU.
     Cpu,
 }
 
-/// Device per role (local models only).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ModelDevices {
@@ -249,15 +208,12 @@ impl ModelDevices {
     }
 }
 
-/// Kinds of work with their own limit of how many run at once.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WorkKind {
-    /// Answers in chats.
     Agent,
     Transcription,
     Indexing,
     WebSearch,
-    /// Requests to model providers (their rate limits, not memory, are the limit).
     ProviderCalls,
 }
 
@@ -265,20 +221,16 @@ impl WorkKind {
     pub const ALL: [WorkKind; 5] = [WorkKind::Agent, WorkKind::Transcription, WorkKind::Indexing, WorkKind::WebSearch, WorkKind::ProviderCalls];
 }
 
-/// Limits for local models and for work running at once.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Budget {
-    /// Video memory local models may take, GB.
     pub gpu_memory_gb: f32,
-    /// RAM models running on the CPU may take, GB.
     pub ram_memory_gb: f32,
     pub agent: u32,
     pub transcription: u32,
     pub indexing: u32,
     pub web_search: u32,
     pub provider_calls: u32,
-    /// How long an idle local model stays loaded, in seconds. The settings page does not edit this yet.
     #[serde(default = "default_keep_alive_secs")]
     pub keep_alive_secs: u64,
 }
@@ -303,7 +255,6 @@ impl Default for Budget {
 }
 
 impl Budget {
-    /// How many jobs of `kind` may run at once (at least one).
     pub fn limit(&self, kind: WorkKind) -> u32 {
         match kind {
             WorkKind::Agent => self.agent,
@@ -341,15 +292,10 @@ fn gb(v: f32) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnalysisOptions {
-    /// Speakers by diarization (needs a diarization model).
     pub diarize: bool,
-    /// How many people speak; `None`: let diarization decide.
     pub speakers: Option<u32>,
-    /// Chunks, full-text search and embeddings.
     pub index: bool,
-    /// Topics (needs the index).
     pub topics: bool,
-    /// Details of each topic (needs topics).
     pub details: bool,
 }
 
@@ -360,8 +306,6 @@ impl Default for AnalysisOptions {
 }
 
 impl AnalysisOptions {
-    /// Turns off what cannot run: details without topics, topics without the index, and
-    /// diarization without a speaker count model.
     pub fn resolved(mut self, models: &ModelChoices) -> AnalysisOptions {
         if models.diarization.is_none() {
             self.diarize = false;
@@ -369,8 +313,6 @@ impl AnalysisOptions {
         self.enforced()
     }
 
-    /// Stages that depend on a disabled one are off. Earlier stages are not required here: a
-    /// restart from a later stage keeps their data.
     pub fn enforced(mut self) -> AnalysisOptions {
         if !self.index {
             self.topics = false;
@@ -392,22 +334,12 @@ pub struct AgentSettings {
     pub models: ModelChoices,
     pub devices: ModelDevices,
     pub budget: Budget,
-    /// Context of a local agent model, tokens: more lets it read more at once and takes more
-    /// memory (the KV cache).
     pub agent_context: u32,
     pub web: WebSettings,
-    /// Stages of the analysis of recordings, the default for the next one.
     pub analysis: AnalysisOptions,
-    /// Models that reason before they act (the «Thinking» switch); off for every model until
-    /// the user turns it on.
     pub thinking: Vec<ModelSource>,
-    /// Every answer is checked against the moments and pages it cites. On until turned off
-    /// (a settings file that has no key keeps the check on).
     #[serde(default = "answers_checked")]
     pub verify_answers: bool,
-    /// The code of the interface language («en», «ru»): every text the program has a model
-    /// write for the user (topics, breakdowns, chat titles, step phrases) follows it. The app
-    /// sets it from the interface language every frame; it is not saved with the settings.
     #[serde(skip)]
     pub ui_language: Option<String>,
 }
@@ -416,33 +348,24 @@ fn answers_checked() -> bool {
     true
 }
 
-/// Where the agent searches the web.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebEngine {
-    /// DuckDuckGo's HTML results: no key, but fragile (the page may change, or ask for a captcha).
     #[default]
     DuckDuckGo,
-    /// A SearXNG instance (its JSON API).
     SearXng,
-    /// Brave Search API (a key).
     Brave,
-    /// Tavily API (a key).
     Tavily,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WebSettings {
-    /// The agent may search the web and read pages.
     pub enabled: bool,
     pub engine: WebEngine,
-    /// The SearXNG instance, e.g. `https://searx.example.org`.
     pub searxng_url: String,
-    /// Brave / Tavily key; kept in the OS keychain ([`crate::secrets`]).
     #[serde(skip)]
     pub api_key: String,
-    /// Proxy for web requests; empty: direct.
     pub proxy: String,
 }
 
@@ -470,9 +393,6 @@ impl Default for AgentSettings {
 }
 
 impl ModelSource {
-    /// Whether the model can reason before it acts, so the «Thinking» switch is shown for it:
-    /// local models of the Qwen3 family (their chat template has a thinking mode), and every
-    /// provider model (a provider that does not know the reasoning parameter ignores it).
     pub fn supports_thinking(&self) -> bool {
         match self {
             ModelSource::Provider { .. } => true,
@@ -483,8 +403,6 @@ impl ModelSource {
 }
 
 impl AgentSettings {
-    /// The name of the interface language for the prompts that make a model write for the user
-    /// («Russian», «English»). No code (tools, tests) is English.
     pub fn language_name(&self) -> &'static str {
         match self.ui_language.as_deref() {
             Some("ru") => "Russian",
@@ -492,12 +410,10 @@ impl AgentSettings {
         }
     }
 
-    /// Whether `model` reasons before it acts (and can).
     pub fn thinking_on(&self, model: &ModelSource) -> bool {
         model.supports_thinking() && self.thinking.contains(model)
     }
 
-    /// Turns the reasoning of `model` on or off.
     pub fn set_thinking(&mut self, model: &ModelSource, on: bool) {
         self.thinking.retain(|m| m != model);
         if on {
@@ -509,8 +425,6 @@ impl AgentSettings {
         self.providers.iter().find(|p| p.id == id)
     }
 
-    /// The Hugging Face provider whose token and proxy model downloads use: the first one with
-    /// a token, else the first one; `None`: anonymous, direct.
     pub fn hugging_face(&self) -> Option<&Provider> {
         let hf = || self.providers.iter().filter(|p| p.kind == ProviderKind::HuggingFace);
         hf().find(|p| !p.api_key.trim().is_empty()).or_else(|| hf().next())
@@ -529,7 +443,6 @@ mod tests {
         assert_eq!(a.language_name(), "Russian");
         a.ui_language = Some("xx".into());
         assert_eq!(a.language_name(), "English", "an unknown code falls back to English");
-        // The language of the interface is the app's, not a saved setting.
         a.ui_language = Some("ru".into());
         let saved = serde_json::to_string(&a).unwrap();
         assert!(!saved.contains("ui_language"), "{saved}");

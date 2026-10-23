@@ -1,6 +1,3 @@
-//! Opening files with the default app, revealing them in the file manager, and deleting
-//! them to the Recycle Bin / Trash (recoverable).
-
 use anyhow::Context;
 use std::path::Path;
 

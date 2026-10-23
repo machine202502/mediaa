@@ -1,14 +1,3 @@
-//! A fake engine for tests: no model, no GPU, no network. It records every call and answers
-//! with fixed values that tests can change (`chat_deltas`, `chat_usage`, …).
-//!
-//! A few model specs trigger failures, so tests can exercise the error paths:
-//! `unsupported/model` (chat, VAD and recognition), `fails/midstream` (an error after the first
-//! token), `slow/model` (an answer that only ends when cancelled), `missing/model` (inspect),
-//! `plain/model` (a repository without a GGUF file), `fails/model` (a download or diarization
-//! failure), `outside/model` (a refused delete) and `bad/model` (a model that does not load).
-//! A spec ending with `.onnx` inspects as a speech model (diarization fits it, llama.cpp roles
-//! do not), like the real engine.
-
 use crate::engine::{
     inspect_files, role_name, Budget, ChatAnswer, ChatRequest, Diarization, DiarizeRequest, EmbedKind, EmbeddingsRequest, Engine, EngineError, Gpu, Health,
     LoadedModel, ModelCheck, ModelFile, ModelFormat, ModelInfo, ModelInspect, Pool, ProgressCallback, RerankRequest, RerankResult, SpeechSegment,
@@ -21,12 +10,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// A chat request as the fake saw it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecordedChat {
     pub model: String,
     pub messages: usize,
-    /// The contents of the messages, in order (system first when there is one).
     pub texts: Vec<String>,
     pub max_tokens: u32,
     pub temperature: f32,
@@ -36,9 +23,7 @@ pub struct RecordedChat {
     pub device: String,
     pub interactive: bool,
     pub hf_token: Option<String>,
-    /// The reasoning budget (tokens) of a `chat_thinking` request.
     pub thinking: Option<u32>,
-    /// `enable_thinking` of the request. Short service calls set it to false.
     pub enable_thinking: bool,
 }
 
@@ -70,7 +55,6 @@ pub struct RecordedInspect {
     pub hf_token: Option<String>,
 }
 
-/// An engine that answers without models. Cloneable: clones share the recordings.
 #[derive(Clone, Default)]
 pub struct FakeEngine {
     inner: Arc<Inner>,
@@ -98,12 +82,10 @@ struct Inner {
     checks: Mutex<Vec<(String, String)>>,
     wanted: Mutex<Vec<String>>,
     forgotten: Mutex<Vec<String>>,
-    /// Calls to a `hangs/model` spec that this many times do not return.
     hangups: AtomicU32,
     release_hang: AtomicBool,
 }
 
-/// Clears the model the pulse names when the call is over (however it ends).
 struct Mark;
 
 impl Drop for Mark {
@@ -135,22 +117,16 @@ impl FakeEngine {
         if request.model.trim() == "unsupported/model" {
             return Err(EngineError::model_unsupported("not a chat model"));
         }
-        // An error after the first token: the stream must report it and not say [DONE].
         if request.model.trim() == "fails/midstream" {
             on_text("partial");
             return Err(EngineError::internal("the model crashed"));
         }
-        // A call stuck inside native code: the first `hangs/model` call returns only when the
-        // test lets it go, and it ignores cancel. A later call is answered normally.
         if request.model.trim() == "hangs/model" && self.inner.hangups.fetch_add(1, Ordering::SeqCst) == 0 {
             while !self.inner.release_hang.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
-        // A long answer that only ends when the client goes away.
         if request.model.trim() == "slow/model" {
-            // No wall-clock cap: the call ends when the client cancels it, so a test that
-            // waits for the call to start can never lose the race to a timer.
             loop {
                 if cancel.load(Ordering::Relaxed) {
                     self.inner.cancel_observed.store(true, Ordering::SeqCst);
@@ -185,28 +161,22 @@ impl FakeEngine {
         FakeEngine::default()
     }
 
-    /// The pieces a chat answer is streamed in (default: «Привет», «, », «мир»).
     pub fn chat_deltas(&self, deltas: &[&str]) {
         *self.inner.deltas.lock().unwrap() = Some(deltas.iter().map(|d| (*d).to_string()).collect());
     }
 
-    /// Whole answers for successive chat calls (the first call gets the first answer, and so on);
-    /// once they run out the deltas (or the default answer) are used again.
     pub fn chat_answers(&self, answers: &[&str]) {
         *self.inner.answers.lock().unwrap() = answers.iter().map(|a| (*a).to_string()).collect();
     }
 
-    /// The usage a chat answer reports (`None`: no usage at all).
     pub fn chat_usage(&self, usage: Option<Usage>) {
         *self.inner.usage.lock().unwrap() = Some(usage);
     }
 
-    /// The vectors embeddings answer with (default: one `[i, i + 0.5]` per input).
     pub fn embed_vectors(&self, vectors: Vec<Vec<f32>>) {
         *self.inner.vectors.lock().unwrap() = Some(vectors);
     }
 
-    /// The scores rerank answers with (default: `[0.2, 0.9, 0.5]` repeating).
     pub fn rerank_scores(&self, scores: Vec<f32>) {
         *self.inner.scores.lock().unwrap() = Some(scores);
     }
@@ -267,18 +237,15 @@ impl FakeEngine {
         self.inner.wanted.lock().unwrap().clone()
     }
 
-    /// The models the caller said were stuck (see [`Engine::forget_loaded`]).
     pub fn forgotten(&self) -> Vec<String> {
         self.inner.forgotten.lock().unwrap().clone()
     }
 
-    /// Lets the first `hangs/model` call return (it waits until this is called).
     pub fn release_hang(&self) {
         self.inner.release_hang.store(true, Ordering::SeqCst);
     }
 }
 
-/// A session that turns every non-empty push into one segment and finishes with a last one.
 struct FakeVad;
 
 impl VadSession for FakeVad {
@@ -421,7 +388,6 @@ impl Engine for FakeEngine {
         match spec {
             "missing/model" => Err(EngineError::not_found("missing/model not found on Hugging Face")),
             "plain/model" => Ok(inspect_files(spec, vec![ModelFile { name: "model.safetensors".into(), bytes: 900 }], false)),
-            // A speech model is one `.onnx` file: diarization fits it, llama.cpp does not.
             _ if spec.to_ascii_lowercase().ends_with(".onnx") => {
                 let name = spec.rsplit(['/', '\\']).next().unwrap_or(spec).to_string();
                 Ok(inspect_files(spec, vec![ModelFile { name, bytes: 900 }], false))

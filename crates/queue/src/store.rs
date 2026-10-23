@@ -1,8 +1,3 @@
-//! One transaction per operation. [`MemStore`] for tests, [`SqliteStore`] for the process.
-//! [`SqliteStore`] keeps the world in memory and writes only the rows an operation changed.
-//! The file has one writer (one store per file), so it is read from disk only when opened.
-//! The schema is created fresh. A file whose `user_version` is not 2 is dropped and created again.
-
 use crate::clock::Clock;
 use crate::state::{self, Child, Filter, KindStat, NewTask, Op, Outcome, Stats, Task, World};
 use crate::{Error, Result, TaskId};
@@ -70,7 +65,6 @@ CREATE TABLE meta (
 PRAGMA user_version = 2;
 ";
 
-/// Columns of `tasks` in the order [`task_params`] binds them. `?1` is `id` in both statements.
 const TASK_INSERT: &str = "INSERT INTO tasks (
         id, kind, title, input, priority, status, cursor, partial, result, progress, error, attempts,
         created_ms, updated_ms, parent, scope, inline, started_ms, finished_ms, stats, detail, units,
@@ -89,7 +83,6 @@ const TASK_UPDATE: &str = "UPDATE tasks SET
         yield_cont = ?28, heartbeat_ms = ?29, stop_intent = ?30, note = ?31
     WHERE id = ?1";
 
-/// The bound values of one `tasks` row. The same list feeds [`TASK_INSERT`] and [`TASK_UPDATE`].
 macro_rules! task_params {
     ($task:expr) => {{
         let task = $task;
@@ -381,8 +374,6 @@ impl Store for MemStore {
     }
 }
 
-/// Rows [`SqliteStore`] has written since the file was opened. A statement that changes nothing
-/// counts no rows. Tests read this to prove an operation touches only what it changed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Writes {
     pub inserted: u64,
@@ -402,15 +393,10 @@ impl Writes {
 
 struct Db {
     conn: Connection,
-    /// The world as the file has it. This store is the file's only writer, so the two agree
-    /// between operations and the world is read from disk only in [`SqliteStore::open`].
     world: World,
     writes: Writes,
 }
 
-/// The rows of `old` the diff needs. Tasks themselves are not copied: a task can change only
-/// when the op stamps `updated_ms` or `heartbeat_ms` with the op's `now`, so the old value of a
-/// changed task is read back from the file one row at a time.
 struct OldRows {
     ids: HashSet<TaskId>,
     deps: Vec<(TaskId, TaskId)>,
@@ -424,9 +410,6 @@ pub struct SqliteStore {
 }
 
 impl SqliteStore {
-    /// Open `path` (a file, not a directory). The parent directory is created.
-    /// Schema version 2 is kept. Any other version is deleted and created again.
-    /// The whole world is read once here; later operations use the in-memory copy.
     pub fn open(path: &Path, clock: Arc<dyn Clock>) -> Result<SqliteStore> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -451,7 +434,6 @@ impl SqliteStore {
         })
     }
 
-    /// Rows written since this file was opened.
     pub fn writes(&self) -> Writes {
         self.db.lock().expect("queue lock").writes
     }
@@ -469,8 +451,6 @@ impl Store for SqliteStore {
             kind_stats: db.world.kind_stats.clone(),
             next_id: db.world.next_id,
         };
-        // `state::apply` consumes the world. If it or the write fails, the file is unchanged
-        // (the transaction rolls back), so the cache is read back from it.
         let world = std::mem::take(&mut db.world);
         let (world, out) = match state::apply(world, op, now) {
             Ok(applied) => applied,
@@ -556,7 +536,6 @@ fn load(conn: &Connection) -> Result<World> {
     })
 }
 
-/// One task row as the file currently has it.
 fn load_task(conn: &Connection, id: TaskId) -> Result<Option<Task>> {
     let mut stmt = conn.prepare(
         "SELECT id, kind, title, input, priority, status, cursor, partial, result, progress, error, attempts,
@@ -627,12 +606,6 @@ fn parse_json(text: &str) -> Result<Value> {
     Ok(serde_json::from_str(text)?)
 }
 
-/// Write the difference between `old` and `new` as rows: task rows inserted, changed and removed,
-/// then dependencies, kind stats and the id counter the same way.
-///
-/// `state::apply` stamps every mutation with `now` in `updated_ms` or `heartbeat_ms`
-/// (`Heartbeat` changes only its beat), so a task carrying neither stamp was not touched by the
-/// op. Only the touched tasks are compared row by row with the file's copy.
 fn persist(conn: &Connection, old: &OldRows, new: &World, now: i64) -> Result<Writes> {
     let mut writes = Writes::default();
     for task in &new.tasks {
@@ -653,7 +626,6 @@ fn persist(conn: &Connection, old: &OldRows, new: &World, now: i64) -> Result<Wr
             }
             Some(_) => {}
             None => {
-                // The cache and the file disagree; the file is the truth, so write the row back.
                 conn.execute(TASK_INSERT, task_params!(task))?;
                 writes.inserted += 1;
                 writes.statements += 1;
@@ -746,8 +718,6 @@ fn persist(conn: &Connection, old: &OldRows, new: &World, now: i64) -> Result<Wr
     Ok(writes)
 }
 
-/// Write the whole world into an empty schema. Only tests use it: the process writes `persist`'s
-/// diff instead.
 #[cfg(test)]
 fn save(conn: &Connection, world: &World) -> Result<()> {
     for task in &world.tasks {
@@ -787,7 +757,6 @@ mod tests {
             .scope("s0")
     }
 
-    /// A tiny deterministic generator; the ops are random but a failure is reproducible.
     fn next(seed: &mut u64) -> u64 {
         *seed = seed
             .wrapping_mul(6_364_136_223_846_793_005)

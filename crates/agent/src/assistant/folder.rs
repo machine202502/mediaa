@@ -1,8 +1,3 @@
-//! The agent over the recordings of a catalog folder: the list of recordings, one search across
-//! them all, and the per-recording tools (outline, read, mentions, speakers) on the recording
-//! named by its number. Moments are cited as `[#N m:ss]` — the recording's number and the time —
-//! and checked against that recording.
-
 use crate::prompts;
 use super::brain::ToolSpec;
 use super::tools::{self, Outcome, Recording, Tools};
@@ -15,12 +10,9 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// A recording close enough to a cited time when a reply is this near (seconds).
 const NEAR: f64 = 15.0;
-/// Chapter titles of a recording shown on the card.
 const CARD_CHAPTERS: usize = 6;
 
-/// A recording of the folder.
 #[derive(Debug, Clone)]
 pub struct Item {
     pub recording: Recording,
@@ -28,10 +20,7 @@ pub struct Item {
     pub path: PathBuf,
 }
 
-/// Searches across the folder: (query, what to favour or narrow down, how many) → hits with the
-/// index of their recording. Shared by the threads of one step, so it is `Sync`.
 pub type FolderSearch<'a> = dyn Fn(&str, Options, usize) -> anyhow::Result<Vec<(usize, Hit)>> + Sync + 'a;
-/// Searches one recording: (index, query, what to favour or narrow down, how many) → hits.
 pub type ItemSearch<'a> = dyn Fn(usize, &str, Options, usize) -> anyhow::Result<Vec<Hit>> + Sync + 'a;
 
 pub struct FolderTools<'a> {
@@ -39,11 +28,9 @@ pub struct FolderTools<'a> {
     pub search: &'a FolderSearch<'a>,
     pub search_one: &'a ItemSearch<'a>,
     pub max_chars: usize,
-    /// The web, when the agent may use it.
     pub web: Option<&'a super::internet::Web<'a>>,
 }
 
-/// `[m:ss` → `[#n m:ss` in a single recording's tool result.
 pub fn tag_times(text: &str, n: usize) -> String {
     let mut out = String::with_capacity(text.len() + 32);
     for (i, c) in text.char_indices() {
@@ -55,7 +42,6 @@ pub fn tag_times(text: &str, n: usize) -> String {
     out
 }
 
-/// Citations `[#N m:ss]` (also the start of a range): (as written, recording number, seconds).
 pub fn folder_citations(text: &str) -> Vec<(String, usize, f64)> {
     let mut out = Vec::new();
     let mut rest = text;
@@ -74,7 +60,6 @@ pub fn folder_citations(text: &str) -> Vec<(String, usize, f64)> {
 }
 
 impl FolderTools<'_> {
-    /// The recording an argument names: its number (`2`, `#2`) or its title.
     fn item(&self, args: &Value) -> anyhow::Result<(usize, &Item)> {
         let raw = match &args["recording"] {
             Value::Number(n) => n.to_string(),
@@ -100,7 +85,6 @@ impl FolderTools<'_> {
         Ok(Outcome { text, seen: out.seen.map(|s| s.into_iter().map(|k| format!("{}:{k}", i + 1)).collect()) })
     }
 
-    /// The speaker a `search` call asked for (`@s2#3` names its recording).
     fn speaker_arg(&self, args: &Value) -> anyhow::Result<Option<Parsed>> {
         let label = args["speaker"].as_str().unwrap_or_default().trim();
         if label.is_empty() {
@@ -115,7 +99,6 @@ impl FolderTools<'_> {
         Ok(Some(parsed))
     }
 
-    /// The part of the recordings a `search` call asked for.
     fn span_arg(&self, args: &Value) -> anyhow::Result<Option<(f64, f64)>> {
         let arg = |k: &str| args.get(k).and_then(Value::as_str).map(str::trim).unwrap_or_default().to_string();
         let (from, to) = (arg("from"), arg("to"));
@@ -194,8 +177,6 @@ impl Toolbox for FolderTools<'_> {
                     return Ok(Outcome { text: prompts::render("results/folder/nothing.j2", minijinja::context! { query }), seen: Some(vec![]) });
                 }
                 let mut shown = Vec::new();
-                // Hits of one recording are widened together, wherever the ranking put them:
-                // their fragments may overlap.
                 let mut order: Vec<usize> = Vec::new();
                 let mut groups: HashMap<usize, Vec<Hit>> = HashMap::new();
                 for (number, hit) in &hits {
@@ -217,12 +198,10 @@ impl Toolbox for FolderTools<'_> {
                 Ok(Outcome { text: tools::bounded(text, self.max_chars, "plain"), seen: Some(seen) })
             }
             "mentions" if args["recording"].is_null() => {
-                // Every recording: their counts together.
                 let mut parts = Vec::new();
                 let mut seen = Vec::new();
                 for i in 0..self.items.len() {
                     let out = self.one(i, "mentions", args)?;
-                    // Never said there: nothing shown (not the result's wording, which lives in a template).
                     if out.seen.as_ref().is_some_and(|s| !s.is_empty()) {
                         parts.push(minijinja::context! { number => i + 1, text => out.text });
                         seen.extend(out.seen.unwrap_or_default());
@@ -271,7 +250,6 @@ impl Toolbox for FolderTools<'_> {
             })
             .map(|(s, _, _)| s)
             .collect();
-        // Written like a citation but not one (e.g. a placeholder copied from the rules).
         let mut rest = text;
         while let Some(open) = rest.find("[#") {
             rest = &rest[open + 1..];
@@ -280,7 +258,6 @@ impl Toolbox for FolderTools<'_> {
                 bad.push(inside.to_string());
             }
         }
-        // A time without its recording cannot be followed.
         bad.extend(super::citations(text).into_iter().filter(|(s, _)| !s.starts_with('#')).map(|(s, _)| s));
         bad
     }
@@ -326,7 +303,6 @@ mod tests {
         let none = |_: &str, _: Options, _: usize| -> anyhow::Result<Vec<(usize, Hit)>> { Ok(vec![]) };
         let one = |_: usize, _: &str, _: Options, _: usize| -> anyhow::Result<Vec<Hit>> { Ok(vec![]) };
         let f = FolderTools { items: &items, search: &none, search_one: &one, max_chars: 4000, web: None };
-        // #2 is two minutes long; #3 does not exist; a bare time names no recording.
         assert_eq!(f.bad_citations("[#1 5:00] [#2 5:00] [#3 0:10] [0:30] [#1 m:00]"), ["#2 5:00", "#3 0:10", "#1 m:00", "0:30"]);
         let around = f.cited_context("[#1 0:10] решили");
         assert!(around.contains("Отчёт отправляем в пятницу.") && around.contains("Графики будут к четвергу."), "{around}");

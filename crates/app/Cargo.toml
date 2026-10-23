@@ -11,7 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 serde_json = "1"
-# Markdown of the agent's answers (the chat lays the lines out itself).
 pulldown-cmark = "0.13"
 mediaa-core.workspace = true
 mediaa-media.workspace = true
@@ -28,7 +27,6 @@ log.workspace = true
 image.workspace = true
 crossbeam-channel.workspace = true
 chrono.workspace = true
-# wgpu renderer (DX12 / Vulkan / Metal): reliable with several native windows (area picker).
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "persistence", "x11", "wayland"] }
 egui-phosphor = "0.14"
 fontdb = "0.23"
@@ -41,7 +39,6 @@ sys-locale = "0.3"
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tray-icon = { version = "0.26", default-features = false }
 
-# KSNI talks D-Bus directly: no GTK / libappindicator needed on Linux.
 [target.'cfg(target_os = "linux")'.dependencies]
 tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 
@@ -50,7 +47,6 @@ ico = "0.4"
 winresource = "0.1"
 
 [dev-dependencies]
-# The app's tests drive `mediaa_engine::testing::FakeEngine` in `pages/agent/dialog.rs`.
 mediaa-engine = { workspace = true, features = ["testing"] }
 egui_kittest = "0.36"
 tempfile.workspace = true

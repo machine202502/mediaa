@@ -1,11 +1,8 @@
-//! What the UI reads. Statuses, the reason a task is waiting, and which runs hold a slot.
-
 use crate::state::{self, effective_status, estimate_tree, DepHold, Resource, Status, Task, World};
 use crate::TaskId;
 use serde_json::Value;
 use std::time::Duration;
 
-/// Why a queued task is not running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WaitReason {
     Dependency,
@@ -15,7 +12,6 @@ pub enum WaitReason {
     Turn,
 }
 
-/// One task, plus what the queue page needs beside the row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskView {
     pub task: Task,
@@ -24,7 +20,6 @@ pub struct TaskView {
     pub estimate_ms: Option<i64>,
 }
 
-/// A run that holds a slot right now. `stopping` means the run was asked to return and has not.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Live {
     pub id: TaskId,
@@ -38,14 +33,12 @@ pub struct Live {
     pub stopping: bool,
 }
 
-/// One model still required by unfinished work, including a run that is stopping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelNeed {
     pub model: String,
     pub tasks: Vec<TaskId>,
 }
 
-/// Free capacity of one pool, and who the next chunks would go to. Built by the scheduler.
 #[derive(Debug, Clone)]
 pub struct PoolLoad {
     pub resource: Resource,
@@ -117,8 +110,6 @@ fn rank(reason: &WaitReason) -> u8 {
     }
 }
 
-/// Waiting reason for one task. Paused and running rows have none; a waiting composite takes the
-/// strongest reason among its children (paused, then dependency, memory, resource, turn).
 pub fn explain(world: &World, loads: &[PoolLoad], task: &Task) -> Option<WaitReason> {
     if task.status.is_finished() || task.status == Status::Paused {
         return None;

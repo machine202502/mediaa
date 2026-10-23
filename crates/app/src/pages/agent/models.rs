@@ -1,10 +1,3 @@
-//! Models: which model does each job (search embeddings, agent, sub-agent, speech recognition
-//! for Russian and English, diarization, speech synthesis) — a Hugging Face model of the engine,
-//! a local file or folder it can open, or a provider's model — and "Check models".
-//!
-//! Local models belong to the engine: the repository is inspected before it is downloaded, the
-//! download shows its progress, and a downloaded model can be deleted.
-
 use super::super::header;
 use crate::app::App;
 use crate::theme;
@@ -21,27 +14,19 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// How long the repository field must stay unchanged before the engine is asked about it.
 const INSPECT_DEBOUNCE: Duration = Duration::from_secs(1);
 
-/// The answer of an inspect request and the repository it belongs to.
 type InspectAnswer = (String, Result<ModelInspect, String>);
 
-/// The repository field of one role: asks the engine what the repository is once typing has
-/// stopped (a request per pause, not per keystroke).
 #[derive(Default)]
 struct Inspect {
-    /// The repository currently in the field.
     spec: Option<String>,
-    /// When it last changed (the debounce's anchor; `None` while a request runs).
     edited: Option<Instant>,
     answer: Option<Result<ModelInspect, String>>,
     run: Option<Receiver<InspectAnswer>>,
 }
 
 impl Inspect {
-    /// Feeds the field's current value; starts a request when it has been still for
-    /// [`INSPECT_DEBOUNCE`] and the engine is reachable. `start` is given a thread's receiver.
     fn tick(&mut self, spec: &str, now: Instant, online: bool, start: impl FnOnce(String) -> Receiver<InspectAnswer>) {
         if let Some(rx) = &self.run {
             match rx.try_recv() {
@@ -65,7 +50,6 @@ impl Inspect {
             self.run = None;
         }
         if !online {
-            // Nothing to ask; a failed answer is retried when the engine is back.
             self.run = None;
             if matches!(self.answer, Some(Err(_))) {
                 self.answer = None;
@@ -99,13 +83,11 @@ impl Inspect {
     }
 }
 
-/// A repository the engine can look at: `owner/name`, optionally with a file after it.
 fn usable(spec: &str) -> bool {
     let spec = spec.trim();
     !spec.is_empty() && spec.contains('/') && !spec.starts_with('/')
 }
 
-/// Whether the inspected model can serve `role` (the engine's own role names).
 fn fits(inspect: &ModelInspect, role: ModelRole) -> bool {
     let name = mediaa_engine::role_name(role);
     inspect.roles.iter().any(|r| r == name)
@@ -120,12 +102,9 @@ fn format_name(format: ModelFormat) -> String {
     }
 }
 
-/// A download running in the background: the engine reports its bytes, the thread its result.
 struct Download {
     role: ModelRole,
-    /// `(done, total)` bytes, written by the pull's progress callback.
     progress: Arc<Mutex<(u64, u64)>>,
-    /// The model's path, or why the download failed.
     result: Receiver<Result<String, String>>,
 }
 
@@ -135,7 +114,6 @@ impl Download {
     }
 }
 
-/// A delete running in the background.
 struct Delete {
     role: ModelRole,
     result: Receiver<Result<(), String>>,
@@ -148,11 +126,8 @@ pub struct ModelsUi {
     inspects: HashMap<ModelRole, Inspect>,
     downloads: Vec<Download>,
     deletes: Vec<Delete>,
-    /// The last delete error of a role (a download's failure is its [`Fetch`]).
     errors: HashMap<ModelRole, String>,
-    /// What each role's Download button is doing. Kept so a click is never silent.
     fetches: HashMap<ModelRole, Fetch>,
-    /// The model waiting for a delete confirmation: `(role, repository)`.
     confirm_delete: Option<(ModelRole, String)>,
 }
 
@@ -188,8 +163,6 @@ impl ModelsUi {
         self.downloads.push(Download { role, progress, result: rx });
     }
 
-    /// Forgets the download in the UI.
-    /// shortcut: `Engine::pull` has no cancel, so the pull keeps running until the engine finishes; upgrade when the engine can abort a pull.
     fn stop_download(&mut self, role: ModelRole) {
         self.downloads.retain(|d| d.role != role);
         self.fetches.insert(role, Fetch::default());
@@ -205,8 +178,6 @@ impl ModelsUi {
         self.deletes.push(Delete { role, result: rx });
     }
 
-    /// Collects finished checks, inspects, downloads and deletes, and starts the debounced
-    /// inspects. Returns whether the engine's model list should be re-read.
     fn poll(&mut self, agent: &AgentSettings, engine: &Arc<dyn Engine>, hf_token: Option<String>, online: bool, ctx: &egui::Context) -> bool {
         let mut refresh = false;
         if let Some(rx) = &self.run {
@@ -315,31 +286,23 @@ impl ModelsUi {
     }
 }
 
-/// `owner/name` of a repository spec (a file after it is not part of the repository name).
 fn repo_id(repo: &str) -> String {
     repo.trim().trim_matches('/').split('/').take(2).collect::<Vec<_>>().join("/")
 }
 
-/// Whether the engine has the Hugging Face repository `repo`.
 fn is_downloaded<'a>(repo: &str, downloaded: impl IntoIterator<Item = &'a str>) -> bool {
     let id = repo_id(repo);
     downloaded.into_iter().any(|spec| spec == id)
 }
 
-/// How long «Скачивается…» stays up after a click, so an instant pull (the file is already
-/// on disk) is still visible before «Скачано» replaces it.
 const FETCH_SHOW_MS: u128 = 400;
-/// The download row: one gap, and the same slots in every state, so a click does not move them.
 const FETCH_GAP: f32 = 8.0;
-/// Text line, the gap under it, and the progress line (the queue's bar is 6 px). The line's
-/// room stays reserved when nothing is downloading.
 const FETCH_TEXT_H: f32 = 18.0;
 const FETCH_BAR_H: f32 = 6.0;
 const FETCH_ROW_H: f32 = FETCH_TEXT_H + 4.0 + FETCH_BAR_H;
 const FETCH_STATUS_W: f32 = 280.0;
 const FETCH_BTN_W: f32 = 180.0;
 
-/// What the Download row says.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchState {
     Idle,
@@ -349,12 +312,10 @@ pub enum FetchState {
     Failed(String),
 }
 
-/// One role's download, plus a result held until «Скачивается…» has been on screen long enough.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fetch {
     pub state: FetchState,
     pub held: Option<Result<(), String>>,
-    /// Monotonic milliseconds when the fetching line started (`None` until the first frame).
     pub started_ms: Option<u128>,
 }
 
@@ -366,14 +327,10 @@ impl Default for Fetch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchInput {
-    /// The user pressed Download. `offline` is the engine's error when it is not reachable.
     Press { on_disk: bool, online: bool, offline: String },
     Progress(u64, u64),
-    /// The pull thread finished.
     Thread(Result<(), String>),
-    /// The engine's list says the model is already there, and nobody has pressed anything.
     Listed,
-    /// Once per frame, before the row is drawn. `now_ms` is monotonic.
     Frame { now_ms: u128 },
 }
 
@@ -441,7 +398,6 @@ fn mono_ms() -> u128 {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Choice {
-    /// Optional roles: unset (not used).
     Unset,
     HuggingFace,
     Local,
@@ -474,7 +430,6 @@ fn role_hint(r: ModelRole) -> String {
     .into()
 }
 
-/// What kind of repository fits the role (shown under the repository field).
 fn role_fit_hint(r: ModelRole) -> String {
     match r {
         ModelRole::Embedding => t!("agent.fit_embedding"),
@@ -521,7 +476,6 @@ fn status_line(ui: &mut egui::Ui, s: &Status) {
     }
 }
 
-/// The folder local models live in, and a way to open it.
 fn models_folder(app: &mut App, ui: &mut egui::Ui) {
     let dir = mediaa_core::paths::models_dir();
     theme::row(ui, &t!("agent.models_folder"), |ui| {
@@ -534,7 +488,6 @@ fn models_folder(app: &mut App, ui: &mut egui::Ui) {
     });
 }
 
-/// The source editor of one role; returns whether it changed.
 fn source_editor(app: &mut App, ui: &mut egui::Ui, role: ModelRole) -> bool {
     let mut changed = false;
     let providers = app.settings.agent.providers.clone();
@@ -590,7 +543,6 @@ fn source_editor(app: &mut App, ui: &mut egui::Ui, role: ModelRole) -> bool {
                     *path = text.into();
                     changed = true;
                 }
-                // One button: a model is a weights file or a folder of them.
                 let browse = theme::icon_button(ui, icon::FOLDER_OPEN, &t!("agent.browse"));
                 let picked = egui::Popup::menu(&browse)
                     .show(|ui| {
@@ -626,7 +578,6 @@ fn source_editor(app: &mut App, ui: &mut egui::Ui, role: ModelRole) -> bool {
                 });
                 theme::row(ui, &t!("agent.model"), |ui| {
                     changed |= ui.add(egui::TextEdit::singleline(model).hint_text("gpt-4o-mini").desired_width(280.0)).changed();
-                    // Models the provider listed at its last check.
                     if let Some(list) = known.get(provider.as_str()) {
                         egui::ComboBox::from_id_salt(("model-pick", role as u8)).selected_text(t!("agent.pick_model")).width(160.0).show_ui(ui, |ui| {
                             for m in list {
@@ -644,8 +595,6 @@ fn source_editor(app: &mut App, ui: &mut egui::Ui, role: ModelRole) -> bool {
     changed
 }
 
-/// What a role's Hugging Face row shows: its repository, whether the engine already has it, and
-/// whether the engine is reachable and not busy with a check.
 struct RoleRow<'a> {
     role: ModelRole,
     repo: &'a str,
@@ -653,8 +602,6 @@ struct RoleRow<'a> {
     online: bool,
 }
 
-/// The Hugging Face part of a role's card: what fits, what the engine found in the repository,
-/// and Download or Delete.
 fn repository_rows(app: &mut App, ui: &mut egui::Ui, row: RoleRow, engine: &Arc<dyn Engine>) {
     let RoleRow { role, repo, downloaded, online } = row;
     let spec = repo.trim().to_string();
@@ -732,8 +679,6 @@ enum FetchClick {
     Delete,
 }
 
-/// Status cell of a fixed width and the button column. The progress line is reserved in every
-/// state and painted only while downloading, so the row does not move.
 fn fetch_controls(ui: &mut egui::Ui, role: ModelRole, line: &str, state: &FetchState, deleting: bool, delete_error: bool) -> FetchClick {
     let p = theme::palette(ui);
     let width = FETCH_STATUS_W + FETCH_GAP + FETCH_BTN_W;
@@ -789,7 +734,6 @@ fn fetch_controls(ui: &mut egui::Ui, role: ModelRole, line: &str, state: &FetchS
     if clicked { kind } else { FetchClick::None }
 }
 
-/// One line for the status cell.
 pub fn fetch_line(state: &FetchState, deleting: bool) -> String {
     if deleting {
         return t!("agent.deleting").into();
@@ -857,7 +801,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
 
     header(ui, &t!("agent.models_title"), "");
     models_folder(app, ui);
-    // Why nothing can be checked or downloaded, in model terms (the engine is this program).
     app.agent.engine_state.offline_hint(ui);
     ui.add_space(6.0);
     let mut changed = false;
@@ -868,7 +811,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         theme::card(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                // What the role does: on hover over its title.
                 ui.scope(|ui| theme::section(ui, role_icon(role), &role_title(role))).response.on_hover_text(role_hint(role));
                 if role.required() {
                     ui.label(RichText::new(t!("agent.required")).size(11.5).color(theme::palette(ui).accent));
@@ -876,7 +818,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             });
             ui.add_enabled_ui(!running, |ui| {
                 changed |= source_editor(app, ui, role);
-                // Local models: where they run (the runtime falls back to the CPU).
                 if matches!(app.settings.agent.models.get(role), Some(ModelSource::HuggingFace { .. } | ModelSource::Local { .. })) {
                     theme::row(ui, &t!("agent.device"), |ui| {
                         let opts = [
@@ -897,7 +838,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                         });
                     }
                 }
-                // Reasoning before acting: only for models that have the mode.
                 if role == ModelRole::Agent {
                     if let Some(model) = app.settings.agent.models.agent.clone().filter(ModelSource::supports_thinking) {
                         let mut on = app.settings.agent.thinking_on(&model);
@@ -921,8 +861,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 let downloaded = is_downloaded(&repo, downloaded.iter().map(String::as_str));
                 repository_rows(app, ui, RoleRow { role, repo: &repo, downloaded, online }, &engine);
             }
-            // The check's answer; a download of this role hides it (the download is what the
-            // role is doing then).
             let busy = app.agent.models.downloading(role).is_some() || app.agent.models.deleting(role);
             if !busy {
                 if let Some(s) = app.agent.models.statuses.get(&role) {
@@ -933,7 +871,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(6.0);
     }
     if changed {
-        // Results of an earlier check no longer apply to the changed choices.
         app.agent.models.statuses.clear();
         app.agent.models.fetches.clear();
         app.settings_changed();
@@ -1018,7 +955,6 @@ mod tests {
         assert!(!inspect.pending("owner/repo"));
         assert!(inspect.answer("owner/repo").is_some_and(Result::is_ok));
 
-        // Another repository: the old answer is dropped and the debounce starts over.
         inspect.tick("owner/other", t0 + Duration::from_secs(3), true, |spec| channel_for(spec, &mut requests));
         assert!(inspect.answer("owner/other").is_none());
         inspect.tick("owner/other", t0 + Duration::from_millis(3500), true, |spec| channel_for(spec, &mut requests));
@@ -1054,7 +990,6 @@ mod tests {
         let moving = fetch_next(started.clone(), FetchInput::Progress(10, 100));
         assert_eq!(moving.state, FetchState::Fetching { done: 10, total: 100 });
 
-        // The pull finished in the same moment, before the line has been readable.
         let held = fetch_next(started.clone(), FetchInput::Thread(Ok(())));
         assert!(matches!(held.state, FetchState::Fetching { .. }), "the result waits");
         assert!(held.held.is_some());
@@ -1073,7 +1008,6 @@ mod tests {
         assert_eq!(fetch_next(Fetch::default(), press(true, true)).state, FetchState::Already);
         assert_eq!(fetch_next(Fetch::default(), press(false, false)).state, FetchState::Failed("engine down".into()));
         assert_eq!(fetch_next(Fetch::default(), FetchInput::Listed).state, FetchState::Already);
-        // A message the user already sees is not wiped by the engine's list.
         let failed = Fetch { state: FetchState::Failed("x".into()), ..Fetch::default() };
         assert_eq!(fetch_next(failed, FetchInput::Listed).state, FetchState::Failed("x".into()));
     }

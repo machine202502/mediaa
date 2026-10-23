@@ -1,40 +1,24 @@
-//! Retrieval over a transcript: the dialog cut into chunks along speaker turns (~200 words, a
-//! sliding overlap for long turns), stored with their embeddings and a keyword index (SQLite
-//! FTS5 over Snowball stems, Russian and English), and a hybrid search: keyword and embedding
-//! rankings merged by reciprocal rank fusion, then thinned so the hits are not all from the same
-//! minute.
-
 use crate::transcript::{Reply, Transcript};
 use rusqlite::params;
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Words in a chunk (a little more to end at a reply or a sentence).
 pub const CHUNK_WORDS: usize = 200;
-/// Words a chunk shares with the one before when a long turn is split.
 pub const OVERLAP_WORDS: usize = 40;
-/// Chunks shorter than this are joined with the next turn.
 const MIN_WORDS: usize = 120;
-/// Reciprocal rank fusion constant.
 const RRF_K: f32 = 60.0;
-/// Hits closer than this (seconds) to a better one are dropped (diversity).
 const SAME_PLACE: f64 = 30.0;
 
-/// A searchable piece of the dialog.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Chunk {
     pub start: f64,
     pub end: f64,
-    /// Speakers in it, in order of first appearance.
     pub speakers: Vec<u32>,
     pub text: String,
 }
 
-/// Cuts the dialog into chunks: whole replies while they fit, a long reply with an overlap;
-/// a chunk ends at a reply end or a sentence end when one is near.
 pub fn chunks(replies: &[Reply]) -> Vec<Chunk> {
-    // Every word with its speaker and whether a reply / a sentence ends after it.
     struct W<'a> {
         text: &'a str,
         start: f64,
@@ -57,7 +41,6 @@ pub fn chunks(replies: &[Reply]) -> Vec<Chunk> {
         let to = if limit == words.len() {
             limit
         } else {
-            // The last reply end, else the last sentence end, past the minimum; else the limit.
             let min = from + MIN_WORDS;
             let last = |f: &dyn Fn(&W) -> bool| (min..limit).rev().find(|&i| f(&words[i])).map(|i| i + 1);
             last(&|w| w.reply_end).or_else(|| last(&sentence_end)).unwrap_or(limit)
@@ -78,14 +61,11 @@ pub fn chunks(replies: &[Reply]) -> Vec<Chunk> {
         if to == words.len() {
             break;
         }
-        // Continue after a reply end as is; inside a reply, with an overlap.
         from = if words[to - 1].reply_end { to } else { (to - OVERLAP_WORDS).max(from + 1) };
     }
     out
 }
 
-/// Keyword stems of `text`: lower case, Russian words by the Russian stemmer, others by the
-/// English one; punctuation dropped.
 pub fn stems(text: &str) -> Vec<String> {
     let ru = Stemmer::create(Algorithm::Russian);
     let en = Stemmer::create(Algorithm::English);
@@ -99,16 +79,13 @@ pub fn stems(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// A chunk found by a search, best first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
     pub id: i64,
     pub chunk: Chunk,
-    /// Fused score (higher is better).
     pub score: f32,
 }
 
-/// Reciprocal rank fusion of rankings (ids best first): ids with their fused scores, best first.
 pub fn fuse(rankings: &[Vec<i64>]) -> Vec<(i64, f32)> {
     let mut score: HashMap<i64, f32> = HashMap::new();
     for ranking in rankings {
@@ -121,7 +98,6 @@ pub fn fuse(rankings: &[Vec<i64>]) -> Vec<(i64, f32)> {
     out
 }
 
-/// Drops hits that start within [`SAME_PLACE`] seconds of a better one.
 pub fn diverse(hits: Vec<Hit>, limit: usize) -> Vec<Hit> {
     let mut out: Vec<Hit> = Vec::new();
     for h in hits {
@@ -144,7 +120,6 @@ fn floats(b: &[u8]) -> Vec<f32> {
 }
 
 impl Transcript {
-    /// Replaces the chunks (and their keyword index); embeddings are added later.
     pub fn set_chunks(&mut self, chunks: &[Chunk]) -> anyhow::Result<()> {
         let tx = self.db.transaction()?;
         tx.execute_batch("DELETE FROM chunks; DELETE FROM chunks_fts;")?;
@@ -160,7 +135,6 @@ impl Transcript {
         Ok(())
     }
 
-    /// Chunks in order with their ids and whether they have an embedding.
     pub fn chunks(&self) -> anyhow::Result<Vec<(i64, Chunk, bool)>> {
         let mut q = self.db.prepare("SELECT id, start, end_, speakers, text, embedding IS NOT NULL FROM chunks ORDER BY id")?;
         let rows = q.query_map([], |r| {
@@ -170,7 +144,6 @@ impl Transcript {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Chunks in order with their embeddings (`None` until embedded).
     pub fn chunks_with_embeddings(&self) -> anyhow::Result<Vec<(Chunk, Option<Vec<f32>>)>> {
         let mut q = self.db.prepare("SELECT start, end_, speakers, text, embedding FROM chunks ORDER BY id")?;
         let rows = q.query_map([], |r| {
@@ -187,7 +160,6 @@ impl Transcript {
         Ok(())
     }
 
-    /// Chunk ids by keyword relevance (BM25 over stems; any of the words), best first.
     pub fn keyword_search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<i64>> {
         let terms: Vec<String> = stems(query).into_iter().map(|s| format!("\"{s}\"*")).collect();
         if terms.is_empty() {
@@ -198,7 +170,6 @@ impl Transcript {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Chunk ids by embedding similarity to `query` (normalised vectors), best first.
     pub fn vector_search(&self, query: &[f32], limit: usize) -> anyhow::Result<Vec<i64>> {
         let mut q = self.db.prepare("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL")?;
         let mut scored: Vec<(i64, f32)> = q
@@ -210,12 +181,10 @@ impl Transcript {
         Ok(scored.into_iter().take(limit).map(|(id, _)| id).collect())
     }
 
-    /// Hybrid search: keywords and (when given) the query's embedding, fused, varied.
     pub fn search(&self, query: &str, embedding: Option<&[f32]>, limit: usize) -> anyhow::Result<Vec<Hit>> {
         Ok(diverse(self.candidates(query, embedding, limit * 4)?, limit))
     }
 
-    /// Up to `n` hybrid-search candidates (fused, best first) for a reranker to re-order.
     pub fn candidates(&self, query: &str, embedding: Option<&[f32]>, n: usize) -> anyhow::Result<Vec<Hit>> {
         let mut rankings = vec![self.keyword_search(query, n)?];
         if let Some(e) = embedding {
@@ -242,7 +211,6 @@ mod tests {
 
     #[test]
     fn chunks_follow_turns_and_overlap_long_ones() {
-        // Short turns are joined; a chunk ends at a reply end past the minimum.
         let short: Vec<Reply> = (0..10).map(|i| reply(i % 2, i as f64 * 20.0, &many(30, 10))).collect();
         let c = chunks(&short);
         assert!(c.len() >= 2);
@@ -250,7 +218,6 @@ mod tests {
         assert_eq!(c[0].text.split(' ').count() % 30, 0, "whole replies");
         assert_eq!(c[0].speakers, vec![0, 1]);
         assert_eq!(c.iter().map(|c| c.text.split(' ').count()).sum::<usize>(), 300, "no overlap between whole replies");
-        // One long monologue: windows with an overlap, cut at sentence ends.
         let long = vec![reply(3, 0.0, &many(500, 25))];
         let c = chunks(&long);
         assert!(c.len() >= 3);
@@ -293,23 +260,19 @@ mod tests {
         assert_eq!(stored.len(), 3);
         assert!(stored.iter().all(|(_, _, embedded)| !embedded));
         assert!(t.chunks_with_embeddings().unwrap().iter().all(|(_, e)| e.is_none()));
-        // Keywords find word forms.
         let found = t.keyword_search("отчетов", 10).unwrap();
         assert_eq!(found.len(), 2);
         assert!(t.keyword_search("!!!", 10).unwrap().is_empty());
-        // Vectors: the dacha chunk points along y, the others along x.
         for (id, c, _) in &stored {
             let v = if c.text.contains("даче") { [0.0, 1.0] } else { [1.0, 0.0] };
             t.set_embedding(*id, &v).unwrap();
         }
         assert_eq!(t.vector_search(&[0.0, 1.0], 1).unwrap(), vec![stored[1].0]);
         assert_eq!(t.chunks_with_embeddings().unwrap().iter().map(|(_, e)| e.clone().unwrap()).collect::<Vec<_>>(), [vec![1.0, 0.0], vec![0.0, 1.0], vec![1.0, 0.0]]);
-        // Hybrid: a keyword miss is still found by meaning.
         let hits = t.search("загородный дом", Some(&[0.0, 1.0]), 3).unwrap();
         assert_eq!(hits[0].chunk.text, cs[1].text);
         let hits = t.search("отчёт", None, 3).unwrap();
         assert_eq!(hits.len(), 2);
-        // Re-chunking replaces everything.
         t.set_chunks(&cs[..1]).unwrap();
         assert_eq!(t.chunks().unwrap().len(), 1);
         assert_eq!(t.keyword_search("релиз", 5).unwrap(), Vec::<i64>::new());

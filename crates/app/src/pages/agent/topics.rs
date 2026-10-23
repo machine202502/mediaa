@@ -1,10 +1,3 @@
-//! Topics of a recording in the studio: the seek bar cut into topic segments (with a tooltip
-//! per segment and a tick at every part boundary), the pinned block above the dialog — folded
-//! to the current topic, unfolded to the whole list — and the breakdown of one topic, which
-//! stretches the block over the whole dialog pane. The place of a topic or a part in time, the
-//! bar and the order and numbering of the breakdown's lines are pure functions, tested without
-//! a window.
-
 use super::mentions::{self, Roster};
 use crate::player::Player;
 use crate::theme::Palette;
@@ -14,26 +7,16 @@ use mediaa_core::library::human_duration;
 use mediaa_core::outline::{Chapter, Part, Section, SectionKind};
 use rust_i18n::t;
 
-/// Gap between neighbouring topic segments of the seek bar.
 pub const SEGMENT_GAP: f32 = 2.0;
-/// Track height of the seek bar (the hit area around it stays 24 px).
 const TRACK: f32 = 6.0;
-/// Inset of the visible track from the seek bar's hit rect on each side; the same padding is
-/// used by every slider and icon of the transport row, so all gaps in that row are equal.
 pub const TRACK_INSET: f32 = 6.0;
-/// The largest radius of a slider's knob. The knob's centre keeps this distance from the ends
-/// of the track, so the thumb never sticks out into a gap: the visible body is always the track.
 pub const KNOB: f32 = 7.0;
-/// How far the unplayed part of a segment is mixed from `accent_soft` towards `accent`: the
-/// soft colour alone is almost the panel background in both themes.
 const UNPLAYED: f32 = 0.45;
 
-/// The current topic's block remembered across frames and restarts (like the studio layout).
 fn open_id() -> egui::Id {
     egui::Id::new("studio-topics-open")
 }
 
-/// A topic's place on the seek bar, in x pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Segment {
     pub chapter: usize,
@@ -41,8 +24,6 @@ pub struct Segment {
     pub x1: f32,
 }
 
-/// The topic that is current at `time`: the last one that began by then (the first one before
-/// the first topic starts, the last one after the last).
 pub fn current_topic(chapters: &[Chapter], time: f64) -> Option<usize> {
     if chapters.is_empty() {
         return None;
@@ -50,12 +31,6 @@ pub fn current_topic(chapters: &[Chapter], time: f64) -> Option<usize> {
     Some(chapters.partition_point(|c| c.start <= time).saturating_sub(1))
 }
 
-/// The x ranges of the topics on a track `width` wide starting at `left`, `duration` seconds
-/// long: every border between neighbours is inset by half of [`SEGMENT_GAP`], so the gap
-/// between two segments is exactly that (the clip keeps zero-length topics from inverting).
-/// The topics cover the whole recording, so the first segment starts at the bar's left edge and
-/// the last one runs to its right edge, even when the first topic starts later or the last one
-/// ends earlier; only the gaps between them stay unfilled.
 pub fn segments(left: f32, width: f32, duration: f64, chapters: &[Chapter]) -> Vec<Segment> {
     if duration <= 0.0 || width <= 0.0 || chapters.is_empty() {
         return Vec::new();
@@ -75,8 +50,6 @@ pub fn segments(left: f32, width: f32, duration: f64, chapters: &[Chapter]) -> V
         .collect()
 }
 
-/// The part of a topic that is at `time`: the last one that began by then, when `time` is
-/// inside the topic's parts at all (a normal topic has no parts).
 pub fn part_at(c: &Chapter, time: f64) -> Option<usize> {
     let parts = &c.digest.parts;
     let last = parts.last()?;
@@ -86,9 +59,6 @@ pub fn part_at(c: &Chapter, time: f64) -> Option<usize> {
     Some(parts.partition_point(|p| p.start <= time).saturating_sub(1))
 }
 
-/// The x of every boundary between neighbouring parts of a topic, on a track `width` wide
-/// starting at `left`, `duration` seconds long (an empty list for a topic without parts).
-/// The start of the first part is the topic's own border, so it gets no tick.
 pub fn part_ticks(left: f32, width: f32, duration: f64, parts: &[Part]) -> Vec<f32> {
     if duration <= 0.0 || width <= 0.0 || parts.len() < 2 {
         return Vec::new();
@@ -102,14 +72,11 @@ pub fn part_ticks(left: f32, width: f32, duration: f64, parts: &[Part]) -> Vec<f
         .collect()
 }
 
-/// `a` moved `t` of the way towards `b` (both opaque palette colours).
 fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let f = |x: u8, y: u8| (f32::from(x) + (f32::from(y) - f32::from(x)) * t).round() as u8;
     Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
 }
 
-/// The tooltip of a segment under the pointer: the topic's title; with `part` (the part under
-/// the pointer) «title — part title».
 pub fn tooltip(c: &Chapter, part: Option<&Part>) -> String {
     let part = part.map(|p| p.title.trim()).filter(|title| !title.is_empty());
     match part {
@@ -118,15 +85,11 @@ pub fn tooltip(c: &Chapter, part: Option<&Part>) -> String {
     }
 }
 
-/// The left x of a tooltip `width` wide centred on the pointer at `pointer_x`, kept inside
-/// `content` (the window): at the edges it slides in instead of running out of the window.
 pub fn tooltip_x(pointer_x: f32, width: f32, content: Rect) -> f32 {
     let max_left = (content.right() - width).max(content.left());
     (pointer_x - width / 2.0).clamp(content.left(), max_left)
 }
 
-/// The line under the seek bar: the title of the topic at `time` («title — part» inside a
-/// part), empty when the recording has no topics.
 pub fn current_label(chapters: &[Chapter], time: f64) -> String {
     let Some(i) = current_topic(chapters, time) else { return String::new() };
     let c = &chapters[i];
@@ -137,9 +100,6 @@ pub fn current_label(chapters: &[Chapter], time: f64) -> String {
     }
 }
 
-/// The delayed tooltip of a topic in the block: what is said in it — the summary, then the
-/// titles of its parts (a long topic merged from pieces); the title itself when there is
-/// nothing else.
 pub fn hover_text(c: &Chapter) -> String {
     let mut out = c.digest.summary.trim().to_string();
     let titles: Vec<&str> = c.digest.parts.iter().map(|p| p.title.trim()).filter(|t| !t.is_empty()).collect();
@@ -155,40 +115,23 @@ pub fn hover_text(c: &Chapter) -> String {
     out
 }
 
-/// The app's tooltips: the popup frame without a shadow (the interface's rule: no shadows on
-/// hints, they must not look like panels).
 pub fn tooltip_frame(style: &egui::Style) -> egui::Frame {
     egui::Frame::popup(style).shadow(egui::epaint::Shadow::NONE)
 }
 
-/// Height of the topics block's header row — the same folded and unfolded, and the height of
-/// the search card (`dialog.rs`).
 pub const HEADER_H: f32 = 28.0;
-/// Left x of the header's list icon.
 pub const HEADER_ICON_X: f32 = 12.0;
-/// Left x of the header's text.
 pub const HEADER_TEXT_X: f32 = 34.0;
-/// Right inset of the count «(3/7)» (folded only).
 pub const HEADER_COUNT_X: f32 = 30.0;
-/// Center of the caret from the right edge.
 pub const HEADER_CARET_X: f32 = 14.0;
-/// Room the count needs right of the text.
 const HEADER_TEXT_RIGHT: f32 = 74.0;
-/// Side of the caret's hit box.
 const CARET_HIT: f32 = 18.0;
 
-/// The positions inside the topics block's header row. Both the folded block and the unfolded
-/// one lay their header out with this, from the same full-width row rect, so opening or
-/// closing the block never moves the icon, the text or the caret.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Header {
-    /// The list icon, left-aligned and vertically centred.
     pub icon: egui::Pos2,
-    /// The text's rect (clipped at its right edge).
     pub text: Rect,
-    /// The count «(3/7)», right-aligned.
     pub count: egui::Pos2,
-    /// The caret's hit box.
     pub caret: Rect,
 }
 
@@ -202,28 +145,20 @@ pub fn header(rect: Rect) -> Header {
     }
 }
 
-/// The seek bar: the playable track with a segment per topic (`2 px` gaps, the segment under
-/// the pointer highlighted and its tooltip shown, a tick at every boundary between the parts
-/// of a topic), the played part and the knob as before. A recording without topics gets the
-/// plain bar. Returns the clicked or dragged fraction.
 #[allow(clippy::too_many_arguments)]
 pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapters: &[Chapter], id: &str, roster: &Roster, p: Palette) -> (egui::Response, Option<f32>) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width.max(40.0), 24.0), Sense::hover());
     let resp = ui.interact(rect, ui.id().with(id), Sense::click_and_drag());
     let track = Rect::from_center_size(rect.center(), egui::vec2(rect.width() - 2.0 * TRACK_INSET, TRACK));
-    // The knob's centre stops one radius short of each end: at the start and at the end of the
-    // recording the thumb stays inside the track and does not reach into the speaker's gap.
     let x = track.left() + KNOB + (track.width() - 2.0 * KNOB) * frac.clamp(0.0, 1.0);
     let segments = segments(track.left(), track.width(), duration, chapters);
     let hovered = resp.hover_pos().and_then(|pt| segments.iter().position(|s| (s.x0..=s.x1).contains(&pt.x)));
-    // The part under the pointer, to name it in the tooltip.
     let hovered_part = resp.hover_pos().zip(hovered).and_then(|(pt, i)| {
         let time = f64::from((pt.x - track.left()) / track.width()) * duration;
         part_at(&chapters[i], time).map(|p| &chapters[i].digest.parts[p])
     });
     {
         let painter = ui.painter();
-        // The base shows through the gaps, so they read as slots between the segments.
         painter.rect_filled(track, CornerRadius::same(3), p.border);
         for (i, seg) in segments.iter().enumerate() {
             let r = Rect::from_min_max(egui::pos2(seg.x0, track.min.y), egui::pos2(seg.x1, track.max.y));
@@ -231,14 +166,12 @@ pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapter
                 continue;
             }
             painter.rect_filled(r, CornerRadius::same(2), if hovered == Some(i) { p.accent } else { mix(p.accent_soft, p.accent, UNPLAYED) });
-            // The played part of every segment up to the knob.
             if hovered != Some(i) && x > seg.x0 {
                 let played = Rect::from_min_max(r.min, egui::pos2(x.min(seg.x1), r.max.y));
                 if played.width() > 0.5 {
                     painter.rect_filled(played, CornerRadius::same(2), p.accent);
                 }
             }
-            // A thin tick at every boundary between the parts of this topic.
             for at in part_ticks(track.left(), track.width(), duration, &chapters[i].digest.parts) {
                 if at <= seg.x0 || at >= seg.x1 {
                     continue;
@@ -256,8 +189,6 @@ pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapter
     if resp.hovered() || hovered.is_some() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    // The topic under the pointer, named above the bar and centred on the pointer (kept inside
-    // the window at its edges).
     if let (Some(i), Some(pt)) = (hovered, resp.hover_pos()) {
         let text = tooltip(&chapters[i], hovered_part);
         let font = FontId::proportional(12.0);
@@ -277,11 +208,6 @@ pub fn seek_bar(ui: &mut egui::Ui, width: f32, frac: f32, duration: f64, chapter
     (resp, value)
 }
 
-/// The pinned block above the dialog. Folded: one line «m:ss Title (3/7)» of the current topic
-/// (a click unfolds it). Unfolded: the topics in their own scroll at most `max_height` tall, the
-/// current one highlighted; a click on a topic returns the time to seek to (the dialog scrolls
-/// to the first reply from there), the caret on its right opens its breakdown (`reading`, see
-/// [`reading`]).
 #[allow(clippy::too_many_arguments)]
 pub fn block(ui: &mut egui::Ui, chapters: &[Chapter], position: f64, max_height: f32, reading: &mut Option<usize>, spin: bool, roster: &Roster, p: Palette) -> Option<f64> {
     if chapters.is_empty() {
@@ -300,7 +226,6 @@ pub fn block(ui: &mut egui::Ui, chapters: &[Chapter], position: f64, max_height:
     clicked
 }
 
-/// The folded line: the current topic; a click unfolds the block.
 fn folded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, p: Palette, open: &mut bool, spin: bool, roster: &Roster) -> Option<f64> {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER_H), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -321,18 +246,14 @@ fn folded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, p: Palette, o
     None
 }
 
-/// The unfolded block: a header that folds it and the list of topics in their own scroll.
-#[allow(clippy::too_many_arguments)] // the header's pieces, plus whether the list icon is a spinner
+#[allow(clippy::too_many_arguments, reason = "the header's pieces, plus whether the list icon is a spinner")]
 fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, max_height: f32, p: Palette, open: &mut bool, reading: &mut Option<usize>, spin: bool, roster: &Roster) -> Option<f64> {
     let mut clicked = None;
-    // The card is filled by a frameless frame and its border is painted over the final rect:
-    // a frame stroke would inset the header by a pixel and make it jump against the folded one.
     let card = egui::Frame::new()
         .fill(p.card)
         .corner_radius(CornerRadius::same(8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            // The same header row as the folded block, laid out from the same full-width rect.
             let (head, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER_H), Sense::click());
             let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
             if resp.clicked() {
@@ -344,11 +265,9 @@ fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, max_height:
             painter_at(ui, h.text).text(egui::pos2(h.text.left(), head.center().y), Align2::LEFT_CENTER, t!("studio.topics"), FontId::proportional(13.0), p.text);
             painter.text(h.caret.center(), Align2::CENTER_CENTER, icon::CARET_UP, FontId::proportional(12.0), p.text_weak);
             ui.add_space(2.0);
-            // Only the list keeps the card's inner padding.
             egui::Frame::new()
                 .inner_margin(Margin { left: 8, right: 8, top: 0, bottom: 6 })
                 .show(ui, |ui| {
-                    // The list keeps its own scroll; the whole block stays under ~40 % of the pane.
                     egui::ScrollArea::vertical()
                         .max_height((max_height - 38.0).max(48.0))
                         .auto_shrink([false, true])
@@ -369,14 +288,11 @@ fn expanded(ui: &mut egui::Ui, chapters: &[Chapter], current: usize, max_height:
     clicked
 }
 
-/// One topic in the unfolded list: a click on it returns its start (the time to seek to); the
-/// caret on its right opens the topic's breakdown. The current topic is highlighted.
 fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, reading: &mut Option<usize>, roster: &Roster, p: Palette) -> Option<f64> {
     let (rect, row) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());
     let row = row.on_hover_cursor(egui::CursorIcon::PointingHand);
     let caret = Rect::from_center_size(egui::pos2(rect.right() - 10.0, rect.center().y), egui::vec2(18.0, 18.0));
     let toggle = ui.interact(caret, ui.id().with(("topic-toggle", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-    // The row's delayed tooltip is the summary (the breakdown does not repeat it).
     hover_tip(&row, c, roster);
     let on_caret = row.interact_pointer_pos().is_some_and(|pt| caret.contains(pt));
     let mut clicked = None;
@@ -404,19 +320,11 @@ fn topic_row(ui: &mut egui::Ui, i: usize, c: &Chapter, current: bool, reading: &
     clicked
 }
 
-// ---------------------------------------------------------------- the breakdown of a topic
-
-/// Distance between the centres of the header's small buttons in the breakdown.
 const READING_STEP: f32 = 22.0;
-/// Width of the marker column («1.», «•») and of the time column in the breakdown.
 const MARKER_W: f32 = 22.0;
 const TIME_COL: f32 = 46.0;
-/// Height of one text line of an item (the time button is as tall).
 const ITEM_LINE: f32 = 18.0;
 
-/// The header row of the breakdown. The icon, the text and the collapse button are exactly
-/// those of [`header`] (the collapse sits where the block's caret is), so opening a topic
-/// moves nothing in the header; «‹ ›» take the room [`header`] keeps for the count.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReadingHeader {
     pub icon: egui::Pos2,
@@ -437,8 +345,6 @@ pub fn reading_header(rect: Rect) -> ReadingHeader {
     }
 }
 
-/// One line of a section: the marker («1.», «•», nothing for prose), the time of the place in
-/// the recording and the text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Line {
     pub marker: String,
@@ -446,8 +352,6 @@ pub struct Line {
     pub text: String,
 }
 
-/// The lines of a section in the order shown: steps numbered, a list with bullets, prose bare.
-/// Items with no text are skipped (and not counted).
 pub fn section_lines(section: &Section) -> Vec<Line> {
     let mut n = 0;
     section
@@ -466,12 +370,6 @@ pub fn section_lines(section: &Section) -> Vec<Line> {
         .collect()
 }
 
-/// The breakdown of topic `*current`: the topics block stretched over the whole `rect` (the
-/// dialog's replies are out of view). A pinned header — time, title, «‹ ›» to the neighbour
-/// topics, collapse (also Esc) — and below it the scrolling breakdown: the sections, the parts
-/// of a long topic and the quotes. A time is a small link that seeks `player` and leaves the
-/// breakdown open. A topic with no breakdown yet shows «Разбор готовится…» (while `building`)
-/// and its summary; the topic is then returned, so the caller can ask the queue to hurry it.
 #[allow(clippy::too_many_arguments)]
 pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usize>, player: &mut Player, building: bool, spin: bool, roster: &Roster, p: Palette) -> Option<usize> {
     let i = (*current)?.min(chapters.len().checked_sub(1)?);
@@ -479,7 +377,6 @@ pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usi
     let esc = !ui.ctx().egui_wants_keyboard_input() && ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     let (card, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
     ui.painter().rect_filled(card, CornerRadius::same(8), p.card);
-    // The pinned header: the same row as the block's.
     let head = Rect::from_min_size(card.min, egui::vec2(card.width(), HEADER_H));
     let h = reading_header(head);
     let painter = painter_at(ui, head);
@@ -510,7 +407,6 @@ pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usi
         }
     }
     ui.painter().hline(card.x_range(), head.bottom(), Stroke::new(1.0, p.border));
-    // The scrolling breakdown below; every topic has its own scroll position (the top, when opened).
     let body = Rect::from_min_max(egui::pos2(card.left() + 12.0, head.bottom() + 6.0), egui::pos2(card.right() - 12.0, card.bottom() - 8.0));
     let mut pending = None;
     ui.scope_builder(egui::UiBuilder::new().max_rect(body), |ui| {
@@ -572,7 +468,6 @@ pub fn reading(ui: &mut egui::Ui, chapters: &[Chapter], current: &mut Option<usi
     pending
 }
 
-/// The list icon, or a spinner of the same size while topics or the breakdown are running.
 fn header_icon(ui: &egui::Ui, at: egui::Pos2, spin: bool, p: Palette) {
     if spin {
         egui::Spinner::new().size(14.0).color(p.accent).paint_at(ui, Rect::from_center_size(at + egui::vec2(7.0, 0.0), egui::vec2(14.0, 14.0)));
@@ -581,8 +476,6 @@ fn header_icon(ui: &egui::Ui, at: egui::Pos2, spin: bool, p: Palette) {
     }
 }
 
-/// One line of the breakdown: marker, then a time link only when the item has a time (no empty
-/// column), then the wrapped text.
 fn item_row(ui: &mut egui::Ui, line: &Line, italic: bool, player: &mut Player, roster: &Roster, p: Palette) {
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
@@ -609,7 +502,6 @@ fn item_row(ui: &mut egui::Ui, line: &Line, italic: bool, player: &mut Player, r
     ui.add_space(3.0);
 }
 
-/// A shadowless tooltip with plain text (the interface's hints have no shadow).
 pub fn text_tip(resp: &egui::Response, text: &str, roster: &Roster) {
     let mut tip = egui::Tooltip::for_enabled(resp);
     tip.popup = tip.popup.width(360.0).frame(tooltip_frame(resp.ctx.global_style().as_ref()));
@@ -620,8 +512,6 @@ pub fn text_tip(resp: &egui::Response, text: &str, roster: &Roster) {
     });
 }
 
-/// The delayed hover tooltip of a topic in the block: what is said in it, wrapped to about
-/// 360 px in the same shadowless frame as the one above the seek bar.
 fn hover_tip(resp: &egui::Response, c: &Chapter, roster: &Roster) {
     let mut tip = egui::Tooltip::for_enabled(resp);
     tip.popup = tip.popup.width(360.0).frame(tooltip_frame(resp.ctx.global_style().as_ref()));
@@ -632,15 +522,12 @@ fn hover_tip(resp: &egui::Response, c: &Chapter, roster: &Roster) {
     });
 }
 
-/// A painter clipped to `rect` (long texts are cut instead of running over the neighbours).
 fn painter_at(ui: &egui::Ui, rect: Rect) -> egui::Painter {
     let mut painter = ui.painter_at(rect);
     painter.set_clip_rect(rect.intersect(ui.clip_rect()));
     painter
 }
 
-/// One line of `text`, cut at `width` with egui's ellipsis: a title too long for its row ends
-/// with «…» instead of being clipped mid-letter.
 fn elided(ui: &egui::Ui, text: &str, width: f32, font: FontId, color: Color32, roster: &Roster, p: Palette) -> std::sync::Arc<egui::Galley> {
     mentions::galley(ui, text, roster, font, color, width, true, false, p)
 }
@@ -656,8 +543,6 @@ mod tests {
 
     #[test]
     fn the_block_header_keeps_its_geometry_in_both_states() {
-        // Both the folded block and the unfolded one lay the header out from a full-width row
-        // of `HEADER_H` at the block's top-left; here is what that gives.
         let rect = Rect::from_min_size(egui::pos2(100.0, 200.0), egui::vec2(400.0, HEADER_H));
         let h = header(rect);
         assert_eq!(h.icon, egui::pos2(112.0, 214.0), "the list icon");
@@ -666,7 +551,6 @@ mod tests {
         assert_eq!(h.count, egui::pos2(470.0, 214.0), "the count, folded only");
         assert_eq!(h.caret.center(), egui::pos2(486.0, 214.0), "the caret, same place");
         assert_eq!((h.icon.y, h.text.center().y, h.caret.center().y), (214.0, 214.0, 214.0), "one centre line");
-        // A too narrow block does not invert the text rect.
         let h = header(Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(80.0, HEADER_H)));
         assert!(h.text.right() >= h.text.left());
     }
@@ -698,8 +582,6 @@ mod tests {
 
     #[test]
     fn segments_cover_the_whole_bar() {
-        // The first reply starts at 5 s and the last topic ends at 95 s: no empty tail at either
-        // end, only the 2 px gap between the two topics.
         let chapters = [chapter(5.0, 50.0), chapter(50.0, 95.0)];
         let s = segments(10.0, 100.0, 100.0, &chapters);
         assert_eq!((s[0].x0, s[0].x1), (10.0, 59.0), "from the bar's left edge to the border");
@@ -792,7 +674,6 @@ mod tests {
 
     #[test]
     fn part_ticks_stand_on_the_boundaries() {
-        // 30/70 of a 100 s recording on a 100 px track starting at 10.
         assert_eq!(part_ticks(10.0, 100.0, 100.0, &parts()), vec![40.0, 80.0]);
         assert!(part_ticks(10.0, 100.0, 100.0, &parts()[..1]).is_empty(), "one part has no boundary");
         assert!(part_ticks(10.0, 100.0, 100.0, &[]).is_empty());
@@ -816,8 +697,6 @@ mod tests {
 
     #[test]
     fn the_unplayed_colour_is_stronger_than_the_soft_one() {
-        // The soft colour is nearly the panel background; the mix must stay clearly apart from
-        // it, from the played accent and from the gap base, in both themes.
         for palette in [crate::theme::LIGHT, crate::theme::DARK] {
             let unplayed = mix(palette.accent_soft, palette.accent, UNPLAYED);
             let distance = |a: Color32, b: Color32| {
@@ -833,15 +712,12 @@ mod tests {
 
     #[test]
     fn the_breakdown_header_keeps_the_blocks_header_geometry() {
-        // Collapsed, unfolded and reading all lay their header out from a full-width row of
-        // `HEADER_H` at the block's top-left; the breakdown adds only «‹ ›» in the count's room.
         let rect = Rect::from_min_size(egui::pos2(100.0, 200.0), egui::vec2(400.0, HEADER_H));
         let (h, r) = (header(rect), reading_header(rect));
         assert_eq!((r.icon, r.text), (h.icon, h.text), "the icon and the text do not move");
         assert_eq!(r.collapse, h.caret, "the collapse button is where the caret is");
         assert_eq!(r.next.center().y, h.caret.center().y);
         assert_eq!(r.prev.center().y, h.caret.center().y);
-        // The buttons are one step apart, in order, and clear of the text.
         assert!((r.collapse.center().x - r.next.center().x - READING_STEP).abs() < 1e-6);
         assert!((r.next.center().x - r.prev.center().x - READING_STEP).abs() < 1e-6);
         assert!(r.prev.left() >= r.text.right(), "{r:?}");

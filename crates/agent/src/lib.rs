@@ -1,6 +1,3 @@
-//! Agent section back end: the chat loop, tools, indexing, transcription and provider checks.
-//! Models run in the engine ([`mediaa_engine::Engine`]), in the app's process.
-
 pub mod assistant;
 pub mod check;
 pub mod diarize;

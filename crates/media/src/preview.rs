@@ -1,6 +1,3 @@
-//! Library tiles: media details for any file kind and the downscaled frames of the hover
-//! preview (decoded with FFmpeg, animated WebP with `image-webp`).
-
 use crate::info::{probe, MediaInfo};
 use ez_ffmpeg::frame_export::{FrameExtractor, PixelLayout, Sampling};
 use ez_ffmpeg::{FfmpegContext, Input, Output};
@@ -11,7 +8,6 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// Dimensions, duration and audio of any library file (images: dimensions only).
 pub fn details(path: &Path, kind: MediaKind) -> anyhow::Result<MediaInfo> {
     if kind == MediaKind::Image {
         let (width, height) = image::image_dimensions(path)?;
@@ -20,15 +16,12 @@ pub fn details(path: &Path, kind: MediaKind) -> anyhow::Result<MediaInfo> {
     probe(path)
 }
 
-/// One preview frame and its time from the start of the clip, in seconds.
 #[derive(Debug)]
 pub struct PreviewFrame {
     pub at: f64,
     pub frame: Frame,
 }
 
-/// Time between preview frames: up to `max_fps`, sparser for long clips so that at most
-/// `max_frames` cover the whole duration.
 pub fn preview_interval(duration: Option<f64>, max_fps: f64, max_frames: u32) -> f64 {
     let dense = 1.0 / max_fps.max(1.0);
     match duration {
@@ -37,9 +30,6 @@ pub fn preview_interval(duration: Option<f64>, max_fps: f64, max_frames: u32) ->
     }
 }
 
-/// Streams the preview frames of a video or animation from `start` seconds on, `width` pixels
-/// wide at most, one every `interval` seconds; `at` is the time in the whole clip. Stops when
-/// `cancel` is set or `on_frame` returns `false`.
 pub fn preview_frames(
     path: &Path,
     width: u32,
@@ -75,8 +65,6 @@ pub fn preview_frames(
     Ok(())
 }
 
-/// Animated WebP (FFmpeg decodes still WebP only): frames are decoded from the beginning (no
-/// seeking), one per `interval` from `start` on is kept.
 fn webp_frames(
     path: &Path,
     width: u32,
@@ -112,10 +100,6 @@ fn webp_frames(
     Ok(())
 }
 
-
-/// A decoded WebP frame (RGBA or RGB, `w`×`h`) scaled to `tw`×`th` RGBA, read in place.
-/// `imageops::thumbnail` (integer area averaging) is several times faster than a filtered
-/// resize and made for shrinking; same-size frames are only converted.
 fn scale_webp_frame(buf: &[u8], w: u32, h: u32, alpha: bool, tw: u32, th: u32) -> Option<Frame> {
     use image::{ImageBuffer, Rgb, Rgba};
     let rgba = if alpha {
@@ -129,7 +113,6 @@ fn scale_webp_frame(buf: &[u8], w: u32, h: u32, alpha: bool, tw: u32, th: u32) -
     Some(Frame::from_image(rgba))
 }
 
-/// `atempo` chain for `speed` (one `atempo` covers 0.5–2.0 well; slower speeds chain two).
 pub fn atempo_chain(speed: f64) -> String {
     let speed = speed.clamp(0.25, 4.0);
     if speed < 0.5 {
@@ -141,9 +124,6 @@ pub fn atempo_chain(speed: f64) -> String {
     }
 }
 
-/// Decodes the sound of `path` from `start` seconds, played at `speed` (pitch kept), into
-/// interleaved stereo `f32` at `rate` Hz, handed to `sink` in chunks. `sink` may block to apply
-/// back-pressure; returning `false` (or setting `cancel`) stops decoding.
 pub fn decode_audio(
     path: &Path,
     start: f64,
@@ -156,13 +136,10 @@ pub fn decode_audio(
     decode_pcm(path, start, &graph, cancel, sink)
 }
 
-/// Decodes the sound of `path` from `start` seconds as mono `f32` at `rate` Hz (all channels
-/// mixed), for speech models; like [`decode_audio`] otherwise.
 pub fn decode_mono(path: &Path, start: f64, rate: u32, cancel: Arc<AtomicBool>, sink: impl FnMut(&[f32]) -> bool + Send + 'static) -> anyhow::Result<()> {
     decode_pcm(path, start, &format!("[0:a]aresample={rate},aformat=sample_fmts=flt:channel_layouts=mono[a]"), cancel, sink)
 }
 
-/// Runs `graph` (`[0:a]` in, `[a]` out as `f32`) over the sound of `path` from `start` seconds.
 fn decode_pcm(path: &Path, start: f64, graph: &str, cancel: Arc<AtomicBool>, mut sink: impl FnMut(&[f32]) -> bool + Send + 'static) -> anyhow::Result<()> {
     let mut input = Input::from(path.to_string_lossy().into_owned());
     if start > 0.0 {
@@ -171,10 +148,6 @@ fn decode_pcm(path: &Path, start: f64, graph: &str, cancel: Arc<AtomicBool>, mut
     let mut rest: Vec<u8> = Vec::new();
     let c = cancel.clone();
     let output = Output::new_by_write_callback(move |bytes: &[u8]| {
-        // Playback stopped (seek, speed change, another recording): drop the bytes and tell
-        // FFmpeg the write succeeded. Returning an error here would abort the muxer mid-write,
-        // which ez_ffmpeg logs as "Error muxing a packet"/"Error writing trailer"; the waiting
-        // thread aborts the job cleanly instead.
         if c.load(Ordering::Relaxed) {
             return bytes.len() as i32;
         }
@@ -193,18 +166,16 @@ fn decode_pcm(path: &Path, start: f64, graph: &str, cancel: Arc<AtomicBool>, mut
     let mut job = Some(FfmpegContext::builder().input(input).filter_desc(graph).output(output).build()?.start()?);
     loop {
         if cancel.load(Ordering::Relaxed) {
-            // Hard abort: the muxer exits without a trailer and nothing is logged as an error.
             if let Some(job) = job.take() {
                 job.abort();
             }
-            return Ok(()); // stopped on purpose
+            return Ok(());
         }
         if job.as_ref().is_some_and(|job| job.is_ended()) {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    // Ended on its own: collect the result (a real failure is returned, not hidden).
     let job = job.take().expect("the job ends only after `job` is taken");
     job.wait().map_err(Into::into)
 }

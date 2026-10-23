@@ -1,7 +1,3 @@
-//! `ffmpeg-sys-next` links the FFmpeg libraries themselves when `FFMPEG_DIR` is set, but not
-//! their transitive dependencies (x264, libwebp, zlib, OS libraries). Those are listed in the
-//! `Libs.private` lines of FFmpeg's pkg-config files, so read them from there.
-
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 

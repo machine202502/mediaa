@@ -1,8 +1,3 @@
-//! Text embeddings and reranking through llama.cpp, on the GPU when there is one. Embedding
-//! models (EmbeddingGemma, Qwen3-Embedding, BGE-M3, e5…): queries and passages get the prompts
-//! their family was trained with; vectors are L2-normalised, so a dot product is the cosine.
-//! Rerankers (cross-encoders: BGE reranker, Qwen3-Reranker) score a query against a passage.
-
 use crate::llm::backend;
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -11,17 +6,14 @@ use llama_cpp_2::model::LlamaModel;
 use std::num::NonZeroU32;
 use std::path::Path;
 
-/// Longest text embedded at once (tokens); longer ones are cut.
 const MAX_TOKENS: u32 = 2048;
 
-/// What goes before a query and before a passage for a model family.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prompts {
     pub query: &'static str,
     pub passage: &'static str,
 }
 
-/// Prompts by the model's architecture (GGUF `general.architecture`) and name.
 pub fn prompts(architecture: &str, name: &str) -> Prompts {
     let name = name.to_ascii_lowercase();
     if architecture.contains("gemma") && name.contains("embedding") || architecture == "gemma-embedding" {
@@ -35,7 +27,6 @@ pub fn prompts(architecture: &str, name: &str) -> Prompts {
     }
 }
 
-/// `v` scaled to length 1 (unchanged when zero).
 pub fn normalized(mut v: Vec<f32>) -> Vec<f32> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
@@ -44,12 +35,10 @@ pub fn normalized(mut v: Vec<f32>) -> Vec<f32> {
     v
 }
 
-/// Dot product (cosine of normalised vectors).
 pub fn similarity(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-/// A loaded embedding model.
 pub struct Embedder {
     model: LlamaModel,
     prompts: Prompts,
@@ -78,7 +67,6 @@ impl Embedder {
         self.gpu
     }
 
-    /// Length of the vectors.
     pub fn dimensions(&self) -> usize {
         self.model.n_embd_out().max(0) as usize
     }
@@ -95,7 +83,6 @@ impl Embedder {
         let mut tokens = self.model.vocab().tokenize(text.as_bytes(), true, false);
         tokens.truncate(self.n_ctx as usize);
         anyhow::ensure!(!tokens.is_empty(), "nothing to embed");
-        // Non-causal models see the whole text in one micro-batch.
         let params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(self.n_ctx))
             .with_n_batch(self.n_ctx)
@@ -113,8 +100,6 @@ impl Embedder {
         log::debug!("embed: context created");
         let mut batch = LlamaBatch::new(tokens.len(), 1);
         batch.add_sequence(&tokens, 0, true)?;
-        // The decode is one long native call; a beat before and after it shows the watchdog
-        // that the call is alive (see `mediaa_core::pulse`).
         mediaa_core::pulse::beat();
         ctx.decode(&mut batch)?;
         mediaa_core::pulse::beat();
@@ -124,16 +109,12 @@ impl Embedder {
     }
 }
 
-/// How a query and a document go into a cross-encoder.
 #[derive(Debug, Clone, PartialEq)]
 enum RerankFormat {
-    /// The model's own `rerank` template with `{query}` and `{document}` (Qwen3-Reranker).
     Template(String),
-    /// `[BOS] query [EOS] [SEP] document [EOS]` (BERT / XLM-R rerankers such as BGE).
     Pair,
 }
 
-/// A loaded reranker (cross-encoder): scores how well a passage answers a query.
 pub struct Reranker {
     model: LlamaModel,
     format: RerankFormat,
@@ -141,7 +122,6 @@ pub struct Reranker {
     gpu: bool,
 }
 
-/// The rerank prompt of a template.
 pub fn rerank_prompt(template: &str, query: &str, document: &str) -> String {
     template.replace("{query}", query).replace("{document}", document)
 }
@@ -163,7 +143,6 @@ impl Reranker {
         self.gpu
     }
 
-    /// Relevance of `document` to `query` (higher is better; not bounded).
     pub fn score(&self, query: &str, document: &str) -> anyhow::Result<f32> {
         let vocab = self.model.vocab();
         let mut tokens = match &self.format {
@@ -199,8 +178,6 @@ impl Reranker {
 mod tests {
     use super::*;
 
-    /// BGE reranker (~440 MB) from `MEDIAA_TEST_AI` or downloaded: the passage that answers
-    /// scores above one that only shares words with the question.
     #[test]
     #[ignore]
     fn reranker_prefers_the_answer() {
@@ -235,8 +212,6 @@ mod tests {
         assert!(similarity(&normalized(vec![1.0, 0.0]), &normalized(vec![0.0, 1.0])).abs() < 1e-6);
     }
 
-    /// EmbeddingGemma (~330 MB) from `MEDIAA_TEST_AI` or downloaded: a question is closer to the
-    /// passage that answers it than to an unrelated one, in Russian.
     #[test]
     #[ignore]
     fn related_texts_are_closer() {
@@ -257,16 +232,12 @@ mod tests {
         }
     }
 
-    /// The models folder for the live tests: `MEDIAA_TEST_AI`, else the app's `MEDIAA_TEST_MODELS`
-    /// (what `scripts/live-test.sh` sets), else a temporary folder it downloads into.
     fn live_models_root() -> std::path::PathBuf {
         std::env::var_os("MEDIAA_TEST_AI")
             .or_else(|| std::env::var_os("MEDIAA_TEST_MODELS"))
             .map_or_else(|| tempfile::tempdir().unwrap().keep(), std::path::PathBuf::from)
     }
 
-    /// Runs `f` on its own thread and fails (instead of hanging the test run) when it does not
-    /// return in `seconds`. A stuck native call keeps its thread, but the test itself ends.
     fn within<R: Send + 'static>(seconds: u64, what: &str, f: impl FnOnce() -> R + Send + 'static) -> R {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -278,8 +249,6 @@ mod tests {
         }
     }
 
-    /// A chunk of a spoken dialog of a little over 1200 characters (the size the first live
-    /// index call embedded when it hung).
     const LONG_RUSSIAN_CHUNK: &str = "Дана: смотри, у нас на этой неделе получается довольно плотно по задачам, потому что \
 релиз сдвинулся, и теперь всё, что мы планировали на следующую неделю, надо успеть сделать до пятницы. \
 Олег: я понимаю, но у меня ещё висит отчёт по поездке, который я обещал закончить, и там надо переписать \
@@ -298,8 +267,6 @@ mod tests {
 Олег: да, я помню, подготовлю короткую демонстрацию на реальной записи, чтобы было видно, как находятся \
 цитаты и как показываются темы. Дана: отлично, тогда на этом и закончим.";
 
-    /// The live hang: the first embedding call of a long Russian chunk never returned on the GPU.
-    /// `scripts/live-test.sh <log> mediaa-engine a_long_russian_chunk_is_embedded_without_hanging`
     #[test]
     #[ignore]
     fn a_long_russian_chunk_is_embedded_without_hanging() {
@@ -311,8 +278,6 @@ mod tests {
         let path = crate::runtime::gguf_path(&root, &source).unwrap();
         assert!(LONG_RUSSIAN_CHUNK.chars().count() > 1200, "{} chars", LONG_RUSSIAN_CHUNK.chars().count());
 
-        // The model alone first (CPU, then the GPU), then the same call through the runtime the
-        // app uses: whichever level hangs shows in the log.
         for gpu in [false, true] {
             let at = Instant::now();
             let path = path.clone();
@@ -339,8 +304,6 @@ mod tests {
             eprintln!("Runtime {device:?}: {dims} dims, {:.1} s", at.elapsed().as_secs_f32());
         }
 
-        // The index stage: one runtime, chunk after chunk, a lease per call. The keeper sweeps
-        // between them; if a sweep ever fails to return, the run hangs here instead of finishing.
         let at = Instant::now();
         let (root, source) = (root.clone(), source.clone());
         let chunks = within(180, "21 chunks through one runtime", move || {

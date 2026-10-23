@@ -1,9 +1,6 @@
-//! File formats produced and understood by MediaA.
-
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Still image formats for screenshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageFormat {
@@ -30,7 +27,6 @@ impl ImageFormat {
     }
 }
 
-/// Video containers for screen recordings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum VideoContainer {
@@ -56,7 +52,6 @@ impl VideoContainer {
         }
     }
 
-    /// FFmpeg muxer short name.
     pub fn muxer(self) -> &'static str {
         match self {
             VideoContainer::Mp4 => "mp4",
@@ -65,7 +60,6 @@ impl VideoContainer {
     }
 }
 
-/// Animated image formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AnimFormat {
@@ -92,7 +86,6 @@ impl AnimFormat {
     }
 }
 
-/// Popular sound formats: MP3 and M4A (AAC) everywhere, WAV and FLAC lossless, OGG (Opus).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioFormat {
@@ -127,19 +120,16 @@ impl AudioFormat {
         }
     }
 
-    /// Lossless formats have no bitrate to choose.
     pub fn lossless(self) -> bool {
         matches!(self, AudioFormat::Wav | AudioFormat::Flac)
     }
 }
 
-/// What a screen recording produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "format", rename_all = "lowercase")]
 pub enum OutputKind {
     Video(VideoContainer),
     Anim(AnimFormat),
-    /// Sound only (audio recording).
     Audio(AudioFormat),
 }
 
@@ -150,7 +140,6 @@ impl Default for OutputKind {
 }
 
 impl OutputKind {
-    /// Formats offered for screen recordings.
     pub const ALL: [OutputKind; 4] = [
         OutputKind::Video(VideoContainer::Mp4),
         OutputKind::Video(VideoContainer::Mkv),
@@ -174,13 +163,11 @@ impl OutputKind {
         }
     }
 
-    /// Video containers and audio files carry sound; animations do not.
     pub fn supports_audio(self) -> bool {
         matches!(self, OutputKind::Video(_) | OutputKind::Audio(_))
     }
 }
 
-/// Classification of files shown in the library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum MediaKind {
@@ -190,21 +177,16 @@ pub enum MediaKind {
     Audio,
 }
 
-/// Extensions of each media kind (`.webp` counts as an image until sniffed, see
-/// [`MediaKind::detect`]).
 pub const IMAGE_EXTENSIONS: [&str; 7] = ["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"];
 pub const ANIMATION_EXTENSIONS: [&str; 1] = ["gif"];
 pub const VIDEO_EXTENSIONS: [&str; 12] = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "wmv", "flv", "mpg", "mpeg", "ts", "3gp"];
 pub const AUDIO_EXTENSIONS: [&str; 8] = ["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "wma"];
 
-/// Every media extension (file dialogs).
 pub fn all_media_extensions() -> Vec<&'static str> {
     [&VIDEO_EXTENSIONS[..], &ANIMATION_EXTENSIONS, &IMAGE_EXTENSIONS, &AUDIO_EXTENSIONS].concat()
 }
 
 impl MediaKind {
-    /// Classifies by extension. `.webp` is ambiguous (still or animated); use
-    /// [`MediaKind::detect`] when the file contents are available.
     pub fn from_extension(ext: &str) -> Option<MediaKind> {
         let ext = ext.to_ascii_lowercase();
         [
@@ -224,7 +206,6 @@ impl MediaKind {
             .and_then(MediaKind::from_extension)
     }
 
-    /// Like [`MediaKind::from_path`] but sniffs WebP headers to tell animated from still images.
     pub fn detect(path: &Path) -> Option<MediaKind> {
         let kind = MediaKind::from_path(path)?;
         if is_webp_path(path) && webp_is_animated(path).unwrap_or(false) {
@@ -240,7 +221,6 @@ pub fn is_webp_path(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("webp"))
 }
 
-/// Reads the RIFF header of a WebP file and reports whether the animation flag is set.
 pub fn webp_is_animated(path: &Path) -> std::io::Result<bool> {
     use std::io::Read;
     let mut head = [0u8; 32];
@@ -249,7 +229,6 @@ pub fn webp_is_animated(path: &Path) -> std::io::Result<bool> {
     Ok(webp_header_is_animated(&head[..n]))
 }
 
-/// `RIFF....WEBPVP8X` with the animation bit (0x02) in the feature flags byte.
 pub fn webp_header_is_animated(head: &[u8]) -> bool {
     head.len() >= 21
         && &head[0..4] == b"RIFF"

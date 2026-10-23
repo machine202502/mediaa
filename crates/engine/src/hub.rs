@@ -1,7 +1,3 @@
-//! Hugging Face models, downloaded with `hf-hub` into the engine's models folder:
-//! `<models>/<owner>--<name>`. Only one weights format of a repository is fetched
-//! (repositories often carry the same weights as safetensors, PyTorch, ONNX, OpenVINO…).
-
 use hf_hub::progress::{DownloadEvent, Progress, ProgressEvent, ProgressHandler};
 use mediaa_core::agent::Provider;
 use hf_hub::repository::RepoTreeEntry;
@@ -9,11 +5,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Written into a model folder once its download is complete.
 const COMPLETE: &str = ".mediaa-complete";
 
-/// A model reference: `owner/name` (the repository) or `owner/name/path/in/repo` (one file of it,
-/// e.g. one model of a repository that holds many).
 pub fn split_spec(spec: &str) -> (&str, Option<&str>) {
     let spec = spec.trim().trim_matches('/');
     match spec.match_indices('/').nth(1) {
@@ -22,7 +15,6 @@ pub fn split_spec(spec: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Folder of a Hugging Face model in a models folder (`repo` as in [`split_spec`]).
 pub fn model_dir(models_root: &Path, repo: &str) -> PathBuf {
     models_root.join(repo.trim().replace('/', "--"))
 }
@@ -31,18 +23,12 @@ pub fn is_downloaded(models_root: &Path, repo: &str) -> bool {
     model_dir(models_root, repo).join(COMPLETE).is_file()
 }
 
-/// The spec of a complete model folder (what its completion marker says), `None` when the
-/// folder is not a complete download.
 pub fn downloaded_repo(dir: &Path) -> Option<String> {
     std::fs::read_to_string(dir.join(COMPLETE)).ok().map(|spec| spec.trim().to_string()).filter(|spec| !spec.is_empty())
 }
 
-/// Quantisations of GGUF repositories in order of preference: a good size / quality balance
-/// first, then smaller or larger.
 const GGUF_QUANTS: [&str; 10] = ["Q4_K_M", "Q4_K_S", "Q5_K_M", "Q4_0", "IQ4_XS", "Q5_K_S", "Q6_K", "Q8_0", "Q3_K_M", "BF16"];
 
-/// The GGUF file of a repository to download (one quantisation; the first shard of a split
-/// model), `None` when it has no GGUF weights. Vision projectors (`mmproj`) are not models.
 pub fn pick_gguf(files: &[String]) -> Option<&str> {
     let models: Vec<&str> = files
         .iter()
@@ -56,17 +42,13 @@ pub fn pick_gguf(files: &[String]) -> Option<&str> {
         .or_else(|| models.first().copied())
 }
 
-/// What to download of a repository: `allow` (only these, when set) and `ignore` globs.
 #[derive(Debug, PartialEq)]
 pub struct Selection {
     pub allow: Option<Vec<String>>,
     pub ignore: Vec<String>,
 }
 
-/// One runnable weights format per repository: a single GGUF file (with all shards of a split
-/// one); otherwise safetensors without the other formats; repository extras never.
 pub fn select_files(files: &[String]) -> Selection {
-    // Evaluation results and sample recordings are not needed to run a model.
     let mut ignore = vec![".eval_results/*".to_string(), "test_wavs/*".to_string()];
     if let Some(gguf) = pick_gguf(files) {
         let allow = match gguf.find("-00001-of-") {
@@ -83,11 +65,8 @@ pub fn select_files(files: &[String]) -> Selection {
     Selection { allow: None, ignore }
 }
 
-/// Byte progress across the files of a snapshot download.
 struct Bytes {
     files: Mutex<HashMap<String, (u64, u64)>>,
-    /// The work this download is part of: the progress comes from the download's own threads,
-    /// so the pulse is carried along and reported here (see `mediaa_core::pulse`).
     pulse: Option<mediaa_core::pulse::Pulse>,
     on_progress: Box<dyn Fn(u64, u64) + Send + Sync>,
 }
@@ -113,10 +92,6 @@ impl ProgressHandler for Bytes {
     }
 }
 
-/// Downloads `repo` (`owner/name`) into `<models_root>/<owner>--<name>` unless already
-/// complete; `on_progress(done, total)` in bytes. `hf`: the Hugging Face provider whose token
-/// (gated / private models) and proxy are used; without one, `HF_TOKEN` from the environment
-/// if set, directly.
 pub fn download(
     models_root: &Path,
     repo: &str,
@@ -132,8 +107,6 @@ fn download_into(
     hf: Option<&Provider>,
     on_progress: impl Fn(u64, u64) + Send + Sync + 'static,
 ) -> anyhow::Result<PathBuf> {
-    // One download at a time: two of the same model (a check and a task) would write the same
-    // files; the second finds the model complete.
     static DOWNLOADS: Mutex<()> = Mutex::new(());
     let _one = DOWNLOADS.lock().unwrap_or_else(|e| e.into_inner());
     if dir.join(COMPLETE).is_file() {
@@ -153,7 +126,6 @@ fn download_into(
         None => http.no_proxy(),
     };
     builder = builder.client(http.build()?);
-    // Xet storage transfers use their own HTTP client, which follows the proxy environment.
     for var in ["HTTPS_PROXY", "HTTP_PROXY"] {
         match proxy {
             Some(url) => std::env::set_var(var, url),
@@ -195,21 +167,17 @@ mod tests {
         let list = |f: &[&str]| f.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let st = select_files(&list(&["config.json", "model.safetensors", "pytorch_model.bin", "onnx/model.onnx"]));
         assert!(st.allow.is_none() && st.ignore.contains(&"*.bin".to_string()) && st.ignore.contains(&"onnx/*".to_string()));
-        // An ONNX-only repository keeps its ONNX files.
         let onnx = select_files(&list(&["v2_ctc.onnx", "v2_vocab.txt"]));
         assert_eq!(onnx, Selection { allow: None, ignore: vec![".eval_results/*".into(), "test_wavs/*".into()] });
-        // GGUF: one quantisation, the preferred one; projectors are not models.
         let gguf = list(&["Qwen3.5-4B-Q8_0.gguf", "Qwen3.5-4B-Q4_K_M.gguf", "Qwen3.5-4B-UD-Q2_K_XL.gguf", "mmproj-F16.gguf", "README.md"]);
         assert_eq!(select_files(&gguf).allow, Some(vec!["Qwen3.5-4B-Q4_K_M.gguf".into()]));
         assert_eq!(pick_gguf(&list(&["mmproj-F16.gguf", "m-Q8_0.gguf"])), Some("m-Q8_0.gguf"));
         assert_eq!(pick_gguf(&list(&["mmproj-F16.gguf"])), None);
         assert_eq!(pick_gguf(&list(&["weird-name.gguf"])), Some("weird-name.gguf"), "any GGUF rather than none");
-        // A split model: all of its shards.
         let split = list(&["big-Q4_K_M-00001-of-00002.gguf", "big-Q4_K_M-00002-of-00002.gguf"]);
         assert_eq!(select_files(&split).allow, Some(vec!["big-Q4_K_M-*".into()]));
     }
 
-    /// Network: `cargo test -p mediaa-engine -- --ignored`.
     #[test]
     #[ignore]
     fn downloads_a_tiny_model() {

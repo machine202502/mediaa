@@ -1,6 +1,3 @@
-//! Statuses, the transition table, parent status (rule 13.7) and dependencies.
-//! Every store applies an [`Op`] to a [`World`] and writes the result back in one transaction.
-
 use crate::events::{Event, EventKind};
 use crate::{Error, Result, TaskId};
 use serde::{Deserialize, Serialize};
@@ -12,10 +9,8 @@ use std::time::Duration;
 pub enum Status {
     Queued,
     Running,
-    /// Stop was asked. The run has not returned, so the task cannot be taken again.
     Stopping,
     Paused,
-    /// A composite no child has started. Never claimed.
     Waiting,
     Done,
     Failed,
@@ -55,7 +50,6 @@ impl Status {
     }
 }
 
-/// Why a run was asked to stop. The stored status stays `stopping` until the run returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopIntent {
     Pause,
@@ -109,7 +103,6 @@ impl Resource {
     }
 }
 
-/// Who a task shares a turn with. A chat answer is one participant; a recording's analysis is one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Role {
     Chat(String),
@@ -141,7 +134,6 @@ impl Role {
     }
 }
 
-/// The round-robin key. Chats are per answer; analysis is per recording.
 pub fn participant(task: &Task) -> String {
     match &task.role {
         Role::Chat(k) => format!("c:{k}"),
@@ -150,7 +142,6 @@ pub fn participant(task: &Task) -> String {
     }
 }
 
-/// Status the rules use. A stopping run already counts as paused or cancelled.
 pub fn effective_status(task: &Task) -> Status {
     match (task.status, task.stop_intent) {
         (Status::Stopping, Some(StopIntent::Cancel)) => Status::Cancelled,
@@ -183,7 +174,6 @@ impl ChildState {
     }
 }
 
-/// Going, else paused, else waiting, else done when every child is done, else failed, else cancelled.
 pub fn composite_status(children: &[ChildState]) -> Option<Status> {
     if children.is_empty() {
         return None;
@@ -222,8 +212,6 @@ pub fn composite_error(children: &[ChildState], errors: &[Option<&str>]) -> Opti
     }
 }
 
-/// The note a cancelled composite shows: that of the first child cancelled because another task
-/// failed. A composite failed on its own carries the error, not a note.
 fn composite_note(children: &[ChildState], notes: &[Option<&Note>]) -> Option<Note> {
     if composite_status(children)? != Status::Cancelled {
         return None;
@@ -235,16 +223,11 @@ fn composite_note(children: &[ChildState], notes: &[Option<&Note>]) -> Option<No
         .and_then(|(_, note)| (*note).cloned())
 }
 
-/// Why a task waits or what interrupted it, kept as data: the app turns it into words in the
-/// user's language. The queue itself never writes a sentence.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Note {
-    /// A dependency of this task is paused.
     PausedBy { title: String },
-    /// This task was cancelled because that task failed.
     FailedBy { title: String },
-    /// A live run stopped answering: the task went back to the queue at its cursor.
     Hang { resource: Resource, idle_s: u64 },
 }
 
@@ -275,7 +258,6 @@ fn is_pause_note(note: Option<&Note>) -> bool {
     matches!(note, Some(Note::PausedBy { .. }))
 }
 
-/// Why a reaped run stopped (`Task::detail["hang"]`), kept until the task finishes.
 fn set_hang(task: &mut Task, note: Option<Note>) {
     let Some(note) = note else { return };
     if !task.detail.is_object() {
@@ -298,7 +280,6 @@ fn clear_hang(task: &mut Task) {
     }
 }
 
-/// The run is gone (it returned, or the process died). A failure note stays; a plain cancel does not.
 fn settle_stop(task: &mut Task, cancel: bool, now: i64) {
     let failure = task.note.clone().filter(|note| is_failure_note(Some(note)));
     task.status = if cancel {
@@ -364,7 +345,6 @@ pub struct Task {
     pub result: Option<Value>,
     pub progress: f32,
     pub error: Option<String>,
-    /// Why it waits or why it was cancelled. Separate from `error`, which is a real failure.
     pub note: Option<Note>,
     pub attempts: i64,
     pub created_ms: i64,
@@ -381,9 +361,7 @@ pub struct Task {
     pub memory: u64,
     pub model: Option<String>,
     pub role: Role,
-    /// Bumped when a run is invalidated (crash, stale heartbeat). Writes carry the run's gen.
     pub gen: i64,
-    /// The next claim continues the yielded chunk and does not count a new attempt.
     pub yield_cont: bool,
     pub heartbeat_ms: Option<i64>,
     pub stop_intent: Option<StopIntent>,
@@ -614,8 +592,6 @@ impl World {
         self.tasks.iter().any(|t| t.parent == Some(id))
     }
 
-    /// Children that are tasks of their own. An inline step of an answer does not count:
-    /// the answer stays one claimed run.
     pub fn has_owned_children(&self, id: TaskId) -> bool {
         self.tasks.iter().any(|t| t.parent == Some(id) && !t.inline)
     }
@@ -628,7 +604,6 @@ impl World {
     }
 }
 
-/// One store operation. The store loads a world, applies this, and writes it back.
 #[derive(Debug, Clone)]
 pub enum Op {
     Enqueue(NewTask),
@@ -683,8 +658,6 @@ pub enum Op {
     Reap {
         older_than_ms: i64,
     },
-    /// A live run showed no sign of life for too long: the task goes back to the queue at its
-    /// cursor, and `note` (when given) tells the user why in the task's details.
     ReapRun {
         id: TaskId,
         gen: i64,
@@ -737,8 +710,6 @@ impl Default for Outcome {
     }
 }
 
-/// Every change to an existing task stamps `updated_ms` with `now`; [`Op::Heartbeat`] stamps
-/// `heartbeat_ms` instead. The SQLite store relies on that to find the rows an operation changed.
 pub fn apply(mut world: World, op: Op, now: i64) -> Result<(World, Outcome)> {
     let before: HashMap<TaskId, Status> = world.tasks.iter().map(|t| (t.id, t.status)).collect();
     let mut out = Outcome::default();
@@ -791,7 +762,6 @@ pub fn apply(mut world: World, op: Op, now: i64) -> Result<(World, Outcome)> {
                 } else {
                     task.attempts += 1;
                 }
-                // A new gen so a runner from the previous claim cannot write into this one.
                 task.gen += 1;
                 task.status = Status::Running;
                 task.error = None;
@@ -925,8 +895,6 @@ pub fn apply(mut world: World, op: Op, now: i64) -> Result<(World, Outcome)> {
             }
         }
         Op::Pause(id) => {
-            // A composite is never claimed, so the pause has to land on its leaves or it is undone
-            // when the parent status is derived. Leaves that are mid-run go to `stopping`.
             if world.task(id).is_none() {
                 out.accepted = false;
             } else {
@@ -949,7 +917,6 @@ pub fn apply(mut world: World, op: Op, now: i64) -> Result<(World, Outcome)> {
                         }
                         Status::Running => {
                             if let Some(task) = world.task_mut(sid) {
-                                // Inline work is never claimed, so nothing would return to finish the stop.
                                 if task.inline {
                                     settle_stop(task, false, now);
                                 } else {
@@ -1073,7 +1040,6 @@ pub fn apply(mut world: World, op: Op, now: i64) -> Result<(World, Outcome)> {
                 let cancel = world.task(id).and_then(|t| t.stop_intent) == Some(StopIntent::Cancel);
                 if let Some(task) = world.task_mut(id) {
                     if task.status == Status::Stopping {
-                        // The user asked to stop: the hang settles it instead of leaving it stuck.
                         settle_stop(task, cancel, now);
                     } else {
                         task.status = Status::Queued;
@@ -1216,7 +1182,6 @@ pub fn apply(mut world: World, op: Op, now: i64) -> Result<(World, Outcome)> {
     Ok((world, out))
 }
 
-/// A leaf the scheduler may claim: queued, not inline, no children, deps done, nothing paused upstream.
 pub fn is_claimable(world: &World, id: TaskId) -> bool {
     let Some(task) = world.task(id) else {
         return false;
@@ -1227,7 +1192,6 @@ pub fn is_claimable(world: &World, id: TaskId) -> bool {
     dep_hold(world, id).is_none()
 }
 
-/// `Paused` when a dependency is paused (even behind a done task), else `None` when every dep is done.
 pub fn dep_hold(world: &World, id: TaskId) -> Option<DepHold> {
     let mut queue = VecDeque::from(world.needs_of(id));
     let mut seen = HashSet::new();
@@ -1328,7 +1292,6 @@ fn recover(world: &mut World, now: i64) -> usize {
             let Some(task) = world.task(id) else { continue };
             (task.status, task.inline, world.has_owned_children(id))
         };
-        // A composite's status comes from its tasks. An answer's inline steps do not.
         if owned && !inline {
             continue;
         }
@@ -1721,8 +1684,6 @@ fn refresh(world: &mut World, parent: TaskId, now: i64) -> bool {
     let Some(parent_task) = world.task(parent).cloned() else {
         return false;
     };
-    // Only a task that owns real children (a composite) derives its status. Inline steps
-    // of an answer do not: the answer keeps the status of its run.
     if parent_task.inline || !world.has_owned_children(parent) {
         return false;
     }
@@ -1818,7 +1779,6 @@ enum CancelCause {
 fn cascade(world: &mut World, now: i64) -> bool {
     let mut any = false;
     for _ in 0..64 {
-        // Read the state the rules decide on, then let the borrow end before writing anything.
         let doomed = {
             let needs = needs_map(world);
             let children = child_map(world);
@@ -1983,7 +1943,6 @@ fn ancestor_cancel(task: &Task, by_id: &HashMap<TaskId, &Task>) -> Option<Cancel
 }
 
 fn write_pause_notes(world: &mut World, now: i64) {
-    // Decide the new notes first, then write them, so the world is borrowed only one way at a time.
     let notes: Vec<(TaskId, Option<Note>)> = {
         let needs = needs_map(world);
         let children = child_map(world);
@@ -2072,8 +2031,6 @@ fn diff_events(before: &HashMap<TaskId, Status>, world: &World) -> Vec<Event> {
     events
 }
 
-/// How long the task has been running: from its start to its finish, or to `now` while it is
-/// still running. A `finished_ms` left by an earlier attempt does not end a running task.
 pub fn elapsed(task: &Task, now: i64) -> Duration {
     let Some(started) = task.started_ms else {
         return Duration::ZERO;
@@ -2156,7 +2113,6 @@ pub fn top_level(tasks: &[Task], filter: &Filter) -> Vec<Task> {
     owned
 }
 
-/// Listing order: running, queued, waiting, then the rest; queued and waiting by priority.
 pub fn sort_tasks(tasks: &mut [Task]) {
     fn rank(status: Status) -> u8 {
         match status {
@@ -2188,7 +2144,6 @@ pub fn in_group(task: &Task, group: KindGroup) -> bool {
     }
 }
 
-/// Models unfinished tasks still need, including a run that is stopping. The engine unloads these last.
 pub fn models_needed(tasks: &[Task]) -> Vec<(String, Vec<TaskId>)> {
     let mut map: HashMap<String, Vec<TaskId>> = HashMap::new();
     for task in tasks {
@@ -2246,7 +2201,6 @@ mod tests {
             heartbeat_ms: None,
             stop_intent: None,
         };
-        // A finish stamp of an earlier attempt does not end the run that is going on.
         let running = task(Status::Running, Some(1_000), Some(2_000));
         assert_eq!(elapsed(&running, 91_000), Duration::from_secs(90));
         let done = task(Status::Done, Some(1_000), Some(4_000));

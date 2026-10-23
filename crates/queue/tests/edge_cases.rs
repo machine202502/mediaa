@@ -1,15 +1,3 @@
-//! One test per edge case of the catalog in `workflow/queue.md` §9.
-//!
-//! Every test drives the real [`Scheduler`] over [`MemStore`] (or [`SqliteStore`] for the crash
-//! cases) with a fake clock and scripted runners. After every step `Probe::check` verifies E01:
-//! the snapshot equals the store (statuses, parents by 13.7, what runs now, waiting reasons) and
-//! every status change produced its event. Every test ends with `drain_to_end`, which verifies
-//! E02: resuming everything and ticking reaches the end, every task done, failed or cancelled,
-//! within a bounded number of ticks.
-//!
-//! Cases A02, A03, A11, A14, A15, B01 and B03 are already covered exactly by
-//! `tests/queue.rs`; the catalog's table points at those tests instead of duplicating them here.
-
 use mediaa_queue::state;
 use mediaa_queue::*;
 use serde_json::{json, Value};
@@ -18,11 +6,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-// ---------------------------------------------------------------- fake runner
-
-/// What one chunked run should do. `busy` model calls precede every chunk; `slow_stop` model
-/// calls are spent after a stop is asked, so the runner returns `Stopped` only later. `hang`
-/// makes the run ignore everything once every chunk is committed. `fail_at` fails on that chunk.
 fn script(chunks: u32, busy: u32, slow_stop: u32) -> Value {
     json!({ "chunks": chunks, "busy": busy, "slow_stop": slow_stop })
 }
@@ -53,7 +36,6 @@ struct RunState {
 #[derive(Default)]
 struct ScriptRunner {
     state: HashMap<(TaskId, i64), RunState>,
-    /// A task whose model call failed once succeeds on the retry after «Заново».
     failed: HashSet<TaskId>,
 }
 
@@ -88,8 +70,6 @@ fn next_step(
     already_failed: bool,
     ctx: &mut dyn RunCtx,
 ) -> std::result::Result<Step, String> {
-    // A hang ignores the stop flag: the scheduler settles a stopping task when the runner
-    // reports it.
     if script.hang && committed >= script.chunks {
         return Ok(Step::Hang { idle: Duration::from_secs(900) });
     }
@@ -130,11 +110,6 @@ fn cursor_u32(cursor: &Value) -> u32 {
     }
 }
 
-// ---------------------------------------------------------------- E01 / E02
-
-/// Checks E01 after every step: the snapshot agrees with the store, parent statuses follow 13.7,
-/// «what runs now» is exactly the live leaves, waiting reasons match the store, and every status
-/// or cursor change since the previous check has its event.
 struct Probe {
     pools: Vec<Pool>,
     prev: HashMap<TaskId, (Status, Value)>,
@@ -332,8 +307,6 @@ impl Probe {
     }
 }
 
-/// The event `state::diff_events` must produce for a status change; `None` when a change has no
-/// event kind of its own (`queued`, `waiting`, `stopping`).
 fn event_of(before: Status, after: Status) -> Option<EventKind> {
     if before == after {
         return None;
@@ -349,8 +322,6 @@ fn event_of(before: Status, after: Status) -> Option<EventKind> {
     })
 }
 
-/// E02: resume everything and tick until the queue reaches the end, with E01 after every tick.
-/// A task that hangs is outside this helper: no catalog test here leaves one running.
 fn drain_to_end(sched: &Scheduler, probe: &mut Probe) {
     for _ in 0..600 {
         let paused: Vec<TaskId> = sched
@@ -383,8 +354,6 @@ fn drain_to_end(sched: &Scheduler, probe: &mut Probe) {
         .collect();
     panic!("E02: the queue did not reach the end; still {left:?}");
 }
-
-// ---------------------------------------------------------------- fixtures
 
 fn pools() -> Vec<Pool> {
     vec![
@@ -459,7 +428,6 @@ impl Fixture {
     }
 }
 
-/// A SQLite-backed scheduler that can be dropped and reopened: the only way to model a crash.
 struct Db {
     _dir: tempfile::TempDir,
     path: PathBuf,
@@ -498,8 +466,6 @@ fn composite(title: &str, scope: &str) -> NewTask {
         .scope(scope)
         .analysis(scope)
 }
-
-// ---------------------------------------------------------------- A — one task
 
 #[test]
 fn a01_a_paused_queued_task_is_not_taken_until_resumed() {
@@ -928,8 +894,6 @@ fn a13_a_crash_while_stopping_settles_each_task_by_its_intent() {
     assert_eq!(sched.store().get(paused).unwrap().unwrap().status, Status::Done);
 }
 
-// ---------------------------------------------------------------- B — two and three recordings
-
 #[test]
 fn b02_two_recordings_on_one_pool_take_turns_by_chunk() {
     let mut f = fixture();
@@ -1275,8 +1239,6 @@ fn c04_a_crash_with_three_in_work_continues_each_from_its_place() {
         assert_eq!(cursor_u32(&task.cursor), 3, "it went on from its place");
     }
 }
-
-// ---------------------------------------------------------------- D — chat answers
 
 #[test]
 fn d01_a_chat_question_during_an_analysis_goes_first_and_background_gets_every_third_chunk() {

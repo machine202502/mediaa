@@ -1,8 +1,3 @@
-//! Measuring diarization against a reference: the `speakers.rttm` reference of a recording,
-//! DER with a collar, and «clones» (one reference speaker found as several). The algorithm
-//! itself lives in the engine; this module only measures it. Used by the ignored live test in
-//! [`crate::diarize`] and by `mediaa-eval diarize`.
-
 use crate::transcribe::SAMPLE_RATE;
 use anyhow::Context;
 use mediaa_core::agent::AgentSettings;
@@ -14,16 +9,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// Frames closer than this to a reference boundary are not scored (NIST collar).
 pub const COLLAR_SECONDS: f64 = 0.25;
-/// Frame grid of the measurement: 10 ms.
 const FRAME_SECONDS: f64 = 0.01;
-/// A found speaker belongs to a clone when it speaks this much of the reference speaker…
 const CLONE_MIN_SECONDS: f64 = 2.0;
-/// …and at least this share of that speaker's speech.
 const CLONE_MIN_SHARE: f64 = 0.10;
 
-/// One stretch of speech of the reference (RTTM `SPEAKER` line).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RefTurn {
     pub start: f64,
@@ -31,8 +21,6 @@ pub struct RefTurn {
     pub speaker: String,
 }
 
-/// Parses the RTTM speaker lines (`SPEAKER <file> 1 <start> <dur> <NA> <NA> <speaker> …`).
-/// Other record kinds and comments are skipped; every `SPEAKER` line is required to be complete.
 pub fn parse_rttm(text: &str) -> anyhow::Result<Vec<RefTurn>> {
     let mut turns = Vec::new();
     for (index, line) in text.lines().enumerate() {
@@ -58,24 +46,15 @@ pub fn parse_rttm(text: &str) -> anyhow::Result<Vec<RefTurn>> {
     Ok(turns)
 }
 
-/// The parts of DER. All times are seconds of *speaker* speech: overlapped speech counts once
-/// for each speaker who talks, so a hypothesis without overlaps cannot cover both sides of a
-/// reference overlap.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Der {
-    /// `(missed + false_alarm + speaker_error) / reference`, 0–1.
     pub score: f64,
-    /// Reference speech with no hypothesis speech at all.
     pub missed: f64,
-    /// Hypothesis speech where the reference has none.
     pub false_alarm: f64,
-    /// Reference speech covered by the wrong found speaker (including the overlapping side).
     pub speaker_error: f64,
-    /// All reference speaker speech in the scored frames (the denominator).
     pub reference: f64,
 }
 
-/// One reference speaker that the diarization split into several found speakers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Clone {
     pub reference: String,
@@ -88,14 +67,12 @@ impl std::fmt::Display for Clone {
     }
 }
 
-/// DER and clones of one hypothesis against one reference.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scores {
     pub der: Der,
     pub clones: Vec<Clone>,
 }
 
-/// What a recording's folder says about its reference: timed turns and/or the speaker count.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Reference {
     pub turns: Option<Vec<RefTurn>>,
@@ -103,8 +80,6 @@ pub struct Reference {
 }
 
 impl Reference {
-    /// Reads `speakers.rttm` (exact timings) and/or `reference.json` (`{"speakers": N}`) from
-    /// the folder of a recording; both are optional.
     pub fn read(dir: &Path) -> anyhow::Result<Reference> {
         let rttm = dir.join("speakers.rttm");
         if rttm.is_file() {
@@ -124,13 +99,11 @@ impl Reference {
     }
 }
 
-/// DER with a collar and clones of `hypothesis` against `reference`.
 pub fn evaluate(reference: &[RefTurn], hypothesis: &[Turn]) -> anyhow::Result<Scores> {
     let raster = Raster::new(reference, hypothesis)?;
     Ok(Scores { der: raster.der(), clones: raster.clones() })
 }
 
-/// One recording measured: found speakers, DER, clones and the time it took.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Recording {
     pub name: String,
@@ -176,11 +149,6 @@ impl std::fmt::Display for Recording {
     }
 }
 
-/// What to run besides the defaults: the speaker model (the settings' when `None`), the
-/// clustering cut height (the engine's when `None`), whether to merge the found speakers by
-/// voice (`None` keeps the clusters as they are), the length of one diarization chunk (`None`
-/// diarizes the whole recording in one engine call, as before chunking) and the share of
-/// neighbouring chunks (`None` takes [`crate::diarize::OVERLAP_SECONDS`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Run {
     pub model: Option<String>,
@@ -190,7 +158,6 @@ pub struct Run {
     pub overlap_seconds: Option<f64>,
 }
 
-/// One diarization run before scoring: the recording, its reference and what the engine found.
 #[derive(Debug, Clone)]
 pub struct Found {
     pub name: String,
@@ -201,16 +168,11 @@ pub struct Found {
     pub diarization: Diarization,
 }
 
-/// Runs the real diarization of `audio` (any format FFmpeg decodes), opening the file the way
-/// the app does: mono 16 kHz, the whole recording, `speakers: None`.
 pub fn run_recording(engine: &dyn Engine, settings: &AgentSettings, audio: &Path, options: &Run) -> anyhow::Result<Found> {
     let (found, _) = run_recording_chunks(engine, settings, audio, options)?;
     Ok(found)
 }
 
-/// [`run_recording`] and the chunks its speakers were linked from (empty when the whole recording
-/// is one engine call). Comparing link settings — the voice threshold, the short-speaker rule —
-/// needs the chunks but not another diarization of the sound.
 pub(crate) fn run_recording_chunks(
     engine: &dyn Engine,
     settings: &AgentSettings,
@@ -252,7 +214,6 @@ pub(crate) fn run_recording_chunks(
     let started = Instant::now();
     let mut chunks = Vec::new();
     let diarization = match options.chunk_seconds {
-        // The app's path: one engine call per chunk, then the speakers are linked across them.
         Some(chunk_seconds) => {
             let overlap = options.overlap_seconds.unwrap_or(crate::diarize::OVERLAP_SECONDS);
             let ranges = crate::diarize::plan(audio_seconds, chunk_seconds, overlap);
@@ -296,7 +257,6 @@ pub(crate) fn run_recording_chunks(
     Ok((Found { name, audio_seconds, decode_seconds, diarize_seconds, reference, diarization }, chunks))
 }
 
-/// Scores one run against its reference.
 pub fn score(found: &Found) -> anyhow::Result<Recording> {
     let turns = &found.diarization.turns;
     let speakers = turns.iter().map(|turn| turn.speaker).collect::<BTreeSet<_>>().len();
@@ -317,8 +277,6 @@ pub fn score(found: &Found) -> anyhow::Result<Recording> {
     })
 }
 
-/// Runs the app's default diarization and measures it: the chosen model, the engine's clustering
-/// threshold, the voice-link threshold and the chunk length the app diarizes with.
 pub fn measure_recording(engine: &dyn Engine, settings: &AgentSettings, audio: &Path) -> anyhow::Result<Recording> {
     let found = run_recording(
         engine,
@@ -333,7 +291,6 @@ pub fn measure_recording(engine: &dyn Engine, settings: &AgentSettings, audio: &
     score(&found)
 }
 
-/// Measures every `evals/data/*/audio.opus` under `data`, sorted by folder name.
 pub fn measure_all(engine: &dyn Engine, settings: &AgentSettings, data: &Path) -> anyhow::Result<Vec<Recording>> {
     anyhow::ensure!(data.is_dir(), "{}: no such data folder", data.display());
     let mut folders: Vec<PathBuf> = std::fs::read_dir(data)
@@ -350,14 +307,12 @@ pub fn measure_all(engine: &dyn Engine, settings: &AgentSettings, data: &Path) -
         .collect()
 }
 
-/// Turns rasterized on a 10 ms grid: which speakers are talking in each frame.
 struct Raster {
     reference: Vec<u128>,
     hypothesis: Vec<u128>,
     reference_speakers: Vec<String>,
     hypothesis_speakers: Vec<u32>,
     frames: usize,
-    /// Reference boundaries, for the collar.
     boundaries: Vec<f64>,
 }
 
@@ -464,15 +419,12 @@ impl Raster {
         clones
     }
 
-    /// Frames that are scored: everything except the collar around reference boundaries.
     fn counted(&self) -> Vec<bool> {
         let mut counted = vec![true; self.frames];
         if COLLAR_SECONDS <= 0.0 {
             return counted;
         }
         for boundary in &self.boundaries {
-            // Frame i is scored when its centre (i + 0.5) * FRAME is farther than the collar
-            // from the boundary.
             let low = ((boundary - COLLAR_SECONDS) / FRAME_SECONDS - 0.5).ceil().max(0.0) as usize;
             let high = ((boundary + COLLAR_SECONDS) / FRAME_SECONDS - 0.5).floor();
             if high >= 0.0 {
@@ -486,7 +438,6 @@ impl Raster {
     }
 }
 
-/// Marks `speaker` in every frame touched by `[start, end)`.
 fn paint(masks: &mut [u128], start: f64, end: f64, speaker: usize) {
     let low = (start / FRAME_SECONDS).ceil().clamp(0.0, masks.len() as f64) as usize;
     let high = (end / FRAME_SECONDS).ceil().clamp(0.0, masks.len() as f64) as usize;
@@ -495,7 +446,6 @@ fn paint(masks: &mut [u128], start: f64, end: f64, speaker: usize) {
     }
 }
 
-/// Speaker indices set in a frame mask, lowest first.
 fn indices(mut mask: u128) -> impl Iterator<Item = usize> {
     std::iter::from_fn(move || {
         if mask == 0 {
@@ -507,7 +457,6 @@ fn indices(mut mask: u128) -> impl Iterator<Item = usize> {
     })
 }
 
-/// Maps each reference speaker to the hypothesis speaker it overlaps most, one-to-one.
 fn best_mapping(counts: &[Vec<u64>]) -> Vec<Option<usize>> {
     let reference = counts.len();
     let hypothesis = counts.first().map_or(0, Vec::len);
@@ -540,8 +489,6 @@ fn best_mapping(counts: &[Vec<u64>]) -> Vec<Option<usize>> {
     mapping
 }
 
-/// Exhaustive one-to-one assignment for small speaker sets; `used` is a bitmask of taken
-/// hypothesis speakers.
 fn assign(counts: &[Vec<u64>], r: usize, used: u64, score: u64, current: &mut Vec<Option<usize>>, best: &mut (u64, Vec<Option<usize>>)) {
     if r == counts.len() {
         if score > best.0 {
@@ -590,9 +537,7 @@ SPEAKER mix 1 1.200 2.000 <NA> <NA> b <NA> <NA>
     #[test]
     fn der_counts_missed_false_alarm_and_confusion_without_a_collar() {
         let reference = refs(&[(0.0, 10.0, "a"), (10.0, 20.0, "b")]);
-        // The first speaker stops two seconds early, and speaker 2 talks after the reference ends.
         let hypothesis = hyps(&[(0.0, 8.0, 0), (10.0, 20.0, 1), (20.0, 22.0, 2)]);
-        // No collar: this checks the arithmetic exactly.
         let mut raster = Raster::new(&reference, &hypothesis).unwrap();
         raster.boundaries.clear();
         let der = raster.der();
@@ -633,7 +578,6 @@ SPEAKER mix 1 1.200 2.000 <NA> <NA> b <NA> <NA>
         let reference = refs(&[(0.0, 10.0, "a")]);
         let hypothesis = hyps(&[(0.1, 9.9, 0)]);
         assert!(evaluate(&reference, &hypothesis).unwrap().der.score < 1e-12, "with the collar");
-        // Without the collar the same turns keep their missed speech.
         let mut raster = Raster::new(&reference, &hypothesis).unwrap();
         raster.boundaries.clear();
         let der = raster.der();
@@ -659,7 +603,6 @@ SPEAKER mix 1 1.200 2.000 <NA> <NA> b <NA> <NA>
         let clones = evaluate(&reference, &hypothesis).unwrap().clones;
         assert_eq!(clones, vec![Clone { reference: "a".into(), found: vec![4, 9] }]);
         assert_eq!(clones[0].to_string(), "a→[4, 9]");
-        // One found speaker is not a clone; two tiny fragments are below the minimum.
         assert!(evaluate(&reference, &hyps(&[(0.0, 20.0, 0)])).unwrap().clones.is_empty());
         assert!(evaluate(&reference, &hyps(&[(0.0, 1.0, 0), (19.0, 20.0, 1)])).unwrap().clones.is_empty());
     }

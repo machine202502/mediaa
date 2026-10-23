@@ -1,9 +1,3 @@
-//! The chat input as text plus indivisible chips (a speaker mention, a quoted reply).
-//!
-//! The editor shows names and clocks. What is stored and sent keeps `@s1` and the quote token,
-//! so a rename only changes the chips. A mention is created by [`Field::insert_mention`] or, on
-//! send, by [`Field::name_mentions`]; typing `@` and a name leaves plain text.
-
 use eframe::egui;
 use mediaa_agent::assistant::quote;
 use mediaa_agent::tools::{format_time, parse_time};
@@ -14,7 +8,6 @@ use super::mentions::Roster;
 
 const PREVIEW: usize = 32;
 
-/// One chip in the editor. Ranges are byte offsets in [`Field::text`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chip {
     pub start: usize,
@@ -28,7 +21,6 @@ pub enum Kind {
     Quote { label: String, start: String, end: String, text: String },
 }
 
-/// A moment or a span the user wrote in brackets. `seek` is its start, in seconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Clock {
     pub start: usize,
@@ -36,7 +28,6 @@ pub struct Clock {
     pub seek: f64,
 }
 
-/// What «Ответить» hands to the chat: the label, the clocks and the reply.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Quote {
     pub label: String,
@@ -47,7 +38,6 @@ pub struct Quote {
 }
 
 impl Quote {
-    /// `speaker` is the 0-based index. `shown` is the name without `@`.
     pub fn from_reply(speaker: Option<u32>, shown: &str, start: f64, end: f64, text: &str) -> Quote {
         Quote {
             label: speaker.map(speakers::label).unwrap_or_default(),
@@ -59,7 +49,6 @@ impl Quote {
     }
 }
 
-/// The id under which the dialog leaves a [`Quote`] for the chat of the same recording.
 pub fn quote_id(path: &str) -> egui::Id {
     egui::Id::new(("mediaa-quote", path))
 }
@@ -76,7 +65,6 @@ impl Field {
         self.chips.clear();
     }
 
-    /// The message as it is stored: labels and quote tokens, the rest as typed.
     pub fn to_message(&self) -> String {
         let mut text = self.text.clone();
         for chip in self.chips.iter().rev() {
@@ -88,7 +76,6 @@ impl Field {
         text
     }
 
-    /// Names follow the roster. `shown` is the name without `@`.
     pub fn relabel(&mut self, shown: impl Fn(&str) -> String) {
         let mut text = String::new();
         let mut at = 0;
@@ -111,8 +98,6 @@ impl Field {
         self.chips = chips;
     }
 
-    /// Applies one edit of the text field. A chip the edit touches is removed whole, including
-    /// the characters of it that the edit left behind. Returns a caret when the text was rewritten.
     pub fn reconcile(&mut self, new_text: String) -> Option<usize> {
         if new_text == self.text {
             return None;
@@ -172,21 +157,18 @@ impl Field {
         caret
     }
 
-    /// Backspace at the end of a chip removes the chip. `false` when the key should delete a character.
     pub fn backspace_at(&mut self, cursor: usize) -> bool {
         let Some(i) = self.chips.iter().position(|c| c.end == cursor) else { return false };
         self.remove_chip(i);
         true
     }
 
-    /// Delete at the start of a chip removes the chip.
     pub fn delete_at(&mut self, cursor: usize) -> bool {
         let Some(i) = self.chips.iter().position(|c| c.start == cursor) else { return false };
         self.remove_chip(i);
         true
     }
 
-    /// Arrow into a chip jumps over it. `None` when the caret is not on an edge.
     pub fn arrow(&self, cursor: usize, right: bool) -> Option<usize> {
         self.chips.iter().find_map(|c| {
             if right && cursor == c.start {
@@ -199,7 +181,6 @@ impl Field {
         })
     }
 
-    /// A caret that landed inside a chip moves to the nearer edge.
     pub fn snap(&self, cursor: usize) -> usize {
         for c in &self.chips {
             if cursor > c.start && cursor < c.end {
@@ -214,7 +195,6 @@ impl Field {
         self.chips.iter().any(|c| byte > c.start && byte < c.end)
     }
 
-    /// The `@` being typed, unless it sits inside a chip.
     pub fn mention_query(&self, cursor: usize) -> Option<Query> {
         if self.covers(cursor) {
             return None;
@@ -226,7 +206,6 @@ impl Field {
         Some(query)
     }
 
-    /// Replaces the `@query` the user typed with one mention chip. Only this inserts a mention.
     pub fn insert_mention(&mut self, at: usize, query: &str, label: &str, shown: &str) {
         let end = (at + '@'.len_utf8() + query.len()).min(self.text.len());
         let body = format!("@{shown}");
@@ -234,8 +213,6 @@ impl Field {
         self.splice(at, end, &insert, at, at + body.len(), Kind::Mention { label: label.to_string() });
     }
 
-    /// Turns a word equal to a speaker's current name into that speaker's mention, as if it were
-    /// chosen from the `@` list. A name that two speakers share stays text.
     pub fn name_mentions(&mut self, roster: &Roster) {
         let mut names: HashMap<String, Option<&Who>> = HashMap::new();
         for who in &roster.speakers {
@@ -267,7 +244,6 @@ impl Field {
         }
     }
 
-    /// The ranges of the text that are not chips.
     fn plain_segments(&self) -> Vec<(usize, usize)> {
         let mut chips: Vec<(usize, usize)> = self.chips.iter().filter(|c| c.start < c.end && c.end <= self.text.len()).map(|c| (c.start, c.end)).collect();
         chips.sort_unstable();
@@ -285,7 +261,6 @@ impl Field {
         out
     }
 
-    /// Inserts a quote chip at `at` (a caret). A space separates it from the text before it.
     pub fn insert_quote(&mut self, at: usize, quote: &Quote) {
         let at = floor(self.text.len().min(at), &self.text);
         let body = quote_text(&quote.shown, &quote.start, &quote.end, &quote.text);
@@ -299,7 +274,6 @@ impl Field {
         clocks_outside(&self.text, &self.chips.iter().map(|c| (c.start, c.end)).collect::<Vec<_>>())
     }
 
-    /// The start of the bracket under `byte`, when it is a real moment or span and not a chip.
     pub fn seek_at(&self, byte: usize) -> Option<f64> {
         if self.covers(byte) {
             return None;
@@ -368,12 +342,10 @@ fn preview(text: &str) -> String {
     if count > PREVIEW { format!("«{body}…»") } else { format!("«{body}»") }
 }
 
-/// A name as the matcher compares it: case and ё/е do not matter.
 fn key(name: &str) -> String {
     name.to_lowercase().replace('ё', "е")
 }
 
-/// The words of `text` with the byte offsets where they start, from `text`.
 fn words(text: &str) -> Vec<(usize, &str)> {
     let mut out = Vec::new();
     let mut start = None;
@@ -394,8 +366,6 @@ fn floor(at: usize, text: &str) -> usize {
     (0..=at.min(text.len())).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0)
 }
 
-/// The single replacement between `old` and `new`: `(old_lo, old_hi, new_lo, new_hi)`.
-/// A shared UTF-8 lead byte is not a character, so both ends snap back onto characters.
 fn edit_bounds(old: &str, new: &str) -> (usize, usize, usize, usize) {
     let raw = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
     let prefix = floor(raw, old).min(floor(raw, new));
@@ -405,8 +375,6 @@ fn edit_bounds(old: &str, new: &str) -> (usize, usize, usize, usize) {
     (prefix, old_hi, prefix, new_hi)
 }
 
-/// Brackets that are one clock, or two clocks joined by `-`, `–` or `—`, with no spaces.
-/// `[99:99]` and a bare number are not clocks.
 pub fn clocks_in(text: &str) -> Vec<Clock> {
     clocks_outside(text, &[])
 }
@@ -467,7 +435,6 @@ fn clock(text: &str) -> Option<f64> {
     parse_time(text)
 }
 
-/// A stored message as pieces the pane can draw. `name` turns a label into the name without `@`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Piece {
     Text(String),
@@ -538,8 +505,6 @@ fn push_plain(text: &str, out: &mut Vec<Piece>, name: &impl Fn(&str) -> Option<S
     }
 }
 
-/// `@sN` / `@sN#R` whose name is known become a mention. The comma in `@s2,` stays text.
-/// `@нет` and any other word stay text.
 fn push_mentions(text: &str, out: &mut Vec<Piece>, name: &impl Fn(&str) -> Option<String>) {
     let bytes = text.as_bytes();
     let mut at = 0;
@@ -565,7 +530,6 @@ fn push_mentions(text: &str, out: &mut Vec<Piece>, name: &impl Fn(&str) -> Optio
     }
 }
 
-/// End of an `@sN` or `@sN#R` that starts at `at`, when the next character is not part of a label.
 fn label_end(text: &str, at: usize) -> Option<usize> {
     let rest = text.get(at + 1..)?;
     let b = rest.as_bytes();
@@ -597,7 +561,6 @@ fn label_end(text: &str, at: usize) -> Option<usize> {
     Some(end)
 }
 
-/// The editor's text, with chips and clocks coloured. The characters stay the ones in `text`.
 #[allow(clippy::too_many_arguments)]
 pub fn layout(ui: &egui::Ui, text: &str, chips: &[Chip], clocks: &[Clock], wrap: f32, text_color: egui::Color32, accent: egui::Color32, soft: egui::Color32) -> std::sync::Arc<egui::Galley> {
     let font = ui.style().text_styles.get(&egui::TextStyle::Body).cloned().unwrap_or_else(|| egui::FontId::proportional(14.0));
@@ -607,7 +570,6 @@ pub fn layout(ui: &egui::Ui, text: &str, chips: &[Chip], clocks: &[Clock], wrap:
     ui.fonts_mut(|f| f.layout_job(job))
 }
 
-/// A stored user message. A clock returns its start in seconds; a mention or a quote does not.
 pub fn show_user(ui: &mut egui::Ui, stored: &str, name: impl Fn(&str) -> Option<String>, font: egui::FontId, text_color: egui::Color32, accent: egui::Color32, soft: egui::Color32) -> Option<f64> {
     let parts = pieces(stored, name);
     let mut job = egui::text::LayoutJob::default();

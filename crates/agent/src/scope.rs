@@ -1,8 +1,3 @@
-//! Work in the context of one queue task: its id, the store and the engine. Every model call of
-//! agent code goes through [`Scope::engine`], which adds the call (tokens, time, model) to the
-//! task's stats; there is no other way for agent code to reach the engine. The service calls of
-//! the engine (status, downloading and checking models) are not task work and go around it.
-
 use mediaa_core::agent::ModelRole;
 use mediaa_engine::speech::Phrase;
 use mediaa_engine::{
@@ -18,23 +13,18 @@ use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 use std::time::Instant;
 
-/// A task as the queue page names it: its kind and its title (the data part, see `Task::title`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRef {
     pub kind: String,
     pub title: String,
 }
 
-/// A task's work: which task, in which store, with which engine.
 #[derive(Clone)]
 pub struct Scope {
     store: Arc<dyn Store>,
     task: TaskId,
     engine: Arc<dyn Engine>,
     key: Option<String>,
-    /// The task that model calls are counted in while it is set (a step or a tool of an answer
-    /// that is run by this scope); otherwise the scope's own. It is per thread: calls of one step
-    /// run in threads of their own, each focused on its own child. Clones share it.
     focus: Arc<Mutex<HashMap<ThreadId, TaskId>>>,
 }
 
@@ -43,26 +33,20 @@ impl Scope {
         Scope { store, task, engine, key, focus: Arc::new(Mutex::new(HashMap::new())) }
     }
 
-    /// Starts an inline task that the caller runs itself and returns its scope.
-    /// The queue file is `dir/queue.db`.
     pub fn begin(dir: &Path, engine: Arc<dyn Engine>, kind: &str, title: &str, input: &Value, key: Option<&str>) -> anyhow::Result<Scope> {
         let store = crate::run::open_store(dir)?;
         let task = store.begin_inline(kind, title, input, None, key)?;
         Ok(Scope::attach(store, task, engine, key.map(str::to_string)))
     }
 
-    /// The task this work belongs to.
     pub fn task(&self) -> TaskId {
         self.task
     }
 
-    /// The store this work is recorded in.
     pub fn store(&self) -> &Arc<dyn Store> {
         &self.store
     }
 
-    /// From now on the model calls of this thread of the scope (and of its clones) are counted in
-    /// `task`, a child that this thread runs (`None`: in the scope's own task again).
     pub fn focus(&self, task: Option<TaskId>) {
         let mut focus = self.focus.lock().expect("scope focus lock");
         match task {
@@ -79,35 +63,28 @@ impl Scope {
         self.focus.lock().expect("scope focus lock").get(&std::thread::current().id()).copied().unwrap_or(self.task)
     }
 
-    /// Counts one model call that did not go through [`Scope::engine`] (a provider's).
     pub fn record_call(&self, model: &str, started: Instant, prompt_tokens: u64, completion_tokens: u64) {
         self.add_stats(&[model], started, prompt_tokens, completion_tokens);
     }
 
-    /// What the task is (for a tool: its name, short arguments and the size of its result).
     pub fn set_detail(&self, detail: &Value) {
         if let Err(e) = self.store.set_detail(self.task, detail) {
             log::warn!("task {}: its detail was not saved: {e:#}", self.task);
         }
     }
 
-    /// The task is done. A task that was stopped meanwhile stays stopped.
     pub fn finish(&self, result: &Value) {
         self.end("done", |store, id| Ok(store.complete(id, result).map(|_| ())?));
     }
 
-    /// The task failed.
     pub fn fail(&self, error: &str) {
         self.end("failed", |store, id| Ok(store.fail(id, error).map(|_| ())?));
     }
 
-    /// The task was stopped (also its running children). Inline work settles at once.
     pub fn cancel(&self) {
         self.end("cancelled", |store, id| Ok(store.cancel(id).map(|_| ())?));
     }
 
-    /// The background tasks running now (not the callers' own work, and not composite
-    /// tasks whose children run): what holds the models when this work has to wait.
     pub fn busy_with(&self) -> Vec<TaskRef> {
         let tasks = self.store.list().unwrap_or_default();
         let parents: std::collections::HashSet<TaskId> = tasks.iter().filter_map(|t| t.parent).collect();
@@ -131,18 +108,14 @@ impl Scope {
         }
     }
 
-    /// The recording (or folder) of the task.
     pub fn key(&self) -> Option<&str> {
         self.key.as_deref()
     }
 
-    /// The engine for this task: every model call is counted in its stats.
     pub fn engine(&self) -> Arc<dyn Engine> {
         Arc::new(ScopedEngine { scope: self.clone() })
     }
 
-    /// Starts a task run by this caller (a model step, a tool) under this task, in the same
-    /// recording and with the same store.
     pub fn inline_child(&self, kind: &str, title: &str, input: &Value) -> anyhow::Result<Scope> {
         let id = self.store.begin_inline(kind, title, input, Some(self.task), self.key.as_deref())?;
         Ok(Scope {
@@ -168,7 +141,6 @@ impl Scope {
     }
 }
 
-/// The engine of one scope: model calls are forwarded and counted, service calls are forwarded.
 struct ScopedEngine {
     scope: Scope,
 }
@@ -366,8 +338,6 @@ mod tests {
 
     #[test]
     fn threads_of_one_scope_focus_their_own_tasks() {
-        // Steps of one answer run at once in threads of their own: each counts its model calls
-        // in its own child, not in whichever focus was set last.
         let dir = tempfile::tempdir().unwrap();
         let store = opened(dir.path());
         let parent = task(store.as_ref(), "answer", None);

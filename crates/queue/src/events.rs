@@ -1,8 +1,5 @@
-//! Changes a subscriber (the studio, the queue page) re-reads on.
-
 use crate::TaskId;
 
-/// What changed. `scope` is the recording or folder the task belongs to, when it has one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventKind {
     Started,

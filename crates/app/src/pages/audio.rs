@@ -1,7 +1,3 @@
-//! Record audio page: microphone and / or system sound into MP3, M4A, WAV, FLAC or OGG.
-//! Only one recording runs at a time (video or audio); the start button sits at the bottom
-//! like on the video page.
-
 use super::header;
 use crate::app::App;
 use crate::theme;
@@ -28,9 +24,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Output (format, bitrate) and sources (microphone, system sound) of an audio recording in one
-/// card; also used on the Settings page for the hotkey / tray settings. Returns (changed,
-/// microphone list just opened).
 pub fn audio_editor(ui: &mut egui::Ui, a: &mut AudioRecordSettings, mics: &[String], salt: &str) -> (bool, bool) {
     let changed = std::cell::Cell::new(false);
     let mark = |c: bool| changed.set(changed.get() | c);
@@ -75,7 +68,6 @@ pub fn audio_editor(ui: &mut egui::Ui, a: &mut AudioRecordSettings, mics: &[Stri
     (changed.get(), refresh_mics)
 }
 
-/// "Start audio recording" bar at the bottom of the window.
 pub fn start_bar(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let a = &app.settings.audio_record;

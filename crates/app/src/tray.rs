@@ -1,7 +1,3 @@
-//! System tray icon with a context menu that controls captures and recordings.
-//! Menu events are forwarded to the UI thread through a channel (and wake egui up, even while
-//! the main window is hidden).
-
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use rust_i18n::t;
@@ -22,7 +18,6 @@ pub enum TrayCommand {
     Quit,
 }
 
-/// What the tray menu should offer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayState {
     Idle,
@@ -50,7 +45,6 @@ fn command_for(id: &str) -> Option<TrayCommand> {
 pub struct Tray {
     icon: TrayIcon,
     items: Vec<(TrayCommand, IconMenuItem)>,
-    /// Last applied `(state, locale)`; texts are refreshed when either changes.
     applied: Option<(TrayState, String)>,
 }
 
@@ -122,7 +116,6 @@ impl Tray {
             item.set_text(text);
             item.set_enabled(enabled);
         }
-        // The main actions carry a coloured badge: area + start while idle, stop while recording.
         let mark = |b: Badge| tray_icon::menu::Icon::from_rgba(badge(b, 32), 32, 32).ok();
         let idle = state == TrayState::Idle;
         self.item(TrayCommand::RegionScreenshot).set_icon(if idle { mark(Badge::Area) } else { None });
@@ -136,7 +129,6 @@ impl Tray {
         };
         let _ = self.icon.set_tooltip(Some(tip));
         if active != was_active {
-            // Red dot on the icon while a recording runs.
             let rgba = if active { crate::icon::rgba_recording(32) } else { crate::icon::rgba(32) };
             if let Ok(icon) = Icon::from_rgba(rgba, 32, 32) {
                 let _ = self.icon.set_icon(Some(icon));

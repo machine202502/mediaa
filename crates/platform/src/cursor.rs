@@ -1,12 +1,5 @@
-//! Mouse cursor position and picture, to draw it into recordings (`xcap` captures the screen
-//! without the cursor).
-//!
-//! Windows: the real cursor picture (`GetCursorInfo` + `DrawIconEx`), position in physical
-//! virtual-desktop pixels. Elsewhere: position from `device_query` and a drawn arrow.
-
 use mediaa_core::cursor::CursorImage;
 
-/// Cursor position on the virtual desktop (physical pixels) and its current picture.
 #[derive(Debug, Clone)]
 pub struct CursorState {
     pub x: i32,
@@ -14,13 +7,10 @@ pub struct CursorState {
     pub image: CursorImage,
 }
 
-/// Current cursor, `None` if it is hidden or unavailable. Cheap enough to call every frame
-/// (the picture is converted only when the cursor shape changes).
 pub fn current() -> Option<CursorState> {
     imp::current()
 }
 
-/// Cursor position on the virtual desktop (physical pixels).
 pub fn position() -> Option<(i32, i32)> {
     imp::position()
 }
@@ -40,7 +30,6 @@ mod imp {
     };
 
     thread_local! {
-        /// Last converted cursor picture, keyed by its handle.
         static CACHE: RefCell<Option<(isize, CursorImage)>> = const { RefCell::new(None) };
     }
 
@@ -74,8 +63,6 @@ mod imp {
         Some(CursorState { x: ci.ptScreenPos.x, y: ci.ptScreenPos.y, image })
     }
 
-    /// Renders the cursor on black and on white; the difference gives its alpha, which also
-    /// covers old monochrome cursors. Inverting pixels (text I-beam) become black.
     fn picture(cursor: HCURSOR) -> Option<CursorImage> {
         // SAFETY: plain GDI calls on objects created and released here; buffers are sized
         // from the bitmap dimensions GDI reports.
@@ -88,7 +75,7 @@ mod imp {
             GetObjectW(ii.hbmMask, std::mem::size_of::<BITMAP>() as i32, (&mut bm as *mut BITMAP).cast());
             let (w, mut h) = (bm.bmWidth, bm.bmHeight);
             if ii.hbmColor.is_null() {
-                h /= 2; // monochrome: AND and XOR masks stacked
+                h /= 2;
             }
             DeleteObject(ii.hbmMask);
             if !ii.hbmColor.is_null() {
@@ -101,10 +88,9 @@ mod imp {
             let on_white = render(cursor, w, h, 0xFF)?;
             let mut data = Vec::with_capacity((w * h * 4) as usize);
             for (b, wh) in on_black.as_chunks::<4>().0.iter().zip(on_white.as_chunks::<4>().0) {
-                // BGRA → per pixel: alpha = 255 - (white - black).
                 let diff = i32::from(wh[1]) - i32::from(b[1]);
                 if diff < 0 {
-                    data.extend_from_slice(&[0, 0, 0, 255]); // inverting pixel
+                    data.extend_from_slice(&[0, 0, 0, 255]);
                     continue;
                 }
                 let a = (255 - diff).clamp(0, 255);
@@ -118,13 +104,12 @@ mod imp {
         }
     }
 
-    /// Draws the cursor onto a `w`×`h` 32-bit DIB pre-filled with `bg`; returns its BGRA bytes.
     unsafe fn render(cursor: HCURSOR, w: i32, h: i32, bg: u8) -> Option<Vec<u8>> {
         let bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: w,
-                biHeight: -h, // top-down
+                biHeight: -h,
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB,
@@ -180,7 +165,6 @@ mod imp {
 mod tests {
     #[test]
     fn current_cursor_is_sane_when_available() {
-        // Headless CI may have no cursor; when there is one, its picture must be usable.
         if let Some(c) = super::current() {
             let img = &c.image.image;
             assert!(img.width > 0 && img.height > 0);

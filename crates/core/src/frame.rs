@@ -1,8 +1,5 @@
-//! Raw RGBA frames and helpers to keep frame sizes stable during a recording.
-
 use crate::geometry::Rect;
 
-/// Tightly packed RGBA8 frame (`width * height * 4` bytes, top row first).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Frame {
     pub width: u32,
@@ -26,7 +23,6 @@ impl Frame {
         }
     }
 
-    /// Solid-colour frame.
     pub fn filled(width: u32, height: u32, rgba: [u8; 4]) -> Self {
         let data = rgba
             .iter()
@@ -52,7 +48,6 @@ impl Frame {
         [self.data[i], self.data[i + 1], self.data[i + 2], self.data[i + 3]]
     }
 
-    /// Copies `rect` out of the frame; the rect is clamped to the frame bounds.
     pub fn crop(&self, rect: Rect) -> Frame {
         let bounds = Rect::new(0, 0, self.width as i32, self.height as i32);
         let r = rect.clamp_to(&bounds);
@@ -66,15 +61,11 @@ impl Frame {
         Frame::new(w as u32, h as u32, data)
     }
 
-    /// Centres the frame on a `width`×`height` canvas filled with `fill`, scaling it down
-    /// (aspect kept) when it is larger, so nothing is cut off. Keeps recordings at a constant
-    /// size when a window is resized (or a display changes resolution) mid-recording.
     pub fn fit_to(&self, width: u32, height: u32, fill: [u8; 4]) -> Frame {
         if self.width == width && self.height == height {
             return self.clone();
         }
         let scale = (f64::from(width) / f64::from(self.width.max(1))).min(f64::from(height) / f64::from(self.height.max(1)));
-        // One extra pixel (sizes rounded down to even for the encoder) is cropped, not scaled.
         let slightly_larger = self.width <= width + 1 && self.height <= height + 1;
         let scaled;
         let src = if scale < 1.0 && !slightly_larger {
@@ -97,7 +88,6 @@ impl Frame {
         out
     }
 
-    /// The frame scaled to `width`×`height` (bilinear, SIMD).
     pub fn resized(&self, width: u32, height: u32) -> Frame {
         use fast_image_resize::{images::Image, images::ImageRef, FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
         let src = ImageRef::new(self.width, self.height, &self.data, PixelType::U8x4).expect("frame buffer matches its size");
@@ -108,7 +98,6 @@ impl Frame {
         Frame::new(width, height, dst.into_vec())
     }
 
-    /// Composites the frame over an opaque background colour (for formats without alpha).
     pub fn flatten(&mut self, bg: [u8; 3]) {
         for px in self.data.as_chunks_mut::<4>().0 {
             let a = u32::from(px[3]);
@@ -157,13 +146,11 @@ mod tests {
     #[test]
     fn fit_centres_and_scales_down_without_cutting() {
         let f = gradient(4, 4);
-        // A smaller frame is centred on the canvas.
         let bigger = f.fit_to(6, 6, [9, 9, 9, 255]);
         assert_eq!(bigger.pixel(1, 1), [0, 0, 0, 255]);
         assert_eq!(bigger.pixel(4, 4), [3, 3, 0, 255]);
         assert_eq!(bigger.pixel(0, 0), [9, 9, 9, 255]);
         assert_eq!(bigger.pixel(5, 5), [9, 9, 9, 255]);
-        // A larger one (a window that grew) is scaled down whole, aspect kept.
         let tall = Frame::filled(20, 40, [200, 10, 10, 255]);
         let fitted = tall.fit_to(20, 20, [0, 0, 0, 255]);
         assert_eq!((fitted.width, fitted.height), (20, 20));
@@ -172,7 +159,6 @@ mod tests {
         assert_eq!(fitted.pixel(0, 10), [0, 0, 0, 255], "side bars");
         assert_eq!(fitted.pixel(19, 10), [0, 0, 0, 255]);
         assert_eq!(f.resized(2, 2).width, 2);
-        // An odd size rounded down to even: the extra pixel is cropped, nothing is rescaled.
         let odd = gradient(5, 5).fit_to(4, 4, [0; 4]);
         assert_eq!(odd.pixel(3, 3), [3, 3, 0, 255]);
     }

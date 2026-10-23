@@ -1,8 +1,3 @@
-//! The model runtime: local GGUF models loaded on demand under the budget. A job asks for a
-//! model; the scheduler decides the device (or makes it wait), the model is loaded there once
-//! and shared by everyone using it. It stays loaded for the keep-alive after the last job.
-//! One file is one load: a larger context reloads it once, a smaller request reuses that load.
-
 use crate::embed::{Embedder, Reranker};
 use crate::hub;
 use crate::llm::{estimate_bytes, LocalModel};
@@ -18,10 +13,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// How long a lease may keep memory others wait for before it is asked to yield.
 pub const QUANTUM: Duration = Duration::from_secs(20);
 
-/// A kind of local model the runtime loads (language models, embedding models).
 pub trait Engine: Sized + Send + 'static {
     fn load(path: &Path, gpu: bool, n_ctx: u32) -> anyhow::Result<Self>;
     fn on_gpu(&self) -> bool;
@@ -57,11 +50,8 @@ impl Engine for Reranker {
     }
 }
 
-/// Loaded models by key: `Arc<Mutex<E>>` of their engine `E`.
 type Loaded = Arc<Mutex<HashMap<String, Arc<dyn Any + Send + Sync>>>>;
 
-/// The GGUF file of a local model source: a file, or the GGUF inside a folder (a downloaded
-/// Hugging Face model or a folder the user picked).
 pub fn gguf_path(models_root: &Path, source: &ModelSource) -> anyhow::Result<PathBuf> {
     let place = match source {
         ModelSource::HuggingFace { repo } => {
@@ -87,9 +77,6 @@ pub fn gguf_path(models_root: &Path, source: &ModelSource) -> anyhow::Result<Pat
     Ok(place.join(pick))
 }
 
-/// The name a model is known by outside the runtime: `owner/repo` for a Hugging Face one, the
-/// absolute path for a local one. [`Runtime::with_model`] reports it in the scheduler status, so
-/// a caller recognizes its model by the same name it asked for it with.
 pub fn source_name(source: &ModelSource) -> anyhow::Result<String> {
     Ok(match source {
         ModelSource::HuggingFace { repo } => repo.trim().to_string(),
@@ -101,14 +88,11 @@ pub fn source_name(source: &ModelSource) -> anyhow::Result<String> {
     })
 }
 
-/// How a job wants a model run.
 #[derive(Debug, Clone, Copy)]
 pub struct Use {
     pub kind: WorkKind,
     pub device: Device,
-    /// Context length in tokens.
     pub n_ctx: u32,
-    /// A user is waiting for the answer (goes before background work).
     pub interactive: bool,
 }
 
@@ -120,8 +104,6 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    /// A runtime over a models folder (models are directly in `models_root`, as the engine
-    /// stores them). `keep_alive` is how long an idle model stays loaded; zero unloads it at once.
     pub fn new(models_root: &Path, budget: Budget, keep_alive: Duration) -> Runtime {
         let loaded: Loaded = Arc::default();
         let l = loaded.clone();
@@ -141,16 +123,10 @@ impl Runtime {
         self.scheduler.set_keep_alive(keep_alive);
     }
 
-    /// Model files that waiting work needs. An idle one is unloaded last when memory runs short.
     pub fn set_wanted(&self, keys: HashSet<String>) {
         self.scheduler.set_wanted(keys);
     }
 
-    /// Runs `f` with the model of `source` loaded (waiting for the budget as needed). The model
-    /// stays loaded while `f` runs and for the keep-alive afterwards; `f` gets the lease to
-    /// check [`Lease::should_yield`]. The same file is one load: a smaller context reuses it, a
-    /// larger one reloads it once. A failed load, a panic or an out-of-memory call unloads the
-    /// model, reloads it and retries `f` once.
     pub fn with_model<E: Engine, R>(
         &self,
         source: &ModelSource,
@@ -163,12 +139,8 @@ impl Runtime {
         let key = path.display().to_string();
         let need = ModelNeed { key: key.clone(), name: source_name(source)?, bytes: estimate_bytes(&path, n_ctx)?, device, n_ctx };
         let lease = self.scheduler.request(kind, Some(need), interactive).wait(cancel)?;
-        // The queue's watchdog reads from the pulse which model a call that never returns was
-        // using, and unloads it before the task tries again.
         pulse::using(&key);
         let outcome = self.run_with_retry::<E, R>(&path, &key, device, &lease, &mut f);
-        // Giving the lease back is part of the call: a thread stuck there must still name the
-        // model to the watchdog.
         drop(lease);
         pulse::release();
         outcome
@@ -192,8 +164,6 @@ impl Runtime {
                     Ok(value) => Ok(value),
                     Err(Fail::GiveUp(error)) => Err(error),
                     Err(Fail::Again(error)) => {
-                        // The second load did not stay usable. Drop it so the listing does not
-                        // keep a model that is not actually in memory.
                         self.loaded.lock().expect("models lock").remove(key);
                         self.scheduler.forget_failed(key);
                         Err(model_failed(&error))
@@ -203,7 +173,6 @@ impl Runtime {
         }
     }
 
-    /// The resident for this lease, loading it when it is missing or the context grew.
     fn attempt<E: Engine, R>(
         &self,
         path: &Path,
@@ -235,7 +204,6 @@ impl Runtime {
                 return Ok(model);
             }
         }
-        // Drop the previous instance before the new load, so a reload does not hold both.
         self.loaded.lock().expect("models lock").remove(key);
         match catch_unwind(AssertUnwindSafe(|| self.load_model::<E>(path, key, device, lease))) {
             Ok(result) => result,
@@ -252,7 +220,6 @@ impl Runtime {
         let n_ctx = lease.n_ctx();
         let model = match E::load(path, gpu, n_ctx) {
             Ok(model) => model,
-            // The GPU could not take it after all: the CPU can.
             Err(error) if gpu && device != Device::Cpu => {
                 log::warn!("loading {} on the GPU failed ({error:#}); using the CPU", path.display());
                 E::load(path, false, n_ctx)?
@@ -265,24 +232,18 @@ impl Runtime {
         Ok(model)
     }
 
-    /// Models in memory now.
     pub fn loaded(&self) -> Vec<String> {
         self.loaded.lock().expect("models lock").keys().cloned().collect()
     }
 
-    /// A call that does not return: forget the model so the next attempt loads a fresh copy
-    /// (the stuck call may still hold the old one's lock), and free its slots. `key` is what the
-    /// pulse was given in [`Runtime::with_model`].
     pub fn forget(&self, key: &str) {
         self.loaded.lock().expect("models lock").remove(key);
         self.scheduler.reclaim(key);
     }
 }
 
-/// A model call failed in a way that unloading and loading it again can fix.
 enum Fail {
     Again(anyhow::Error),
-    /// The call failed for a reason a reload will not change (a bad prompt, a cancel).
     GiveUp(anyhow::Error),
 }
 
@@ -290,7 +251,6 @@ fn model_failed(error: &anyhow::Error) -> anyhow::Error {
     anyhow::anyhow!("model failed to load: {error:#}")
 }
 
-/// Out of memory while the model was running. A load error is retried on its own.
 fn recoverable(error: &anyhow::Error) -> bool {
     let message = format!("{error:#}").to_lowercase();
     message.contains("out of memory") || message.contains("outofmemory") || message.contains("failed to allocate") || message.contains("cannot allocate")
@@ -324,7 +284,6 @@ mod tests {
         let hf = ModelSource::HuggingFace { repo: "a/b".into() };
         assert!(gguf_path(dir.path(), &hf).unwrap_err().to_string().contains("not downloaded"));
         assert!(gguf_path(dir.path(), &ModelSource::Provider { provider: "p".into(), model: "m".into() }).is_err());
-        // A model file directly in the models folder, and a downloaded repository.
         let direct = dir.path().join("direct.gguf");
         std::fs::write(&direct, b"x").unwrap();
         assert_eq!(gguf_path(dir.path(), &local(&direct)).unwrap(), direct);
@@ -335,8 +294,6 @@ mod tests {
         assert_eq!(gguf_path(dir.path(), &hf).unwrap(), repo.join("m-Q4_K_M.gguf"));
     }
 
-    /// Loads the 19 MB story model once for two jobs and unloads it after them.
-    /// Network: `cargo test -p mediaa-engine -- --ignored`.
     #[test]
     #[ignore]
     fn loads_shares_and_unloads() {
@@ -361,7 +318,6 @@ mod tests {
             .unwrap();
         assert!(!text.is_empty());
         assert!(rt.loaded().is_empty(), "unloaded when no one needs it");
-        // Too big for the budget: fails at once instead of waiting forever.
         let tiny = Runtime::new(dir.path(), Budget { gpu_memory_gb: 0.0, ram_memory_gb: 0.0, ..Budget::default() }, Duration::ZERO);
         assert!(tiny.with_model(&source, how, &cancel, |_: &LocalModel, _| Ok(())).is_err());
     }
@@ -371,11 +327,8 @@ mod tests {
     struct Script {
         loads: AtomicU32,
         calls: AtomicU32,
-        /// The first this many loads fail.
         fail_loads: u32,
-        /// The first this many calls panic.
         panic_calls: u32,
-        /// The first this many calls run out of memory.
         oom_calls: u32,
     }
 
@@ -416,7 +369,6 @@ mod tests {
     }
 
     fn runtime(dir: &Path) -> Runtime {
-        // CPU only: the test budget is RAM, and a fake load never touches a GPU.
         Runtime::new(dir, Budget { gpu_memory_gb: 0.0, ram_memory_gb: 8.0, ..Budget::default() }, Duration::from_secs(300))
     }
 
@@ -454,8 +406,6 @@ mod tests {
         model.n_ctx
     }
 
-    /// The status names a model the way the caller asked for it, not by its file: the agent
-    /// compares that name with the settings' spec to tell "loading" from "running".
     #[test]
     fn a_resident_is_reported_by_the_name_the_caller_asked_for() {
         let dir = tempfile::tempdir().unwrap();
@@ -468,7 +418,6 @@ mod tests {
         let rt = runtime(dir.path());
         let ctx = |n_ctx| use_model(&rt, &source, n_ctx, |model, lease| Ok(assert_same(model, lease))).unwrap();
         assert_eq!(ctx(32), 32);
-        // A second step of the same chat asks again: same load, same name.
         assert_eq!(ctx(32), 32);
         assert_eq!(script(&file).loads.load(Ordering::SeqCst), 1, "one load for two calls");
         let status = rt.scheduler().status();
@@ -540,8 +489,6 @@ mod tests {
         scripts().lock().unwrap().insert(path.display().to_string(), Arc::new(script));
     }
 
-    /// A call that never returns (a stuck native decode) holds the model's lock. The watchdog
-    /// forgets the model, so the retry loads a fresh copy instead of waiting for that lock.
     #[test]
     fn a_stuck_call_is_forgotten_and_the_retry_loads_a_fresh_model() {
         use std::sync::Barrier;
@@ -569,7 +516,6 @@ mod tests {
         rt.forget(&key);
         assert!(rt.loaded().is_empty(), "the stuck model is dropped, nothing resident is left to reuse");
 
-        // The retry (the next attempt of the same task) must not wait for the stuck call's lock.
         let (tx, rx) = std::sync::mpsc::channel();
         let (retry_rt, retry_source) = (rt.clone(), source.clone());
         std::thread::spawn(move || {

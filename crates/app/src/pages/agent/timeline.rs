@@ -1,12 +1,3 @@
-//! The timeline of a chat answer in the pane: steps, reasoning and parts of the answer in the
-//! order they happened, growing downward while the model works. The same blocks draw the answer
-//! being written and every saved answer; a finished answer folds its steps and reasoning behind
-//! one row above the final text.
-//!
-//! What is drawn is decided by pure functions ([`blocks`], [`status_of`], [`hidden_sections`]);
-//! the drawing only follows them. Rows have fixed heights and one gap ([`GAP`]), so nothing
-//! jumps when a block opens or closes or when the text starts to stream.
-
 use super::chat::linkify;
 use crate::theme;
 use eframe::egui::{self, RichText};
@@ -17,38 +8,26 @@ use mediaa_core::chat::{ChatMessage, TimelineEntry, STEP_RUNNING};
 use rust_i18n::t;
 use std::hash::Hash;
 
-/// The one gap between blocks of an answer and after a message.
 pub const GAP: f32 = 8.0;
-/// Text size of a step or a reasoning header.
 const ROW_TEXT: f32 = 12.5;
-/// Text size of the numbers under the status line.
 const METRICS_TEXT: f32 = 11.5;
-/// Height of the thin context bar under the numbers.
 const METRICS_BAR: f32 = 3.0;
-/// Gap between the numbers and the bar.
 const METRICS_GAP: f32 = 4.0;
 
-/// A step or a piece of reasoning.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row<'a> {
     Step { title: &'a str, tool: &'a str, status: &'a str },
     Thinking { text: &'a str },
-    /// A correction of the user the answer took from here on.
     Steer { text: &'a str },
 }
 
-/// A block of the drawn answer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block<'a> {
     Row(Row<'a>),
     Answer(&'a str),
-    /// Steps and reasoning of a finished answer, behind one row «Шаги и размышления (N)».
     Folded(Vec<Row<'a>>),
 }
 
-/// The blocks of a timeline. While the answer is written every entry is drawn where it happened;
-/// with `fold` (a stored answer, finished or stopped) the steps and reasoning are gathered in
-/// one folded group above the parts of the answer. Empty reasoning and empty text are dropped.
 pub fn blocks(entries: &[TimelineEntry], fold: bool) -> Vec<Block<'_>> {
     let mut out = Vec::new();
     let mut folded = Vec::new();
@@ -60,7 +39,6 @@ pub fn blocks(entries: &[TimelineEntry], fold: bool) -> Vec<Block<'_>> {
             TimelineEntry::Answer { text, .. } if text.trim().is_empty() => continue,
             TimelineEntry::Answer { text, .. } => Block::Answer(text),
             TimelineEntry::Steer { text } => {
-                // Where the answer took a correction stays in place even when the rest is folded.
                 out.push(Block::Row(Row::Steer { text }));
                 continue;
             }
@@ -76,20 +54,14 @@ pub fn blocks(entries: &[TimelineEntry], fold: bool) -> Vec<Block<'_>> {
     out
 }
 
-/// What the line under the timeline says while the answer is written.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
-    /// Before the model writes: what it waits for.
     Waiting(WaitReason),
-    /// The model is reasoning.
     Reasoning,
-    /// The answer's text is streaming.
     Writing,
-    /// Nothing has come yet and nothing is known to wait for.
     Starting,
 }
 
-/// The status line of a running answer; `None` when a step or a scan shows the progress itself.
 pub fn status_of(live: &Live) -> Option<Status> {
     if let Some(reason) = &live.waiting {
         return Some(Status::Waiting(reason.clone()));
@@ -102,18 +74,13 @@ pub fn status_of(live: &Live) -> Option<Status> {
         Some(TimelineEntry::Thinking { .. }) => Some(Status::Reasoning),
         Some(TimelineEntry::Answer { section: false, .. }) => Some(Status::Writing),
         Some(TimelineEntry::Step { status, .. }) if status == STEP_RUNNING => None,
-        // A step is over or a section was sent: the model is on its next one.
         Some(_) => Some(Status::Starting),
     }
 }
 
-/// Which messages are not drawn as messages of their own because the timeline draws them: the
-/// sections of an answer (`section` in the details) that has its final message with a timeline,
-/// or that is being written now (`running`). Same length as `messages`.
 pub fn hidden_sections(messages: &[ChatMessage], running: bool) -> Vec<bool> {
     let mut hidden = vec![false; messages.len()];
     let mut end = messages.len();
-    // The turns from the last one back: a turn is a question and the messages after it.
     let mut last = true;
     for start in (0..messages.len()).rev() {
         if messages[start].author != mediaa_core::chat::Author::User {
@@ -136,12 +103,10 @@ fn is_section(m: &ChatMessage) -> bool {
     m.details["section"].as_bool() == Some(true)
 }
 
-/// The tasks the models are busy with, by their labels.
 fn busy_names(tasks: &[mediaa_agent::scope::TaskRef]) -> String {
     tasks.iter().map(|t| super::task_label::label(&t.kind, &t.title)).collect::<Vec<_>>().join(", ")
 }
 
-/// What the model waits for, in words.
 pub fn wait_text(reason: &WaitReason) -> String {
     let name = |model: &str| model.rsplit(['/', '\\']).next().unwrap_or(model).to_string();
     match reason {
@@ -166,14 +131,11 @@ fn status_text(status: &Status) -> String {
     }
 }
 
-/// A number as the interface language writes it: a decimal comma in Russian, a dot in English.
 fn number(value: f64, digits: usize, locale: &str) -> String {
     let text = format!("{value:.digits$}");
     if locale == "ru" { text.replace('.', ",") } else { text }
 }
 
-/// The numbers line: how much of the context is taken, and how fast a local model writes. The
-/// speed is `None` for a provider's model (it is not measured).
 pub fn metrics_text(metrics: &Metrics, locale: &str) -> (String, Option<String>) {
     let used = number(f64::from(metrics.context_tokens) / 1000.0, 1, locale);
     let total = number(f64::from(metrics.context) / 1000.0, 0, locale);
@@ -182,11 +144,7 @@ pub fn metrics_text(metrics: &Metrics, locale: &str) -> (String, Option<String>)
     (context, speed)
 }
 
-/// The numbers under the status line: a thin bar of the context taken and the text above it.
-/// The row takes its height even without the numbers, so the layout does not jump.
 pub fn metrics_ui(ui: &mut egui::Ui, metrics: Option<&Metrics>, p: theme::Palette) {
-    // The same widgets are drawn with and without numbers (an empty line instead), so the row
-    // always takes the same place.
     let locale = rust_i18n::locale();
     let (context, speed) = metrics.map_or_else(|| (" ".into(), None), |metrics| metrics_text(metrics, &locale));
     ui.vertical(|ui| {
@@ -210,7 +168,6 @@ pub fn metrics_ui(ui: &mut egui::Ui, metrics: Option<&Metrics>, p: theme::Palett
     });
 }
 
-/// A step as one line: the icon of how it went and the title the model gave it.
 fn step_row(ui: &mut egui::Ui, title: &str, status: &str, roster: &super::mentions::Roster, p: theme::Palette) {
     let (glyph, color) = match status {
         "found" => (icon::CHECK_CIRCLE, p.success),
@@ -227,8 +184,6 @@ fn step_row(ui: &mut egui::Ui, title: &str, status: &str, roster: &super::mentio
     });
 }
 
-/// A piece of reasoning: a header, closed until the user opens it; the text grows while the
-/// model thinks.
 fn thinking_row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, text: &str, roster: &super::mentions::Roster, p: theme::Palette) {
     egui::CollapsingHeader::new(RichText::new(t!("studio.thinking_block")).size(ROW_TEXT).color(p.text_weak))
         .id_salt(id)
@@ -238,8 +193,6 @@ fn thinking_row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, text: &str, 
         });
 }
 
-/// The title shown for a step. A plain label follows the interface language. A phrase the titles
-/// model wrote stays as stored. An internal tool name is never shown.
 fn step_title(tool: &str, title: &str) -> String {
     shown_in(&rust_i18n::locale(), tool, title)
 }
@@ -267,7 +220,6 @@ fn tool_label(locale: &str, key: &str) -> String {
     .into()
 }
 
-/// `title` is a plain label (either language) or empty or the tool's own name.
 fn plain_label(tool: &str, title: &str) -> bool {
     if title.is_empty() || title == tool {
         return true;
@@ -296,7 +248,6 @@ fn shown_in(locale: &str, tool: &str, title: &str) -> String {
     if plain_label(tool, title) { tool_label(locale, tool) } else { title.to_string() }
 }
 
-/// The draft, folded until the user opens it. Its text is the step's result.
 fn draft_row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, body: &str, bare: bool, roster: &super::mentions::Roster, p: theme::Palette) -> Option<String> {
     let mut seek = None;
     egui::CollapsingHeader::new(RichText::new(t!("studio.draft_step")).size(ROW_TEXT).color(p.text_weak))
@@ -330,7 +281,6 @@ fn row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, row: &Row, steps: &[S
     }
 }
 
-/// Where the answer took a correction of the user.
 fn steer_row(ui: &mut egui::Ui, text: &str, roster: &super::mentions::Roster, p: theme::Palette) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(icon::CHAT_TEXT).color(p.accent));
@@ -340,8 +290,6 @@ fn steer_row(ui: &mut egui::Ui, text: &str, roster: &super::mentions::Roster, p:
     });
 }
 
-/// Draws the blocks of one answer's timeline; `forced`: it was given before the agent finished
-/// looking. Returns the target of a clicked citation.
 #[allow(clippy::too_many_arguments)]
 pub fn timeline_ui(
     ui: &mut egui::Ui,
@@ -398,8 +346,6 @@ pub fn timeline_ui(
     seek
 }
 
-/// The answer being written: its timeline as it is, the progress of a scan and the status line.
-/// `pending` are corrections the user sent while it runs and the answer has not taken yet.
 pub fn live_ui(ui: &mut egui::Ui, live: &Live, bare_times: bool, roster: &super::mentions::Roster, p: theme::Palette, pending: &[String]) -> Option<String> {
     let seek = timeline_ui(ui, "live", &live.timeline.entries, &live.steps, false, false, bare_times, roster, p);
     ui.spacing_mut().item_spacing.y = GAP;
@@ -413,11 +359,9 @@ pub fn live_ui(ui: &mut egui::Ui, live: &Live, bare_times: bool, roster: &super:
             ui.label(RichText::new(status_text(&status)).color(p.text_weak));
         });
     }
-    // Under «думаю…»: the corrections it will take after this step, until it does.
     for text in pending {
         theme::hint(ui, t!("studio.steer_pending", text = text));
     }
-    // Under «думаю…»: the context fill and the speed, live from the stream.
     metrics_ui(ui, live.metrics.as_ref(), p);
     seek
 }
@@ -451,15 +395,11 @@ mod tests {
             TimelineEntry::Thinking { text } => Row::Thinking { text },
             _ => unreachable!(),
         };
-        // Written now or stopped: where it happened (empty ones left out).
         assert_eq!(blocks(&entries, false), [Block::Row(row(0)), Block::Row(row(1)), Block::Row(row(3)), Block::Answer("В пятницу.")]);
-        // Final: one group above the text; its count is what the header shows.
         let done = blocks(&entries, true);
         assert_eq!(done, [Block::Folded(vec![row(0), row(1), row(3)]), Block::Answer("В пятницу.")]);
-        // Only an answer: nothing to fold.
         assert_eq!(blocks(&[answer("Привет.", false)], true), [Block::Answer("Привет.")]);
         assert!(blocks(&[], true).is_empty());
-        // Parts of the answer between steps keep their order, after the group.
         let parts = [step("А", "found"), answer("Часть 1.", true), step("Б", "found"), answer("Итог.", false)];
         let folded = blocks(&parts, true);
         assert_eq!(folded.len(), 3);
@@ -473,7 +413,6 @@ mod tests {
         assert_eq!(status_of(&live), Some(Status::Starting));
         live.apply(&Event::Waiting { reason: WaitReason::Busy { tasks: vec![task("analysis", "a.mp4")] } });
         assert_eq!(status_of(&live), Some(Status::Waiting(WaitReason::Busy { tasks: vec![task("analysis", "a.mp4")] })));
-        // Any other event ends the waiting; reasoning, then a step (it shows itself), then text.
         live.apply(&Event::Thinking("Думаю".into()));
         assert_eq!(status_of(&live), Some(Status::Reasoning));
         live.apply(&Event::StepStarted { title: "Ищу".into(), tool: "search".into() });
@@ -498,13 +437,10 @@ mod tests {
         let metrics = Metrics { context_tokens: 6100, context: 8000, speed: Some(12.4) };
         assert_eq!(metrics_text(&metrics, "ru"), ("контекст: 6,1 из 8 тыс.".into(), Some("12 ток/с".into())));
         assert_eq!(metrics_text(&metrics, "en"), ("context: 6.1 of 8k".into(), Some("12 tok/s".into())));
-        // A provider's model does not measure its speed.
         let provider = Metrics { context_tokens: 500, context: 4000, speed: None };
         assert_eq!(metrics_text(&provider, "ru"), ("контекст: 0,5 из 4 тыс.".into(), None));
     }
 
-    /// The line is drawn with fixed heights: without numbers it still takes its place, so the
-    /// answer below does not jump when they appear.
     #[test]
     fn the_numbers_take_their_place_even_without_them() {
         fn height(metrics: Option<Metrics>) -> f32 {
@@ -539,19 +475,14 @@ mod tests {
         let last = || message(Author::Agent, "Итог.", json!({ "steps": [], "timeline": tl.to_value() }));
         let user = || message(Author::User, "в?", serde_json::Value::Null);
 
-        // Saved: the final message draws the sections inside its timeline.
         let saved = [user(), section(), last(), user(), section(), last()];
         assert_eq!(hidden_sections(&saved, false), [false, true, false, false, true, false]);
-        // Written now: the sections of the last turn are in the live timeline.
         let running = [user(), section(), last(), user(), section()];
         assert_eq!(hidden_sections(&running, true), [false, true, false, false, true]);
-        // An answer that failed has no final message: its sections stay as they are.
         let failed = [user(), section()];
         assert_eq!(hidden_sections(&failed, false), [false, false]);
-        // An old answer without a timeline is not a reason to hide anything.
         let old = [user(), section(), message(Author::Agent, "Итог.", json!({ "steps": [] }))];
         assert_eq!(hidden_sections(&old, false), [false, false, false]);
-        // A stopped answer keeps its timeline in the message it stored.
         let stopped = [user(), section(), message(Author::Agent, "", json!({ "steps": [], "timeline": tl.to_value(), "stopped": true }))];
         assert_eq!(hidden_sections(&stopped, false), [false, true, false]);
     }
@@ -565,11 +496,9 @@ mod tests {
             assert_ne!(shown_in("en", tool, tool), tool, "{tool}");
             assert_ne!(shown_in("ru", tool, ""), tool);
         }
-        // A Russian label follows the interface when it switches to English.
         assert_eq!(shown_in("en", "search", "Поиск"), "Search");
         assert_eq!(shown_in("en", "outline", "Разбор темы"), caption("outline", true, true));
         assert_eq!(shown_in("ru", "outline", "Topic breakdown"), caption("outline", true, false));
-        // A phrase stays, in either language. "Ищу" is not a label.
         assert_eq!(shown_in("ru", "search", "Ищу"), "Ищу");
         assert_eq!(shown_in("en", "search", "Ищу"), "Ищу");
         assert_eq!(shown_in("en", "nope", "nope"), caption("nope", false, true));

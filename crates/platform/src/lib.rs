@@ -1,6 +1,3 @@
-//! OS integrations for MediaA. Each module wraps a mature cross-platform crate:
-//! `xcap` (screen/window capture), `cpal` (audio), `clipboard-rs`, `opener`, `trash`.
-
 pub mod audio;
 pub mod clipboard;
 pub mod cursor;

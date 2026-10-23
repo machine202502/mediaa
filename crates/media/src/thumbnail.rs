@@ -1,11 +1,8 @@
-//! Library thumbnails. Still images are decoded with `image`; videos and animations with FFmpeg.
-
 use ez_ffmpeg::frame_export::{FrameExtractor, PixelLayout};
 use mediaa_core::formats::MediaKind;
 use mediaa_core::Frame;
 use std::path::Path;
 
-/// First frame of `path`, scaled to fit `max_size`×`max_size`.
 pub fn thumbnail(path: &Path, kind: MediaKind, max_size: u32) -> anyhow::Result<Frame> {
     let max_size = max_size.max(16);
     if kind == MediaKind::Image {
@@ -13,7 +10,6 @@ pub fn thumbnail(path: &Path, kind: MediaKind, max_size: u32) -> anyhow::Result<
         return Ok(Frame::from_image(img));
     }
     if mediaa_core::formats::is_webp_path(path) {
-        // Animated WebP: FFmpeg decodes still WebP only.
         let mut first = None;
         let cancel = std::sync::atomic::AtomicBool::new(false);
         crate::preview::preview_frames(path, max_size, 1.0, 0.0, &cancel, &mut |f| {

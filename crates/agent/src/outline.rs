@@ -1,15 +1,3 @@
-//! The topics of a recording (`mediaa_core::outline`) as four queue tasks: the boundary plan,
-//! a digest per topic (one call when the topic fits a window, map-reduce over its windows
-//! otherwise), an iterative merge of neighbouring topics that are the same subject (by
-//! similarity, with the model asked about a borderline pair only), and a detailed breakdown per
-//! final topic. Each task resumes from its own checkpoint: the plan, the merge state and the
-//! merge decision live in the transcript's `meta`, digests and sections in its chapters.
-//!
-//! The graph: [`topics_task`] is a composite with a [`plan_task`] child; the plan completes with
-//! a [`DIGEST_KIND`] child per topic and one [`MERGE_KIND`] child after all of them; the merge
-//! completes with the [`DETAILS_KIND`] composite and a [`DETAIL_KIND`] child per final topic when
-//! the analysis options ask for details.
-
 use crate::assistant::{Message, Role};
 use crate::prompts;
 use crate::run::{Host, Stage, Work};
@@ -29,46 +17,25 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-/// The composite of the topics of one recording.
 pub const TOPICS_KIND: &str = "topics";
-/// The boundary plan: chapters with placeholders, then the digest and merge tasks.
 pub const PLAN_KIND: &str = "topics-plan";
-/// The digest of one topic (`TopicInput::topic`).
 pub const DIGEST_KIND: &str = "topic-digest";
-/// The merge of neighbouring topics and the start of the details.
 pub const MERGE_KIND: &str = "topics-merge";
-/// The composite of the detailed breakdown of every final topic.
 pub const DETAILS_KIND: &str = "details";
-/// The breakdown of one final topic (`TopicInput::topic`).
 pub const DETAIL_KIND: &str = "topic-detail";
 
-/// Priority of the topic tasks of an analysis (its stages are 10).
 const TOPIC_PRIORITY: i64 = 10;
-/// The priority of a `topic-detail` the interface is waiting for (raised by
-/// [`crate::pipeline::prioritize_detail`]).
 pub const DETAIL_PRIORITY: i64 = 1000;
 
-/// Context of the model for one window (~1200 words of Russian ≈ 3000 tokens, plus the answer
-/// with its margin).
 const OUTLINE_CTX: u32 = 12288;
-/// The model's answer about one pair of topics: `{"same": true}`.
 const PAIR_TOKENS: u32 = 32;
-/// Characters of a model's answer per token (~3 for Russian and English alike).
 const CHARS_PER_TOKEN: u32 = 3;
-/// Tokens of the JSON around one string of an answer: keys, quotes, commas, the time.
 const ITEM_OVERHEAD_TOKENS: u32 = 16;
-/// Tokens of the braces and the end of an answer.
 const ANSWER_OVERHEAD_TOKENS: u32 = 64;
-/// Spare past a full answer (a quarter of it), so a sentence can run past the length the prompt
-/// asks for and the JSON still closes instead of being cut.
 const ANSWER_MARGIN_DIV: u32 = 4;
-/// Tokens the chat template adds around the system and user text.
 const TEMPLATE_OVERHEAD_TOKENS: u32 = 32;
-/// Tokens left free at the end of the context (the engine refuses a prompt that fills it).
 const CTX_RESERVE: u32 = 8;
 
-/// Lengths a full digest is budgeted for. The prompts ask the model to stay near them; the
-/// schema does not enforce them.
 const DIGEST_TITLE_CHARS: usize = 80;
 const DIGEST_SUMMARY_CHARS: usize = 400;
 const DIGEST_POINT_CHARS: usize = 160;
@@ -77,47 +44,34 @@ const DIGEST_KEYWORD_CHARS: usize = 40;
 const DIGEST_QUOTE_CHARS: usize = 200;
 const DIGEST_QUOTES: usize = 3;
 
-/// The answer limit of a call: the characters of a full answer at [`CHARS_PER_TOKEN`], the
-/// overhead of its items, and a margin, so the answer is not cut in the middle of its JSON.
 fn answer_tokens(chars: usize, items: usize) -> u32 {
     let base = (chars as u32).div_ceil(CHARS_PER_TOKEN) + items as u32 * ITEM_OVERHEAD_TOKENS + ANSWER_OVERHEAD_TOKENS;
     base + base / ANSWER_MARGIN_DIV
 }
 
-/// The limit of a digest (a window, or the reduce of a topic).
 fn digest_tokens() -> u32 {
     let chars = DIGEST_TITLE_CHARS + DIGEST_SUMMARY_CHARS + 3 * DIGEST_POINTS * DIGEST_POINT_CHARS + DIGEST_POINTS * DIGEST_KEYWORD_CHARS + DIGEST_QUOTES * DIGEST_QUOTE_CHARS;
     let items = 2 + 3 * DIGEST_POINTS + DIGEST_POINTS + DIGEST_QUOTES;
     answer_tokens(chars, items)
 }
 
-/// The limit a full answer was budgeted for when the schema capped each text
-/// ([`outline::SECTION_TEXT_CHARS`]). 13.9 stopped enforcing those caps, so this is only the
-/// floor: a topic whose text is longer is budgeted from that text ([`topic_section_tokens`]).
 fn sections_tokens() -> u32 {
     let chars = outline::SECTIONS_MAX * (outline::SECTION_TITLE_CHARS + outline::SECTION_ITEMS_MAX * outline::SECTION_TEXT_CHARS);
     answer_tokens(chars, outline::SECTIONS_MAX * (outline::SECTION_ITEMS_MAX + 1))
 }
 
-/// The answer limit for one breakdown: the schema floor, or the topic's own text when that is
-/// larger, with the same margin. `source_chars` / `source_items` are the transcript (or the
-/// points the sections are assembled from), not the character caps the schema used to enforce.
 fn topic_section_tokens(source_chars: usize, source_items: usize) -> u32 {
     let chars = source_chars.min(OUTLINE_CTX as usize * CHARS_PER_TOKEN as usize * 8);
     let items = source_items.clamp(1, 10_000);
     answer_tokens(chars, items).max(sections_tokens())
 }
 
-/// Tokens of a prompt text at [`CHARS_PER_TOKEN`].
 fn text_tokens(text: &str) -> u32 {
     (text.chars().count() as u32).div_ceil(CHARS_PER_TOKEN)
 }
 
-/// How many tokens the sections call may spend, and whether a full answer still fits in
-/// [`OUTLINE_CTX`] next to the prompt.
 struct SectionBudget {
     max_tokens: u32,
-    /// The limit before it was shrunk to the context window.
     wanted: u32,
     prompt_tokens: u32,
     fits: bool,
@@ -132,29 +86,17 @@ fn section_budget(system: &str, user: &str, source_chars: usize, source_items: u
     SectionBudget { max_tokens, wanted, prompt_tokens, fits }
 }
 
-/// The limit of the points of one window of a long topic (from the caps of
-/// [`outline::points_schema`]).
 fn points_tokens() -> u32 {
     answer_tokens(outline::POINTS_MAX * outline::POINT_TEXT_CHARS, outline::POINTS_MAX)
 }
-/// A merged topic longer than this keeps its pieces as subtopics (`Digest::parts`), seconds.
 const PARTS_MIN_SECONDS: f64 = 15.0 * 60.0;
 
-/// The boundary plan (`Plan`) in the transcript's `meta`.
 const PLAN_KEY: &str = "outline-plan";
-/// The chapters as the digest stage left them, before the merge; kept after it so the merge can
-/// be re-run alone (`MEDIAA_BENCH_MERGE`).
 pub(crate) const TOPICS_KEY: &str = "outline-topics";
-/// The merge groups the model answered, so a restart does not ask again.
 pub(crate) const MERGE_KEY: &str = "outline-merge";
-/// The merge is decided and the chapters are final (or `outline-final` still has to be written).
 pub(crate) const MERGED_KEY: &str = "outline-merged";
-/// The final chapters, written after the merge; removed once they are in the table (a restart
-/// that finds it writes them again, so a half-written table repairs itself).
 pub(crate) const FINAL_KEY: &str = "outline-final";
 
-/// The input of the plan and the merge: the recording and the analysis options (details on or
-/// off travel with the work, so a restarted task does what it was asked).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Input {
     pub path: PathBuf,
@@ -162,8 +104,6 @@ pub struct Input {
     pub options: AnalysisOptions,
 }
 
-/// The input of a task about one topic: the recording, the options and the topic's index in the
-/// plan (digest) or in the final outline (detail).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TopicInput {
     pub path: PathBuf,
@@ -172,15 +112,11 @@ pub struct TopicInput {
     pub topic: usize,
 }
 
-/// The request for window `i` of `n` (of one topic). `language` is the interface language
-/// ([`AgentSettings::language_name`]): the digest is written for the user, not for the
-/// transcription.
 pub fn prompt(window: &Window, i: usize, n: usize, previous: Option<&str>, language: &str) -> String {
     let (start, end) = (human_duration(window.start), human_duration(window.end));
     prompts::render("outline/part.j2", minijinja::context! { number => i + 1, parts => n, start, end, language, previous, text => &window.text })
 }
 
-/// What the model wrote, before the quotes are checked against the replies.
 #[derive(Debug, Deserialize)]
 struct RawDigest {
     title: String,
@@ -206,7 +142,6 @@ struct RawQuote {
 }
 
 impl RawDigest {
-    /// Parses the quote times; the quotes themselves are checked later, against the replies.
     fn into_digest(self) -> Digest {
         Digest {
             title: self.title.trim().trim_end_matches('.').to_string(),
@@ -227,7 +162,6 @@ impl RawDigest {
     }
 }
 
-/// What the model wrote about a topic's breakdown, before the item times are checked.
 #[derive(Debug, Deserialize)]
 struct RawSections {
     #[serde(default)]
@@ -253,10 +187,6 @@ struct RawItem {
 }
 
 impl RawSections {
-    /// The sections whose items have text; an item's time is checked against the fine lines of
-    /// the topic ([`outline::verified_detail_time`]): a time the lines do not confirm becomes
-    /// `None`, the item itself stays. An empty section is dropped; sections with the same title
-    /// are one (their items keep their order, an item said twice is kept once).
     fn into_sections(self, lines: &[FineLine]) -> Vec<Section> {
         let sections = self
             .sections
@@ -279,8 +209,6 @@ impl RawSections {
     }
 }
 
-/// Merges sections with the same title (case-insensitive, trimmed): the items keep their order
-/// and an item with the same text is kept once.
 fn merge_sections(sections: Vec<Section>) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
     for section in sections {
@@ -299,26 +227,21 @@ fn merge_sections(sections: Vec<Section>) -> Vec<Section> {
     out
 }
 
-/// One model answer: the text and the token usage, when the engine reported it.
 struct ModelText {
     text: String,
     usage: Option<Usage>,
 }
 
-/// Sections parsed from a call, and the note for the task details when the answer was cut or
-/// does not fit the context.
 struct SectionAnswer {
     raw: RawSections,
     note: Option<String>,
 }
 
-/// The breakdown of one topic and, when the answer was cut or does not fit, why.
 struct Breakdown {
     sections: Vec<Section>,
     note: Option<String>,
 }
 
-/// The byte just after the `[` of the `"sections"` array.
 fn sections_array_at(text: &str) -> Option<usize> {
     let key = text.find("\"sections\"")?;
     let after = key + "\"sections\"".len();
@@ -326,8 +249,6 @@ fn sections_array_at(text: &str) -> Option<usize> {
     Some(after + rel + 1)
 }
 
-/// The end (exclusive) of the object that starts at `start`, when its braces close.
-/// An object cut off mid-item has no end: a repair crate would close it and keep the cut section.
 fn closed_object_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut i = start;
     let mut depth = 0;
@@ -365,7 +286,6 @@ fn parse_sections(text: &str) -> Option<RawSections> {
     serde_json::from_str(text.trim()).ok()
 }
 
-/// Sections whose objects closed completely. The one the answer was cut inside is dropped.
 fn closed_sections(text: &str) -> RawSections {
     if let Some(raw) = parse_sections(text) {
         return raw;
@@ -413,8 +333,6 @@ fn hit_context(usage: Option<Usage>) -> bool {
     usage.is_some_and(|u| u.prompt_tokens.saturating_add(u.completion_tokens) + 1 >= OUTLINE_CTX)
 }
 
-/// What the task details say. `cut_text` is the answer that did not close; `kept` is how many
-/// sections of that answer closed (`None` when a later complete answer replaced it).
 fn section_note(cut_text: Option<&str>, kept: Option<usize>, budget: &SectionBudget, first: Option<Usage>, second: Option<Usage>) -> Option<String> {
     let mut bits = Vec::new();
     if let Some(text) = cut_text {
@@ -442,7 +360,6 @@ fn section_note(cut_text: Option<&str>, kept: Option<usize>, budget: &SectionBud
     }
 }
 
-/// A point of one window of a long topic, as the model wrote it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct RawPoint {
     #[serde(default)]
@@ -486,7 +403,6 @@ fn ask(engine: &dyn Engine, model: &str, device: Device, hf_token: Option<&str>,
     Ok(raw.into_digest())
 }
 
-/// Asks the engine's `model` for the digest of a window.
 #[allow(clippy::too_many_arguments)]
 pub fn digest(engine: &dyn Engine, model: &str, device: Device, hf_token: Option<&str>, window: &Window, i: usize, n: usize, previous: Option<&str>, language: &str, cancel: &AtomicBool) -> anyhow::Result<Digest> {
     ask(
@@ -502,7 +418,6 @@ pub fn digest(engine: &dyn Engine, model: &str, device: Device, hf_token: Option
     )
 }
 
-/// Shortens a list for a prompt that gets many digests: the gist is in the summary.
 fn short_list(items: &[String]) -> Vec<String> {
     let short = |s: &String| {
         if s.chars().count() <= 140 {
@@ -514,7 +429,6 @@ fn short_list(items: &[String]) -> Vec<String> {
     items.iter().take(3).map(short).collect()
 }
 
-/// The quotes of the parts, in order, without repeats, at most [`outline::MAX_QUOTES`].
 fn quotes_of(parts: &[Digest]) -> Vec<Quote> {
     let mut out: Vec<Quote> = Vec::new();
     for quote in parts.iter().flat_map(|d| d.quotes.iter()) {
@@ -529,7 +443,6 @@ fn quotes_of(parts: &[Digest]) -> Vec<Quote> {
     out
 }
 
-/// The model calls of the outline: a window's digest, a digest from digests, the merge groups.
 struct Ask<'a> {
     engine: &'a dyn Engine,
     model: &'a str,
@@ -543,9 +456,6 @@ impl Ask<'_> {
         digest(self.engine, self.model, self.device, self.hf_token, window, i, n, previous, language, self.cancel)
     }
 
-    /// The digest of a topic from the digests of its parts. The quotes of the parts are kept;
-    /// the model is asked for an empty list. `previous` is the title of the topic before this
-    /// one, so the title names what is new.
     fn reduce(&self, language: &str, previous: Option<&str>, parts: &[Digest]) -> anyhow::Result<Digest> {
         let context: Vec<_> = parts
             .iter()
@@ -578,8 +488,6 @@ impl Ask<'_> {
         Ok(digest)
     }
 
-    /// Asks the model about one pair of neighbouring topics: is the second the same subject
-    /// continued, or a new one? Both digests are given, so the answer is about this pair only.
     fn same_topic(&self, first: &Chapter, second: &Chapter) -> anyhow::Result<bool> {
         let topic = |c: &Chapter| {
             minijinja::context! {
@@ -618,11 +526,6 @@ impl Ask<'_> {
         Ok(ModelText { text: answer.content, usage: answer.usage })
     }
 
-    /// The sections of a topic, from its transcript or from the points of its windows; the item
-    /// times are checked by the caller, against the topic's replies. `source_chars` and
-    /// `source_items` are that text: the answer limit is taken from them, then shrunk so the
-    /// prompt and the answer fit [`OUTLINE_CTX`]. A cut-off JSON is asked once to be shorter;
-    /// sections that closed completely are kept either way.
     fn sections(&self, user: String, source_chars: usize, source_items: usize) -> anyhow::Result<SectionAnswer> {
         let system = prompts::render("outline/detail_system.j2", ());
         let budget = section_budget(&system, &user, source_chars, source_items);
@@ -653,7 +556,6 @@ impl Ask<'_> {
         Ok(SectionAnswer { raw, note })
     }
 
-    /// The points of one window of a long topic.
     fn points(&self, user: String) -> anyhow::Result<Vec<RawPoint>> {
         let request = chat_request(
             self.model,
@@ -670,7 +572,6 @@ impl Ask<'_> {
     }
 }
 
-/// JSON Schema of the model's answer about one pair of topics.
 fn pair_schema() -> Value {
     json!({
         "type": "object",
@@ -679,9 +580,6 @@ fn pair_schema() -> Value {
     })
 }
 
-/// Where the topics start and end: by the meaning of the chunks, or (without embeddings) the
-/// windows of `WINDOW_WORDS` as before. The first topic starts with the first reply, the last
-/// ends with the last one; topics are contiguous.
 fn plan_topics(t: &Transcript, dialog: &[Reply], windows: &[Window]) -> anyhow::Result<Vec<PlanTopic>> {
     let chunks = t.chunks_with_embeddings()?;
     let mut starts: Vec<f64> = if !chunks.is_empty() && chunks.iter().all(|(_, embedding)| embedding.is_some()) {
@@ -709,7 +607,6 @@ fn plan_topics(t: &Transcript, dialog: &[Reply], windows: &[Window]) -> anyhow::
     Ok(plan)
 }
 
-/// The plan as stored in the transcript's `meta`.
 #[derive(Debug, Serialize, Deserialize)]
 struct Plan {
     topics: Vec<PlanTopic>,
@@ -723,7 +620,6 @@ fn placeholder(topic: &PlanTopic) -> Chapter {
     Chapter { start: topic.start, end: topic.end, digest: Digest::default() }
 }
 
-/// The replies of a topic (by their middle, so a reply on a boundary goes to one of them).
 fn topic_replies(replies: &[Reply], topic: &PlanTopic, with_end: bool) -> Vec<Reply> {
     replies
         .iter()
@@ -747,8 +643,6 @@ struct DetailCursor {
     points: Vec<RawPoint>,
 }
 
-/// The digest of one topic: one call when its text fits a window, else the digests of its
-/// windows and then a digest of those. Every quote is checked against the topic's replies.
 fn digest_topic(ask: &Ask<'_>, replies: &[Reply], topic: &PlanTopic, with_end: bool, previous: Option<&str>, language: &str) -> anyhow::Result<Digest> {
     let picked = topic_replies(replies, topic, with_end);
     let words: usize = picked.iter().map(|r| r.words.len()).sum();
@@ -762,8 +656,6 @@ fn digest_topic(ask: &Ask<'_>, replies: &[Reply], topic: &PlanTopic, with_end: b
     let windows = outline::windows(&picked, WINDOW_WORDS);
     let n = windows.len();
     let mut parts = Vec::with_capacity(n);
-    // The title of the topic before this one, for the digest of the whole; inside the topic the
-    // parts see each other.
     let topic_before = previous.map(str::to_string);
     let mut previous = topic_before.clone();
     for (i, window) in windows.iter().enumerate() {
@@ -783,7 +675,6 @@ pub(crate) fn write_chapters(t: &Transcript, chapters: &[Chapter]) -> anyhow::Re
     Ok(())
 }
 
-/// The parts of a merged topic, as a template sees them.
 fn part_context(parts: &[Part]) -> Vec<minijinja::Value> {
     parts
         .iter()
@@ -791,15 +682,9 @@ fn part_context(parts: &[Part]) -> Vec<minijinja::Value> {
         .collect()
 }
 
-/// The detailed breakdown of one topic: one model call when its text fits a window; otherwise
-/// the points of every window and one more call that assembles the sections from them (the
-/// transcript is not read again). Every item's time is checked against the topic's replies like
-/// a quote: an unconfirmed time becomes `None`, the item stays.
 fn detail_topic(ask: &Ask<'_>, replies: &[Reply], language: &str, chapter: &Chapter, last: bool) -> anyhow::Result<Breakdown> {
     let topic = PlanTopic { start: chapter.start, end: chapter.end };
     let picked = topic_replies(replies, &topic, last);
-    // Short lines with their own times: one long reply would otherwise give every item the
-    // time of its start. Speakers are `@sN`.
     let lines = outline::fine_lines(&picked);
     let words: usize = picked.iter().map(|r| r.words.len()).sum();
     let (title, summary) = (&chapter.digest.title, &chapter.digest.summary);
@@ -846,13 +731,10 @@ fn detail_topic(ask: &Ask<'_>, replies: &[Reply], language: &str, chapter: &Chap
     Ok(Breakdown { sections: parsed.raw.into_sections(&lines), note: parsed.note })
 }
 
-/// The title of a task in the queue: the file (what the task is about; the queue page builds the
-/// visible label from the kind and this).
 fn file_title(path: &Path) -> String {
     path.file_name().unwrap_or_default().to_string_lossy().into_owned()
 }
 
-/// The title of a topic's task: the topic's own title, or its number (`#3`) while it has none.
 fn topic_title(title: &str, number: usize) -> String {
     match title.trim() {
         "" => format!("#{number}"),
@@ -860,23 +742,18 @@ fn topic_title(title: &str, number: usize) -> String {
     }
 }
 
-/// The composite task of the topics of a recording. It brings its [`plan_task`] child; the plan
-/// adds the digests and the merge, the merge adds the details.
 pub fn topics_task(path: &Path, options: &AnalysisOptions) -> NewTask {
     NewTask::new(TOPICS_KIND, &file_title(path), &json!({ "path": path, "options": options })).composite()
 }
 
-/// The plan task of the topics of a recording.
 pub fn plan_task(path: &Path, options: &AnalysisOptions) -> NewTask {
     analysis_leaf(NewTask::new(PLAN_KIND, &file_title(path), &json!({ "path": path, "options": options })), path)
 }
 
-/// The composite task of the breakdown of every final topic.
 pub fn details_task(path: &Path) -> NewTask {
     NewTask::new(DETAILS_KIND, &file_title(path), &json!({ "path": path })).composite()
 }
 
-/// One `topic-detail` child per final topic; each carries its index and the analysis options.
 pub fn detail_tasks(path: &Path, options: &AnalysisOptions, chapters: &[Chapter], replies: &[Reply]) -> Vec<Child> {
     chapters
         .iter()
@@ -894,7 +771,6 @@ pub fn detail_tasks(path: &Path, options: &AnalysisOptions, chapters: &[Chapter]
         .collect()
 }
 
-/// The chunks of a chapter by their middle (the last chapter includes its end).
 fn topic_chunks(chunks: &[ChunkVector], chapter: &Chapter, with_end: bool) -> Vec<ChunkVector> {
     chunks
         .iter()
@@ -906,7 +782,6 @@ fn topic_chunks(chunks: &[ChunkVector], chapter: &Chapter, with_end: bool) -> Ve
         .collect()
 }
 
-/// The chunk embeddings of a topic, summed (a run of topics has the sum of their sums).
 #[derive(Debug, Clone, Default, PartialEq)]
 struct ChunkSum {
     sum: Vec<f64>,
@@ -932,7 +807,6 @@ impl ChunkSum {
     }
 }
 
-/// The sums of the chunk embeddings of every chapter.
 fn chunk_sums(chunks: &[ChunkVector], chapters: &[Chapter]) -> Vec<ChunkSum> {
     chapters
         .iter()
@@ -950,17 +824,11 @@ fn chunk_sums(chunks: &[ChunkVector], chapters: &[Chapter]) -> Vec<ChunkSum> {
         .collect()
 }
 
-/// The value at quantile `q` of sorted values (nearest rank).
 fn quantile(sorted: &[f64], q: f64) -> f64 {
     let i = ((sorted.len() - 1) as f64 * q).round() as usize;
     sorted[i.min(sorted.len() - 1)]
 }
 
-/// Where the recording itself puts a clear boundary. Its adjacent-chunk similarities are mostly
-/// the inside of topics, with a dip wherever a topic changes: the lower tenth is the level of a
-/// real change, the median the level of an ordinary boundary inside a topic. A pair of topics
-/// scoring at most `different` is clearly two topics, at least `similar` clearly one; in between
-/// the code cannot tell and the model is asked about that pair.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Thresholds {
     different: f64,
@@ -976,11 +844,6 @@ fn thresholds(boundaries: &[f64]) -> Option<Thresholds> {
     Some(Thresholds { different: quantile(&values, 0.1), similar: quantile(&values, 0.5) })
 }
 
-/// How alike two neighbouring topics are: the cosine similarity of their mean chunk embeddings,
-/// the cosine similarity of the embeddings of their descriptions (“title — summary”), and their
-/// mean (the one known when the other is not). The mean is used because each feature is noisy on
-/// its own: a topic told in other words still continues the same subject, and a familiar word
-/// does not make two different subjects one.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PairScore {
     chunks: Option<f64>,
@@ -998,7 +861,6 @@ impl PairScore {
         Some(PairScore { chunks, descriptions, score })
     }
 
-    /// Both features and their mean, for the log.
     fn describe(&self) -> String {
         match (self.chunks, self.descriptions) {
             (Some(chunks), Some(descriptions)) => format!("chunks {chunks:.2}, descriptions {descriptions:.2} — {:.2}", self.score),
@@ -1009,7 +871,6 @@ impl PairScore {
     }
 }
 
-/// The embedding model for the descriptions of topics, with the texts already embedded.
 struct Embed<'a> {
     engine: &'a dyn Engine,
     model: String,
@@ -1017,12 +878,10 @@ struct Embed<'a> {
     hf_token: Option<&'a str>,
     cancel: &'a AtomicBool,
     cache: HashMap<String, Vec<f64>>,
-    /// Set after the first failure: the merge goes on with the chunk similarities alone.
     failed: bool,
 }
 
 impl Embed<'_> {
-    /// The embeddings of `texts`, in order; `None` for a text the model could not embed.
     fn vectors(&mut self, texts: &[String]) -> Vec<Option<Vec<f64>>> {
         let mut missing: Vec<String> = Vec::new();
         for text in texts {
@@ -1059,7 +918,6 @@ impl Embed<'_> {
     }
 }
 
-/// The model's answer about one borderline pair, by the first original chapter of each side.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 struct PairAnswer {
     left: usize,
@@ -1067,12 +925,9 @@ struct PairAnswer {
     same: bool,
 }
 
-/// Where the merge stopped: the runs of original chapters, the digests of merged runs and the
-/// model's answers. Kept in the transcript's `meta`, so a restart goes on from here.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct MergeState {
     runs: Vec<Vec<usize>>,
-    /// Merged digests by the first original chapter of their run (a run of one has none here).
     #[serde(default)]
     digests: BTreeMap<usize, Digest>,
     #[serde(default)]
@@ -1084,7 +939,6 @@ impl MergeState {
         MergeState { runs: (0..n).map(|i| vec![i]).collect(), ..MergeState::default() }
     }
 
-    /// Whether the state is about exactly these chapters (a state of another outline is dropped).
     fn fits(&self, n: usize) -> bool {
         !self.runs.is_empty()
             && self.runs.iter().all(|run| !run.is_empty())
@@ -1093,8 +947,6 @@ impl MergeState {
     }
 }
 
-/// The similarity of the neighbouring runs `i` and `i + 1` (their sums and description
-/// embeddings are prepared for all runs at once).
 fn pair_score(sums: &[ChunkSum], descriptions: &[Option<Vec<f64>>], i: usize) -> Option<PairScore> {
     let chunks = (sums[i].count > 0 && sums[i + 1].count > 0).then(|| outline::cosine(&sums[i].mean(), &sums[i + 1].mean()));
     let descriptions = match (&descriptions[i], &descriptions[i + 1]) {
@@ -1104,10 +956,6 @@ fn pair_score(sums: &[ChunkSum], descriptions: &[Option<Vec<f64>>], i: usize) ->
     PairScore::new(chunks, descriptions)
 }
 
-/// The agglomerative merge: repeatedly take the most alike neighbouring pair; the code merges it
-/// when the recording's own similarities say it is clearly one topic, keeps it when they say it
-/// is clearly two, and the model decides a borderline pair. After a merge the similarities of
-/// the new topic are computed again.
 struct Merger<'a, 'b> {
     ask: &'a Ask<'b>,
     language: &'a str,
@@ -1119,8 +967,6 @@ struct Merger<'a, 'b> {
 }
 
 impl Merger<'_, '_> {
-    /// What a run looks like as a chapter: its span is the first original chapter's start to the
-    /// last one's end; its digest is the merged one when the run has several chapters.
     fn run_chapter(&self, run: &[usize]) -> Chapter {
         let first = run[0];
         let last = *run.last().unwrap_or(&first);
@@ -1128,14 +974,11 @@ impl Merger<'_, '_> {
         Chapter { start: self.chapters[first].start, end: self.chapters[last].end, digest }
     }
 
-    /// The description of a run: the title and summary of its digest.
     fn description_text(&self, run: &[usize]) -> String {
         let chapter = self.run_chapter(run);
         format!("{} — {}", chapter.digest.title.trim(), chapter.digest.summary.trim())
     }
 
-    /// One step: merge the most alike pair the code is sure of, or ask the model about the most
-    /// alike borderline pair. `false` when no pair is left to merge.
     fn step(&mut self) -> anyhow::Result<bool> {
         let n = self.state.runs.len();
         if n < 2 {
@@ -1154,8 +997,6 @@ impl Merger<'_, '_> {
             Some(embed) => embed.vectors(&texts),
             None => vec![None; n],
         };
-        // A pair the model said is two topics stays apart: the first original chapter of each
-        // side does not change while the merge goes on.
         let rejected: HashSet<(usize, usize)> = self.state.answers.iter().filter(|a| !a.same).map(|a| (a.left, a.right)).collect();
         let keys: Vec<(usize, usize)> = self.state.runs.windows(2).map(|w| (w[0][0], w[1][0])).collect();
         let mut best: Option<(usize, PairScore)> = None;
@@ -1182,7 +1023,6 @@ impl Merger<'_, '_> {
             return Ok(true);
         }
         if score.score <= self.thresholds.different {
-            // Every other pair is less alike, so none of them can be clearly one topic either.
             log::info!(
                 "outline merge: topics {}–{}: {}; clearly different (at most {:.2}) — kept apart",
                 left + 1,
@@ -1195,8 +1035,6 @@ impl Merger<'_, '_> {
         let same = match self.state.answers.iter().find(|a| a.left == left && a.right == right) {
             Some(answer) => answer.same,
             None => {
-                // The question is about the current runs, not their first chapters: a merged run
-                // is described by its merged digest and its whole span.
                 let first = self.run_chapter(&self.state.runs[i]);
                 let second = self.run_chapter(&self.state.runs[i + 1]);
                 let same = self.ask.same_topic(&first, &second)?;
@@ -1219,9 +1057,6 @@ impl Merger<'_, '_> {
         Ok(true)
     }
 
-    /// Merges the runs at `i` and `i + 1`; the merged digest is a summary of the digests of all
-    /// the original topics of the new run. The run before it (if any) tells the model which title
-    /// not to repeat.
     fn merge(&mut self, i: usize) -> anyhow::Result<()> {
         let start = self.state.runs[i][0];
         let right = self.state.runs[i + 1][0];
@@ -1238,8 +1073,6 @@ impl Merger<'_, '_> {
         Ok(())
     }
 
-    /// The chapters after the merge: a run is one chapter; a merged topic longer than
-    /// [`PARTS_MIN_SECONDS`] keeps its pieces as subtopics.
     fn finish(&mut self) -> Vec<Chapter> {
         self.state
             .runs
@@ -1266,14 +1099,7 @@ impl Merger<'_, '_> {
     }
 }
 
-/// The merge stage: merge the neighbouring topics the recording's own similarities say are one,
-/// asking the model about a borderline pair only, until no pair is clearly one topic. The table
-/// is replaced only at the end; `outline-final` lets a restart finish a half-written table,
-/// `outline-merged` says the table is final. The digest-stage chapters are kept in `outline-topics`
-/// so the merge can be re-run alone.
 #[allow(clippy::too_many_arguments)]
-/// One merge decision. `None`: another decision remains (its state is in the transcript).
-/// `Some(n)`: the chapters are final and there are `n` of them.
 fn merge_stage(
     t: &Transcript,
     ask: &Ask<'_>,
@@ -1329,7 +1155,6 @@ fn merge_stage(
     Ok(Some(final_chapters.len()))
 }
 
-/// Everything a topic task needs from the recording once the model is known.
 struct Run {
     transcript: Transcript,
     dialog: Vec<Reply>,
@@ -1341,8 +1166,6 @@ struct Run {
     hf_token: Option<String>,
 }
 
-/// Opens the recording of `path` and reads the settings; `None` when the agent's model is not
-/// local (a provider model writes topics once the agent talks to providers, P4).
 fn open_run(ai_dir: &Path, path: &Path, settings: &AgentSettings) -> anyhow::Result<Option<Run>> {
     let id = transcript::file_id(path)?;
     anyhow::ensure!(Transcript::exists(ai_dir, &id), "{} has no transcript", path.display());
@@ -1354,8 +1177,6 @@ fn open_run(ai_dir: &Path, path: &Path, settings: &AgentSettings) -> anyhow::Res
     Ok(Some(Run {
         transcript,
         dialog,
-        // What the model writes is for the user: the outline, the breakdown, every phrase and
-        // title follow the interface language, never the language of the recording.
         language: settings.language_name(),
         model,
         device: settings.devices.get(ModelRole::Agent),
@@ -1365,8 +1186,6 @@ fn open_run(ai_dir: &Path, path: &Path, settings: &AgentSettings) -> anyhow::Res
     }))
 }
 
-/// Completes the task together with the children it has just planned, in one transaction. The
-/// worker completes it again afterwards with no children, which changes nothing.
 fn complete_with_children(store: &dyn Store, task: &Task, result: &Value, children: Vec<Child>) -> anyhow::Result<()> {
     store.complete_with(task.id, result, children)?;
     Ok(())
@@ -1377,8 +1196,6 @@ fn analysis_leaf(task: NewTask, path: &Path) -> NewTask {
     task.resource(Resource::Llm).scope(&id).analysis(&id)
 }
 
-/// A task of the topics stage: the plan, a digest, the merge or a detail. One structure for all
-/// four, because they share the settings, the folder and the lease; `kind` picks the work.
 pub struct TopicTask {
     kind: &'static str,
     ai_dir: PathBuf,
@@ -1391,7 +1208,6 @@ impl TopicTask {
     }
 }
 
-/// The handlers of the topics stage and the details, one per task kind.
 pub fn stages(ai_dir: &Path, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Vec<Arc<dyn Stage>> {
     [PLAN_KIND, DIGEST_KIND, MERGE_KIND, DETAIL_KIND]
         .into_iter()
@@ -1416,8 +1232,6 @@ impl Stage for TopicTask {
 }
 
 impl TopicTask {
-    /// The boundary plan: the chapters with placeholders, then a digest per topic and one merge
-    /// after all of them. A restored plan (a restart in the middle) only adds the children.
     fn plan(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work> {
         let input: Input = serde_json::from_value(task.input.clone())?;
         let settings = (self.settings)();
@@ -1436,7 +1250,6 @@ impl TopicTask {
                 plan
             }
         };
-        // The placeholders of every topic; digests already written by a resumed digest task stay.
         let known = t.chapters()?;
         let placeholders: Vec<Chapter> = topics.iter().map(placeholder).collect();
         if known.len() != topics.len() || known.iter().zip(&topics).any(|(c, topic)| (c.start - topic.start).abs() > 0.01 || (c.end - topic.end).abs() > 0.01) {
@@ -1475,7 +1288,6 @@ impl TopicTask {
         Ok(Work::Done(result))
     }
 
-    /// The digest of one topic, one window per chunk. A topic whose digest is already written is kept.
     fn digest(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work> {
         let input: TopicInput = serde_json::from_value(task.input.clone())?;
         let settings = (self.settings)();
@@ -1524,8 +1336,6 @@ impl TopicTask {
         Ok(Work::Done(json!({ "topic": input.topic, "title": digest.title })))
     }
 
-    /// The merge; when the options ask for details, it adds the `details` composite with one
-    /// `topic-detail` per final topic in the same transaction.
     fn merge(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work> {
         let input: Input = serde_json::from_value(task.input.clone())?;
         let settings = (self.settings)();
@@ -1558,7 +1368,6 @@ impl TopicTask {
         Ok(Work::Done(result))
     }
 
-    /// The breakdown of one final topic, written into its chapter (`Digest.sections`).
     fn detail(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work> {
         let input: TopicInput = serde_json::from_value(task.input.clone())?;
         let settings = (self.settings)();
@@ -1644,13 +1453,9 @@ impl TopicTask {
 mod tests {
     use super::*;
 
-    /// Models are required (`MEDIAA_TEST_MODELS`, the app's folder by default); the default agent
-    /// model is downloaded on first use (~2.5 GB). It digests a short meeting: a title, the
-    /// decision and the action items with names.
     #[test]
     #[ignore]
     fn digests_a_meeting() {
-        // `RUST_LOG=info` shows the merge decisions of the bench.
         let _ = env_logger::Builder::from_env(env_logger::Env::default()).try_init();
         let engine = crate::live::engine();
         let model = match ModelRole::Agent.default_source().unwrap() {
@@ -1674,15 +1479,11 @@ mod tests {
 
     #[test]
     fn prompts_carry_the_part_and_its_neighbour() {
-        // The recording is Russian; the text is written for the user, so the language of the
-        // interface decides it, not the letters of the recording.
         let w = Window { start: 600.0, end: 1200.0, text: "[10:00] Дана: начнём.".into() };
-        // A later part sees the part before it.
         let p = prompt(&w, 1, 3, Some("Планы на квартал"), "English");
         assert!(p.starts_with("Part 2 of 3 of one topic of the recording (10:00 – 20:00).\nWrite everything in English.\n"), "{p}");
         assert!(p.contains("The previous part of this topic was about: Планы на квартал\nDescribe what this part adds; do not repeat the previous part."), "{p}");
         assert!(p.contains("[10:00] Дана: начнём."));
-        // The first window of a topic sees the topic before it.
         let first = prompt(&w, 0, 1, Some("Планы на квартал"), "English");
         assert!(first.starts_with("One topic of the recording (10:00 – 20:00).\nWrite everything in English.\n"), "{first}");
         assert!(first.contains("The previous topic of the recording was: Планы на квартал\nName this topic by what is new in it; do not reuse that title."), "{first}");
@@ -1716,10 +1517,8 @@ mod tests {
 
     #[test]
     fn thresholds_come_from_the_recording() {
-        // Nine boundaries: four inside topics (1.0) and a slope down to the dips.
         let boundaries = [0.0, 1.0, 1.0, 1.0, 1.0, 0.9, 0.7, 0.6, 0.4, 0.1];
         assert_eq!(thresholds(&boundaries), Some(Thresholds { different: 0.4, similar: 0.9 }));
-        // Nothing to learn from without at least one boundary between chunks.
         assert_eq!(thresholds(&[0.0]), None);
         assert_eq!(thresholds(&[]), None);
     }
@@ -1743,14 +1542,12 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let ask = Ask { engine: &fake, model: "unsloth/Qwen3.5-4B-GGUF", device: Device::Auto, hf_token: None, cancel: &cancel };
         let chapters: Vec<Chapter> = (0..4).map(|i| chapter(&format!("Тема {}", i + 1), i as f64 * 360.0, (i + 1) as f64 * 360.0)).collect();
-        // Every topic is made of the same meaning: similarity 1.0 at every step.
         let chunk_sums = sums(&[&[[1.0, 0.0]], &[[1.0, 0.0]], &[[1.0, 0.0]], &[[1.0, 0.0]]]);
         let mut m = merger(&ask, &chapters, chunk_sums, Thresholds { different: 0.5, similar: 0.9 }, None);
         while m.step().unwrap() {}
         let merged = m.finish();
         assert_eq!(merged.len(), 1);
         assert_eq!((merged[0].start, merged[0].end), (0.0, 1440.0));
-        // 24 minutes: longer than 15, so the pieces stay as subtopics.
         assert_eq!(merged[0].digest.parts.iter().map(|p| p.title.as_str()).collect::<Vec<_>>(), ["Тема 1", "Тема 2", "Тема 3", "Тема 4"]);
         assert_eq!(fake.chats().len(), 3, "one reduce per merge, the model is not asked about pairs");
     }
@@ -1780,7 +1577,6 @@ mod tests {
             let cancel = AtomicBool::new(false);
             let ask = Ask { engine: &fake, model: "unsloth/Qwen3.5-4B-GGUF", device: Device::Auto, hf_token: None, cancel: &cancel };
             let chapters = [chapter("Отчёт", 0.0, 300.0), chapter("Бюджет", 300.0, 600.0)];
-            // 0.7 between the topics: between "clearly different" (0.5) and "clearly one" (0.9).
             let chunk_sums = sums(&[&[[1.0, 0.0]], &[[0.7, 0.714]]]);
             let mut m = merger(&ask, &chapters, chunk_sums, Thresholds { different: 0.5, similar: 0.9 }, None);
             while m.step().unwrap() {}
@@ -1809,8 +1605,6 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let ask = Ask { engine: &fake, model: "unsloth/Qwen3.5-4B-GGUF", device: Device::Auto, hf_token: None, cancel: &cancel };
         let chapters = [chapter("Отчёт", 0.0, 300.0), chapter("Бюджет", 300.0, 600.0), chapter("Найм", 600.0, 900.0)];
-        // A and B are alike (0.87, borderline); B and C are further apart (0.77); after A and B
-        // are merged, the run against C is borderline again (0.57).
         let chunk_sums = sums(&[&[[1.0, 0.0]], &[[0.866, 0.5]], &[[0.342, 0.940]]]);
         let mut m = merger(&ask, &chapters, chunk_sums, Thresholds { different: 0.5, similar: 0.9 }, None);
         while m.step().unwrap() {}
@@ -1818,7 +1612,6 @@ mod tests {
         let calls = fake.chats();
         assert_eq!(calls.len(), 3, "two questions and one reduce");
         assert!(calls[0].texts[1].contains("Chapter A (00:00 – 05:00):\nTitle: Отчёт"), "{}", calls[0].texts[1]);
-        // The next question is about the merged run: its merged title and its whole span.
         let second = &calls[2].texts[1];
         assert!(second.contains("Chapter A (00:00 – 10:00):\nTitle: Общий отчёт\nSummary: всё об отчёте"), "{second}");
         assert!(second.contains("Chapter B (10:00 – 15:00):\nTitle: Найм"), "{second}");
@@ -1832,8 +1625,6 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let ask = Ask { engine: &fake, model: "unsloth/Qwen3.5-4B-GGUF", device: Device::Auto, hf_token: None, cancel: &cancel };
         let chapters = [chapter("Отчёт", 0.0, 600.0), chapter("Бюджет", 600.0, 1200.0)];
-        // The chunks are identical (1.0) but the descriptions unrelated (0.0): the mean 0.5 is
-        // clearly different, so the topics stay apart.
         let chunk_sums = sums(&[&[[1.0, 0.0]], &[[1.0, 0.0]]]);
         let embed = Some(Embed { engine: &fake, model: "ggml-org/embeddinggemma-300M-GGUF".into(), device: Device::Auto, hf_token: None, cancel: &cancel, cache: HashMap::new(), failed: false });
         let mut m = merger(&ask, &chapters, chunk_sums, Thresholds { different: 0.5, similar: 0.9 }, embed);
@@ -1843,8 +1634,6 @@ mod tests {
         assert!(fake.chats().is_empty());
     }
 
-    /// A recording of three topics by the meaning of its chunks: three chunks of 40 s each mean
-    /// one subject, then three another, then three the opposite of the first.
     fn recording() -> (tempfile::TempDir, PathBuf, PathBuf, String) {
         use mediaa_core::retrieval::Chunk;
         use mediaa_core::transcript::Word;
@@ -1877,13 +1666,9 @@ mod tests {
         (dir, ai, file, id)
     }
 
-    /// Without an embedding model the merge describes the topics by their chunks alone and the
-    /// fake chat answers stay in a known order.
     fn settings() -> AgentSettings {
         let mut settings = AgentSettings::default();
         settings.models.embedding = None;
-        // The fake hands whole answers out in call order, so two digests at once would let a
-        // topic take another topic's answer. One model call at a time makes the order the ids'.
         settings.budget.agent = 1;
         settings
     }
@@ -1897,12 +1682,10 @@ mod tests {
         sched
     }
 
-    /// Runs the queue to the end.
     fn drain(sched: &mediaa_queue::Scheduler) {
         crate::run::drain(sched, std::time::Duration::from_secs(60));
     }
 
-    /// Pause everything still going and wait until no chunk is inside a model call.
     fn pause_until_quiet(sched: &mediaa_queue::Scheduler) {
         let store = sched.store();
         for task in store.list().unwrap() {
@@ -1918,8 +1701,6 @@ mod tests {
             let _ = sched.tick();
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
-        // A paused row stays paused across a reopen. The tests drop the scheduler to
-        // imitate a restart, so the unfinished rows have to be queued again first.
         for task in store.list().unwrap() {
             if task.status == mediaa_queue::Status::Paused {
                 let _ = sched.resume(task.id);
@@ -1939,8 +1720,6 @@ mod tests {
         format!(r#"{{"points":{points}}}"#)
     }
 
-    /// The topics composite: the plan brings a digest per topic and the merge, the merge brings
-    /// the details; everything ends done.
     #[test]
     fn topics_run_as_plan_digests_merge_and_details() {
         use mediaa_queue::Status as TaskStatus;
@@ -1979,7 +1758,6 @@ mod tests {
         );
         assert_eq!(queue.get(topics).unwrap().unwrap().status, TaskStatus::Done);
         assert_eq!(queue.get(plan).unwrap().unwrap().status, TaskStatus::Done);
-        // The plan's children join the topics composite; the details hang under their composite.
         let kinds: Vec<String> = queue.children(topics).unwrap().into_iter().map(|t| t.kind).collect();
         assert_eq!(kinds, [PLAN_KIND, DIGEST_KIND, DIGEST_KIND, DIGEST_KIND, MERGE_KIND, DETAILS_KIND]);
         let details = tasks.iter().find(|t| t.kind == DETAILS_KIND).unwrap();
@@ -1991,7 +1769,6 @@ mod tests {
         assert_eq!(chapters[0].digest.quotes, [Quote { time: 20.0, text: "реплика1 обсуждение".into() }], "the quote is checked, the invented one dropped");
         assert_eq!(chapters[1].digest.quotes, [Quote { time: 120.0, text: "реплика6 обсуждение".into() }]);
         assert!(t.meta(MERGED_KEY).unwrap().is_some() && t.meta(FINAL_KEY).unwrap().is_none());
-        // The details: an item's time is checked against the topic's own replies.
         assert_eq!(chapters[0].digest.sections.len(), 1);
         assert_eq!(chapters[0].digest.sections[0].items.iter().map(|i| i.time).collect::<Vec<_>>(), [Some(20.0), None], "the found time, the invented one");
         assert_eq!(chapters[1].digest.sections[0].items[0].time, None, "0:20 does not belong to this topic");
@@ -1999,15 +1776,11 @@ mod tests {
         assert_eq!(fake.chats().len(), 6, "three digests and three details — the merge asks nothing");
         assert!(fake.chats()[0].json_schema.as_deref().unwrap_or_default().contains("\"quotes\""));
         assert!(fake.chats()[3].json_schema.as_deref().unwrap_or_default().contains("\"sections\""));
-        // The replies are Russian, the interface of the default settings is English: every
-        // text the model writes for the user — a digest and a breakdown alike — is English.
         for (i, chat) in fake.chats().iter().enumerate() {
             assert!(chat.texts[1].contains("Write everything in English."), "call {i}: {:?}", chat.texts);
         }
     }
 
-    /// A program stop after one digest: the finished digest is not asked again, the rest of the
-    /// chain goes on.
     #[test]
     fn a_restart_in_the_middle_does_not_redo_a_digest() {
         use mediaa_queue::Status as TaskStatus;
@@ -2031,7 +1804,6 @@ mod tests {
         sched
             .enqueue_tree(topics_task(&file, &options).scope(&id), vec![Child::new(plan_task(&file, &options).scope(&id))])
             .unwrap();
-        // Stop once a digest has been written. A later chunk is not asked again.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while fake.chats().is_empty() {
             if std::time::Instant::now() > deadline {
@@ -2059,9 +1831,6 @@ mod tests {
         assert_eq!(fake.chats().len(), 6, "three digests and three details — a written digest was not asked twice");
     }
 
-    /// A language change while the topics are unfinished: what is written stays as written (the
-    /// user restarts the topics themselves to get them in another language), and only the rest is
-    /// written in the new language.
     #[test]
     fn a_language_change_keeps_written_topics_and_writes_the_rest_in_the_new_language() {
         use mediaa_queue::Status as TaskStatus;
@@ -2102,8 +1871,6 @@ mod tests {
         drop(t);
         drop(sched);
 
-        // The user switches the interface to Russian. The switch starts nothing; the run goes
-        // on in the new language, and the digest already written is kept.
         let mut russian = settings.clone();
         russian.ui_language = Some("ru".into());
         let sched = topic_sched(&ai, engine, &russian);
@@ -2120,7 +1887,6 @@ mod tests {
         }
     }
 
-    /// A stop after one detail: its sections are in the chapter, so the detail is not asked again.
     #[test]
     fn a_restart_in_the_middle_does_not_redo_a_detail() {
         use mediaa_queue::Status as TaskStatus;
@@ -2167,7 +1933,6 @@ mod tests {
         assert_eq!(fake.chats().len(), 6, "the stopped detail was not asked twice");
     }
 
-    /// The details are off: the merge finishes the topics and starts nothing.
     #[test]
     fn without_the_details_option_the_merge_starts_nothing() {
         use mediaa_queue::Status as TaskStatus;
@@ -2198,7 +1963,6 @@ mod tests {
         assert_eq!(topics.len(), 3, "the digest-stage chapters are kept for a merge re-run");
     }
 
-    /// A reply of 100 words: fifteen of them are more than one window.
     fn long_reply(i: usize) -> Reply {
         use mediaa_core::transcript::Word;
         let start = i as f64 * 10.0;
@@ -2282,15 +2046,11 @@ mod tests {
         assert_eq!(sections[0].items[2].text, "Олег проверит цифры", "the item stays without its time");
     }
 
-    /// One reply of minutes becomes many lines with their own times, so an item about the middle
-    /// of it gets the middle time, not the start of the reply (a live run collapsed them all to
-    /// the topic start).
     #[test]
     fn the_items_of_a_monologue_get_the_times_of_their_lines() {
         use mediaa_core::transcript::Word;
         use mediaa_engine::testing::FakeEngine;
 
-        // 100 words, half a second each: two lines, at 0:00 and 0:26 (25.5 s).
         let words: Vec<Word> = (0..100).map(|i| Word { text: format!("слово{i}"), start: i as f64 * 0.5, end: i as f64 * 0.5 + 0.4 }).collect();
         let replies = [Reply { start: 0.0, end: words.last().unwrap().end, speaker: None, words }];
         let fake = FakeEngine::new();
@@ -2318,8 +2078,6 @@ mod tests {
         use mediaa_engine::testing::FakeEngine;
 
         let fake = FakeEngine::new();
-        // A small model repeats a section with the same item; the titles differ in case and
-        // spaces only.
         let answer = r#"{"sections":[
             {"title":"Предлагаемые действия","kind":"steps","items":[{"text":"лайкнуть видео"}]},
             {"title":" Другие ","kind":"list","items":[{"text":"первое"}]},
@@ -2339,8 +2097,6 @@ mod tests {
         assert_eq!(sections[1].items[0].text, "первое");
     }
 
-    /// A full answer at the budgeted lengths fits, and the limit is larger than that answer by
-    /// the margin, so a sentence that runs long still closes the JSON.
     #[test]
     fn the_answer_limits_cover_a_maximal_answer() {
         let fits = |answer: &str, limit: u32| {
@@ -2373,7 +2129,6 @@ mod tests {
         fits(&serde_json::to_string(&digest).unwrap(), digest_tokens());
     }
 
-    /// An answer cut inside the third section. The first two objects are closed.
     fn cut_off_sections() -> String {
         "{\n\"sections\":[\n\
          {\"title\":\"Первый\",\"kind\":\"list\",\"items\":[{\"text\":\"один\"}]},\n\
@@ -2386,7 +2141,6 @@ mod tests {
     fn a_section_cut_off_mid_item_is_dropped() {
         let raw = closed_sections(&cut_off_sections());
         assert_eq!(raw.sections.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Первый", "Второй"]);
-        // A quote inside a closed section is not the end of that section.
         let quoted = r#"{"sections":[{"title":"A","kind":"list","items":[{"text":"say \"hi\""}]},{"title":"B","kind":"list","items":[{"text":"cut"}"#;
         let raw = closed_sections(quoted);
         assert_eq!(raw.sections.len(), 1);
@@ -2461,8 +2215,6 @@ mod tests {
         assert_eq!(saved[0].digest.sections[0].items[0].text, "реплика1 обсуждение");
     }
 
-    /// The old schema caps are only a floor. A larger topic raises the limit, with the margin,
-    /// and a prompt that leaves no room for that answer is clamped to the context.
     #[test]
     fn the_section_limit_follows_the_topic_and_the_context() {
         assert_eq!(topic_section_tokens(10, 1), sections_tokens(), "a short topic keeps the floor");
@@ -2487,7 +2239,6 @@ mod tests {
         let cramped = section_budget("sys", &huge, huge.chars().count(), 80);
         assert!(!cramped.fits);
         assert!(cramped.max_tokens < cramped.wanted);
-        // The prompt alone is past the window, so the answer is held to one token.
         assert!(cramped.prompt_tokens > OUTLINE_CTX);
         assert_eq!(cramped.max_tokens, 1);
         let note = section_note(None, None, &cramped, None, None).unwrap();

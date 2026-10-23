@@ -1,15 +1,9 @@
-//! UI languages. Translations live in `crates/app/locales/<code>.toml` (one file per
-//! language, compiled in by `rust-i18n`); adding a language = adding a file + a row in
-//! [`LANGUAGES`]. The default is the system language when it is available.
-
 use mediaa_core::settings::{AfterCapture, GifDither, ThemePreference};
 use mediaa_core::MediaKind;
 use rust_i18n::t;
 
-/// `(code, native name)` of every bundled language.
 pub const LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("ru", "Русский")];
 
-/// Picks the UI language: explicit setting, else the system locale, else English.
 pub fn resolve(setting: Option<&str>, system_locale: Option<&str>) -> &'static str {
     let supported = |code: &str| {
         let base = code
@@ -123,7 +117,6 @@ mod tests {
         }
     }
 
-    /// The user sees no engine: the program, its state and its errors are models and tasks.
     #[test]
     fn no_locale_value_mentions_the_engine() {
         for (lang, _) in LANGUAGES {
@@ -171,7 +164,6 @@ mod tests {
         for f in files {
             let src = std::fs::read_to_string(&f).unwrap();
             for (pos, _) in src.match_indices("t!(\"") {
-                // Skip `format!(`, `print!(`… — only a standalone `t!` macro counts.
                 let prev = src[..pos].chars().next_back();
                 if prev.is_some_and(|c| c.is_alphanumeric() || c == '_') {
                     continue;
@@ -187,7 +179,6 @@ mod tests {
 
     #[test]
     fn interpolation_works() {
-        // An explicit locale: the global one is shared by the tests running in parallel.
         assert_eq!(t!("lib.count", n = 3, locale = "en"), "3 files");
         assert_eq!(t!("lib.count", n = 3, locale = "ru"), "файлов: 3");
     }

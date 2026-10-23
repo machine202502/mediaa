@@ -1,5 +1,3 @@
-//! Global hotkeys (work while the app is in the background or hidden in the tray).
-
 use crossbeam_channel::Receiver;
 use eframe::egui;
 use mediaa_core::settings::HotkeySettings;
@@ -21,12 +19,10 @@ pub struct Hotkeys {
     registered: Vec<(HotKey, HotkeyAction)>,
 }
 
-/// Validates a hotkey string such as `"Shift+PrintScreen"` or `"Alt+Shift+R"`.
 pub fn parse(text: &str) -> Result<HotKey, String> {
     HotKey::from_str(text.trim()).map_err(|e| e.to_string())
 }
 
-/// Keys that make sense as a global hotkey without any modifier.
 fn standalone(token: &str) -> bool {
     token.starts_with('F') && token[1..].parse::<u8>().is_ok()
         || matches!(token, "PRINTSCREEN" | "PAUSE" | "SCROLLLOCK" | "INSERT")
@@ -43,8 +39,6 @@ fn modifier_prefix(m: egui::Modifiers) -> String {
     s
 }
 
-/// Builds a hotkey string from a key press (as captured by the settings field), or `None` if
-/// the key cannot be a global hotkey or needs a modifier that is missing.
 pub fn combo_from_token(modifiers: egui::Modifiers, token: &str) -> Option<String> {
     let has_modifier = modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.mac_cmd;
     if !has_modifier && !standalone(token) {
@@ -56,13 +50,11 @@ pub fn combo_from_token(modifiers: egui::Modifiers, token: &str) -> Option<Strin
 
 pub fn combo_from_key(modifiers: egui::Modifiers, key: egui::Key) -> Option<String> {
     if key == egui::Key::Escape {
-        return None; // cancels the capture
+        return None;
     }
     combo_from_token(modifiers, &key.name().to_uppercase().replace(' ', ""))
 }
 
-/// `"PRINTSCREEN"` → `"PrintScreen"`, `"S"` → `"S"`, `"PAGEUP"` → `"PageUp"` (parse is
-/// case-insensitive, this is only for display).
 fn pretty(token: &str) -> String {
     match token {
         "PRINTSCREEN" => "PrintScreen".into(),
@@ -78,7 +70,6 @@ fn pretty(token: &str) -> String {
 }
 
 impl Hotkeys {
-    /// The receiver yields raw hotkey ids; map them with [`Hotkeys::action_for`].
     pub fn new(ctx: &egui::Context) -> anyhow::Result<(Hotkeys, Receiver<u32>)> {
         let manager = GlobalHotKeyManager::new()?;
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -105,8 +96,6 @@ impl Hotkeys {
             .map(|(_, a)| *a)
     }
 
-    /// Re-registers all hotkeys from settings. Returns human-readable problems (bad syntax,
-    /// combination already taken by another app…).
     pub fn apply(&mut self, settings: &HotkeySettings) -> Vec<String> {
         for (hk, _) in self.registered.drain(..) {
             let _ = self.manager.unregister(hk);

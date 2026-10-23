@@ -1,5 +1,3 @@
-//! Standard locations: config file, working (temp) directory, default output folders.
-
 use directories::{ProjectDirs, UserDirs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -10,14 +8,12 @@ fn project_dirs() -> Option<ProjectDirs> {
     ProjectDirs::from("dev", APP_NAME, APP_NAME)
 }
 
-/// `settings.toml` location (e.g. `%APPDATA%\MediaA\MediaA\config\settings.toml`).
 pub fn settings_file() -> PathBuf {
     project_dirs()
         .map(|d| d.config_dir().join("settings.toml"))
         .unwrap_or_else(|| PathBuf::from("mediaa-settings.toml"))
 }
 
-/// Per-user data directory (logs, thumbnails, recording scratch space).
 pub fn data_dir() -> PathBuf {
     project_dirs()
         .map(|d| d.data_local_dir().to_path_buf())
@@ -28,12 +24,10 @@ pub fn logs_dir() -> PathBuf {
     data_dir().join("logs")
 }
 
-/// Scratch space for in-progress recordings.
 pub fn work_dir() -> PathBuf {
     data_dir().join("work")
 }
 
-/// Where the engine downloads models (and runs the ones from there).
 pub fn models_dir() -> PathBuf {
     data_dir().join("models")
 }
@@ -44,8 +38,6 @@ fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Default folder for everything MediaA makes (screenshots, recordings, conversions):
-/// `Documents/MediaA`.
 pub fn default_media_dir() -> PathBuf {
     UserDirs::new()
         .and_then(|u| u.document_dir().map(Path::to_path_buf))
@@ -53,8 +45,6 @@ pub fn default_media_dir() -> PathBuf {
         .join(APP_NAME)
 }
 
-/// Removes entries in `dir` that were last modified more than `max_age` ago.
-/// Used at startup to clean scratch files left behind by crashed sessions.
 pub fn remove_stale_entries(dir: &Path, max_age: Duration) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
@@ -102,7 +92,6 @@ mod tests {
         std::fs::write(dir.path().join("fresh.tmp"), b"x").unwrap();
         std::fs::create_dir(dir.path().join("session")).unwrap();
         assert_eq!(remove_stale_entries(dir.path(), Duration::from_secs(3600)), 0);
-        // Everything is "stale" with a zero max age once a moment has passed.
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(remove_stale_entries(dir.path(), Duration::ZERO), 2);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);

@@ -1,10 +1,7 @@
-//! Running an FFmpeg job with progress reporting and cancellation.
-
 use ez_ffmpeg::FfmpegContext;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-/// Returned (inside `anyhow::Error`) when a job was cancelled by the user.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cancelled;
 
@@ -20,8 +17,6 @@ pub fn is_cancelled(err: &anyhow::Error) -> bool {
     err.downcast_ref::<Cancelled>().is_some()
 }
 
-/// Starts `ctx`, reports `out_time / total` through `on_progress` (0..=1) and aborts when
-/// `cancel` becomes true.
 pub fn run(
     ctx: FfmpegContext,
     total_us: Option<i64>,

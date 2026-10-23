@@ -1,30 +1,20 @@
-//! The prompts of the models, kept as templates in `crates/agent/prompts/` (MiniJinja: Jinja
-//! syntax with `{% if %}`, `{% for %}` and `{% include %}`) so they read apart from the code that
-//! fills them. They are built into the binary; the snapshot tests show each one rendered.
-
 use minijinja::{Environment, UndefinedBehavior};
 use serde::Serialize;
 use std::sync::LazyLock;
 
 static ENV: LazyLock<Environment<'static>> = LazyLock::new(|| {
     let mut env = Environment::new();
-    // A missing value is a bug, not an empty string; block tags leave no blank lines behind.
     env.set_undefined_behavior(UndefinedBehavior::Strict);
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
-    // Every `.j2` file under `prompts/`, embedded by build.rs, named by its path there.
     minijinja_embed::load_templates!(&mut env);
     env
 });
 
-/// The prompt `name` (a path under `prompts/`) filled with `ctx`.
-///
-/// Templates are part of the binary: a failure is a bug, caught by the tests.
 pub fn render(name: &str, ctx: impl Serialize) -> String {
     ENV.get_template(name).and_then(|t| t.render(ctx)).unwrap_or_else(|e| panic!("prompt template {name}: {e:#}"))
 }
 
-/// The description of a tool for the model: `prompts/tools/<name>.j2`.
 pub fn tool(name: &str) -> String {
     render(&format!("tools/{name}.j2"), ())
 }
@@ -65,7 +55,6 @@ mod tests {
 
     #[test]
     fn memory() {
-        // Exactly what the code wrote before the move to templates.
         assert_eq!(render("memory.j2", context! { facts => ["a", "b"], summary => "s" }), "\nRemembered in this chat:\n- a\n- b\n\nThe earlier conversation, summarised:\ns\n");
         assert_eq!(render("memory.j2", context! { facts => Vec::<String>::new(), summary => "" }), "");
         insta::assert_snapshot!("memory_fold_system", render("memory_fold_system.j2", ()));
@@ -101,12 +90,10 @@ mod tests {
             part(Some("бюджет"), 2, 3),
             format!("Part 2 of 3 of one topic of the recording (20 мин – 40 мин).\nWrite everything in Russian.\nThe previous part of this topic was about: бюджет\nDescribe what this part adds; do not repeat the previous part.\n\nTranscript (this part), {lines}{tail}")
         );
-        // The first part of a topic sees the previous topic.
         assert_eq!(
             part(Some("бюджет"), 1, 3),
             format!("Part 1 of 3 of one topic of the recording (20 мин – 40 мин).\nWrite everything in Russian.\nThe previous topic of the recording was: бюджет\nName this topic by what is new in it; do not reuse that title.\n\nTranscript (this part), {lines}{tail}")
         );
-        // A topic that fits one window has no part number and is read as a whole.
         assert_eq!(
             part(None, 1, 1),
             format!("One topic of the recording (20 мин – 40 мин).\nWrite everything in Russian.\n\nTranscript (the whole topic), {lines}{tail}")
@@ -122,7 +109,6 @@ mod tests {
         assert!(reduce.contains("[1] Отчёт — Сроки.\nDecisions: Сдать в пятницу\n") && reduce.contains("[2] Бюджет — Цифры.\nActions: Олег проверит\n"), "{reduce}");
         assert!(!reduce.contains("Part 2"), "empty lists leave no line");
         assert!(!reduce.contains("previous topic"), "the first topic has none: {reduce}");
-        // After a merge the previous topic is named, so the new title does not repeat it.
         let after = render("outline/reduce.j2", context! { language => "Russian", previous => "Смета", parts });
         assert!(after.contains("The previous topic of the recording was: Смета\nName this topic by what is new in it; do not reuse that title.\n"), "{after}");
 
@@ -138,8 +124,6 @@ mod tests {
         assert!(pair.ends_with("Write a JSON object:\nsame — true or false, as above."), "{pair}");
     }
 
-    /// The details templates carry the topic and its text (or its points); their wording is a
-    /// placeholder until the lead writes it (P3a), so only the data wiring is tested.
     #[test]
     fn outline_details() {
         insta::assert_snapshot!("outline_detail_system", render("outline/detail_system.j2", ()));
@@ -172,8 +156,6 @@ mod tests {
         );
         assert!(assembled.contains("The subtopics may become sections") && !assembled.contains("Transcript of the topic"), "{assembled}");
 
-        // The corrective ask after a cut-off breakdown; `tokens`
-        // is the limit the previous answer hit.
         let shorter = render("outline/detail_shorter.j2", context! { tokens => 1819 });
         insta::assert_snapshot!("outline_detail_shorter", shorter);
         assert_eq!(
@@ -243,11 +225,11 @@ mod tests {
         assert_eq!(render("results/remember.j2", context! { new => false }), "Already remembered (or empty).");
         assert_eq!(
             render("results/say_uncited.j2", context! { kind => "recording" }),
-            "a section must cite the moments it is based on, as [m:ss]: read that part of the recording first"
+            "a section must cite the moments it is based on, as [m:ss]: cite the moments you already have in the results of search, read or scan"
         );
         assert_eq!(
             render("results/say_uncited.j2", context! { kind => "folder" }),
-            "a section must cite the moments it is based on, as [#2 12:30] (the recording's number, then the time): read that part of the recording first"
+            "a section must cite the moments it is based on, as [#2 12:30] (the recording's number, then the time): cite the moments you already have in the results of search, read or scan"
         );
         assert!(render("results/step.j2", context! { step => 3, tool => "search", text => "x" }).starts_with("Result of step 3 (search):\nx"));
         let hits = [context! { title => "ТК РФ", url => "https://example.org", snippet => "Статья 66.1" }];
@@ -263,7 +245,6 @@ mod tests {
 
     #[test]
     fn recording_results_and_errors() {
-        // Exactly what the code wrote before the move to templates.
         let chapters = [
             context! { start => "0:00", end => "10:00", title => "Отчёт", summary => "Сроки.", sections => Vec::<String>::new() },
             context! { start => "10:00", end => "20:00", title => "Бюджет", summary => "Цифры.", sections => Vec::<String>::new() },
@@ -287,7 +268,7 @@ mod tests {
         assert_eq!(render("results/recording/never_said.j2", context! { query => "q" }), "«q» is never said (no word form of it). Try a synonym or search.");
         assert_eq!(render("results/recording/no_speakers.j2", ()), "Speakers were not told apart in this recording.");
         assert_eq!(render("results/recording/time.j2", context! { clock => "4:50", seconds => "290" }), "4:50 (290 seconds)");
-        for (name, text) in [("chapters", "(more chapters: read by time)"), ("search", "(cut; read a range for the rest)"), ("plain", "(cut)"), ("scan", "(cut; ask a narrower instruction)")] {
+        for (name, text) in [("chapters", "(more chapters: read by time)"), ("search", "(cut: the fragments above end here; read a range only if what you need, or its moment, is not in them)"), ("plain", "(cut)"), ("scan", "(cut; ask a narrower instruction)")] {
             assert_eq!(render(&format!("results/cut/{name}.j2"), ()), text);
         }
         for (what, text) in [("query", "search needs a query"), ("names", "search needs names"), ("instruction", "search needs an instruction"), ("word", "search needs a word"), ("address", "search needs an address")] {
@@ -412,8 +393,6 @@ Check the draft"), "{bare}");
         assert!(bare.ends_with("Put nothing else into the answer text."), "{bare}");
     }
 
-    /// The judge templates carry the question, the reference answer, the facts and the agent's
-    /// answer. The wording is a placeholder until the lead writes the rubric.
     #[test]
     fn judge_prompt_carries_the_case() {
         let system = render("eval/judge_system.j2", ());
@@ -511,13 +490,11 @@ Check the draft"), "{bare}");
         );
         assert!(some.ends_with(tail), "{some}");
         insta::assert_snapshot!("speaker_names_known", some);
-        // One speaker is listed without a comma.
         let one = render(
             "speakers/names.j2",
             context! { start => "0:00", end => "4:00", speakers => ["@s1"], known => Vec::<minijinja::Value>::new(), lines => lines() },
         );
         assert!(one.starts_with("Part of the recording 0:00 – 4:00. Speakers in it: @s1.\n"), "{one}");
-        // No lines: the transcript block is empty, the question stays.
         let empty = render(
             "speakers/names.j2",
             context! { start => "0:00", end => "4:00", speakers => ["@s1"], known => Vec::<minijinja::Value>::new(), lines => Vec::<String>::new() },

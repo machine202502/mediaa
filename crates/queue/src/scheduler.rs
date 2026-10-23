@@ -1,7 +1,3 @@
-//! Pools, round-robin by chunk, and the stop flag. The host calls [`Scheduler::tick`].
-//! One tick reaps stale runs, steps each live run once, then starts one wave of new runs.
-//! A slot freed by a run that returns is given to the next task in that same tick.
-
 use crate::events::Event;
 use crate::runner::{RunCtx, Runner, Step};
 use crate::snapshot::{self, ModelNeed, PoolLoad, Snapshot};
@@ -20,10 +16,6 @@ use std::time::Duration;
 
 const DEFAULT_STALE: Duration = Duration::from_secs(15 * 60);
 
-/// How long work of a resource may show no sign of life before it is taken for a hang. A model
-/// call beats on every token, embedding and download chunk, so only a call that stopped moving
-/// reaches its limit. Speech is one long native call per recording (diarization of a whole file),
-/// so its limit is wide.
 fn default_stale(resource: Resource) -> Duration {
     match resource {
         Resource::Speech => Duration::from_secs(60 * 60),
@@ -33,7 +25,6 @@ fn default_stale(resource: Resource) -> Duration {
     }
 }
 
-/// How many runs of one resource may hold a slot, and how much memory they may use together.
 #[derive(Debug, Clone, Copy)]
 pub struct Pool {
     pub resource: Resource,
@@ -41,7 +32,6 @@ pub struct Pool {
     pub memory: u64,
 }
 
-/// One chunk that was handed out. `bg_ready` / `chat_ready` are what was waiting at the claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Turn {
     pub resource: Resource,
@@ -52,7 +42,6 @@ pub struct Turn {
     pub ready: Vec<String>,
 }
 
-/// A slot that is held. `gen` is the only generation whose checkpoints are kept.
 #[derive(Debug, Clone)]
 pub struct LiveRun {
     pub id: TaskId,
@@ -78,7 +67,6 @@ struct Run {
     bg_ready: bool,
     chat_ready: bool,
     ready: Vec<String>,
-    /// A checkpoint landed. Until then the claim is not a chunk and does not count for fairness.
     chunked: bool,
 }
 
@@ -90,7 +78,6 @@ struct Inner {
     events: Vec<Event>,
     subs: Vec<Sender<Event>>,
     stale: Duration,
-    /// A wider (or narrower) stale limit for one resource, when the default does not fit it.
     stale_for: HashMap<Resource, Duration>,
 }
 
@@ -126,13 +113,10 @@ impl Scheduler {
         self.inner.lock().expect("queue lock").runners.push(runner);
     }
 
-    /// A run with no heartbeat for this long is reaped on the next tick. The default is 15 minutes.
     pub fn set_stale(&self, stale: Duration) {
         self.inner.lock().expect("queue lock").stale = stale;
     }
 
-    /// How long a run of `resource` may show no sign of life before the runner is asked to take
-    /// it for a hang ([`Step::Hang`]). The default comes from [`default_stale`].
     pub fn set_stale_for(&self, resource: Resource, stale: Duration) {
         self.inner.lock().expect("queue lock").stale_for.insert(resource, stale);
     }
@@ -204,8 +188,6 @@ impl Scheduler {
         Ok(self.exec(Op::Purge { cutoff_ms: cutoff })?.changed)
     }
 
-    /// One quantum. Safe to call from the host thread. Pause and cancel from another thread only
-    /// raise the stop flag and write the store; they do not wait for this call.
     pub fn tick(&self) -> Result<Vec<Event>> {
         let start = self.inner.lock().expect("queue lock").events.len();
         let stale = self.inner.lock().expect("queue lock").stale;
@@ -275,8 +257,6 @@ impl Scheduler {
         self.exec(Op::Restart(id))
     }
 
-    /// The process died. Running leaves go back to queued at the last chunk. A stopping run is
-    /// settled (the user already asked). Inline runs are cancelled. Slots are dropped.
     pub fn recover(&self) -> Result<Outcome> {
         let out = self.exec(Op::Recover)?;
         let mut guard = self.inner.lock().expect("queue lock");
@@ -768,7 +748,6 @@ impl RunCtx for SchedCtx<'_> {
     }
 }
 
-/// Drop a slot. A claim that never checkpointed is not a chunk, so it gives its fairness turn back.
 fn take_run(guard: &mut Inner, id: TaskId) {
     let Some(run) = guard.runs.remove(&id) else {
         return;
@@ -838,7 +817,6 @@ fn ready_flags(ready: &[Task]) -> (bool, bool, Vec<String>) {
     (bg_ready, chat_ready, keys)
 }
 
-/// Chats go first, except every 3rd chunk, which goes to background when one is waiting.
 fn pick(fair: &mut Fairness, ready: &[Task]) -> Option<Task> {
     let chats: Vec<&Task> = ready.iter().filter(|task| task.role.is_chat()).collect();
     let bgs: Vec<&Task> = ready.iter().filter(|task| !task.role.is_chat()).collect();

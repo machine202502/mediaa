@@ -1,6 +1,3 @@
-//! Dev helper: `cargo run --release -p mediaa-media --example encode_bench -- 3200 2000 [1080]`
-//! pushes frames as fast as possible through the recording encoder (as in `recorder.rs`) and
-//! prints the achievable frame rate.
 use ez_ffmpeg::{FfmpegContext, FramePushSource, Output};
 use std::time::Instant;
 

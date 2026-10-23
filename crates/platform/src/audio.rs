@@ -1,7 +1,3 @@
-//! Audio capture via `cpal`: microphones, and system output ("loopback") on Windows (WASAPI)
-//! and macOS 14.6+ (CoreAudio taps). On Linux, PulseAudio/PipeWire expose "Monitor of …"
-//! input devices which can be picked as a microphone to record system sound.
-
 use anyhow::{anyhow, Context};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
@@ -12,17 +8,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
-/// Whether recording system output is supported natively on this OS.
 pub fn system_audio_supported() -> bool {
     cfg!(any(target_os = "windows", target_os = "macos"))
 }
 
-/// Name of the system default input device, if any.
 pub fn default_input_device() -> Option<String> {
     cpal::default_host().default_input_device().map(|d| d.to_string())
 }
 
-/// Names of available input devices (microphones, line-ins, monitor sources).
 pub fn input_devices() -> Vec<String> {
     let host = cpal::default_host();
     let mut names: Vec<String> = host
@@ -35,14 +28,10 @@ pub fn input_devices() -> Vec<String> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CpalTarget {
-    /// Input device by name.
     Input(String),
-    /// Default output device in loopback mode.
     System,
 }
 
-/// An [`AudioSource`] that owns a cpal stream on a dedicated thread
-/// (cpal streams are not `Send` on every platform).
 pub struct CpalSource {
     target: CpalTarget,
     stop_tx: Option<Sender<()>>,
@@ -74,7 +63,6 @@ fn open_device(target: &CpalTarget) -> anyhow::Result<(cpal::Device, cpal::Suppo
             let device = host
                 .default_output_device()
                 .ok_or_else(|| anyhow!("no audio output device"))?;
-            // Building an *input* stream on an output device enables loopback capture.
             let config = device.default_output_config()?;
             Ok((device, config))
         }
@@ -168,9 +156,6 @@ impl Drop for CpalSource {
     }
 }
 
-/// Plays interleaved stereo `f32` samples on the default output device (the media viewer).
-/// Samples are queued with [`AudioOut::push`]; the device pulls them from the queue, padding
-/// with silence while paused or empty. The cpal stream lives on its own thread.
 pub struct AudioOut {
     shared: Arc<OutShared>,
     rate: u32,
@@ -182,7 +167,6 @@ pub struct AudioOut {
 struct OutShared {
     queue: Mutex<std::collections::VecDeque<f32>>,
     paused: AtomicBool,
-    /// Volume 0..=1 as `f32` bits.
     volume: AtomicU32,
 }
 
@@ -219,22 +203,18 @@ impl AudioOut {
         Ok(AudioOut { shared, rate: config.sample_rate, stop_tx: Some(stop_tx), thread: Some(thread) })
     }
 
-    /// Device sample rate; queue stereo samples at this rate.
     pub fn sample_rate(&self) -> u32 {
         self.rate
     }
 
-    /// Queues interleaved stereo samples.
     pub fn push(&self, samples: &[f32]) {
         self.shared.queue.lock().expect("audio queue").extend(samples);
     }
 
-    /// Queued audio, in seconds.
     pub fn queued_secs(&self) -> f64 {
         self.shared.queue.lock().expect("audio queue").len() as f64 / 2.0 / f64::from(self.rate)
     }
 
-    /// Drops everything queued (seeking).
     pub fn clear(&self) {
         self.shared.queue.lock().expect("audio queue").clear();
     }
@@ -272,7 +252,6 @@ where
             let mut queue = shared.queue.lock().expect("audio queue");
             for frame in out.chunks_mut(channels) {
                 let (l, r) = if paused { (0.0, 0.0) } else { (queue.pop_front().unwrap_or(0.0), queue.pop_front().unwrap_or(0.0)) };
-                // Stereo onto however many channels the device has (mono: average).
                 for (i, s) in frame.iter_mut().enumerate() {
                     let v = match (channels, i) {
                         (1, _) => (l + r) / 2.0,

@@ -1,6 +1,3 @@
-// Offline tests for the spend report. They do not spawn grok and do not use the network.
-// Run: node --test scripts/usage.test.mjs
-
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

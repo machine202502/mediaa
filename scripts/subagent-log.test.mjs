@@ -1,6 +1,3 @@
-// Tests for the links the log mirror keeps right when a run moves to subagents/archive/ and back.
-// Run: node --test scripts/
-
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -297,8 +294,6 @@ test("the grok smoke stream renders pong on grok-4.7-build", () => {
     assert.deepEqual(facts.fast, []);
 });
 
-// The same function `follow` calls every few seconds. A growing NDJSON, a partial last line,
-// and a turn's `end` with the agent still alive must not freeze the dialog.
 test("follow renders a grok stream as lines are appended", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "follow-grow-"));
     const dir = path.join(root, "2026-10-21_12-00_grok-4.7_follow-grow");

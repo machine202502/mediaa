@@ -31,3 +31,6 @@ keyring = "4"
 
 [dev-dependencies]
 tempfile.workspace = true
+rustc_lexer = "0.1"
+toml_edit = "0.22"
+walkdir = "2"

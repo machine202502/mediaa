@@ -1,14 +1,8 @@
-//! Providers over the OpenAI-style API: checks (the key is accepted, the model exists) and chat
-//! completions. Each provider's requests go through its own proxy, or directly (never through a
-//! system proxy).
-
 use mediaa_core::agent::{Provider, ProviderKind};
 use std::time::Duration;
 
-/// Hugging Face Hub API (account checks).
 const HF_HUB: &str = "https://huggingface.co";
 
-/// Parses a proxy address (`http://`, `https://`, `socks5://`).
 pub fn proxy(url: &str) -> anyhow::Result<reqwest::Proxy> {
     reqwest::Proxy::all(url).map_err(|e| anyhow::anyhow!("proxy \"{url}\": {e}"))
 }
@@ -35,25 +29,19 @@ fn get(p: &Provider, url: &str) -> anyhow::Result<serde_json::Value> {
     }
 }
 
-/// Answers longer than this are given up on (a long answer of a slow model).
 const CHAT_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// A streamed chat completion (`"stream": true` is set): `on_chunk` gets each chunk as it arrives
-/// (server-sent events): its `choices[0].delta`, and at the end its `usage` when the server sends it.
 pub fn chat_completion_stream(p: &Provider, body: &serde_json::Value, on_chunk: &mut dyn FnMut(&serde_json::Value)) -> anyhow::Result<()> {
     use std::io::BufRead;
     let url = format!("{}/chat/completions", p.api_url());
     let mut body = body.clone();
     body["stream"] = serde_json::Value::Bool(true);
-    // The last chunk then carries the tokens used.
     body["stream_options"] = serde_json::json!({"include_usage": true});
     let mut req = client(p, CHAT_TIMEOUT)?.post(&url).json(&body);
     if !p.api_key.trim().is_empty() {
         req = req.bearer_auth(p.api_key.trim());
     }
     let resp = {
-        // The request waits for the first byte: a sign of life before it is enough for the
-        // watchdog, the stream below reports on every event.
         mediaa_core::pulse::beat();
         req.send().map_err(|e| anyhow::anyhow!("{url}: {e}"))?
     };
@@ -81,9 +69,6 @@ pub fn chat_completion_stream(p: &Provider, body: &serde_json::Value, on_chunk: 
     Ok(())
 }
 
-/// Model ids the provider serves; fails on a wrong key or an unreachable server. OpenRouter
-/// and Hugging Face list models without a key, so their keys are checked separately (a Hugging
-/// Face token is optional).
 pub fn list_models(p: &Provider) -> anyhow::Result<Vec<String>> {
     match p.kind {
         ProviderKind::OpenRouter => {
@@ -105,7 +90,6 @@ pub fn list_models(p: &Provider) -> anyhow::Result<Vec<String>> {
     Ok(ids)
 }
 
-/// The provider accepts the key and serves `model`.
 pub fn check_model(p: &Provider, model: &str) -> anyhow::Result<()> {
     let ids = list_models(p)?;
     anyhow::ensure!(ids.iter().any(|id| id == model.trim()), "{} does not serve \"{}\"", p.name, model.trim());
@@ -116,8 +100,6 @@ pub fn check_model(p: &Provider, model: &str) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    /// An OpenAI-style server: `/models` lists `gpt-x`, the key must be "good". Also answers
-    /// proxied requests (absolute URLs), counting them.
     fn server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
         let srv = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = srv.server_addr().to_ip().unwrap();
@@ -160,7 +142,6 @@ mod tests {
     fn requests_go_through_the_provider_proxy() {
         let (url, proxied) = server();
         let mut p = Provider::new(ProviderKind::OpenAiCompatible, "Behind proxy");
-        // Not reachable directly: only the proxy knows how to answer.
         p.base_url = "http://models.invalid/v1".into();
         p.api_key = "good".into();
         assert!(list_models(&p).is_err());

@@ -1,5 +1,3 @@
-//! Clipboard: images, file lists (paste into Explorer/Finder/chat apps) and text.
-
 use anyhow::anyhow;
 use clipboard_rs::common::RustImage;
 use clipboard_rs::{Clipboard, ClipboardContext, RustImageData};
@@ -7,7 +5,6 @@ use mediaa_core::Frame;
 use std::path::Path;
 
 thread_local! {
-    // On X11 the clipboard content lives only as long as its owner, so keep one context alive.
     static CTX: std::cell::RefCell<Option<ClipboardContext>> = const { std::cell::RefCell::new(None) };
 }
 

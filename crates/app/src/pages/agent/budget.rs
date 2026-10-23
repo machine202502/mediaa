@@ -1,6 +1,3 @@
-//! Budget: how much memory local models may take (GPU, RAM) and how many jobs of each kind run
-//! at once; the GPUs the engine sees.
-
 use super::super::header;
 use super::engine_state::{gb, EngineState};
 use crate::app::App;
@@ -70,12 +67,10 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         gpus(ui, &app.agent.engine_state);
     });
     if changed {
-        // The engine keeps its models under the same memory budget (applied by `AgentUi::tick`).
         app.settings_changed();
     }
 }
 
-/// The cards the engine sees, with their memory (the shared engine state).
 fn gpus(ui: &mut egui::Ui, engine: &EngineState) {
     if engine.loading() {
         ui.spinner();
@@ -97,10 +92,8 @@ fn gpus(ui: &mut egui::Ui, engine: &EngineState) {
     }
 }
 
-/// A day is more than any model needs to stay in memory; the field keeps a sane range.
 const MAX_KEEP_ALIVE_MINUTES: u64 = 1440;
 
-/// The setting is seconds; the field shows whole minutes (300 s → 5).
 fn minutes_of(secs: u64) -> u64 {
     secs.div_ceil(60)
 }
