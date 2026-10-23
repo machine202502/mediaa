@@ -65,6 +65,12 @@ impl Embedder {
         let architecture = model.meta_val_str("general.architecture").unwrap_or_default();
         let name = format!("{} {}", model.meta_val_str("general.name").unwrap_or_default(), path.file_name().unwrap_or_default().to_string_lossy());
         let n_ctx = MAX_TOKENS.min(model.n_ctx_train().max(128));
+        log::info!(
+            "embedding model {}: architecture {architecture}, n_ctx_train {}, n_ctx {n_ctx}, {} layers on the GPU",
+            path.display(),
+            model.n_ctx_train(),
+            if gpu { "all" } else { "none" }
+        );
         Ok(Embedder { prompts: prompts(&architecture, &name), model, n_ctx, gpu })
     }
 
@@ -95,10 +101,24 @@ impl Embedder {
             .with_n_batch(self.n_ctx)
             .with_n_ubatch(self.n_ctx)
             .with_embeddings(true);
+        log::debug!(
+            "embed: {} tokens ({} chars), context n_ctx {}, n_batch {}, n_ubatch {}",
+            tokens.len(),
+            text.chars().count(),
+            self.n_ctx,
+            self.n_ctx,
+            self.n_ctx
+        );
         let mut ctx = self.model.new_context(backend()?, params)?;
+        log::debug!("embed: context created");
         let mut batch = LlamaBatch::new(tokens.len(), 1);
         batch.add_sequence(&tokens, 0, true)?;
+        // The decode is one long native call; a beat before and after it shows the watchdog
+        // that the call is alive (see `mediaa_core::pulse`).
+        mediaa_core::pulse::beat();
         ctx.decode(&mut batch)?;
+        mediaa_core::pulse::beat();
+        log::debug!("embed: decoded");
         let v = ctx.embeddings_seq_ith(0).map_err(|e| anyhow::anyhow!("not an embedding model: {e}"))?;
         Ok(normalized(v.to_vec()))
     }
@@ -167,7 +187,9 @@ impl Reranker {
         let mut ctx = self.model.new_context(backend()?, params)?;
         let mut batch = LlamaBatch::new(tokens.len(), 1);
         batch.add_sequence(&tokens, 0, true)?;
+        mediaa_core::pulse::beat();
         ctx.decode(&mut batch)?;
+        mediaa_core::pulse::beat();
         let out = ctx.embeddings_seq_ith(0).map_err(|e| anyhow::anyhow!("not a reranker: {e}"))?;
         out.first().copied().ok_or_else(|| anyhow::anyhow!("not a reranker: no score"))
     }
@@ -233,5 +255,108 @@ mod tests {
             eprintln!("gpu={gpu}: {s_yes} vs {s_no}");
             assert!(s_yes > s_no + 0.05, "{s_yes} vs {s_no}");
         }
+    }
+
+    /// The models folder for the live tests: `MEDIAA_TEST_AI`, else the app's `MEDIAA_TEST_MODELS`
+    /// (what `scripts/live-test.sh` sets), else a temporary folder it downloads into.
+    fn live_models_root() -> std::path::PathBuf {
+        std::env::var_os("MEDIAA_TEST_AI")
+            .or_else(|| std::env::var_os("MEDIAA_TEST_MODELS"))
+            .map_or_else(|| tempfile::tempdir().unwrap().keep(), std::path::PathBuf::from)
+    }
+
+    /// Runs `f` on its own thread and fails (instead of hanging the test run) when it does not
+    /// return in `seconds`. A stuck native call keeps its thread, but the test itself ends.
+    fn within<R: Send + 'static>(seconds: u64, what: &str, f: impl FnOnce() -> R + Send + 'static) -> R {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(seconds)) {
+            Ok(value) => value,
+            Err(_) => panic!("{what}: no result in {seconds} s, the call hangs"),
+        }
+    }
+
+    /// A chunk of a spoken dialog of a little over 1200 characters (the size the first live
+    /// index call embedded when it hung).
+    const LONG_RUSSIAN_CHUNK: &str = "Дана: смотри, у нас на этой неделе получается довольно плотно по задачам, потому что \
+релиз сдвинулся, и теперь всё, что мы планировали на следующую неделю, надо успеть сделать до пятницы. \
+Олег: я понимаю, но у меня ещё висит отчёт по поездке, который я обещал закончить, и там надо переписать \
+примерно половину, потому что заказчик поменял требования к структуре. Дана: а насколько это критично? \
+Олег: если честно, не очень критично, но если не сделать сейчас, потом придётся возвращаться и всё равно \
+переделывать, так что лучше сразу закрыть. Дана: хорошо, тогда давай так: ты заканчиваешь отчёт до среды, \
+а я беру на себя интеграцию с новым сервисом, потому что там нужно постоянно общаться с их командой, \
+а у меня как раз есть контакт. Олег: договорились. Ещё вопрос по тестам: те, что падали на прошлой неделе, \
+они падали из-за окружения или из-за кода? Дана: часть из-за окружения, там не хватало переменной, \
+а часть реально из-за кода, потому что мы поменяли формат и забыли обновить ожидания в трёх местах. \
+Олег: то есть если я сейчас запущу полный прогон, он должен быть зелёным? Дана: должен, но я бы всё равно \
+посмотрела на медленные тесты, потому что один из них стал идти заметно дольше, и мне кажется, что там \
+появилось лишнее ожидание. Олег: ок, тогда я сначала посмотрю на этот тест, а потом уже возьмусь за отчёт. \
+Дана: только не забудь, что в четверг у нас встреча с командой поддержки, и надо будет показать, как \
+работает поиск по записям, потому что они жалуются, что не могут быстро найти нужный фрагмент разговора. \
+Олег: да, я помню, подготовлю короткую демонстрацию на реальной записи, чтобы было видно, как находятся \
+цитаты и как показываются темы. Дана: отлично, тогда на этом и закончим.";
+
+    /// The live hang: the first embedding call of a long Russian chunk never returned on the GPU.
+    /// `scripts/live-test.sh <log> mediaa-engine a_long_russian_chunk_is_embedded_without_hanging`
+    #[test]
+    #[ignore]
+    fn a_long_russian_chunk_is_embedded_without_hanging() {
+        use std::time::{Duration, Instant};
+        let root = live_models_root();
+        let Some(source) = mediaa_core::agent::ModelRole::Embedding.default_source() else { panic!() };
+        let mediaa_core::agent::ModelSource::HuggingFace { repo } = &source else { panic!() };
+        crate::hub::download(&root, repo, None, |_, _| {}).unwrap();
+        let path = crate::runtime::gguf_path(&root, &source).unwrap();
+        assert!(LONG_RUSSIAN_CHUNK.chars().count() > 1200, "{} chars", LONG_RUSSIAN_CHUNK.chars().count());
+
+        // The model alone first (CPU, then the GPU), then the same call through the runtime the
+        // app uses: whichever level hangs shows in the log.
+        for gpu in [false, true] {
+            let at = Instant::now();
+            let path = path.clone();
+            let (dims, norm) = within(60, &format!("Embedder::load + passage on gpu={gpu}"), move || {
+                let embedder = Embedder::load(&path, gpu).unwrap();
+                let v = embedder.passage(LONG_RUSSIAN_CHUNK).unwrap();
+                (v.len(), v.iter().map(|x| x * x).sum::<f32>())
+            });
+            eprintln!("Embedder gpu={gpu}: {dims} dims, norm {norm:.4}, {:.1} s", at.elapsed().as_secs_f32());
+            assert!(norm > 0.99 && norm < 1.01, "a unit vector, not {norm}");
+        }
+        for device in [mediaa_core::agent::Device::Cpu, mediaa_core::agent::Device::Auto] {
+            let at = Instant::now();
+            let (root, source) = (root.clone(), source.clone());
+            let dims = within(60, &format!("Runtime::with_model on {device:?}"), move || {
+                let runtime = crate::runtime::Runtime::new(&root, mediaa_core::agent::Budget::default(), Duration::from_secs(60));
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                let how = crate::runtime::Use { kind: mediaa_core::agent::WorkKind::Indexing, device, n_ctx: 2048, interactive: false };
+                runtime
+                    .with_model::<Embedder, _>(&source, how, &cancel, |embedder, _| embedder.passage(LONG_RUSSIAN_CHUNK))
+                    .unwrap()
+                    .len()
+            });
+            eprintln!("Runtime {device:?}: {dims} dims, {:.1} s", at.elapsed().as_secs_f32());
+        }
+
+        // The index stage: one runtime, chunk after chunk, a lease per call. The keeper sweeps
+        // between them; if a sweep ever fails to return, the run hangs here instead of finishing.
+        let at = Instant::now();
+        let (root, source) = (root.clone(), source.clone());
+        let chunks = within(180, "21 chunks through one runtime", move || {
+            let runtime = crate::runtime::Runtime::new(&root, mediaa_core::agent::Budget::default(), Duration::from_secs(60));
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let how = crate::runtime::Use { kind: mediaa_core::agent::WorkKind::Indexing, device: mediaa_core::agent::Device::Auto, n_ctx: 2048, interactive: false };
+            let mut done = 0;
+            for _ in 0..21 {
+                let v = runtime.with_model::<Embedder, _>(&source, how, &cancel, |embedder, _| embedder.passage(LONG_RUSSIAN_CHUNK)).unwrap();
+                if v.len() == 768 {
+                    done += 1;
+                }
+            }
+            done
+        });
+        eprintln!("Runtime: {chunks} chunks, {:.1} s", at.elapsed().as_secs_f32());
+        assert_eq!(chunks, 21, "every chunk of the index stage got an embedding");
     }
 }

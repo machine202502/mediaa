@@ -18,9 +18,11 @@ pub const KINDS: &[&str] = &[
     "details",
     "topic-detail",
     "chat",
+    "chat-answer",
     "chat-title",
     "model-step",
     "tool",
+    "step-title",
 ];
 
 /// The label of a task of `kind` with the data `title`: «Анализ: interview.mp4». A kind the
@@ -43,9 +45,11 @@ pub(crate) fn label_in(locale: &str, kind: &str, title: &str) -> String {
         "details" => t!("queue.kind.details", locale = locale, title = title),
         "topic-detail" => t!("queue.kind.topic-detail", locale = locale, title = title),
         "chat" => t!("queue.kind.chat", locale = locale, title = title),
+        "chat-answer" => t!("queue.kind.chat-answer", locale = locale, title = title),
         "chat-title" => t!("queue.kind.chat-title", locale = locale, title = title),
         "model-step" => t!("queue.kind.model-step", locale = locale, title = title),
         "tool" => t!("queue.kind.tool", locale = locale, title = title),
+        "step-title" => t!("queue.kind.step-title", locale = locale, title = title),
         other => return if title.is_empty() { other.to_string() } else { format!("{other}: {title}") },
     }
     .into();

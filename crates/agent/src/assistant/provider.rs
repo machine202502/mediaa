@@ -40,15 +40,7 @@ pub fn request(model: &str, messages: &[Message], tools: &[ToolSpec], may_answer
     if !tools.is_empty() {
         let specs: Vec<Value> = tools
             .iter()
-            .map(|t| {
-                // The step title rides along as an argument.
-                let mut params = t.params.clone();
-                params["properties"]["title"] = json!({"type": "string", "description": crate::prompts::tool("step_title")});
-                let mut required = params["required"].as_array().cloned().unwrap_or_default();
-                required.push(json!("title"));
-                params["required"] = Value::Array(required);
-                json!({"type": "function", "function": {"name": t.name, "description": t.description, "parameters": params}})
-            })
+            .map(|t| json!({"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.params}}))
             .collect();
         body["tools"] = Value::Array(specs);
         body["tool_choice"] = json!(if may_answer { "auto" } else { "required" });
@@ -129,8 +121,11 @@ pub fn read_response(body: &Value) -> anyhow::Result<Step> {
         let tool = call["function"]["name"].as_str().unwrap_or_default().to_string();
         let raw = call["function"]["arguments"].as_str().unwrap_or("{}");
         let mut args: Value = serde_json::from_str(raw).map_err(|e| anyhow::anyhow!(crate::prompts::render("errors/arguments_not_json.j2", minijinja::context! { tool => &tool, error => e.to_string(), raw })))?;
-        let title = args.as_object_mut().and_then(|o| o.remove("title")).and_then(|t| t.as_str().map(str::to_string)).unwrap_or_default();
-        return Ok(Step::Tool { thought: content, title, tool, args });
+        // A model may still send the old title argument. It is not a tool argument.
+        if let Some(obj) = args.as_object_mut() {
+            obj.remove("title");
+        }
+        return Ok(Step::Tool { thought: content, tool, args });
     }
     // A step written as text (the history shows steps as JSON), else a plain answer.
     if content.starts_with('{') {
@@ -206,7 +201,7 @@ impl Brain for ProviderBrain {
 mod tests {
     use super::*;
     use mediaa_core::agent::Budget;
-    use mediaa_core::queue::{Queue, TaskId};
+    use mediaa_queue::{Store, TaskId};
     use std::sync::{Arc, Mutex};
 
     fn spec() -> ToolSpec {
@@ -219,7 +214,8 @@ mod tests {
         assert_eq!(body["tool_choice"], "required");
         let f = &body["tools"][0]["function"];
         assert_eq!(f["name"], "search");
-        assert_eq!(f["parameters"]["required"], json!(["query", "title"]));
+        assert_eq!(f["parameters"]["required"], json!(["query"]));
+        assert!(f["parameters"]["properties"].get("title").is_none());
         assert_eq!(body["messages"][0], json!({"role": "user", "content": "q"}));
         assert_eq!(request("m", &[], &[spec()], true, 100, None)["tool_choice"], "auto");
         assert!(request("m", &[], &[], true, 100, None).get("tools").is_none());
@@ -228,7 +224,7 @@ mod tests {
     #[test]
     fn responses_become_steps() {
         let call = json!({"choices": [{"message": {"content": null, "tool_calls": [{"function": {"name": "search", "arguments": "{\"query\":\"бюджет\",\"title\":\"Ищу бюджет\"}"}}]}}]});
-        assert_eq!(read_response(&call).unwrap(), Step::Tool { thought: String::new(), title: "Ищу бюджет".into(), tool: "search".into(), args: json!({"query": "бюджет"}) });
+        assert_eq!(read_response(&call).unwrap(), Step::Tool { thought: String::new(), tool: "search".into(), args: json!({"query": "бюджет"}) });
         let text = json!({"choices": [{"message": {"content": "Ответ [1:00]."}}]});
         assert_eq!(read_response(&text).unwrap(), Step::Answer { thought: String::new(), text: "Ответ [1:00].".into() });
         let as_text = json!({"choices": [{"message": {"content": "{\"thought\":\"\",\"action\":\"read\",\"title\":\"Читаю\",\"args\":{\"from\":\"1:00\",\"to\":\"2:00\"}}"}}]});
@@ -262,13 +258,13 @@ mod tests {
     }
 
     /// A brain over the server at `url`, counted in a task of a queue in `dir`.
-    fn brain(url: String, dir: &std::path::Path) -> (ProviderBrain, Queue, TaskId) {
+    fn brain(url: String, dir: &std::path::Path) -> (ProviderBrain, Arc<dyn Store>, TaskId) {
         let mut p = Provider::new(ProviderKind::OpenAiCompatible, "Local");
         p.base_url = url;
-        let queue = Queue::open(dir).unwrap();
-        let task = queue.begin_inline("model-step", "step", &json!({}), None, None).unwrap();
-        let scope = Scope::new(dir, task, Arc::new(mediaa_engine::testing::FakeEngine::new()), None);
-        (ProviderBrain { provider: p, model: "m".into(), slots: Slots::new(Budget::default()), max_tokens: 100, scope, thinking: false }, queue, task)
+        let store = crate::run::open_store(dir).unwrap();
+        let task = store.begin_inline("model-step", "step", &json!({}), None, None).unwrap();
+        let scope = Scope::attach(store.clone(), task, Arc::new(mediaa_engine::testing::FakeEngine::new()), None);
+        (ProviderBrain { provider: p, model: "m".into(), slots: Slots::new(Budget::default()), max_tokens: 100, scope, thinking: false }, store, task)
     }
 
     fn call(name: &str, args: &str) -> Value {
@@ -297,7 +293,7 @@ mod tests {
             })
             .unwrap()
         };
-        assert_eq!(step(false), Step::Tool { thought: String::new(), title: "Ищу".into(), tool: "search".into(), args: json!({"query": "бюджет"}) });
+        assert_eq!(step(false), Step::Tool { thought: String::new(), tool: "search".into(), args: json!({"query": "бюджет"}) });
         assert_eq!(step(true), Step::Answer { thought: String::new(), text: "Да, [1:00].".into() });
         assert_eq!(step(true), Step::Answer { thought: String::new(), text: "Нет.".into() });
         assert_eq!(shown, "Да, [1:00].Нет.", "answers streamed, calls not");

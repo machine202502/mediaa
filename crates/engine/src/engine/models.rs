@@ -74,7 +74,7 @@ pub fn role_fitness(files: &[ModelFile]) -> (Vec<String>, Vec<String>) {
     if format != ModelFormat::Onnx {
         problems.push("not a speaker embedding model: diarization needs a single .onnx model without tokens.txt".into());
     }
-    problems.push("speech synthesis is not supported by the engine yet".into());
+    problems.push("speech synthesis models are not supported yet".into());
     (roles, problems)
 }
 

@@ -17,7 +17,7 @@ use crate::engine::{
 use crate::speech::{Phrase, Turn, Word};
 use mediaa_core::agent::ModelRole;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -95,11 +95,27 @@ struct Inner {
     pull_progress: Mutex<Vec<(u64, u64)>>,
     deletes: Mutex<Vec<String>>,
     checks: Mutex<Vec<(String, String)>>,
+    wanted: Mutex<Vec<String>>,
+    forgotten: Mutex<Vec<String>>,
+    /// Calls to a `hangs/model` spec that this many times do not return.
+    hangups: AtomicU32,
+    release_hang: AtomicBool,
+}
+
+/// Clears the model the pulse names when the call is over (however it ends).
+struct Mark;
+
+impl Drop for Mark {
+    fn drop(&mut self) {
+        mediaa_core::pulse::release();
+    }
 }
 
 impl FakeEngine {
     fn chat_inner(&self, request: &ChatRequest, thinking: Option<u32>, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError> {
         request.clone().into_call()?;
+        mediaa_core::pulse::using(request.model.trim());
+        let _mark = Mark;
         self.inner.chats.lock().unwrap().push(RecordedChat {
             model: request.model.trim().to_string(),
             messages: request.messages.len(),
@@ -123,9 +139,18 @@ impl FakeEngine {
             on_text("partial");
             return Err(EngineError::internal("the model crashed"));
         }
+        // A call stuck inside native code: the first `hangs/model` call returns only when the
+        // test lets it go, and it ignores cancel. A later call is answered normally.
+        if request.model.trim() == "hangs/model" && self.inner.hangups.fetch_add(1, Ordering::SeqCst) == 0 {
+            while !self.inner.release_hang.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         // A long answer that only ends when the client goes away.
         if request.model.trim() == "slow/model" {
-            for _ in 0..1000 {
+            // No wall-clock cap: the call ends when the client cancels it, so a test that
+            // waits for the call to start can never lose the race to a timer.
+            loop {
                 if cancel.load(Ordering::Relaxed) {
                     self.inner.cancel_observed.store(true, Ordering::SeqCst);
                     return Ok(ChatAnswer::default());
@@ -136,7 +161,7 @@ impl FakeEngine {
                     }
                     return Ok(ChatAnswer::default());
                 }
-                std::thread::sleep(Duration::from_millis(2));
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
         let next = {
@@ -236,6 +261,20 @@ impl FakeEngine {
     pub fn checks(&self) -> Vec<(String, String)> {
         self.inner.checks.lock().unwrap().clone()
     }
+
+    pub fn wanted(&self) -> Vec<String> {
+        self.inner.wanted.lock().unwrap().clone()
+    }
+
+    /// The models the caller said were stuck (see [`Engine::forget_loaded`]).
+    pub fn forgotten(&self) -> Vec<String> {
+        self.inner.forgotten.lock().unwrap().clone()
+    }
+
+    /// Lets the first `hangs/model` call return (it waits until this is called).
+    pub fn release_hang(&self) {
+        self.inner.release_hang.store(true, Ordering::SeqCst);
+    }
 }
 
 /// A session that turns every non-empty push into one segment and finishes with a last one.
@@ -275,15 +314,23 @@ impl Engine for FakeEngine {
 
     fn status(&self) -> Status {
         Status {
-            loaded: vec![LoadedModel { model: "C:/models/m.gguf".into(), pool: Pool::Gpu, bytes: 1 << 30, users: 1 }],
+            loaded: vec![LoadedModel { model: "C:/models/m.gguf".into(), pool: Pool::Gpu, bytes: 1 << 30, users: 1, idle: Duration::ZERO, unloads_in: None }],
             waiting: Vec::<WaitingModel>::new(),
-            budget: Budget { gpu_bytes: 8 << 30, ram_bytes: 8 << 30 },
+            budget: Budget { gpu_bytes: 8 << 30, ram_bytes: 8 << 30, keep_alive: Duration::from_secs(5 * 60) },
             used: Used { gpu_bytes: 1 << 30, ram_bytes: 0 },
         }
     }
 
     fn set_budget(&self, budget: Budget) {
         *self.inner.budget.lock().unwrap() = Some(budget);
+    }
+
+    fn set_wanted(&self, specs: &[String]) {
+        *self.inner.wanted.lock().unwrap() = specs.to_vec();
+    }
+
+    fn forget_loaded(&self, model: &str) {
+        self.inner.forgotten.lock().unwrap().push(model.to_string());
     }
 
     fn chat(&self, request: &ChatRequest, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError> {
@@ -294,8 +341,10 @@ impl Engine for FakeEngine {
         self.chat_inner(request, Some(thinking.budget), cancel, on_text)
     }
 
-    fn embeddings(&self, request: &EmbeddingsRequest) -> Result<Vec<Vec<f32>>, EngineError> {
+    fn embeddings(&self, request: &EmbeddingsRequest, _cancel: &AtomicBool) -> Result<Vec<Vec<f32>>, EngineError> {
         request.clone().into_call()?;
+        mediaa_core::pulse::using(request.model.trim());
+        let _mark = Mark;
         self.inner.kinds.lock().unwrap().push(request.kind);
         self.inner.embeddings.fetch_add(request.input.len() as u64, Ordering::Relaxed);
         if let Some(vectors) = self.inner.vectors.lock().unwrap().clone() {
@@ -304,7 +353,7 @@ impl Engine for FakeEngine {
         Ok(request.input.iter().enumerate().map(|(i, _)| vec![i as f32, i as f32 + 0.5]).collect())
     }
 
-    fn rerank(&self, request: &RerankRequest) -> Result<Vec<RerankResult>, EngineError> {
+    fn rerank(&self, request: &RerankRequest, _cancel: &AtomicBool) -> Result<Vec<RerankResult>, EngineError> {
         request.clone().into_call()?;
         let scores = self
             .inner
@@ -452,7 +501,7 @@ mod tests {
     fn the_fake_orders_rerank_scores() {
         let fake = FakeEngine::new();
         let request = RerankRequest { model: "a/b".into(), query: "q".into(), documents: vec!["one".into(), "two".into(), "three".into()], ..RerankRequest::default() };
-        let results = fake.rerank(&request).unwrap();
+        let results = fake.rerank(&request, &AtomicBool::new(false)).unwrap();
         assert_eq!(results, [RerankResult { index: 1, relevance_score: 0.9 }, RerankResult { index: 2, relevance_score: 0.5 }, RerankResult { index: 0, relevance_score: 0.2 }]);
     }
 }

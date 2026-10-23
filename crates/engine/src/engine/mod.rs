@@ -17,13 +17,14 @@ pub use types::*;
 
 use crate::embed::{Embedder, Reranker};
 use crate::llm::{Generate, LocalModel};
-use crate::runtime::{Runtime, Use};
+use crate::runtime::{self, Runtime, Use};
 use crate::scheduler::Wait;
 use crate::speech::{self, Phrase, Turn};
 use crate::{hub, local};
 use mediaa_core::agent::{ModelRole, ModelSource, Provider, ProviderKind, WorkKind};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Download progress in bytes, callable from the downloading threads.
@@ -36,18 +37,28 @@ pub trait Engine: Send + Sync + 'static {
     fn health(&self) -> Health;
     /// Loaded models, waiting requests and the memory budget.
     fn status(&self) -> Status;
-    /// Sets the memory budget models are kept loaded under.
+    /// Sets the memory budget models are kept loaded under, including how long an idle model stays.
     fn set_budget(&self, budget: Budget);
+    /// Specs of models that waiting work needs (`owner/repo`, `owner/repo/file` or a path).
+    /// An idle loaded model that matches one is unloaded last when memory runs short.
+    /// An empty list clears the set.
+    fn set_wanted(&self, _specs: &[String]) {}
+    /// A call with `model` is stuck: unload it so the next attempt starts from a fresh load
+    /// instead of waiting for the lock it holds. `model` is what the engine named to the pulse
+    /// ([`mediaa_core::pulse::using`]) when the call began.
+    fn forget_loaded(&self, _model: &str) {}
     /// Answers `request`; `on_text` gets the answer as it is produced (returning `false` stops),
     /// and a set `cancel` stops the model at the next token.
     fn chat(&self, request: &ChatRequest, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError>;
     /// Like [`Engine::chat`], but the model reasons first (see [`Thinking`]): the text starts
     /// with `<think>`, the reasoning is streamed and kept in the answer.
     fn chat_thinking(&self, request: &ChatRequest, thinking: Thinking, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError>;
-    /// Embeddings of `request.input`, in the order of the inputs.
-    fn embeddings(&self, request: &EmbeddingsRequest) -> Result<Vec<Vec<f32>>, EngineError>;
-    /// The documents by relevance to the query, most relevant first.
-    fn rerank(&self, request: &RerankRequest) -> Result<Vec<RerankResult>, EngineError>;
+    /// Embeddings of `request.input`, in the order of the inputs. A set `cancel` stops the call
+    /// before the next input (and while it waits for the model).
+    fn embeddings(&self, request: &EmbeddingsRequest, cancel: &AtomicBool) -> Result<Vec<Vec<f32>>, EngineError>;
+    /// The documents by relevance to the query, most relevant first. A set `cancel` stops the
+    /// call before the next document (and while it waits for the model).
+    fn rerank(&self, request: &RerankRequest, cancel: &AtomicBool) -> Result<Vec<RerankResult>, EngineError>;
     /// Loads the voice activity model and opens a session at `offset` seconds.
     fn vad_open(&self, model: &str, offset: f64, hf_token: Option<&str>) -> Result<Box<dyn VadSession>, EngineError>;
     /// Recognises one piece of speech that starts `offset` seconds into the recording.
@@ -73,14 +84,25 @@ pub struct LocalEngine {
     /// The budget as the app set it, in bytes (the scheduler keeps GB).
     budget: Mutex<Budget>,
     downloads: Downloads,
+    /// Stops the keep-alive thread. The thread holds its own clone and exits after [`Drop`].
+    stop: Arc<AtomicBool>,
 }
 
 impl LocalEngine {
     /// `models_dir`: where Hugging Face models are downloaded to. It is created when missing.
     pub fn new(models_dir: PathBuf, budget: Budget) -> LocalEngine {
         let _ = std::fs::create_dir_all(&models_dir);
-        let runtime = Runtime::new(&models_dir, to_budget(budget));
-        LocalEngine { runtime, models_dir, budget: Mutex::new(budget), downloads: Downloads::default() }
+        let runtime = Runtime::new(&models_dir, to_budget(budget), budget.keep_alive);
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let scheduler = runtime.scheduler().clone();
+        // Unloads idle models when their keep-alive runs out, even if nobody asks for one.
+        let _ = std::thread::Builder::new().name("model-keepalive".into()).spawn(move || {
+            while !thread_stop.load(Ordering::Relaxed) {
+                scheduler.sweep_wait(&thread_stop);
+            }
+        });
+        LocalEngine { runtime, models_dir, budget: Mutex::new(budget), downloads: Downloads::default(), stop }
     }
 
     /// Where downloaded models live.
@@ -192,6 +214,8 @@ impl Engine for LocalEngine {
                     },
                     bytes: m.bytes,
                     users: m.leases,
+                    idle: m.idle,
+                    unloads_in: m.unloads_in,
                 })
                 .collect(),
             waiting,
@@ -201,8 +225,23 @@ impl Engine for LocalEngine {
     }
 
     fn set_budget(&self, budget: Budget) {
-        self.runtime.set_budget(to_budget(budget));
+        self.runtime.set_budget(to_budget(budget), budget.keep_alive);
         *self.budget.lock().expect("budget lock") = budget;
+    }
+
+    fn set_wanted(&self, specs: &[String]) {
+        let mut keys = HashSet::new();
+        for spec in specs {
+            let Ok(source) = types::parse_spec(spec) else { continue };
+            if let Ok(path) = runtime::gguf_path(&self.models_dir, &source) {
+                keys.insert(path.display().to_string());
+            }
+        }
+        self.runtime.set_wanted(keys);
+    }
+
+    fn forget_loaded(&self, model: &str) {
+        self.runtime.forget(model);
     }
 
     fn chat(&self, request: &ChatRequest, cancel: &AtomicBool, on_text: &mut dyn FnMut(&str) -> bool) -> Result<ChatAnswer, EngineError> {
@@ -213,34 +252,41 @@ impl Engine for LocalEngine {
         self.chat_with(request, Some(thinking), cancel, on_text)
     }
 
-    fn embeddings(&self, request: &EmbeddingsRequest) -> Result<Vec<Vec<f32>>, EngineError> {
+    fn embeddings(&self, request: &EmbeddingsRequest, cancel: &AtomicBool) -> Result<Vec<Vec<f32>>, EngineError> {
         let call = request.clone().into_call()?;
         self.ensure(&call.source, call.hf_token.as_deref())?;
         let how = Use { kind: WorkKind::Indexing, device: call.device, n_ctx: call.n_ctx, interactive: false };
-        let cancel = AtomicBool::new(false);
         let kind = call.kind;
         self.runtime
-            .with_model::<Embedder, _>(&call.source, how, &cancel, |model, _lease| {
+            .with_model::<Embedder, _>(&call.source, how, cancel, |model, _lease| {
                 call.texts
                     .iter()
-                    .map(|text| match kind {
-                        EmbedKind::Query => model.query(text),
-                        EmbedKind::Passage => model.passage(text),
+                    .map(|text| {
+                        anyhow::ensure!(!cancel.load(Ordering::Relaxed), "cancelled");
+                        match kind {
+                            EmbedKind::Query => model.query(text),
+                            EmbedKind::Passage => model.passage(text),
+                        }
                     })
                     .collect()
             })
             .map_err(EngineError::classify)
     }
 
-    fn rerank(&self, request: &RerankRequest) -> Result<Vec<RerankResult>, EngineError> {
+    fn rerank(&self, request: &RerankRequest, cancel: &AtomicBool) -> Result<Vec<RerankResult>, EngineError> {
         let call = request.clone().into_call()?;
         self.ensure(&call.source, call.hf_token.as_deref())?;
         let how = Use { kind: WorkKind::Indexing, device: call.device, n_ctx: call.n_ctx, interactive: false };
-        let cancel = AtomicBool::new(false);
         let scores = self
             .runtime
-            .with_model::<Reranker, Vec<f32>>(&call.source, how, &cancel, |model, _lease| {
-                call.documents.iter().map(|document| model.score(&call.query, document)).collect::<anyhow::Result<Vec<f32>>>()
+            .with_model::<Reranker, Vec<f32>>(&call.source, how, cancel, |model, _lease| {
+                call.documents
+                    .iter()
+                    .map(|document| {
+                        anyhow::ensure!(!cancel.load(Ordering::Relaxed), "cancelled");
+                        model.score(&call.query, document)
+                    })
+                    .collect::<anyhow::Result<Vec<f32>>>()
             })
             .map_err(EngineError::classify)?;
         let mut ranked: Vec<RerankResult> =
@@ -327,7 +373,7 @@ impl Engine for LocalEngine {
                 on_progress(bytes, bytes);
                 Ok(path)
             }
-            ModelSource::Provider { .. } => Err(EngineError::bad_request("provider models are not downloaded by the engine")),
+            ModelSource::Provider { .. } => Err(EngineError::bad_request("a provider's model is not downloaded: it runs at the provider")),
         }
     }
 
@@ -337,7 +383,7 @@ impl Engine for LocalEngine {
         let path = match types::parse_spec(spec)? {
             ModelSource::HuggingFace { repo } => hub::model_dir(&self.models_dir, &repo),
             ModelSource::Local { path } => path,
-            ModelSource::Provider { .. } => return Err(EngineError::bad_request("provider models are not stored by the engine")),
+            ModelSource::Provider { .. } => return Err(EngineError::bad_request("a provider's model is not stored locally: it lives at the provider")),
         };
         let target = std::fs::canonicalize(&path).map_err(|_| EngineError::not_found(format!("{} not found", path.display())))?;
         if target == root || !target.starts_with(&root) {
@@ -380,6 +426,13 @@ impl Engine for LocalEngine {
 
 /// The real voice activity session: sherpa-onnx's stateful detector.
 struct RealVad(speech::Vad);
+
+impl Drop for LocalEngine {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.runtime.scheduler().wake();
+    }
+}
 
 impl VadSession for RealVad {
     fn push(&mut self, samples: &[f32]) -> Vec<SpeechSegment> {
@@ -445,6 +498,7 @@ fn to_budget(bytes: Budget) -> mediaa_core::agent::Budget {
     mediaa_core::agent::Budget {
         gpu_memory_gb: gigabytes(bytes.gpu_bytes),
         ram_memory_gb: gigabytes(bytes.ram_bytes),
+        keep_alive_secs: bytes.keep_alive.as_secs(),
         ..mediaa_core::agent::Budget::default()
     }
 }
@@ -464,7 +518,7 @@ mod tests {
 
     #[test]
     fn bytes_and_scheduler_keys() {
-        let budget = to_budget(Budget { gpu_bytes: 2 << 30, ram_bytes: 512 << 20 });
+        let budget = to_budget(Budget { gpu_bytes: 2 << 30, ram_bytes: 512 << 20, keep_alive: DEFAULT_KEEP_ALIVE });
         assert_eq!(budget.gpu_memory_gb, 2.0);
         assert_eq!(budget.ram_memory_gb, 0.5);
         assert_eq!(strip_context("/m/qwen.gguf#8192"), "/m/qwen.gguf");
@@ -474,11 +528,12 @@ mod tests {
     #[test]
     fn a_local_engine_starts_without_loading_models() {
         let dir = tempfile::tempdir().unwrap();
-        let engine = LocalEngine::new(dir.path().to_path_buf(), Budget { gpu_bytes: 1 << 30, ram_bytes: 1 << 30 });
+        let engine = LocalEngine::new(dir.path().to_path_buf(), Budget { gpu_bytes: 1 << 30, ram_bytes: 1 << 30, keep_alive: DEFAULT_KEEP_ALIVE });
         assert_eq!(engine.status().loaded.len(), 0);
         assert_eq!(engine.status().budget.gpu_bytes, 1 << 30);
-        engine.set_budget(Budget { gpu_bytes: 2 << 30, ram_bytes: 3 << 30 });
-        assert_eq!(engine.status().budget, Budget { gpu_bytes: 2 << 30, ram_bytes: 3 << 30 });
+        assert_eq!(engine.status().budget.keep_alive, DEFAULT_KEEP_ALIVE);
+        engine.set_budget(Budget { gpu_bytes: 2 << 30, ram_bytes: 3 << 30, keep_alive: std::time::Duration::from_secs(12) });
+        assert_eq!(engine.status().budget, Budget { gpu_bytes: 2 << 30, ram_bytes: 3 << 30, keep_alive: std::time::Duration::from_secs(12) });
         assert!(engine.ensure(&ModelSource::Local { path: std::path::Path::new("/nope.gguf").into() }, None).is_ok());
         assert_eq!(engine.health().models_dir, engine.models_dir().display().to_string());
     }

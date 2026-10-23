@@ -86,11 +86,17 @@ pub fn select_files(files: &[String]) -> Selection {
 /// Byte progress across the files of a snapshot download.
 struct Bytes {
     files: Mutex<HashMap<String, (u64, u64)>>,
+    /// The work this download is part of: the progress comes from the download's own threads,
+    /// so the pulse is carried along and reported here (see `mediaa_core::pulse`).
+    pulse: Option<mediaa_core::pulse::Pulse>,
     on_progress: Box<dyn Fn(u64, u64) + Send + Sync>,
 }
 
 impl ProgressHandler for Bytes {
     fn on_progress(&self, event: &ProgressEvent) {
+        if let Some(pulse) = &self.pulse {
+            pulse.beat();
+        }
         let ProgressEvent::Download(event) = event else { return };
         let (done, total) = match event {
             DownloadEvent::Progress { files } => {
@@ -156,7 +162,7 @@ fn download_into(
     }
     let client = builder.build_sync()?;
     let model = client.model(owner, name);
-    let progress = Progress::new(Bytes { files: Mutex::default(), on_progress: Box::new(on_progress) });
+    let progress = Progress::new(Bytes { files: Mutex::default(), pulse: mediaa_core::pulse::current(), on_progress: Box::new(on_progress) });
     if let Some(file) = file {
         model.snapshot_download().maybe_allow_patterns(Some(vec![file.to_string()])).local_dir(dir.clone()).progress(progress).send()?;
         anyhow::ensure!(dir.join(file).is_file(), "{repo_id} has no file {file}");

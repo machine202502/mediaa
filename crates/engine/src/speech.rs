@@ -124,7 +124,9 @@ impl Recognizer {
     pub fn recognize(&self, samples: &[f32], offset: f64) -> anyhow::Result<Phrase> {
         let stream = self.0.create_stream();
         stream.accept_waveform(SAMPLE_RATE as i32, samples);
+        mediaa_core::pulse::beat();
         self.0.decode(&stream);
+        mediaa_core::pulse::beat();
         let result = stream.get_result().context("no recognition result")?;
         let end = offset + samples.len() as f64 / f64::from(SAMPLE_RATE);
         let starts = result.timestamps.unwrap_or_default();
@@ -169,12 +171,14 @@ impl Vad {
     /// Feeds samples; returns the speech completed so far.
     pub fn push(&mut self, samples: &[f32]) -> Vec<Speech> {
         self.inner.accept_waveform(samples);
+        mediaa_core::pulse::beat();
         self.take()
     }
 
     /// The end of the stream: returns the rest of the speech.
     pub fn finish(&mut self) -> Vec<Speech> {
         self.inner.flush();
+        mediaa_core::pulse::beat();
         self.take()
     }
 
@@ -202,8 +206,17 @@ pub fn diarize(segmentation: &Path, embedding: &Path, samples: &[f32], speakers:
         clustering: FastClusteringConfig { num_clusters: speakers.map_or(-1, |n| n as i32), ..Default::default() },
         ..Default::default()
     };
+    let at = std::time::Instant::now();
+    mediaa_core::pulse::beat();
     let d = OfflineSpeakerDiarization::create(&config).ok_or_else(|| anyhow::anyhow!("the diarization models do not load"))?;
+    log::info!("diarize: the models loaded in {:.1} s", at.elapsed().as_secs_f32());
+    let at = std::time::Instant::now();
+    // The whole job is one native call: a beat before it starts (and the speech stale limit is
+    // wide enough for a long recording — see the queue's per-resource limits).
+    mediaa_core::pulse::beat();
     let result = d.process(samples).ok_or_else(|| anyhow::anyhow!("diarization failed"))?;
+    mediaa_core::pulse::beat();
+    log::info!("diarize: segmentation, embeddings and clustering took {:.1} s", at.elapsed().as_secs_f32());
     Ok(result
         .sort_by_start_time()
         .into_iter()

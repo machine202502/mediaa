@@ -110,7 +110,7 @@ start_claude() { # prompt, session id (empty for a new session), run dir
             "Bash(cargo:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(head:*)" "Bash(tail:*)" "Bash(wc:*)"
             "Bash(grep:*)" "Bash(find:*)" "Bash(mkdir:*)" "Bash(git diff:*)" "Bash(git status:*)"
             "WebFetch" "mcp__integrated-browser-mcp" "mcp__debugmcp" "mcp__desktop-mcp"
-            "Bash(scripts/ui-snap.sh:*)" "Bash(bash scripts/ui-snap.sh:*)" "Bash(node:*)"
+            "Bash(scripts/ui-snap.sh:*)" "Bash(bash scripts/ui-snap.sh:*)" "Bash(node:*)" "Bash(scripts/live-test.sh:*)" "Bash(bash scripts/live-test.sh:*)"
         --disallowedTools "Bash(git commit:*)" "Bash(git add:*)" "Bash(git reset:*)" "Bash(git push:*)"
             "Bash(git stash:*)" "Bash(git checkout:*)" "Bash(git restore:*)" "Bash(git rm:*)"
             "Bash(cargo run:*)" "mcp__claude-in-chrome")

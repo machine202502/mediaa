@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node scripts/subagent-log.mjs watch --detach",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

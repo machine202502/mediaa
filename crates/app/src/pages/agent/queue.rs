@@ -6,7 +6,7 @@
 //! it keeps in memory and the requests that wait for it (a download, memory, a free slot).
 //!
 //! The decisions (the flat list of rows, their texts, the geometry, which actions a row offers)
-//! are pure functions on `mediaa_core::queue` data, tested without a window; the drawing follows
+//! are pure functions on `mediaa_queue` data, tested without a window; the drawing follows
 //! them.
 
 use super::super::header;
@@ -23,7 +23,7 @@ use egui_phosphor::regular as icon;
 use mediaa_agent::slots;
 use mediaa_core::agent::{Budget, WorkKind};
 use mediaa_core::catalogs::ai_dir;
-use mediaa_core::queue::{self, Filter, KindGroup, KindStat, Queue, Stats, Task, TaskId, TaskStatus};
+use mediaa_queue::{self as queue, Filter, KindGroup, KindStat, Scheduler, Stats, Status as TaskStatus, Store, Task, TaskId, WaitReason};
 use mediaa_engine::{LoadedModel, Pool, Status, WaitingModel};
 use rust_i18n::t;
 use serde_json::Value;
@@ -46,17 +46,37 @@ struct Snapshot {
     kind_stats: Vec<KindStat>,
     /// Recordings (scopes) that have top-level tasks: key and the name to show.
     scopes: Vec<(String, String)>,
+    /// Why a task is waiting, already turned into the user's language.
+    waits: HashMap<TaskId, String>,
 }
 
 /// Reads the queue for `filter`.
-fn read(queue: &Queue, filter: &Filter) -> anyhow::Result<Snapshot> {
-    let everything = queue.top_level(&Filter::default())?;
-    let tops = if filter.scope.is_none() && filter.group == KindGroup::All { everything.clone() } else { queue.top_level(filter)? };
+fn read(store: &dyn Store, filter: &Filter) -> anyhow::Result<Snapshot> {
+    let everything = store.top_level(&Filter::default())?;
+    let tops = if filter.scope.is_none() && filter.group == KindGroup::All { everything.clone() } else { store.top_level(filter)? };
     let mut tasks = Vec::new();
     for top in &tops {
-        tasks.extend(queue.subtree(top.id)?);
+        tasks.extend(store.subtree(top.id)?);
     }
-    Ok(Snapshot { tops: tops.iter().map(|t| t.id).collect(), tasks, kind_stats: queue.kind_stats()?, scopes: scopes_of(&everything) })
+    Ok(Snapshot { tops: tops.iter().map(|t| t.id).collect(), tasks, kind_stats: store.kind_stats()?, scopes: scopes_of(&everything), waits: HashMap::new() })
+}
+
+/// The sentence for a waiting reason from the snapshot.
+pub fn wait_label(reason: &WaitReason) -> String {
+    match reason {
+        WaitReason::Dependency => t!("queue.wait_dependency").into(),
+        WaitReason::Resource(queue::Resource::Speech) => t!("queue.wait_speech").into(),
+        WaitReason::Resource(queue::Resource::Embed) => t!("queue.wait_embed").into(),
+        WaitReason::Resource(queue::Resource::Llm) => t!("queue.wait_llm").into(),
+        WaitReason::Resource(queue::Resource::Provider) => t!("queue.wait_provider").into(),
+        WaitReason::Memory => t!("queue.wait_memory_pool").into(),
+        WaitReason::Paused => t!("queue.wait_paused").into(),
+        WaitReason::Turn => t!("queue.reason_turn").into(),
+    }
+}
+
+fn fill_waits(snap: &mut Snapshot, views: &[queue::TaskView]) {
+    snap.waits = views.iter().filter_map(|view| view.wait.as_ref().map(|reason| (view.task.id, wait_label(reason)))).collect();
 }
 
 /// The recordings that have work in the queue: the key and the name (the file of its analysis, or
@@ -175,7 +195,7 @@ pub fn tool_text(detail: &Value) -> Option<String> {
 pub fn time_text(task: &Task, elapsed: Duration, estimate: Option<Duration>, estimated: bool) -> String {
     let left_part = || left_text(left(estimate));
     match task.status {
-        TaskStatus::Running => {
+        TaskStatus::Running | TaskStatus::Stopping => {
             let gone = t!("analysis.elapsed", time = clock(elapsed)).to_string();
             if estimated {
                 format!("{gone} · {}", left_part())
@@ -209,15 +229,52 @@ pub struct RowTexts {
     pub error: Option<String>,
 }
 
-pub fn row_texts(task: &Task, tasks: &[Task], kind_stats: &[KindStat], now_ms: i64) -> RowTexts {
+pub fn row_texts(task: &Task, tasks: &[Task], kind_stats: &[KindStat], now_ms: i64, locale: &str) -> RowTexts {
     let estimated = !task.inline;
     let estimate = if estimated { queue::estimate_tree(task, tasks, now_ms, kind_stats) } else { None };
+    let note = note_text(task.note.as_ref(), locale);
     RowTexts {
         label: task_label::label(&task.kind, &task.title),
         count: count_text(task, tasks),
         time: time_text(task, queue::elapsed(task, now_ms), estimate, estimated),
-        error: task.error.as_ref().map(|e| e.trim().to_string()).filter(|e| !e.is_empty()),
+        // Why it waits or why it was cancelled comes first: it is newer than a failure left by
+        // an earlier attempt.
+        error: if note.is_empty() {
+            task.error.as_ref().map(|e| e.trim().to_string()).filter(|e| !e.is_empty())
+        } else {
+            Some(note)
+        },
     }
+}
+
+/// The note of a task in the user's language, empty when there is none.
+pub fn note_text(note: Option<&queue::Note>, locale: &str) -> String {
+    match note {
+        Some(queue::Note::PausedBy { title }) => {
+            t!("queue.note_paused_by", title = title.as_str(), locale = locale).to_string()
+        }
+        Some(queue::Note::FailedBy { title }) => {
+            t!("queue.note_failed_by", title = title.as_str(), locale = locale).to_string()
+        }
+        Some(queue::Note::Hang { resource, idle_s }) => hang_text(*resource, *idle_s, locale),
+        None => String::new(),
+    }
+}
+
+/// Why the watchdog interrupted a run: what stopped answering and for how long.
+pub fn hang_text(resource: queue::Resource, idle_s: u64, locale: &str) -> String {
+    let what = match resource {
+        queue::Resource::Speech => t!("queue.hang_speech", locale = locale).to_string(),
+        queue::Resource::Embed => t!("queue.hang_embed", locale = locale).to_string(),
+        queue::Resource::Llm => t!("queue.hang_llm", locale = locale).to_string(),
+        queue::Resource::Provider => t!("queue.hang_provider", locale = locale).to_string(),
+    };
+    let idle = if idle_s >= 120 {
+        t!("queue.hang_minutes", n = idle_s / 60, locale = locale).to_string()
+    } else {
+        t!("queue.hang_seconds", n = idle_s, locale = locale).to_string()
+    };
+    t!("queue.hang_note", what = what.as_str(), idle = idle.as_str(), locale = locale).to_string()
 }
 
 // ---------------------------------------------------------------- actions
@@ -233,18 +290,20 @@ pub struct Actions {
 }
 
 pub fn actions(task: &Task) -> Actions {
+    let chat = matches!(task.kind.as_str(), "chat" | "chat-answer");
     let active = matches!(task.status, TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting);
-    // A chat answer runs in the program that asked for it: the queue cannot stop or restart it
-    // (the answer's own stop button does); a finished one can only be removed.
-    let own = !task.inline;
+    let stopping = task.status == TaskStatus::Stopping;
+    // Inline work belongs to the program that asked for it. A chat answer is stopped from its
+    // own chat (and can be cancelled here); it is not paused or started over from the row.
+    let own = !task.inline && !chat;
     Actions {
         pause: own && active,
         resume: own && task.status == TaskStatus::Paused,
-        cancel: own && (active || task.status == TaskStatus::Paused),
+        cancel: !task.inline && !task.status.is_finished() && (own || chat) && (active || stopping || task.status == TaskStatus::Paused),
         // «Начать заново» only after a failure or a cancel. A running, waiting or finished task
         // is not started over from the row.
         restart: own && matches!(task.status, TaskStatus::Failed | TaskStatus::Cancelled),
-        remove: task.parent.is_none() && (own || task.status.is_finished()),
+        remove: task.parent.is_none() && (task.status.is_finished() || own),
     }
 }
 
@@ -257,15 +316,28 @@ enum Op {
     ClearDone,
 }
 
-fn run(queue: &Queue, op: &Op) -> anyhow::Result<()> {
+fn run(sched: &Scheduler, op: &Op) -> anyhow::Result<()> {
     match *op {
-        Op::Pause(id) => queue.pause(id),
-        Op::Resume(id) => queue.resume(id),
-        Op::Cancel(id) => queue.cancel(id),
-        Op::Restart(id) => queue.restart(id),
-        Op::Remove(id) => queue.remove(id),
-        Op::ClearDone => queue.clear_done(),
+        Op::Pause(id) => {
+            sched.pause(id)?;
+        }
+        Op::Resume(id) => {
+            sched.resume(id)?;
+        }
+        Op::Cancel(id) => {
+            sched.cancel(id)?;
+        }
+        Op::Restart(id) => {
+            sched.restart(id)?;
+        }
+        Op::Remove(id) => {
+            sched.remove(id)?;
+        }
+        Op::ClearDone => {
+            sched.clear_done()?;
+        }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------- geometry
@@ -329,7 +401,11 @@ pub fn geom(row: Rect, depth: usize) -> Geom {
 
 #[derive(Default)]
 pub struct QueueUi {
-    queue: Option<(PathBuf, Result<Queue, String>)>,
+    /// The library the last reading came from.
+    dir: Option<PathBuf>,
+    /// Events already applied from the host's feed.
+    seen: usize,
+    error: Option<String>,
     snapshot: Snapshot,
     read: Option<Instant>,
     group: KindGroup,
@@ -356,6 +432,7 @@ fn status_label(s: TaskStatus) -> (&'static str, String) {
     match s {
         TaskStatus::Queued => (icon::CLOCK, t!("queue.queued").into()),
         TaskStatus::Running => (icon::SPINNER_GAP, t!("queue.running").into()),
+        TaskStatus::Stopping => (icon::SPINNER_GAP, t!("queue.stopping").into()),
         TaskStatus::Waiting => (icon::HOURGLASS, t!("queue.status_waiting").into()),
         TaskStatus::Paused => (icon::PAUSE_CIRCLE, t!("queue.paused").into()),
         TaskStatus::Done => (icon::CHECK_CIRCLE, t!("queue.done").into()),
@@ -368,7 +445,7 @@ fn status_color(status: TaskStatus, p: Palette) -> egui::Color32 {
     match status {
         TaskStatus::Failed => p.danger,
         TaskStatus::Done => p.success,
-        TaskStatus::Running => p.accent,
+        TaskStatus::Running | TaskStatus::Stopping => p.accent,
         _ => p.text_weak,
     }
 }
@@ -416,7 +493,7 @@ fn row_ui(ui: &mut egui::Ui, row: Row, snap: &Snapshot, open: &mut HashSet<TaskI
     let task = &snap.tasks[row.index];
     let key = task.scope.clone().unwrap_or_default();
     let roster = rosters.entry(key.clone()).or_insert_with(|| super::mentions::Roster::of_file(ai, &key)).clone();
-    let texts = row_texts(task, &snap.tasks, &snap.kind_stats, now);
+    let texts = row_texts(task, &snap.tasks, &snap.kind_stats, now, &rust_i18n::locale());
     let shown_error = texts.error.as_deref();
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ROW_H), Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -431,7 +508,7 @@ fn row_ui(ui: &mut egui::Ui, row: Row, snap: &Snapshot, open: &mut HashSet<TaskI
     }
     let (glyph, _) = status_label(task.status);
     let color = status_color(task.status, p);
-    if task.status == TaskStatus::Running {
+    if matches!(task.status, TaskStatus::Running | TaskStatus::Stopping) {
         egui::Spinner::new().size(14.0).color(color).paint_at(ui, Rect::from_center_size(g.icon.center(), egui::vec2(14.0, 14.0)));
     } else {
         painter.text(g.icon.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(14.0), color);
@@ -444,7 +521,7 @@ fn row_ui(ui: &mut egui::Ui, row: Row, snap: &Snapshot, open: &mut HashSet<TaskI
         None => column_text(ui, g.label, &texts.label, FontId::proportional(13.0), label_color, false, &roster, p),
     }
     // The progress bar: the same place in every row.
-    if matches!(task.status, TaskStatus::Running | TaskStatus::Paused | TaskStatus::Queued | TaskStatus::Waiting) && task.progress > 0.0 {
+    if matches!(task.status, TaskStatus::Running | TaskStatus::Stopping | TaskStatus::Paused | TaskStatus::Queued | TaskStatus::Waiting) && task.progress > 0.0 {
         painter.rect_filled(g.bar, CornerRadius::same(3), p.border);
         let fill = Rect::from_min_size(g.bar.min, egui::vec2(g.bar.width() * task.progress.clamp(0.0, 1.0), g.bar.height()));
         painter.rect_filled(fill, CornerRadius::same(3), p.accent);
@@ -452,10 +529,18 @@ fn row_ui(ui: &mut egui::Ui, row: Row, snap: &Snapshot, open: &mut HashSet<TaskI
     if let Some(count) = &texts.count {
         column_text(ui, g.count, count, FontId::proportional(11.5), p.text_weak, true, &roster, p);
     }
-    column_text(ui, g.time, &texts.time, FontId::proportional(11.5), p.text_weak, true, &roster, p);
+    let mut time = texts.time.clone();
+    if let Some(wait) = snap.waits.get(&task.id) {
+        time = if time.is_empty() { wait.clone() } else { format!("{time} · {wait}") };
+    }
+    column_text(ui, g.time, &time, FontId::proportional(11.5), p.text_weak, true, &roster, p);
     // Hints of the parts that may be cut.
     let status_resp = ui.interact(g.icon, ui.id().with(("queue-status", task.id)), Sense::hover());
-    topics::text_tip(&status_resp, &status_label(task.status).1, &super::mentions::Roster::default());
+    let mut status_tip = status_label(task.status).1;
+    if let Some(wait) = snap.waits.get(&task.id) {
+        status_tip = format!("{status_tip}\n{wait}");
+    }
+    topics::text_tip(&status_resp, &status_tip, &super::mentions::Roster::default());
     let label_resp = ui.interact(g.label, ui.id().with(("queue-label", task.id)), Sense::hover());
     let mut full = texts.label.clone();
     if let Some(error) = shown_error {
@@ -504,28 +589,45 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     header(ui, &t!("queue.title"), "");
     let dir = ai_dir(&library_dir(&app.settings));
     let budget = app.settings.agent.budget.clone();
-    let state = &mut app.agent.queue;
     let slots = app.agent.slots.status();
     runtime_card(ui, &app.agent.engine_state, &slots, &budget);
-    if state.queue.as_ref().is_none_or(|(d, _)| *d != dir) {
-        state.queue = Some((dir.clone(), Queue::open(&dir).map_err(|e| format!("{e:#}"))));
+    let host = app.agent.services().map(|s| (s.sched.clone(), s.feed.clone()));
+    let state = &mut app.agent.queue;
+    if state.dir.as_deref() != Some(dir.as_path()) {
+        state.dir = Some(dir.clone());
+        state.seen = 0;
         state.read = None;
+        state.error = None;
+    }
+    let mut eventful = false;
+    if let Some((_, feed)) = &host {
+        let (next, events, gap) = feed.since(state.seen);
+        let restarted = next < state.seen;
+        state.seen = next;
+        eventful = gap || restarted || !events.is_empty();
     }
     let filter = state.filter();
-    let Some((_, opened)) = &state.queue else { return };
-    let queue = match opened {
-        Ok(q) => q,
-        Err(e) => {
-            ui.colored_label(theme::palette(ui).danger, e);
-            return;
-        }
-    };
-    if state.read.is_none_or(|r| r.elapsed() >= REFRESH) {
-        match read(queue, &filter) {
-            Ok(s) => state.snapshot = s,
-            Err(e) => log::warn!("agent queue: {e:#}"),
+    if state.read.is_none_or(|r| r.elapsed() >= REFRESH) || eventful {
+        match &host {
+            Some((sched, _)) => match read(sched.store().as_ref(), &filter) {
+                Ok(mut snap) => {
+                    if let Ok(live) = sched.snapshot() {
+                        fill_waits(&mut snap, &live.tasks);
+                    }
+                    state.snapshot = snap;
+                    state.error = None;
+                }
+                Err(e) => {
+                    log::warn!("agent queue: {e:#}");
+                    state.error = Some(format!("{e:#}"));
+                }
+            },
+            None => state.error = Some(t!("studio.agent_not_ready").into()),
         }
         state.read = Some(Instant::now());
+    }
+    if let Some(e) = &state.error {
+        ui.colored_label(theme::palette(ui).danger, e);
     }
     ui.ctx().request_repaint_after(REFRESH);
 
@@ -594,8 +696,10 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let mut op_error = None;
     if let Some(op) = op {
         state.read = None;
-        if let Err(e) = run(queue, &op) {
-            op_error = Some(format!("{e:#}"));
+        if let Some((sched, _)) = &host {
+            if let Err(e) = run(sched, &op) {
+                op_error = Some(format!("{e:#}"));
+            }
         }
     }
     let copy_error = {
@@ -620,9 +724,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
 }
 
 /// Draws the details window.
-fn task_window(ctx: &egui::Context, task: &Task, stats: &mediaa_core::queue::Stats, log: &str, copied: &mut bool, open: &mut Option<TaskId>, ai: &std::path::Path) -> Option<String> {
+fn task_window(ctx: &egui::Context, task: &Task, stats: &Stats, log: &str, copied: &mut bool, open: &mut Option<TaskId>, ai: &std::path::Path) -> Option<String> {
     let roster = task.scope.as_deref().map(|id| super::mentions::Roster::of_file(ai, id)).unwrap_or_default();
-    match task_details::show(ctx, task, stats, log, copied, &roster) {
+    match task_details::show(ctx, task, stats, now_ms(), log, copied, &roster) {
         Some(task_details::Cmd::Close) => {
             *open = None;
             None
@@ -653,7 +757,8 @@ fn slots(status: &slots::Status, budget: &Budget) -> Vec<(WorkKind, u32, u32, us
         .collect()
 }
 
-/// A loaded model: its file name, where it runs, its size and how many jobs use it.
+/// A loaded model: its file name, where it runs, its size, how many jobs use it, and — while it
+/// is idle — for how long and when it is unloaded.
 fn model_line(m: &LoadedModel) -> String {
     let path = m.model.rsplit_once('#').map_or(m.model.as_str(), |(p, _)| p);
     let name = Path::new(path).file_name().map_or(path.into(), |n| n.to_string_lossy());
@@ -661,7 +766,19 @@ fn model_line(m: &LoadedModel) -> String {
         Pool::Gpu => t!("queue.on_gpu"),
         Pool::Cpu => t!("queue.on_cpu"),
     };
-    format!("{name} · {pool} · {} GB · {}", gb(m.bytes), t!("queue.jobs", n = m.users))
+    let mut parts = vec![format!("{name} · {pool} · {} GB", gb(m.bytes))];
+    if m.users > 0 {
+        parts.push(t!("queue.jobs", n = m.users).to_string());
+    }
+    if !m.idle.is_zero() {
+        parts.push(t!("queue.idle_for", time = clock(m.idle)).to_string());
+    }
+    match m.unloads_in {
+        Some(left) if left.is_zero() => parts.push(t!("queue.unloads_now").to_string()),
+        Some(left) => parts.push(t!("queue.unloads_in", time = clock(left)).to_string()),
+        None => {}
+    }
+    parts.join(" · ")
 }
 
 /// Why a request waits for the engine.
@@ -764,9 +881,16 @@ mod tests {
     #[test]
     fn budget_in_use() {
         let engine = Status {
-            loaded: vec![LoadedModel { model: "C:\\m\\models\\q\\Qwen3-Q4_K_M.gguf#4096".into(), pool: Pool::Gpu, bytes: 3 << 30, users: 2 }],
+            loaded: vec![LoadedModel {
+                model: "C:\\m\\models\\q\\Qwen3-Q4_K_M.gguf#4096".into(),
+                pool: Pool::Gpu,
+                bytes: 3 << 30,
+                users: 2,
+                idle: Duration::ZERO,
+                unloads_in: None,
+            }],
             waiting: vec![],
-            budget: EngineBudget { gpu_bytes: 8 << 30, ram_bytes: 8 << 30 },
+            budget: EngineBudget { gpu_bytes: 8 << 30, ram_bytes: 8 << 30, keep_alive: Duration::from_secs(5 * 60) },
             used: Used { gpu_bytes: 3 << 30, ram_bytes: 0 },
         };
         let state = slots::Status { running: vec![(WorkKind::Agent, 1), (WorkKind::WebSearch, 2)], waiting: vec![(7, WorkKind::WebSearch), (8, WorkKind::Transcription)] };
@@ -778,6 +902,17 @@ mod tests {
         assert!(s.contains(&(WorkKind::Agent, 1, 2, 0)) && s.contains(&(WorkKind::WebSearch, 2, 2, 1)) && s.contains(&(WorkKind::Transcription, 0, 1, 1)), "{s:?}");
         let line = model_line(&engine.loaded[0]);
         assert!(line.starts_with("Qwen3-Q4_K_M.gguf · ") && line.contains(" · 3.0 GB · ") && line.ends_with('2'), "{line}");
+        // An idle model says for how long and when it goes.
+        let mut idle = engine.loaded[0].clone();
+        idle.users = 0;
+        idle.idle = Duration::from_secs(83);
+        idle.unloads_in = Some(Duration::from_secs(217));
+        let line = model_line(&idle);
+        assert!(!line.contains(&t!("queue.jobs", n = 0).to_string()), "{line}");
+        assert!(line.contains(&t!("queue.idle_for", time = "1:23").to_string()), "{line}");
+        assert!(line.contains(&t!("queue.unloads_in", time = "3:37").to_string()), "{line}");
+        idle.unloads_in = Some(Duration::ZERO);
+        assert!(model_line(&idle).contains(&t!("queue.unloads_now").to_string()));
         let waiting = WaitingModel { id: 1, model: Some("owner/repo".into()), reason: "downloading".into(), progress: Some(Progress { done: 1 << 29, total: 1 << 30 }) };
         assert_eq!(waiting.model.as_deref(), Some("owner/repo"));
         assert_eq!(reason_label(&waiting.reason), t!("queue.reason_downloading").to_string());
@@ -785,26 +920,32 @@ mod tests {
         assert_eq!(download_bar(waiting.progress.as_ref().unwrap().done, 1 << 30).0, 0.5);
     }
 
-    use mediaa_core::queue::NewTask;
+    use mediaa_queue::{FakeClock, MemStore, NewTask, Resource};
     use serde_json::json;
+    use std::sync::Arc;
 
-    fn tree() -> (tempfile::TempDir, Queue, TaskId, Vec<TaskId>) {
-        let dir = tempfile::tempdir().unwrap();
-        let q = Queue::open(dir.path()).unwrap();
-        let root = q.enqueue(NewTask::new("analysis", "talk.mp4", &json!({})).composite().scope("rec-1")).unwrap();
+    /// The store, its scheduler, the analysis root, its children and the fake clock.
+    type Tree = (Arc<dyn Store>, Arc<Scheduler>, TaskId, Vec<TaskId>, Arc<FakeClock>);
+
+    fn tree() -> Tree {
+        let clock = Arc::new(FakeClock::new(0));
+        let store: Arc<dyn Store> = Arc::new(MemStore::new(clock.clone()));
+        let sched = Arc::new(Scheduler::new(store.clone(), vec![]));
+        let root = store.enqueue(NewTask::new("analysis", "talk.mp4", &json!({})).composite().scope("rec-1")).unwrap();
         let mut kids = Vec::new();
         for kind in ["transcribe", "index", "topics"] {
-            kids.push(q.enqueue(NewTask::new(kind, "talk.mp4", &json!({})).parent(root).scope("rec-1").units(2.0)).unwrap());
+            kids.push(store.enqueue(NewTask::new(kind, "talk.mp4", &json!({})).resource(Resource::Llm).parent(root).scope("rec-1").units(2.0)).unwrap());
         }
-        (dir, q, root, kids)
+        (store, sched, root, kids, clock)
     }
 
     #[test]
     fn rows_flatten_in_order_and_open_on_demand() {
-        let (_dir, q, root, kids) = tree();
-        let chat = q.begin_inline("chat", "Когда?", &json!({}), None, Some("rec-2")).unwrap();
-        let tool = q.begin_inline("tool", "Ищу", &json!({}), Some(chat), Some("rec-2")).unwrap();
-        let snap = read(&q, &Filter::default()).unwrap();
+        let (store, _sched, root, kids, clock) = tree();
+        clock.advance(1_000);
+        let chat = store.begin_inline("chat", "Когда?", &json!({}), None, Some("rec-2")).unwrap();
+        let tool = store.begin_inline("tool", "Ищу", &json!({}), Some(chat), Some("rec-2")).unwrap();
+        let snap = read(store.as_ref(), &Filter::default()).unwrap();
         let mut open = HashSet::new();
         let ids = |rows: &[Row]| rows.iter().map(|r| (snap.tasks[r.index].id, r.depth)).collect::<Vec<_>>();
         let rows = flatten(&snap.tasks, &snap.tops, &open);
@@ -819,21 +960,21 @@ mod tests {
 
     #[test]
     fn filters_pick_the_group_and_the_recording() {
-        let (_dir, q, root, _) = tree();
-        let chat = q.begin_inline("chat", "Когда?", &json!({}), None, Some("rec-2")).unwrap();
-        let tops = |f: &Filter| read(&q, f).unwrap().tops;
+        let (store, _sched, root, _, _clock) = tree();
+        let chat = store.begin_inline("chat", "Когда?", &json!({}), None, Some("rec-2")).unwrap();
+        let tops = |f: &Filter| read(store.as_ref(), f).unwrap().tops;
         assert_eq!(tops(&Filter::group(KindGroup::Analysis)), [root]);
         assert_eq!(tops(&Filter::group(KindGroup::Chat)), [chat]);
         assert_eq!(tops(&Filter::scope("rec-2")), [chat]);
-        let snap = read(&q, &Filter::group(KindGroup::Chat)).unwrap();
+        let snap = read(store.as_ref(), &Filter::group(KindGroup::Chat)).unwrap();
         assert_eq!(snap.tasks.len(), 1, "only the tasks of the filter are read");
         assert_eq!(snap.scopes, [("rec-2".to_string(), "rec-2…".to_string()), ("rec-1".to_string(), "talk.mp4".to_string())], "the scopes are not narrowed by the filter; by name");
     }
 
     fn task(kind: &str, status: TaskStatus) -> Task {
-        let (_dir, q, ..) = tree();
-        let id = q.enqueue(NewTask::new(kind, "x", &json!({}))).unwrap();
-        let mut t = q.get(id).unwrap().unwrap();
+        let (store, ..) = tree(); // clock is last and unused
+        let id = store.enqueue(NewTask::new(kind, "x", &json!({})).resource(Resource::Llm)).unwrap();
+        let mut t = store.get(id).unwrap().unwrap();
         t.status = status;
         t
     }
@@ -854,16 +995,21 @@ mod tests {
         assert_eq!(time_text(&t, Duration::ZERO, Some(Duration::from_secs(600)), true), left_text(left(Some(Duration::from_secs(600)))));
         t.status = TaskStatus::Cancelled;
         assert_eq!(time_text(&t, Duration::ZERO, None, true), "", "never started");
+        t.status = TaskStatus::Failed;
+        t.started_ms = Some(1_000);
+        assert_eq!(time_text(&t, Duration::from_secs(3), None, true), "0:03", "a failure shows when it started");
+        t.status = TaskStatus::Stopping;
+        assert!(time_text(&t, Duration::from_secs(5), None, true).contains("0:05"), "stopping keeps the clock");
     }
 
     #[test]
     fn a_composite_counts_its_children_and_sums_their_work() {
-        let (_dir, q, root, kids) = tree();
-        q.claim(&["transcribe"]).unwrap();
-        q.add_stats(kids[0], &Stats { model_calls: 2, prompt_tokens: 100, completion_tokens: 20, model_ms: 5, models: vec!["C:\\m\\Qwen3-Q4.gguf#4096".into()] }).unwrap();
-        q.add_stats(kids[1], &Stats { model_calls: 1, prompt_tokens: 10, completion_tokens: 5, model_ms: 1, models: vec!["owner/embed".into()] }).unwrap();
-        q.complete(kids[0], &json!({})).unwrap();
-        let snap = read(&q, &Filter::default()).unwrap();
+        let (store, _sched, root, kids, _clock) = tree();
+        store.claim(kids[0]).unwrap();
+        store.add_stats(kids[0], &Stats { model_calls: 2, prompt_tokens: 100, completion_tokens: 20, model_ms: 5, models: vec!["C:\\m\\Qwen3-Q4.gguf#4096".into()] }).unwrap();
+        store.add_stats(kids[1], &Stats { model_calls: 1, prompt_tokens: 10, completion_tokens: 5, model_ms: 1, models: vec!["owner/embed".into()] }).unwrap();
+        store.complete(kids[0], &json!({})).unwrap();
+        let snap = read(store.as_ref(), &Filter::default()).unwrap();
         let top = snap.tasks.iter().find(|t| t.id == root).unwrap();
         assert_eq!(count_text(top, &snap.tasks), Some(t!("analysis.of", done = 1, total = 3).to_string()));
         let leaf = snap.tasks.iter().find(|t| t.id == kids[2]).unwrap();
@@ -893,11 +1039,45 @@ mod tests {
         let mut t = task("topic-digest", TaskStatus::Failed);
         t.title = "#3".into();
         t.error = Some("  модель упала \n".into());
-        let texts = row_texts(&t, std::slice::from_ref(&t), &[], 0);
+        let texts = row_texts(&t, std::slice::from_ref(&t), &[], 0, "ru");
         assert_eq!(texts.label, task_label::label("topic-digest", "#3"));
         assert_eq!(texts.error.as_deref(), Some("модель упала"));
+        // A note is newer than a failure left by an earlier attempt, and it is in the window's
+        // language.
+        t.note = Some(queue::pause_note("Индекс: rec"));
+        assert_eq!(
+            row_texts(&t, std::slice::from_ref(&t), &[], 0, "ru").error.as_deref(),
+            Some("ждёт: Индекс: rec на паузе")
+        );
+        assert_eq!(
+            row_texts(&t, std::slice::from_ref(&t), &[], 0, "en").error.as_deref(),
+            Some("waiting: Индекс: rec is paused")
+        );
+        t.note = None;
         t.error = Some("   ".into());
-        assert_eq!(row_texts(&t, std::slice::from_ref(&t), &[], 0).error, None);
+        assert_eq!(row_texts(&t, std::slice::from_ref(&t), &[], 0, "ru").error, None);
+    }
+
+    #[test]
+    fn a_note_is_words_in_the_language_of_the_window() {
+        let failed = queue::failure_note("Темы: rec");
+        assert_eq!(note_text(Some(&failed), "ru"), "из-за ошибки в Темы: rec");
+        assert_eq!(note_text(Some(&failed), "en"), "because of a failure in Темы: rec");
+        let hang = queue::hang_note(queue::Resource::Llm, Duration::from_secs(300));
+        assert_eq!(
+            note_text(Some(&hang), "ru"),
+            "модель не отвечает дольше 5 мин — вызов прерван, задача продолжит с последней точки"
+        );
+        assert_eq!(
+            note_text(Some(&hang), "en"),
+            "the model has not responded for over 5 min — the call was interrupted; the task will continue from the last point"
+        );
+        let short = queue::hang_note(queue::Resource::Embed, Duration::from_secs(45));
+        assert_eq!(
+            note_text(Some(&short), "ru"),
+            "индексация не отвечает дольше 45 с — вызов прерван, задача продолжит с последней точки"
+        );
+        assert_eq!(note_text(None, "ru"), "");
     }
 
     #[test]
@@ -912,12 +1092,21 @@ mod tests {
         assert!(paused.resume && paused.cancel && !paused.restart);
         assert!(a("index", TaskStatus::Cancelled).restart);
         assert!(!a("index", TaskStatus::Queued).restart);
-        // A chat task belongs to the program that runs it: only a finished one can be removed.
+        // Inline chat work is not steered from the row; a finished one can be removed.
         let mut chat = task("chat", TaskStatus::Running);
         chat.inline = true;
         assert_eq!(actions(&chat), Actions::default());
         chat.status = TaskStatus::Done;
         assert_eq!(actions(&chat), Actions { remove: true, ..Actions::default() });
+        // A queued chat answer can be cancelled here, not paused or started over.
+        let mut answer = task("chat-answer", TaskStatus::Running);
+        answer.inline = false;
+        let offered = actions(&answer);
+        assert!(offered.cancel && !offered.pause && !offered.resume && !offered.restart && !offered.remove);
+        answer.status = TaskStatus::Stopping;
+        assert!(actions(&answer).cancel && !actions(&answer).resume);
+        answer.status = TaskStatus::Done;
+        assert_eq!(actions(&answer), Actions { remove: true, ..Actions::default() });
         // A child is not removed on its own.
         let mut child = task("index", TaskStatus::Done);
         child.parent = Some(1);
@@ -926,23 +1115,23 @@ mod tests {
 
     #[test]
     fn the_actions_of_a_composite_reach_its_subtree() {
-        let (_dir, q, root, kids) = tree();
+        let (store, sched, root, kids, _clock) = tree();
         // Pause is this task only. A sibling that can still run keeps the composite going.
-        run(&q, &Op::Pause(kids[0])).unwrap();
-        assert_eq!(q.get(kids[0]).unwrap().unwrap().status, TaskStatus::Paused);
-        assert_eq!(q.get(kids[1]).unwrap().unwrap().status, TaskStatus::Queued);
-        assert_eq!(q.get(root).unwrap().unwrap().status, TaskStatus::Running);
-        run(&q, &Op::Resume(root)).unwrap();
-        assert_eq!(q.get(kids[0]).unwrap().unwrap().status, TaskStatus::Queued);
-        run(&q, &Op::Cancel(root)).unwrap();
+        run(&sched, &Op::Pause(kids[0])).unwrap();
+        assert_eq!(store.get(kids[0]).unwrap().unwrap().status, TaskStatus::Paused);
+        assert_eq!(store.get(kids[1]).unwrap().unwrap().status, TaskStatus::Queued);
+        assert_eq!(store.get(root).unwrap().unwrap().status, TaskStatus::Running);
+        run(&sched, &Op::Resume(root)).unwrap();
+        assert_eq!(store.get(kids[0]).unwrap().unwrap().status, TaskStatus::Queued);
+        run(&sched, &Op::Cancel(root)).unwrap();
         for id in kids.iter().chain([&root]) {
-            assert_eq!(q.get(*id).unwrap().unwrap().status, TaskStatus::Cancelled);
+            assert_eq!(store.get(*id).unwrap().unwrap().status, TaskStatus::Cancelled);
         }
-        run(&q, &Op::Restart(root)).unwrap();
-        assert_eq!(q.get(kids[2]).unwrap().unwrap().status, TaskStatus::Queued);
-        assert_eq!(q.get(root).unwrap().unwrap().status, TaskStatus::Running, "queued children are free to run");
-        run(&q, &Op::Remove(root)).unwrap();
-        assert!(q.list().unwrap().is_empty(), "the children go with it");
+        run(&sched, &Op::Restart(root)).unwrap();
+        assert_eq!(store.get(kids[2]).unwrap().unwrap().status, TaskStatus::Queued);
+        assert_eq!(store.get(root).unwrap().unwrap().status, TaskStatus::Running, "queued children are free to run");
+        run(&sched, &Op::Remove(root)).unwrap();
+        assert!(store.list().unwrap().is_empty(), "the children go with it");
     }
 
     #[test]

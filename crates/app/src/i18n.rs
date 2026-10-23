@@ -115,6 +115,31 @@ mod tests {
         keys
     }
 
+    fn strings_of(value: &toml::Value, out: &mut Vec<String>) {
+        match value {
+            toml::Value::String(s) => out.push(s.clone()),
+            toml::Value::Table(t) => t.values().for_each(|v| strings_of(v, out)),
+            _ => {}
+        }
+    }
+
+    /// The user sees no engine: the program, its state and its errors are models and tasks.
+    #[test]
+    fn no_locale_value_mentions_the_engine() {
+        for (lang, _) in LANGUAGES {
+            let path = crate_dir().join("locales").join(format!("{lang}.toml"));
+            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let value: toml::Value = toml::from_str(&text).unwrap();
+            let mut values = Vec::new();
+            strings_of(&value, &mut values);
+            for value in values {
+                let lower = value.to_lowercase();
+                assert!(!lower.contains("движ"), "{lang}: «{value}»");
+                assert!(!lower.contains("engine"), "{lang}: «{value}»");
+            }
+        }
+    }
+
     #[test]
     fn every_language_has_the_same_keys() {
         let en = keys_of("en");

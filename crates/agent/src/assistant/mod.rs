@@ -15,7 +15,10 @@ pub mod folder;
 pub mod internet;
 pub mod memory;
 pub mod provider;
+pub mod quote;
 pub mod scan;
+pub mod queued;
+pub mod step_title;
 pub mod title;
 pub mod tools;
 
@@ -30,7 +33,7 @@ use crate::tools::{format_time, parse_time};
 use serde::{Deserialize, Serialize};
 use crate::scope::Scope;
 use serde_json::{json, Value};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -298,7 +301,7 @@ fn step_json(step: &Step, thinking: bool) -> String {
     let q = |v: &str| Value::String(v.to_string()).to_string();
     let thought = |t: &str| if thinking { String::new() } else { format!(r#""thought":{},"#, q(t)) };
     match step {
-        Step::Tool { thought: t, title, tool, args } => format!(r#"{{{}"action":{},"title":{},"args":{args}}}"#, thought(t), q(tool), q(title)),
+        Step::Tool { thought: t, tool, args } => format!(r#"{{{}"action":{},"args":{args}}}"#, thought(t), q(tool)),
         Step::Answer { thought: t, text } => format!(r#"{{{}"action":"{}","answer":{}}}"#, thought(t), brain::ANSWER, q(text)),
     }
 }
@@ -363,11 +366,9 @@ fn waiter(scope: &Scope, slots: &Slots, settings: &mediaa_core::agent::AgentSett
 /// History and the question as the model reads them: `@<name>` of a speaker becomes `@sN`
 /// (or `@sN#R` in a folder). Answers already store labels and are left as written.
 fn for_model(speakers: &[mediaa_core::speakers::Who], history: &[Turn], question: &str) -> (Vec<Turn>, String) {
-    let history = history
-        .iter()
-        .map(|t| Turn { question: mediaa_core::speakers::to_model(&t.question, speakers), answer: t.answer.clone() })
-        .collect();
-    (history, mediaa_core::speakers::to_model(question, speakers))
+    let one = |text: &str| mediaa_core::speakers::to_model(&quote::expand(text), speakers);
+    let history = history.iter().map(|t| Turn { question: one(&t.question), answer: t.answer.clone() }).collect();
+    (history, one(question))
 }
 
 /// Answers `question` about the transcript `file_id` of `ai_dir` with the agent's model of
@@ -521,6 +522,95 @@ pub fn ask_folder(
         let web = settings.web.enabled.then(|| internet::Web::new(&*web_search, &*web_read, max_chars / 3));
         let tools = folder::FolderTools { items, search: &across, search_one: &one, max_chars, web: web.as_ref() };
         answer(brain, &tools, scope, &history, memory, &question, cancel, Some(&waiter), settings.verify_answers, on_event)
+    })
+}
+
+/// One step of [`ask`], for a queue chunk. `session` is the cursor.
+#[allow(clippy::too_many_arguments)]
+pub fn answer_step(
+    scope: &Scope,
+    slots: &Slots,
+    settings: &mediaa_core::agent::AgentSettings,
+    ai_dir: &std::path::Path,
+    file_id: &str,
+    recording: &Recording,
+    history: &[Turn],
+    session: &mut Session,
+    question: &str,
+    cancel: &AtomicBool,
+    on_event: &mut (dyn FnMut(&Event) + Send),
+) -> anyhow::Result<Advance> {
+    use mediaa_core::agent::ModelSource;
+    let engine = scope.engine();
+    let engine = engine.as_ref();
+    let find = |q: &str, n: usize| crate::search::search(engine, slots, settings, ai_dir, file_id, q, n, true).map(|(h, _)| h);
+    let events = Mutex::new(on_event);
+    let transcript = mediaa_core::transcript::Transcript::open(ai_dir, file_id).ok();
+    let scan_with = |extract: &dyn scan::Extract, instruction: &str| {
+        scan::scan(extract, recording, transcript.as_ref(), instruction, cancel, &mut |done, total| (events.lock().expect("event sink"))(&Event::Scanning { done, total }))
+    };
+    let rename = |speaker: u32, name: &str| transcript.as_ref().ok_or_else(|| anyhow::anyhow!("no transcript"))?.rename_speaker(speaker, name);
+    let sub = match &settings.models.subagent {
+        Some(ModelSource::Provider { provider, model }) => Some(provider_brain(scope, slots, settings, provider, model, false)?),
+        _ => None,
+    };
+    let (web_search, web_read) = web_calls(slots, settings, cancel);
+    let wait = waiter(scope, slots, settings);
+    let waiter = Waiter { reason: &*wait, grace: WAIT_GRACE };
+    let (history, question) = for_model(&tools::whos(recording, None), history, question);
+    let emit = |e: &Event| (events.lock().expect("event sink"))(e);
+    let run = |brain: &dyn Brain, extract: &dyn scan::Extract| {
+        let helper: &dyn Brain = sub.as_ref().map_or(brain, |s| s as &dyn Brain);
+        let delegate = |task: &str, text: &str| {
+            let messages = [
+                Message::new(Role::System, prompts::render("delegate_system.j2", ())),
+                Message::new(Role::User, prompts::render("delegate_task.j2", minijinja::context! { task, text })),
+            ];
+            helper.complete(&messages, cancel)
+        };
+        let scanner = |instruction: &str| scan_with(extract, instruction);
+        let max_chars = (brain.context() as usize) * 3 / 4;
+        let web = settings.web.enabled.then(|| internet::Web::new(&*web_search, &*web_read, max_chars / 3));
+        let tools = Tools { scan: Some(&scanner), rename: Some(&rename), delegate: Some(&delegate), web: web.as_ref(), ..Tools::new(recording, &find, max_chars) };
+        advance(brain, &tools, scope, session, &history, &question, cancel, Some(&waiter), settings.verify_answers, &emit)
+    };
+    with_brain(scope, slots, settings, run)
+}
+
+/// One step of [`ask_folder`].
+#[allow(clippy::too_many_arguments)]
+pub fn answer_step_folder(
+    scope: &Scope,
+    slots: &Slots,
+    settings: &mediaa_core::agent::AgentSettings,
+    ai_dir: &std::path::Path,
+    items: &[folder::Item],
+    history: &[Turn],
+    session: &mut Session,
+    question: &str,
+    cancel: &AtomicBool,
+    on_event: &mut (dyn FnMut(&Event) + Send),
+) -> anyhow::Result<Advance> {
+    let engine = scope.engine();
+    let engine = engine.as_ref();
+    let sources: Vec<crate::search::Source> = items.iter().map(|it| crate::search::Source { id: it.file_id.clone(), path: it.path.clone() }).collect();
+    let across = |q: &str, n: usize| {
+        let (hits, _) = crate::search::search_files(engine, slots, settings, ai_dir, &sources, q, n, true)?;
+        Ok(hits.into_iter().filter_map(|h| items.iter().position(|it| it.path == h.path).map(|i| (i, h.hit))).collect())
+    };
+    let one = |i: usize, q: &str, n: usize| crate::search::search(engine, slots, settings, ai_dir, &items[i].file_id, q, n, true).map(|(h, _)| h);
+    let events = Mutex::new(on_event);
+    let (web_search, web_read) = web_calls(slots, settings, cancel);
+    let wait = waiter(scope, slots, settings);
+    let waiter = Waiter { reason: &*wait, grace: WAIT_GRACE };
+    let speakers: Vec<_> = items.iter().enumerate().flat_map(|(i, it)| tools::whos(&it.recording, Some((i + 1) as u32))).collect();
+    let (history, question) = for_model(&speakers, history, question);
+    let emit = |e: &Event| (events.lock().expect("event sink"))(e);
+    with_brain(scope, slots, settings, |brain, _| {
+        let max_chars = (brain.context() as usize) * 3 / 4;
+        let web = settings.web.enabled.then(|| internet::Web::new(&*web_search, &*web_read, max_chars / 3));
+        let tools = folder::FolderTools { items, search: &across, search_one: &one, max_chars, web: web.as_ref() };
+        advance(brain, &tools, scope, session, &history, &question, cancel, Some(&waiter), settings.verify_answers, &emit)
     })
 }
 
@@ -817,6 +907,73 @@ fn check_answer(
     Ok(text)
 }
 
+/// One agent step, saved in the task cursor so a later chunk continues from it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub messages: Vec<Message>,
+    pub steps: Vec<StepRecord>,
+    #[serde(default)]
+    pub done: BTreeMap<String, usize>,
+    #[serde(default)]
+    pub known: Vec<String>,
+    pub stall: usize,
+    pub told_to_answer: bool,
+    pub checked_citations: bool,
+    pub cut_steps: usize,
+    pub n: usize,
+    pub memory: Memory,
+    #[serde(default)]
+    pub timeline: Value,
+    /// Gen of the run that saved this cursor. The next claim is one higher after a yield.
+    #[serde(default)]
+    pub gen_at_save: i64,
+    /// The restart line was already shown for this answer.
+    #[serde(default)]
+    pub noticed: bool,
+    /// The interface is English. The plain step labels follow it. Set for each chunk.
+    #[serde(default)]
+    pub ui_english: bool,
+    /// A titles model is chosen, so a phrase is queued for each tool step.
+    #[serde(default)]
+    pub titles: bool,
+    /// The chat's store and id, so the phrase task stays with the chat.
+    #[serde(default)]
+    pub store: String,
+    #[serde(default)]
+    pub chat: i64,
+}
+
+impl Session {
+    pub fn new(memory: Memory) -> Session {
+        Session {
+            messages: Vec::new(),
+            steps: Vec::new(),
+            done: BTreeMap::new(),
+            known: Vec::new(),
+            stall: 0,
+            told_to_answer: false,
+            checked_citations: false,
+            cut_steps: 0,
+            n: 0,
+            memory,
+            timeline: Value::Null,
+            gen_at_save: 0,
+            noticed: false,
+            ui_english: false,
+            titles: false,
+            store: String::new(),
+            chat: 0,
+        }
+    }
+}
+
+/// What one step of [`advance`] did.
+pub enum Advance {
+    /// The loop goes on; the cursor should keep `session`.
+    More,
+    Done(Answer),
+}
+
 /// Answers `question` about the recording of `tools`, after the chat's `history` (folded into
 /// `memory`'s summary when it does not fit) with the chat's remembered facts. The answer is the
 /// task of `scope`: every model step and every tool call is a child of it (with its own
@@ -838,98 +995,138 @@ pub fn answer(
 ) -> anyhow::Result<Answer> {
     let sink = Mutex::new(on_event);
     let emit = |e: &Event| (sink.lock().expect("event sink"))(e);
+    let mut session = Session::new(memory.clone());
+    let result = (|| {
+        loop {
+            match advance(brain, tools, scope, &mut session, history, question, cancel, waiter, verify, &emit)? {
+                Advance::More => {}
+                Advance::Done(answer) => return Ok(answer),
+            }
+        }
+    })();
+    *memory = session.memory;
+    result
+}
+
+/// One step of [`answer`]. A queue chunk calls this once and checkpoints `session`.
+#[allow(clippy::too_many_arguments)]
+pub fn advance(
+    brain: &dyn Brain,
+    tools: &dyn Toolbox,
+    scope: &Scope,
+    session: &mut Session,
+    history: &[Turn],
+    question: &str,
+    cancel: &AtomicBool,
+    waiter: Option<&Waiter>,
+    verify: bool,
+    emit: &(dyn Fn(&Event) + Sync),
+) -> anyhow::Result<Advance> {
     let running = || -> anyhow::Result<()> {
         anyhow::ensure!(!cancel.load(Ordering::Relaxed), "cancelled");
         Ok(())
     };
+    if session.messages.is_empty() {
+        running()?;
+        memory::fold(brain, history, &mut session.memory, cancel)?;
+        let mut specs = tools.specs();
+        specs.extend(chat_specs());
+        if tools.web().is_some() {
+            specs.extend(internet::Web::specs());
+        }
+        let mut messages = vec![Message::new(Role::System, system_prompt(tools, &specs, &session.memory))];
+        for t in &history[session.memory.summarized.min(history.len())..] {
+            messages.push(Message::new(Role::User, t.question.clone()));
+            messages.push(Message::new(Role::Assistant, t.answer.clone()));
+        }
+        messages.push(Message::new(Role::User, question.to_string()));
+        session.messages = messages;
+    }
+    if session.n >= MAX_STEPS + 4 {
+        anyhow::bail!("the model did not answer in {} steps", MAX_STEPS + 4);
+    }
+    let n = session.n;
+    session.n += 1;
     running()?;
-    memory::fold(brain, history, memory, cancel)?;
     let mut specs = tools.specs();
     specs.extend(chat_specs());
     if tools.web().is_some() {
         specs.extend(internet::Web::specs());
     }
-    let mut messages = vec![Message::new(Role::System, system_prompt(tools, &specs, memory))];
-    for t in &history[memory.summarized.min(history.len())..] {
-        messages.push(Message::new(Role::User, t.question.clone()));
-        messages.push(Message::new(Role::Assistant, t.answer.clone()));
+    let must_answer = session.steps.len() >= MAX_STEPS || session.stall >= STALL_STEPS;
+    if must_answer && !session.told_to_answer {
+        session.told_to_answer = true;
+        session.messages.push(Message::new(Role::User, prompts::render("nudges/answer_now.j2", ())));
     }
-    messages.push(Message::new(Role::User, question.to_string()));
-
-    let mut done: HashMap<String, usize> = HashMap::new();
-    let mut known: HashSet<String> = HashSet::new();
-    let mut steps: Vec<StepRecord> = Vec::new();
-    let (mut stall, mut told_to_answer, mut checked_citations, mut cut_steps) = (0, false, false, 0);
-    for n in 0..MAX_STEPS + 4 {
-        running()?;
-        let must_answer = steps.len() >= MAX_STEPS || stall >= STALL_STEPS;
-        if must_answer && !told_to_answer {
-            told_to_answer = true;
-            messages.push(Message::new(Role::User, prompts::render("nudges/answer_now.j2", ())));
-        }
-        compact(&mut messages, brain.context());
-        // Small models jump to conclusions: the first step always looks into the recording.
-        let mut drafted = false;
-        let model_step = begin_child(scope, "model-step", &(n + 1).to_string(), &json!({ "step": n + 1 }));
-        scope.focus(model_step.as_ref().map(Scope::task));
-        let step = {
-            let (started, finished) = (AtomicBool::new(false), AtomicBool::new(false));
-            std::thread::scope(|s| {
-                if let Some(w) = waiter {
-                    s.spawn(|| watch(w, &started, &finished, &emit));
-                }
-                let step = brain.step(&messages, if must_answer { &[] } else { &specs }, !steps.is_empty(), cancel, &mut |piece| {
-                    started.store(true, Ordering::Relaxed);
-                    match piece {
-                        Piece::Thinking(text) => emit(&Event::Thinking(text.to_string())),
-                        Piece::Answer(text) => {
-                            drafted = true;
-                            emit(&Event::AnswerText(text.to_string()));
-                        }
+    compact(&mut session.messages, brain.context());
+    // Small models jump to conclusions: the first step always looks into the recording.
+    let mut drafted = false;
+    let model_step = begin_child(scope, "model-step", &(n + 1).to_string(), &json!({ "step": n + 1 }));
+    scope.focus(model_step.as_ref().map(Scope::task));
+    let step = {
+        let (started, finished) = (AtomicBool::new(false), AtomicBool::new(false));
+        std::thread::scope(|s| {
+            if let Some(w) = waiter {
+                s.spawn(|| watch(w, &started, &finished, &emit));
+            }
+            let step = brain.step(&session.messages, if must_answer { &[] } else { &specs }, !session.steps.is_empty(), cancel, &mut |piece| {
+                started.store(true, Ordering::Relaxed);
+                match piece {
+                    Piece::Thinking(text) => emit(&Event::Thinking(text.to_string())),
+                    Piece::Answer(text) => {
+                        drafted = true;
+                        emit(&Event::AnswerText(text.to_string()));
                     }
-                });
-                finished.store(true, Ordering::Relaxed);
-                step
-            })
-        };
-        scope.focus(None);
-        if let Some(child) = &model_step {
-            match &step {
-                Ok(_) => child.finish(&json!({})),
-                Err(e) => child.fail(&format!("{e:#}")),
-            }
-        }
-        // A stop: whatever the model had written is dropped, the loop does not go on.
-        running()?;
-        let step = match step {
-            Ok(step) => step,
-            // A step cut off at the token limit: the model is told (twice at most) and goes on.
-            Err(e) if cut_steps < 2 && e.to_string().contains("not JSON") => {
-                cut_steps += 1;
-                stall += 1;
-                if drafted {
-                    emit(&Event::AnswerDiscarded);
                 }
-                messages.push(Message::new(Role::User, prompts::render("nudges/cut_off.j2", ())));
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        if drafted && !matches!(step, Step::Answer { .. }) {
-            emit(&Event::AnswerDiscarded);
+            });
+            finished.store(true, Ordering::Relaxed);
+            step
+        })
+    };
+    scope.focus(None);
+    if let Some(child) = &model_step {
+        match &step {
+            Ok(_) => child.finish(&json!({})),
+            Err(e) => child.fail(&format!("{e:#}")),
         }
-        messages.push(Message::new(Role::Assistant, step_json(&step, brain.thinking())));
-        match step {
-            Step::Tool { title, tool, args, .. } => {
-                let fp = fingerprint(&tool, &args);
-                let no = steps.len() + 1;
-                let title = if title.is_empty() { tool.clone() } else { title };
-                emit(&Event::StepStarted { title: title.clone(), tool: tool.clone() });
-                let child = begin_child(scope, "tool", &title, &json!({ "tool": tool, "args": args }));
-                scope.focus(child.as_ref().map(Scope::task));
-                let (status, text) = match done.get(&fp) {
-                    Some(prev) => (StepStatus::Repeated, prompts::render("results/repeated.j2", minijinja::context! { step => prev })),
-                    None => match chat_tool(&tool, &args, tools, memory, &mut |e| emit(e)).unwrap_or_else(|| tools.run(&tool, &args)) {
+    }
+    // A stop: whatever the model had written is dropped, the loop does not go on.
+    running()?;
+    let step = match step {
+        Ok(step) => step,
+        // A step cut off at the token limit: the model is told (twice at most) and the next chunk goes on.
+        Err(e) if session.cut_steps < 2 && e.to_string().contains("not JSON") => {
+            session.cut_steps += 1;
+            session.stall += 1;
+            if drafted {
+                emit(&Event::AnswerDiscarded);
+            }
+            session.messages.push(Message::new(Role::User, prompts::render("nudges/cut_off.j2", ())));
+            return Ok(Advance::More);
+        }
+        Err(e) => return Err(e),
+    };
+    if drafted && !matches!(step, Step::Answer { .. }) {
+        emit(&Event::AnswerDiscarded);
+    }
+    session.messages.push(Message::new(Role::Assistant, step_json(&step, brain.thinking())));
+    match step {
+        Step::Tool { tool, args, .. } => {
+            let fp = fingerprint(&tool, &args);
+            let no = session.steps.len() + 1;
+            let index = session.steps.len();
+            let title = step_title::caption(&tool, step_title::is_topic(&args), session.ui_english);
+            let purpose = tools.specs().into_iter().find(|s| s.name == tool).map(|s| s.description.lines().next().unwrap_or("").trim().to_string()).unwrap_or_default();
+            step_title::enqueue(scope, session, index, question, &tool, &purpose, &args);
+            emit(&Event::StepStarted { title: title.clone(), tool: tool.clone() });
+            let child = begin_child(scope, "tool", &title, &json!({ "tool": &title, "args": args }));
+            scope.focus(child.as_ref().map(Scope::task));
+            let repeated = session.done.get(&fp).copied();
+            let (status, text) = match repeated {
+                Some(prev) => (StepStatus::Repeated, prompts::render("results/repeated.j2", minijinja::context! { step => prev })),
+                None => {
+                    let mut known: HashSet<String> = session.known.iter().cloned().collect();
+                    let outcome = match chat_tool(&tool, &args, tools, &mut session.memory, &mut |e| emit(e)).unwrap_or_else(|| tools.run(&tool, &args)) {
                         Ok(out) => {
                             let new = out.seen.as_ref().is_none_or(|s| tools::adds(&mut known, s));
                             if new {
@@ -941,54 +1138,61 @@ pub fn answer(
                             }
                         }
                         Err(e) => (StepStatus::Failed, format!("Error: {e:#}")),
-                    },
-                };
-                scope.focus(None);
-                if let Some(child) = &child {
-                    child.set_detail(&json!({ "tool": tool, "args": short_args(&args), "result_chars": text.chars().count() }));
-                    match status {
-                        StepStatus::Failed => child.fail(&text),
-                        _ => child.finish(&json!({ "status": status.as_str() })),
-                    }
+                    };
+                    session.known = known.into_iter().collect();
+                    session.known.sort();
+                    outcome
                 }
-                // A stop: what the tool brought is dropped.
-                running()?;
-                done.entry(fp).or_insert(no);
-                // A repeat means the model is going round in circles: it counts double.
-                stall = match status {
-                    StepStatus::Found => 0,
-                    StepStatus::Repeated => stall + 2,
-                    _ => stall + 1,
-                };
-                messages.push(Message::new(Role::User, prompts::render("results/step.j2", minijinja::context! { step => no, tool => &tool, text => &text })));
-                let record = StepRecord { title, tool, args, result: text, status };
-                emit(&Event::Step(record.clone()));
-                steps.push(record);
+            };
+            scope.focus(None);
+            if let Some(child) = &child {
+                child.set_detail(&json!({ "tool": &title, "args": short_args(&args), "result_chars": text.chars().count() }));
+                match status {
+                    StepStatus::Failed => child.fail(&text),
+                    _ => child.finish(&json!({ "status": status.as_str() })),
+                }
             }
-            Step::Answer { text, .. } => {
-                let bad = tools.bad_citations(&text);
-                if !bad.is_empty() && !checked_citations && n + 1 < MAX_STEPS + 4 {
-                    checked_citations = true;
-                    emit(&Event::AnswerDiscarded);
-                    let bad: Vec<String> = bad.iter().map(|b| format!("[{b}]")).collect();
-                    let nudge = prompts::render("nudges/bad_citations.j2", minijinja::context! { bad, kind => tools.kind() });
-                    messages.push(Message::new(Role::User, nudge));
-                    continue;
-                }
-                let mut text = tidy(&without(&text, &bad));
-                if let Some(web) = tools.web() {
-                    text = web.known_links(&text);
-                }
-                // Sections were sent: the answer only closes them (models tend to repeat them all).
-                if steps.iter().any(|s| s.tool == "say" && s.status == StepStatus::Found) && text.chars().count() > CLOSING_CHARS {
-                    text = text.split("\n\n").next().unwrap_or_default().trim().to_string();
-                }
-                let text = if verify && !text.is_empty() { check_answer(brain, tools, scope, &mut steps, question, text, cancel, waiter, &emit)? } else { text };
-                return Ok(Answer { text, steps, forced: told_to_answer });
+            // A stop: what the tool brought is dropped.
+            running()?;
+            session.done.entry(fp).or_insert(no);
+            // A repeat means the model is going round in circles: it counts double.
+            session.stall = match status {
+                StepStatus::Found => 0,
+                StepStatus::Repeated => session.stall + 2,
+                _ => session.stall + 1,
+            };
+            session.messages.push(Message::new(Role::User, prompts::render("results/step.j2", minijinja::context! { step => no, tool => &tool, text => &text })));
+            let record = StepRecord { title, tool, args, result: text, status };
+            emit(&Event::Step(record.clone()));
+            session.steps.push(record);
+            Ok(Advance::More)
+        }
+        Step::Answer { text, .. } => {
+            let bad = tools.bad_citations(&text);
+            if !bad.is_empty() && !session.checked_citations && n + 1 < MAX_STEPS + 4 {
+                session.checked_citations = true;
+                emit(&Event::AnswerDiscarded);
+                let bad: Vec<String> = bad.iter().map(|b| format!("[{b}]")).collect();
+                let nudge = prompts::render("nudges/bad_citations.j2", minijinja::context! { bad, kind => tools.kind() });
+                session.messages.push(Message::new(Role::User, nudge));
+                return Ok(Advance::More);
             }
+            let mut text = tidy(&without(&text, &bad));
+            if let Some(web) = tools.web() {
+                text = web.known_links(&text);
+            }
+            // Sections were sent: the answer only closes them (models tend to repeat them all).
+            if session.steps.iter().any(|s| s.tool == "say" && s.status == StepStatus::Found) && text.chars().count() > CLOSING_CHARS {
+                text = text.split("\n\n").next().unwrap_or_default().trim().to_string();
+            }
+            let text = if verify && !text.is_empty() {
+                check_answer(brain, tools, scope, &mut session.steps, question, text, cancel, waiter, &emit)?
+            } else {
+                text
+            };
+            Ok(Advance::Done(Answer { text, steps: session.steps.clone(), forced: session.told_to_answer }))
         }
     }
-    anyhow::bail!("the model did not answer in {} steps", MAX_STEPS + 4)
 }
 
 #[cfg(test)]
@@ -1079,7 +1283,7 @@ mod tests {
     }
 
     fn call(tool: &str, args: Value) -> Step {
-        Step::Tool { thought: String::new(), title: format!("{tool} step"), tool: tool.into(), args }
+        Step::Tool { thought: String::new(), tool: tool.into(), args }
     }
 
     fn say(text: &str) -> Step {
@@ -1102,11 +1306,11 @@ mod tests {
 
     #[test]
     fn a_thinking_models_step_has_no_thought_in_the_history() {
-        let tool = Step::Tool { thought: String::new(), title: "Ищу".into(), tool: "search".into(), args: json!({"q": "x"}) };
+        let tool = Step::Tool { thought: String::new(), tool: "search".into(), args: json!({"q": "x"}) };
         let answer = Step::Answer { thought: "думаю".into(), text: "Да.".into() };
-        assert_eq!(step_json(&tool, true), r#"{"action":"search","title":"Ищу","args":{"q":"x"}}"#);
+        assert_eq!(step_json(&tool, true), r#"{"action":"search","args":{"q":"x"}}"#);
         assert_eq!(step_json(&answer, true), r#"{"action":"answer","answer":"Да."}"#);
-        assert_eq!(step_json(&tool, false), r#"{"thought":"","action":"search","title":"Ищу","args":{"q":"x"}}"#);
+        assert_eq!(step_json(&tool, false), r#"{"thought":"","action":"search","args":{"q":"x"}}"#);
         assert!(serde_json::from_str::<Value>(&step_json(&answer, false)).is_ok());
     }
 
@@ -1119,7 +1323,7 @@ mod tests {
         assert_eq!(a.steps.len(), 1);
         assert_eq!(a.steps[0].status, StepStatus::Found);
         // The step begins and ends, then the answer streams in pieces.
-        assert!(matches!(&events[0], Event::StepStarted { title, tool } if title == "search step" && tool == "search"));
+        assert!(matches!(&events[0], Event::StepStarted { title, tool } if title == "Поиск" && tool == "search"));
         assert!(matches!(&events[1], Event::Step(s) if s.status == StepStatus::Found));
         let draft: String = events.iter().filter_map(|e| if let Event::AnswerText(t) = e { Some(t.as_str()) } else { None }).collect();
         assert_eq!(draft, "В пятницу [0:10].");
@@ -1192,11 +1396,11 @@ mod tests {
             live.timeline.entries,
             [
                 TimelineEntry::Thinking { text: "Надо искать отчёт.".into() },
-                TimelineEntry::Step { title: "search step".into(), tool: "search".into(), status: "found".into() },
+                TimelineEntry::Step { title: "Поиск".into(), tool: "search".into(), status: "found".into() },
                 TimelineEntry::Thinking { text: "Нашёл, отправлю.".into() },
-                TimelineEntry::Step { title: "say step".into(), tool: "say".into(), status: "found".into() },
+                TimelineEntry::Step { title: "Ответ".into(), tool: "say".into(), status: "found".into() },
                 TimelineEntry::Answer { text: "Часть 1: отчёт в пятницу [0:10].".into(), section: true },
-                TimelineEntry::Step { title: "search step".into(), tool: "search".into(), status: "nothing".into() },
+                TimelineEntry::Step { title: "Поиск".into(), tool: "search".into(), status: "nothing".into() },
                 TimelineEntry::Thinking { text: "Теперь закрою.".into() },
                 TimelineEntry::Answer { text: "Остальное — позже.".into(), section: false },
             ]
@@ -1259,7 +1463,10 @@ mod tests {
     fn the_wait_comes_from_the_engines_status() {
         use mediaa_engine::{Budget as EngineBudget, LoadedModel, Pool, Progress, Status, Used, WaitingModel};
         let status = |loaded: &[&str], waiting: Vec<WaitingModel>| Status {
-            loaded: loaded.iter().map(|m| LoadedModel { model: (*m).to_string(), pool: Pool::Gpu, bytes: 1, users: 1 }).collect(),
+            loaded: loaded
+                .iter()
+                .map(|m| LoadedModel { model: (*m).to_string(), pool: Pool::Gpu, bytes: 1, users: 1, idle: Duration::ZERO, unloads_in: None })
+                .collect(),
             waiting,
             budget: EngineBudget::default(),
             used: Used::default(),
@@ -1559,6 +1766,9 @@ mod tests {
     /// (a library with the file transcribed and indexed), `MEDIAA_BENCH_FILE`, questions in
     /// `MEDIAA_BENCH_QUESTIONS` (separated by `|`; none are asked when it is unset), a Tavily
     /// key in `MEDIAA_BENCH_TAVILY` and a proxy in `MEDIAA_BENCH_PROXY` for the web.
+    /// `MEDIAA_BENCH_FROM=<transcribe|diarize|index|topics|details>` runs the analysis from that
+    /// stage on, like a restart in the interface, and reuses what the library already has (the
+    /// quick way to reproduce one stage of the pipeline);
     /// `MEDIAA_BENCH_ANALYSIS` runs the whole analysis from scratch through the worker (every stage);
     /// `MEDIAA_BENCH_OUTLINE` rebuilds the topics through the worker (plan, digests, merge and
     /// the details when the settings ask); `MEDIAA_BENCH_MERGE` runs only the merge over the
@@ -1595,38 +1805,49 @@ mod tests {
         let slots = Slots::new(Budget::default());
         let s = settings.clone();
         let current: std::sync::Arc<dyn Fn() -> AgentSettings + Send + Sync> = std::sync::Arc::new(move || s.clone());
-        // The handlers the app's worker has: every stage of the analysis.
-        let all_handlers = || {
-            let mut handlers: Vec<Box<dyn crate::worker::TaskHandler>> = vec![
-                Box::new(crate::transcribe::Transcribe::new(&ai, slots.clone(), current.clone())),
-                Box::new(crate::diarize::Diarize::new(&ai, slots.clone(), current.clone())),
-                Box::new(crate::index::Index::new(&ai, slots.clone(), current.clone())),
-            ];
-            handlers.extend(crate::outline::handlers(&ai, slots.clone(), current.clone()));
-            handlers
+        let sched = crate::run::open_scheduler(&ai, &settings.budget).unwrap();
+        crate::run::register_stages(&sched, &ai, engine.clone(), slots.clone(), current.clone(), std::sync::Arc::new(crate::run::Streams::default()));
+        let drain = || {
+            crate::run::drain(&sched, std::time::Duration::from_secs(3600));
         };
-        let drain = |q: &mediaa_core::queue::Queue| {
-            let handlers = all_handlers();
-            let stop = AtomicBool::new(false);
-            while crate::worker::run_next(q, &engine, &handlers, &stop).unwrap() {}
+        // A task's time, also while it runs: from its start to its finish, or to now.
+        let print_tasks = || {
+            let now = sched.store().now_ms();
+            for t in sched.store().list().unwrap().iter().filter(|t| t.created_ms >= 0).take(40) {
+                let time = t.started_ms.map_or(0.0, |start| (t.finished_ms.unwrap_or(now) - start) as f64 / 1000.0);
+                eprintln!("task {} {} {:?} {time:.0} s {}", t.kind, t.title, t.status, t.error.clone().unwrap_or_default());
+            }
         };
-        if std::env::var_os("MEDIAA_BENCH_ANALYSIS").is_some() {
+        if let Ok(from) = std::env::var("MEDIAA_BENCH_FROM") {
+            use crate::pipeline::Stage;
+            let stage = match from.as_str() {
+                "transcribe" => Stage::Transcribe,
+                "diarize" => Stage::Diarize,
+                "index" => Stage::Index,
+                "topics" => Stage::Topics,
+                "details" => Stage::Details,
+                other => panic!("MEDIAA_BENCH_FROM: no stage {other} (transcribe, diarize, index, topics, details)"),
+            };
+            let started = std::time::Instant::now();
+            crate::pipeline::restart(&sched, &ai, &file, stage, settings.analysis).unwrap();
+            drain();
+            print_tasks();
+            let ready = crate::pipeline::readiness(&ai, &id).unwrap();
+            eprintln!("from {from} in {:.0} s, ready: {ready:?}", started.elapsed().as_secs_f32());
+        } else if std::env::var_os("MEDIAA_BENCH_ANALYSIS").is_some() {
             let started = std::time::Instant::now();
             // The whole analysis from scratch, as «Распознать» starts it: every stage.
-            crate::pipeline::restart(&ai, &file, crate::pipeline::Stage::Transcribe, settings.analysis).unwrap();
-            let q = mediaa_core::queue::Queue::open(&ai).unwrap();
-            drain(&q);
-            for t in q.list().unwrap().iter().filter(|t| t.created_ms >= 0).take(40) {
-                eprintln!("task {} {} {:?} {:.0} s {}", t.kind, t.title, t.status, t.started_ms.zip(t.finished_ms).map_or(0.0, |(a, b)| (b - a) as f64 / 1000.0), t.error.clone().unwrap_or_default());
-            }
+            crate::pipeline::restart(&sched, &ai, &file, crate::pipeline::Stage::Transcribe, settings.analysis).unwrap();
+            drain();
+            print_tasks();
             let ready = crate::pipeline::readiness(&ai, &id).unwrap();
             eprintln!("analysis in {:.0} s, ready: {ready:?}", started.elapsed().as_secs_f32());
         } else if std::env::var_os("MEDIAA_BENCH_OUTLINE").is_some() {
             let started = std::time::Instant::now();
             // The whole topics stage as the interface starts it: the plan, the digests, the merge
             // and the details the settings ask for.
-            crate::pipeline::restart(&ai, &file, crate::pipeline::Stage::Topics, settings.analysis).unwrap();
-            drain(&mediaa_core::queue::Queue::open(&ai).unwrap());
+            crate::pipeline::restart(&sched, &ai, &file, crate::pipeline::Stage::Topics, settings.analysis).unwrap();
+            drain();
             eprintln!("outline rebuilt in {:.0} s", started.elapsed().as_secs_f32());
         } else if std::env::var_os("MEDIAA_BENCH_MERGE").is_some() {
             // Only the merge: the chapters of the digest stage are restored from meta, so the
@@ -1641,15 +1862,14 @@ mod tests {
             }
             drop(t);
             let started = std::time::Instant::now();
-            let q = mediaa_core::queue::Queue::open(&ai).unwrap();
             let input = serde_json::to_value(crate::outline::Input { path: file.clone(), options: settings.analysis }).unwrap();
-            q.enqueue(mediaa_core::queue::NewTask::new(crate::outline::MERGE_KIND, "rec.mp4", &input)).unwrap();
-            drain(&q);
+            sched.enqueue(mediaa_queue::NewTask::new(crate::outline::MERGE_KIND, "rec.mp4", &input).resource(mediaa_queue::Resource::Llm).analysis(&id)).unwrap();
+            drain();
             eprintln!("merge rebuilt in {:.0} s", started.elapsed().as_secs_f32());
         } else if std::env::var_os("MEDIAA_BENCH_DETAILS").is_some() {
             let started = std::time::Instant::now();
-            crate::pipeline::restart(&ai, &file, crate::pipeline::Stage::Details, settings.analysis).unwrap();
-            drain(&mediaa_core::queue::Queue::open(&ai).unwrap());
+            crate::pipeline::restart(&sched, &ai, &file, crate::pipeline::Stage::Details, settings.analysis).unwrap();
+            drain();
             eprintln!("details rebuilt in {:.0} s", started.elapsed().as_secs_f32());
         }
         let t = Transcript::open(&ai, &id).unwrap();

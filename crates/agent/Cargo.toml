@@ -9,6 +9,7 @@ license.workspace = true
 mediaa-core.workspace = true
 mediaa-media.workspace = true
 mediaa-engine.workspace = true
+mediaa-queue.workspace = true
 crossbeam-channel.workspace = true
 anyhow.workspace = true
 log.workspace = true

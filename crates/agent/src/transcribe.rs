@@ -4,12 +4,12 @@
 //! continues from its last phrase. Speakers are a task of their own (`diarize`), the index and
 //! the topics too: the pipeline links them by dependencies.
 
-use crate::slots::Slots;
-use crate::worker::{Checkpoints, TaskHandler};
-use mediaa_core::agent::{AgentSettings, WorkKind};
-use mediaa_core::queue::Task;
+use crate::run::{Host, Stage, Work};
+use crate::scope::Scope;
+use mediaa_core::agent::AgentSettings;
 use mediaa_core::transcript::{self, Transcript};
-use mediaa_engine::{Engine, SpeechSegment};
+use mediaa_queue::Task;
+use mediaa_engine::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -37,92 +37,135 @@ struct Cursor {
     t: f64,
 }
 
-/// The engine's model specs of a task.
+/// The engine's model specs of a task and the token to download the model files.
 struct Specs {
     recognizer: String,
     vad: String,
+    hf_token: Option<String>,
 }
 
 impl Specs {
     fn get(settings: &AgentSettings) -> anyhow::Result<Specs> {
         let source = settings.models.speech_recognition.as_ref().ok_or_else(|| anyhow::anyhow!("the speech recognition model is not chosen"))?;
-        Ok(Specs { recognizer: crate::models::local_spec(source)?, vad: VAD_MODEL.to_string() })
+        Ok(Specs {
+            recognizer: crate::models::local_spec(source)?,
+            vad: VAD_MODEL.to_string(),
+            hf_token: crate::assistant::hf_token(settings),
+        })
     }
 }
 
 pub struct Transcribe {
     ai_dir: PathBuf,
-    slots: Slots,
     settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>,
 }
 
 impl Transcribe {
-    pub fn new(ai_dir: &std::path::Path, slots: Slots, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Transcribe {
-        Transcribe { ai_dir: ai_dir.to_path_buf(), slots, settings }
+    pub fn new(ai_dir: &std::path::Path, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Transcribe {
+        Transcribe { ai_dir: ai_dir.to_path_buf(), settings }
     }
 
-    /// Recognises from `cursor.t` to the end, a checkpoint after every phrase.
-    #[allow(clippy::too_many_arguments)]
-    fn recognize(
+    /// One phrase from `cursor.t`. `None` when the recording has no more speech.
+    fn one_phrase(
         &self,
         engine: &dyn Engine,
         input: &Input,
         specs: &Specs,
-        duration: f64,
+        cursor: &Cursor,
         transcript: &mut Transcript,
-        cursor: &mut Cursor,
-        cp: &mut Checkpoints,
-        hf_token: Option<&str>,
-    ) -> anyhow::Result<()> {
+        cancel: &Arc<AtomicBool>,
+    ) -> anyhow::Result<Option<f64>> {
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let hf_token = specs.hf_token.as_deref();
         let mut session = engine.vad_open(&specs.vad, cursor.t, hf_token)?;
-
         let (tx, rx) = crossbeam_channel::bounded::<Vec<f32>>(16);
         let stop = Arc::new(AtomicBool::new(false));
-        let (path, start, s) = (input.path.clone(), cursor.t, stop.clone());
-        let decoder = std::thread::Builder::new()
-            .name("transcribe-decode".into())
-            .spawn(move || mediaa_media::preview::decode_mono(&path, start, SAMPLE_RATE, s, move |samples| tx.send(samples.to_vec()).is_ok()))?;
-
-        let mut step = |speech: SpeechSegment, cursor: &mut Cursor, cp: &mut Checkpoints| -> anyhow::Result<()> {
-            let phrase = engine.recognize(&specs.recognizer, speech.start, &speech.samples, hf_token)?;
-            let phrases = if phrase.words.is_empty() { vec![] } else { vec![phrase.clone()] };
-            transcript.put_phrases(phrase.start, &phrases)?;
-            cursor.t = phrase.end;
-            let progress = if duration > 0.0 { (phrase.end / duration).min(1.0) as f32 } else { 0.0 };
-            cp.save(&serde_json::to_value(&*cursor)?, &Value::Null, progress)
-        };
-        let mut result = Ok(());
-        'decode: for chunk in rx.iter() {
-            for speech in session.push(&chunk) {
-                if let Err(e) = step(speech, cursor, cp) {
-                    result = Err(e);
-                    break 'decode;
-                }
-            }
-        }
-        if result.is_ok() {
-            for speech in session.finish() {
-                result = step(speech, cursor, cp);
-                if result.is_err() {
+        let (path, start, decode_stop) = (input.path.clone(), cursor.t, Arc::clone(&stop));
+        let (watch_stop, watch_cancel) = (Arc::clone(&stop), Arc::clone(cancel));
+        let watcher = std::thread::Builder::new().name("transcribe-cancel".into()).spawn(move || {
+            while !watch_stop.load(Ordering::Relaxed) {
+                if watch_cancel.load(Ordering::Relaxed) {
+                    watch_stop.store(true, Ordering::Relaxed);
                     break;
                 }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        })?;
+        let decoder = std::thread::Builder::new().name("transcribe-decode".into()).spawn(move || {
+            // The decoding runs on this thread; its progress is the chunk's pulse too.
+            let pulse = mediaa_core::pulse::current();
+            mediaa_media::preview::decode_mono(&path, start, SAMPLE_RATE, decode_stop, move |samples| {
+                if let Some(pulse) = &pulse {
+                    pulse.beat();
+                }
+                tx.send(samples.to_vec()).is_ok()
+            })
+        })?;
+        let mut found: Option<f64> = None;
+        let mut failed: Option<anyhow::Error> = None;
+        'decode: for chunk in rx.iter() {
+            mediaa_core::pulse::beat();
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+            for speech in session.push(&chunk) {
+                match engine.recognize(&specs.recognizer, speech.start, &speech.samples, hf_token) {
+                    Ok(phrase) => {
+                        // A segment that does not move past the cursor is behind us (a new
+                        // session can report it again). Skipping it is what lets the next
+                        // chunk reach the end of the file.
+                        if phrase.end <= cursor.t {
+                            continue;
+                        }
+                        let phrases = if phrase.words.is_empty() { vec![] } else { vec![phrase.clone()] };
+                        if let Err(error) = transcript.put_phrases(phrase.start, &phrases) {
+                            failed = Some(error);
+                            break 'decode;
+                        }
+                        found = Some(phrase.end);
+                        break 'decode;
+                    }
+                    Err(error) => {
+                        failed = Some(error.into());
+                        break 'decode;
+                    }
+                }
             }
         }
-        // Stop the decoder when recognition stopped early (it is blocked on the full channel).
-        stop.store(result.is_err(), Ordering::Relaxed);
+        if found.is_none() && failed.is_none() && !cancel.load(Ordering::Relaxed) {
+            for speech in session.finish() {
+                let phrase = engine.recognize(&specs.recognizer, speech.start, &speech.samples, hf_token)?;
+                if phrase.end <= cursor.t {
+                    continue;
+                }
+                let phrases = if phrase.words.is_empty() { vec![] } else { vec![phrase.clone()] };
+                transcript.put_phrases(phrase.start, &phrases)?;
+                found = Some(phrase.end);
+                break;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
         drop(rx);
-        let decoded = decoder.join().map_err(|_| anyhow::anyhow!("the audio decoder crashed"))?;
-        result?;
-        decoded
+        decoder.join().map_err(|_| anyhow::anyhow!("the audio decoder crashed"))??;
+        let _ = watcher.join();
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        if cancel.load(Ordering::Relaxed) && found.is_none() {
+            return Ok(None);
+        }
+        Ok(found)
     }
 }
 
-impl TaskHandler for Transcribe {
-    fn kind(&self) -> &'static str {
-        KIND
+impl Stage for Transcribe {
+    fn handles(&self, kind: &str) -> bool {
+        kind == KIND
     }
 
-    fn run(&self, task: &Task, cp: &mut Checkpoints) -> anyhow::Result<Value> {
+    fn chunk(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work> {
         let input: Input = serde_json::from_value(task.input.clone())?;
         let fresh = task.cursor.is_null();
         let mut cursor: Cursor = serde_json::from_value(task.cursor.clone()).unwrap_or_default();
@@ -135,18 +178,25 @@ impl TaskHandler for Transcribe {
         let duration = mediaa_media::info::probe(&input.path)?.duration_secs().unwrap_or(0.0);
         let settings = (self.settings)();
         let specs = Specs::get(&settings)?;
-        let hf_token = crate::assistant::hf_token(&settings);
-        let engine = cp.engine();
-
-        // Transcriptions at once per the budget.
-        let _lease = self.slots.request(WorkKind::Transcription, false).wait(cp.stopping())?;
-        self.recognize(engine.as_ref(), &input, &specs, duration, &mut transcript, &mut cursor, cp, hf_token.as_deref())?;
-        let phrases = transcript.phrases()?;
-        log::info!("{}: {} phrases", input.path.display(), phrases.len());
-        let replies = transcript::replies(&phrases, &[]);
-        transcript.set_replies(&replies)?;
-        transcript.remove_meta("diarized")?;
-        Ok(json!({ "file_id": id, "replies": replies.len() }))
+        let scope = Scope::attach(host.store.clone(), task.id, host.engine.clone(), task.scope.clone());
+        let engine = scope.engine();
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(Work::Stopped);
+        }
+        let Some(end) = self.one_phrase(engine.as_ref(), &input, &specs, &cursor, &mut transcript, cancel)? else {
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(Work::Stopped);
+            }
+            let phrases = transcript.phrases()?;
+            log::info!("{}: {} phrases", input.path.display(), phrases.len());
+            let replies = transcript::replies(&phrases, &[]);
+            transcript.set_replies(&replies)?;
+            transcript.remove_meta("diarized")?;
+            return Ok(Work::Done(json!({ "file_id": id, "replies": replies.len() })));
+        };
+        cursor.t = end;
+        let progress = if duration > 0.0 { (end / duration).min(1.0) as f32 } else { 0.0 };
+        Ok(Work::More { cursor: serde_json::to_value(&cursor)?, partial: Value::Null, progress })
     }
 }
 
@@ -154,7 +204,7 @@ impl TaskHandler for Transcribe {
 mod tests {
     use super::*;
     use mediaa_core::agent::{AgentSettings, AnalysisOptions, Budget};
-    use mediaa_core::queue::{Queue, TaskStatus};
+    use mediaa_queue::Status as TaskStatus;
 
     /// A real transcription through the queue with models in `MEDIAA_TEST_MODELS` (the app's
     /// folder by default): GigaAM + VAD on a two-speaker sample, diarized. The engine downloads
@@ -173,25 +223,19 @@ mod tests {
         let media = library.path().join("talk.wav");
         std::fs::copy(&wav, &media).unwrap();
         // Models (shared between test runs), the queue and the transcript live in `ai`.
-        let q = Queue::open(&ai).unwrap();
-        for t in q.list().unwrap() {
-            q.remove(t.id).unwrap();
-        }
         let defaults = AgentSettings::default();
         let options = AnalysisOptions { diarize: true, speakers: None, index: true, topics: false, details: false };
-        let id = crate::pipeline::start(&ai, &media, options).unwrap();
-
+        let sched = crate::run::open_scheduler(&ai, &defaults.budget).unwrap();
+        for t in sched.store().list().unwrap() {
+            sched.remove(t.id).unwrap();
+        }
+        let id = crate::pipeline::start(&sched, &ai, &media, options).unwrap();
         let engine = crate::live::engine();
-        let slots = Slots::new(Budget::default());
+        let slots = crate::slots::Slots::new(Budget::default());
         let settings: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(AgentSettings::default);
-        let handlers: Vec<Box<dyn TaskHandler>> = vec![
-            Box::new(Transcribe::new(&ai, slots.clone(), settings.clone())),
-            Box::new(crate::diarize::Diarize::new(&ai, slots.clone(), settings.clone())),
-            Box::new(crate::index::Index::new(&ai, slots.clone(), settings)),
-        ];
-        let stop = AtomicBool::new(false);
-        while crate::worker::run_next(&q, &engine, &handlers, &stop).unwrap() {}
-        let task = q.get(id).unwrap().unwrap();
+        crate::run::register_stages(&sched, &ai, engine.clone(), slots.clone(), settings, Arc::new(crate::run::Streams::default()));
+        crate::run::drain(&sched, std::time::Duration::from_secs(600));
+        let task = sched.store().get(id).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Done, "{:?}", task.error);
         let t = Transcript::open(&ai, &transcript::file_id(&media).unwrap()).unwrap();
         let dialog = t.dialog().unwrap();

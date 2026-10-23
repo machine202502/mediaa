@@ -6,8 +6,12 @@
 //! * **Placement**: a model already loaded is shared; otherwise it goes to the preferred pool if
 //!   it fits (GPU for `Auto` / `Gpu`, then the CPU as a fallback; `Cpu` never uses the GPU).
 //!   A model larger than every allowed pool fails at once.
-//! * **Unloading**: a model with no lease left is unloaded at once, unless a waiting job wants
-//!   it (it is then handed over without reloading).
+//! * **One resident per file**: the same file with a larger context reloads once, up to the
+//!   largest context a queued request needs that still fits. A smaller request reuses it. The
+//!   resident never shrinks, so chat and a longer task do not reload back and forth.
+//! * **Unloading**: an idle model stays until `keep_alive` (zero unloads it at once), unless a
+//!   job already in line wants it. When a request needs the memory, idle models are unloaded
+//!   least recently used first; a model in the wanted set, or one a queued job wants, goes last.
 //! * **Order**: one line, first come first served; interactive work (chat answers) goes before
 //!   background jobs. Jobs that need no new memory may pass a job waiting for memory; jobs that
 //!   need memory may not (no starvation of big models).
@@ -16,11 +20,13 @@
 //!   the waiting job gets the memory, the yielding one goes to the back of the line.
 //!
 //! Loading and unloading the model itself is up to the runtime: a lease says whether the model
-//! has to be loaded ([`Lease::fresh`]), and the `on_unload` callback says when to free it.
+//! has to be loaded ([`Lease::fresh`]) and at which context ([`Lease::n_ctx`]), and the
+//! `on_unload` callback says when to free it.
 
 use mediaa_core::agent::{Budget, Device, WorkKind};
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use mediaa_core::pulse;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,11 +39,13 @@ pub enum Pool {
 /// A model a job needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelNeed {
-    /// Identifies the model (same key: same loaded instance).
+    /// Identifies the model file (same key: same loaded instance, whatever the context).
     pub key: String,
-    /// Memory it takes once loaded (weights + working memory).
+    /// Memory it takes once loaded at `n_ctx` (weights + working memory).
     pub bytes: u64,
     pub device: Device,
+    /// Context length to run at. A resident loaded with at least this is reused.
+    pub n_ctx: u32,
 }
 
 impl ModelNeed {
@@ -60,12 +68,30 @@ pub enum Wait {
     Turn,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedModel {
     pub key: String,
     pub pool: Pool,
     pub bytes: u64,
     pub leases: u32,
+    /// Context the resident was loaded with (the high-water mark, never shrunk).
+    pub n_ctx: u32,
+    /// How long it has been unused. Zero while a lease holds it.
+    pub idle: Duration,
+    /// How soon an idle model is unloaded. `None` while a lease holds it.
+    pub unloads_in: Option<Duration>,
+}
+
+/// A resident model. `idle_since` is set when the last lease drops. `holders` are the leases
+/// using it: a lease that is given back by force (a stuck call) must not free its slot twice.
+struct Resident {
+    key: String,
+    pool: Pool,
+    bytes: u64,
+    leases: u32,
+    holders: HashMap<u64, WorkKind>,
+    n_ctx: u32,
+    idle_since: Option<Instant>,
 }
 
 /// What the scheduler is doing (for the queue page).
@@ -91,15 +117,60 @@ struct Grant {
     pool: Option<Pool>,
     key: Option<String>,
     fresh: bool,
+    n_ctx: u32,
+    /// The id of the lease this grant becomes (0 until the grant is handed out).
+    lease: u64,
 }
 
 struct State {
     budget: Budget,
+    /// How long an idle model stays. Zero unloads it on the next schedule.
+    keep_alive: Duration,
+    /// Keys (model files) that waiting work needs. Evicted last when memory is short.
+    wanted: HashSet<String>,
     running: HashMap<WorkKind, u32>,
-    loaded: Vec<LoadedModel>,
+    loaded: Vec<Resident>,
     line: Vec<Waiting>,
     granted: HashMap<u64, Result<Grant, String>>,
     next: u64,
+    next_lease: u64,
+    /// Leases whose slot was already given back by [`Scheduler::reclaim`]: their drop must not
+    /// count it again.
+    abandoned: HashSet<u64>,
+}
+
+/// `None`: real time. `Some`: tests move it with [`Scheduler::advance`] and it stays put.
+struct Clock {
+    manual: Mutex<Option<Instant>>,
+    offset_ms: AtomicU64,
+}
+
+impl Clock {
+    fn real() -> Clock {
+        Clock { manual: Mutex::new(None), offset_ms: AtomicU64::new(0) }
+    }
+
+    #[cfg(test)]
+    fn manual() -> Clock {
+        Clock { manual: Mutex::new(Some(Instant::now())), offset_ms: AtomicU64::new(0) }
+    }
+
+    fn now(&self) -> Instant {
+        if let Some(now) = *self.manual.lock().expect("clock lock") {
+            return now;
+        }
+        Instant::now() + Duration::from_millis(self.offset_ms.load(Ordering::Relaxed))
+    }
+
+    fn advance(&self, by: Duration) {
+        let mut manual = self.manual.lock().expect("clock lock");
+        if let Some(now) = manual.as_mut() {
+            *now += by;
+            return;
+        }
+        let add = by.as_millis().min(u128::from(u64::MAX)) as u64;
+        self.offset_ms.fetch_add(add, Ordering::Relaxed);
+    }
 }
 
 impl State {
@@ -114,9 +185,71 @@ impl State {
         }
     }
 
-    /// Hands out every lease that can be given now; returns models to unload.
-    fn schedule(&mut self) -> Vec<(String, Pool)> {
+    fn line_wants(&self, key: &str) -> bool {
+        self.line.iter().any(|t| t.model.as_ref().is_some_and(|m| m.key == key))
+    }
+
+    fn fits_a_pool(&self, need: &ModelNeed, bytes: u64) -> bool {
+        need.pools().iter().any(|&pool| bytes <= self.cap(pool))
+    }
+
+    /// Contexts queued for this file, largest first. The resident is loaded at the largest that fits.
+    fn candidates(&self, need: &ModelNeed) -> Vec<(u32, u64)> {
+        let mut best: HashMap<u32, u64> = HashMap::new();
+        let mut consider = |n_ctx: u32, bytes: u64| {
+            let slot = best.entry(n_ctx).or_insert(0);
+            if bytes > *slot {
+                *slot = bytes;
+            }
+        };
+        consider(need.n_ctx, need.bytes);
+        for ticket in &self.line {
+            if let Some(model) = &ticket.model {
+                if model.key == need.key {
+                    consider(model.n_ctx, model.bytes);
+                }
+            }
+        }
+        let mut options: Vec<(u32, u64)> = best.into_iter().collect();
+        options.sort_by_key(|option| std::cmp::Reverse(option.0));
+        options
+    }
+
+    /// When the keeper has to wake up: the nearest expiry of a model that can actually be
+    /// unloaded. A model a queued job wants (see [`State::expire`]) never expires, so waiting for
+    /// it would spin the keeper with a zero timeout until that job takes it.
+    fn time_until_expiry(&self, now: Instant) -> Option<Duration> {
+        self.loaded
+            .iter()
+            .filter(|m| m.leases == 0 && !self.line_wants(&m.key))
+            .filter_map(|m| m.idle_since)
+            .map(|since| (since + self.keep_alive).saturating_duration_since(now))
+            .min()
+    }
+
+    /// Drops idle models whose keep-alive has run out. A model a queued job wants stays, so that
+    /// job takes it without a reload.
+    fn expire(&mut self, now: Instant) -> Vec<(String, Pool)> {
+        let keep = self.keep_alive;
         let mut unload = Vec::new();
+        let mut kept = Vec::new();
+        // Take the vec so the line can be read while each resident is checked.
+        for model in std::mem::take(&mut self.loaded) {
+            let idle = model.idle_since.map(|since| now.saturating_duration_since(since)).unwrap_or(Duration::ZERO);
+            let wanted = self.line.iter().any(|t| t.model.as_ref().is_some_and(|m| m.key == model.key));
+            if model.leases == 0 && idle >= keep && !wanted {
+                unload.push((model.key, model.pool));
+            } else {
+                kept.push(model);
+            }
+        }
+        self.loaded = kept;
+        unload
+    }
+
+    /// Hands out every lease that can be given now; returns models to unload.
+    fn schedule(&mut self, now: Instant) -> Vec<(String, Pool)> {
+        let mut unload = self.expire(now);
         // Pools an earlier ticket is waiting on memory for: later ones may not take memory there.
         let mut blocked: Vec<Pool> = Vec::new();
         let mut i = 0;
@@ -128,39 +261,28 @@ impl State {
                 continue;
             }
             let grant = match self.line[i].model.clone() {
-                None => Some(Ok(Grant { pool: None, key: None, fresh: false })),
-                Some(need) => match self.loaded.iter().position(|m| m.key == need.key) {
-                    Some(at) => {
-                        self.loaded[at].leases += 1;
-                        Some(Ok(Grant { pool: Some(self.loaded[at].pool), key: Some(need.key.clone()), fresh: false }))
-                    }
-                    None if need.pools().iter().all(|&p| need.bytes > self.cap(p)) => {
-                        Some(Err(format!("model needs {} MB, more than the budget allows", need.bytes >> 20)))
-                    }
-                    None if need.pools().iter().any(|p| blocked.contains(p)) => {
-                        self.line[i].reason = Some(Wait::Turn);
-                        None
-                    }
-                    None => match self.place(&need, &mut unload) {
-                        Some(pool) => {
-                            self.loaded.push(LoadedModel { key: need.key.clone(), pool, bytes: need.bytes, leases: 1 });
-                            Some(Ok(Grant { pool: Some(pool), key: Some(need.key.clone()), fresh: true }))
-                        }
-                        None => {
-                            self.line[i].reason = Some(Wait::Memory { key: need.key.clone(), bytes: need.bytes });
-                            blocked.extend(need.pools());
-                            None
-                        }
-                    },
-                },
+                None => Some(Ok(Grant { pool: None, key: None, fresh: false, n_ctx: 0, lease: 0 })),
+                Some(need) => self.grant_model(i, &need, &mut blocked, &mut unload),
             };
             match grant {
                 Some(g) => {
-                    let t = self.line.remove(i);
-                    if g.is_ok() {
-                        *self.running.entry(kind).or_default() += 1;
-                    }
-                    self.granted.insert(t.id, g);
+                    let ticket = self.line.remove(i);
+                    let g = match g {
+                        Ok(mut g) => {
+                            let id = self.next_lease;
+                            self.next_lease += 1;
+                            g.lease = id;
+                            *self.running.entry(kind).or_default() += 1;
+                            if let Some(key) = &g.key {
+                                if let Some(model) = self.loaded.iter_mut().find(|m| &m.key == key) {
+                                    model.holders.insert(id, kind);
+                                }
+                            }
+                            Ok(g)
+                        }
+                        Err(error) => Err(error),
+                    };
+                    self.granted.insert(ticket.id, g);
                 }
                 None => i += 1,
             }
@@ -168,25 +290,150 @@ impl State {
         unload
     }
 
-    /// The first allowed pool with room (idle models are unloaded to make room).
-    fn place(&mut self, need: &ModelNeed, unload: &mut Vec<(String, Pool)>) -> Option<Pool> {
-        for &pool in need.pools() {
-            let idle: u64 = self.loaded.iter().filter(|m| m.pool == pool && m.leases == 0).map(|m| m.bytes).sum();
-            let free = self.cap(pool).saturating_sub(self.used(pool));
-            if need.bytes <= free + idle {
-                if need.bytes > free {
-                    self.loaded.retain(|m| {
-                        let evict = m.pool == pool && m.leases == 0;
-                        if evict {
-                            unload.push((m.key.clone(), m.pool));
-                        }
-                        !evict
-                    });
-                }
-                return Some(pool);
+    /// A lease on `need`: share a large enough resident, reload once into a larger context, or load.
+    fn grant_model(&mut self, index: usize, need: &ModelNeed, blocked: &mut Vec<Pool>, unload: &mut Vec<(String, Pool)>) -> Option<Result<Grant, String>> {
+        if let Some(at) = self.loaded.iter().position(|m| m.key == need.key) {
+            if need.n_ctx <= self.loaded[at].n_ctx {
+                self.loaded[at].leases += 1;
+                self.loaded[at].idle_since = None;
+                return Some(Ok(Grant {
+                    pool: Some(self.loaded[at].pool),
+                    key: Some(need.key.clone()),
+                    fresh: false,
+                    n_ctx: self.loaded[at].n_ctx,
+                    lease: 0,
+                }));
+            }
+            // Busy at a smaller context: it cannot be reloaded until that job finishes.
+            if self.loaded[at].leases > 0 {
+                return self.wait_memory(index, need, blocked);
             }
         }
+        if need.pools().iter().any(|pool| blocked.contains(pool)) {
+            self.line[index].reason = Some(Wait::Turn);
+            return None;
+        }
+        let mut fits_somewhere = false;
+        for (n_ctx, bytes) in self.candidates(need) {
+            // A smaller queued context does not satisfy this request; a larger one may, in one load.
+            if n_ctx < need.n_ctx || !self.fits_a_pool(need, bytes) {
+                continue;
+            }
+            fits_somewhere = true;
+            if self.acquire(need, n_ctx, bytes, unload) {
+                let at = self.loaded.iter().position(|m| m.key == need.key).expect("just acquired");
+                return Some(Ok(Grant { pool: Some(self.loaded[at].pool), key: Some(need.key.clone()), fresh: true, n_ctx: self.loaded[at].n_ctx, lease: 0 }));
+            }
+        }
+        if !fits_somewhere {
+            return Some(Err(format!("model needs {} MB, more than the budget allows", need.bytes >> 20)));
+        }
+        self.wait_memory(index, need, blocked)
+    }
+
+    fn wait_memory(&mut self, index: usize, need: &ModelNeed, blocked: &mut Vec<Pool>) -> Option<Result<Grant, String>> {
+        self.line[index].reason = Some(Wait::Memory { key: need.key.clone(), bytes: need.bytes });
+        blocked.extend(need.pools());
         None
+    }
+
+    /// Loads `need` at `n_ctx` (or grows the resident). The caller sets the wait reason when this is false.
+    fn acquire(&mut self, need: &ModelNeed, n_ctx: u32, bytes: u64, unload: &mut Vec<(String, Pool)>) -> bool {
+        if let Some(at) = self.loaded.iter().position(|m| m.key == need.key) {
+            let pool = self.loaded[at].pool;
+            let old = self.loaded[at].bytes;
+            if bytes <= self.cap(pool) && self.evict(pool, bytes.saturating_sub(old), Some(&need.key), unload) {
+                let model = self.loaded.iter_mut().find(|m| m.key == need.key).expect("still resident");
+                model.bytes = bytes.max(model.bytes);
+                model.n_ctx = n_ctx.max(model.n_ctx);
+                model.leases = 1;
+                model.idle_since = None;
+                return true;
+            }
+            return self.move_pool(need, n_ctx, bytes, unload);
+        }
+        let Some(pool) = self.place(need, bytes, unload) else { return false };
+        self.loaded.push(Resident { key: need.key.clone(), pool, bytes, leases: 1, holders: HashMap::new(), n_ctx, idle_since: None });
+        true
+    }
+
+    /// The resident does not fit its pool at the new size: load it in another pool, once.
+    fn move_pool(&mut self, need: &ModelNeed, n_ctx: u32, bytes: u64, unload: &mut Vec<(String, Pool)>) -> bool {
+        let Some(at) = self.loaded.iter().position(|m| m.key == need.key) else { return false };
+        let old = self.loaded.remove(at);
+        if let Some(pool) = self.place(need, bytes, unload) {
+            unload.push((old.key.clone(), old.pool));
+            self.loaded.push(Resident { key: old.key, pool, bytes, leases: 1, holders: HashMap::new(), n_ctx, idle_since: None });
+            true
+        } else {
+            self.loaded.insert(at.min(self.loaded.len()), old);
+            false
+        }
+    }
+
+    /// The first allowed pool with room. Idle models are unloaded least recently used first.
+    fn place(&mut self, need: &ModelNeed, bytes: u64, unload: &mut Vec<(String, Pool)>) -> Option<Pool> {
+        need.pools().iter().copied().find(|&pool| bytes <= self.cap(pool) && self.evict(pool, bytes, None, unload))
+    }
+
+    /// Makes `need_free` bytes available in `pool`. Evicts nothing when that is impossible.
+    /// `skip` (the model being grown) is never evicted. Wanted models go last.
+    fn evict(&mut self, pool: Pool, need_free: u64, skip: Option<&str>, unload: &mut Vec<(String, Pool)>) -> bool {
+        let free = self.cap(pool).saturating_sub(self.used(pool));
+        if need_free <= free {
+            return true;
+        }
+        let mut deficit = need_free - free;
+        let mut order: Vec<usize> = self
+            .loaded
+            .iter()
+            .enumerate()
+            .filter(|(_, model)| model.pool == pool && model.leases == 0 && skip != Some(model.key.as_str()))
+            .map(|(index, _)| index)
+            .collect();
+        order.sort_by(|&a, &b| {
+            let rank = |index: usize| {
+                let model = &self.loaded[index];
+                let wanted = self.wanted.contains(&model.key) || self.line_wants(&model.key);
+                (wanted, model.idle_since)
+            };
+            rank(a).cmp(&rank(b))
+        });
+        let mut doomed = Vec::new();
+        for index in order {
+            if deficit == 0 {
+                break;
+            }
+            deficit = deficit.saturating_sub(self.loaded[index].bytes);
+            doomed.push(index);
+        }
+        if deficit > 0 {
+            return false;
+        }
+        doomed.sort_unstable();
+        for index in doomed.into_iter().rev() {
+            let model = self.loaded.remove(index);
+            unload.push((model.key, model.pool));
+        }
+        true
+    }
+
+    fn snapshot(&self, now: Instant) -> Status {
+        Status {
+            loaded: self
+                .loaded
+                .iter()
+                .map(|model| {
+                    let idle = model.idle_since.map(|since| now.saturating_duration_since(since)).unwrap_or(Duration::ZERO);
+                    let unloads_in = (model.leases == 0).then(|| self.keep_alive.saturating_sub(idle));
+                    LoadedModel { key: model.key.clone(), pool: model.pool, bytes: model.bytes, leases: model.leases, n_ctx: model.n_ctx, idle, unloads_in }
+                })
+                .collect(),
+            running: WorkKind::ALL.iter().map(|kind| (*kind, self.running.get(kind).copied().unwrap_or(0))).collect(),
+            waiting: self.line.iter().filter_map(|ticket| ticket.reason.clone().map(|reason| (ticket.id, ticket.kind, reason))).collect(),
+            gpu_used: self.used(Pool::Gpu),
+            ram_used: self.used(Pool::Cpu),
+        }
     }
 }
 
@@ -197,16 +444,18 @@ struct Shared {
     state: Mutex<State>,
     changed: Condvar,
     quantum: Duration,
+    clock: Clock,
     on_unload: Unload,
 }
 
 impl Shared {
     /// Runs `f` on the state, schedules, unloads outside the lock and wakes waiters.
-    fn update<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
+    fn update<R>(&self, f: impl FnOnce(&mut State, Instant) -> R) -> R {
+        let now = self.clock.now();
         let (r, unload) = {
             let mut s = self.state.lock().expect("scheduler lock");
-            let r = f(&mut s);
-            let unload = s.schedule();
+            let r = f(&mut s, now);
+            let unload = s.schedule(now);
             (r, unload)
         };
         for (key, pool) in unload {
@@ -223,21 +472,115 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    /// `quantum`: how long a lease may keep memory others wait for; `on_unload(key, pool)`:
-    /// free that model now.
-    pub fn new(budget: Budget, quantum: Duration, on_unload: impl Fn(&str, Pool) + Send + Sync + 'static) -> Scheduler {
-        let state = State { budget, running: HashMap::new(), loaded: Vec::new(), line: Vec::new(), granted: HashMap::new(), next: 1 };
-        Scheduler { shared: Arc::new(Shared { state: Mutex::new(state), changed: Condvar::new(), quantum, on_unload: Box::new(on_unload) }) }
+    /// `quantum`: how long a lease may keep memory others wait for. `keep_alive`: how long an
+    /// idle model stays loaded (`Duration::ZERO` unloads it as soon as its last job finishes).
+    /// `on_unload(key, pool)` frees that model now.
+    pub fn new(budget: Budget, quantum: Duration, keep_alive: Duration, on_unload: impl Fn(&str, Pool) + Send + Sync + 'static) -> Scheduler {
+        Self::build(budget, quantum, keep_alive, Clock::real(), on_unload)
     }
 
-    /// New limits (take effect for the next leases).
+    /// Like [`Scheduler::new`], with a clock that moves only when [`Scheduler::advance`] is called.
+    #[cfg(test)]
+    pub(crate) fn new_manual(budget: Budget, quantum: Duration, keep_alive: Duration, on_unload: impl Fn(&str, Pool) + Send + Sync + 'static) -> Scheduler {
+        Self::build(budget, quantum, keep_alive, Clock::manual(), on_unload)
+    }
+
+    fn build(budget: Budget, quantum: Duration, keep_alive: Duration, clock: Clock, on_unload: impl Fn(&str, Pool) + Send + Sync + 'static) -> Scheduler {
+        let state = State {
+            budget,
+            keep_alive,
+            wanted: HashSet::new(),
+            running: HashMap::new(),
+            loaded: Vec::new(),
+            line: Vec::new(),
+            granted: HashMap::new(),
+            next: 1,
+            next_lease: 1,
+            abandoned: HashSet::new(),
+        };
+        Scheduler { shared: Arc::new(Shared { state: Mutex::new(state), changed: Condvar::new(), quantum, clock, on_unload: Box::new(on_unload) }) }
+    }
+
+    /// New limits (take effect for the next leases). Memory only: keep-alive is [`Scheduler::set_keep_alive`].
     pub fn set_budget(&self, budget: Budget) {
-        self.shared.update(|s| s.budget = budget);
+        self.shared.update(|s, _| s.budget = budget);
+    }
+
+    /// How long an idle model stays loaded. Zero unloads it on the next schedule.
+    pub fn set_keep_alive(&self, keep_alive: Duration) {
+        self.shared.update(|s, _| s.keep_alive = keep_alive);
+    }
+
+    /// Model files waiting work needs. An idle one is unloaded last when memory runs short.
+    pub fn set_wanted(&self, keys: HashSet<String>) {
+        self.shared.update(|s, _| s.wanted = keys);
+    }
+
+    /// Drops a resident this call failed to load, when it is the only user. The lease drop then
+    /// finds nothing to keep warm, so a model that never came up does not hold memory.
+    pub(crate) fn forget_failed(&self, key: &str) {
+        self.shared.update(|s, _| {
+            if let Some(i) = s.loaded.iter().position(|m| m.key == key && m.leases <= 1) {
+                s.loaded.remove(i);
+            }
+        });
+    }
+
+    /// A call with this model is stuck: forget the resident so the next attempt loads a fresh
+    /// copy instead of waiting for the lock the stuck call holds, and give back the slots its
+    /// leases took (the stuck call may never return to drop them). Returns whether it was loaded.
+    pub fn reclaim(&self, key: &str) -> bool {
+        let gone = self.shared.update(|s, _| {
+            let at = s.loaded.iter().position(|m| m.key == key)?;
+            let resident = s.loaded.remove(at);
+            for (id, kind) in resident.holders {
+                if let Some(n) = s.running.get_mut(&kind) {
+                    *n = n.saturating_sub(1);
+                }
+                s.abandoned.insert(id);
+            }
+            Some((resident.key, resident.pool))
+        });
+        if let Some((key, pool)) = &gone {
+            (self.shared.on_unload)(key, *pool);
+            log::warn!("model dropped after a stuck call: {key}");
+        }
+        self.shared.changed.notify_all();
+        gone.is_some()
+    }
+
+    /// Moves the clock forward and unloads models whose keep-alive has run out. Tests use it with
+    /// [`Scheduler::new_manual`]; on a real clock it jumps the same amount ahead of wall time.
+    pub fn advance(&self, by: Duration) {
+        self.shared.clock.advance(by);
+        self.shared.update(|_, _| {});
+    }
+
+    /// Wakes the keep-alive thread (and anyone waiting for a lease).
+    pub fn wake(&self) {
+        self.shared.changed.notify_all();
+    }
+
+    /// Sleeps until the next idle model expires, or until [`Scheduler::wake`], then unloads what expired.
+    pub fn sweep_wait(&self, stop: &AtomicBool) {
+        let guard = self.shared.state.lock().expect("scheduler lock");
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let wait = guard.time_until_expiry(self.shared.clock.now()).unwrap_or(Duration::from_secs(30));
+        // Drop the guard with the wait's result: `update` below locks the state again, and a
+        // binding that outlives the statement would hold the lock and deadlock this thread (and
+        // with it everyone who asks for a lease).
+        drop(self.shared.changed.wait_timeout(guard, wait.min(Duration::from_secs(30))).expect("scheduler lock"));
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        self.shared.update(|_, _| {});
     }
 
     /// Joins the line; `interactive` work goes before background jobs.
     pub fn request(&self, kind: WorkKind, model: Option<ModelNeed>, interactive: bool) -> Ticket {
-        let id = self.shared.update(|s| {
+        let id = self.shared.update(|s, _| {
             let id = s.next;
             s.next += 1;
             let at = if interactive { s.line.iter().position(|t| !t.interactive).unwrap_or(s.line.len()) } else { s.line.len() };
@@ -248,14 +591,18 @@ impl Scheduler {
     }
 
     pub fn status(&self) -> Status {
-        let s = self.shared.state.lock().expect("scheduler lock");
-        Status {
-            loaded: s.loaded.clone(),
-            running: WorkKind::ALL.iter().map(|k| (*k, s.running.get(k).copied().unwrap_or(0))).collect(),
-            waiting: s.line.iter().filter_map(|t| t.reason.clone().map(|r| (t.id, t.kind, r))).collect(),
-            gpu_used: s.used(Pool::Gpu),
-            ram_used: s.used(Pool::Cpu),
+        let now = self.shared.clock.now();
+        let (status, unload) = {
+            let mut state = self.shared.state.lock().expect("scheduler lock");
+            let unload = state.schedule(now);
+            let status = state.snapshot(now);
+            (status, unload)
+        };
+        for (key, pool) in unload {
+            (self.shared.on_unload)(&key, pool);
         }
+        self.shared.changed.notify_all();
+        status
     }
 }
 
@@ -277,7 +624,16 @@ impl Ticket {
         let grant = self.shared.state.lock().expect("scheduler lock").granted.remove(&self.id)?;
         self.taken = true;
         Some(match grant {
-            Ok(g) => Ok(Lease { shared: self.shared.clone(), kind: self.kind, pool: g.pool, key: g.key, fresh: g.fresh, since: Instant::now() }),
+            Ok(g) => Ok(Lease {
+                shared: self.shared.clone(),
+                id: g.lease,
+                kind: self.kind,
+                pool: g.pool,
+                key: g.key,
+                fresh: g.fresh,
+                n_ctx: g.n_ctx,
+                since: self.shared.clock.now(),
+            }),
             Err(e) => Err(anyhow::anyhow!(e)),
         })
     }
@@ -288,6 +644,8 @@ impl Ticket {
             if let Some(r) = self.try_take() {
                 return r;
             }
+            // Waiting for memory is work of its own: the watchdog must not take it for a hang.
+            pulse::beat();
             if cancel.load(Ordering::Relaxed) {
                 anyhow::bail!("cancelled");
             }
@@ -305,26 +663,28 @@ impl Drop for Ticket {
     fn drop(&mut self) {
         if !self.taken {
             let id = self.id;
-            let granted = self.shared.update(|s| {
+            let granted = self.shared.update(|s, _| {
                 s.line.retain(|t| t.id != id);
                 s.granted.remove(&id)
             });
             // Granted but never taken: give it back.
             if let Some(Ok(g)) = granted {
-                drop(Lease { shared: self.shared.clone(), kind: self.kind, pool: g.pool, key: g.key, fresh: false, since: Instant::now() });
+                drop(Lease { shared: self.shared.clone(), id: g.lease, kind: self.kind, pool: g.pool, key: g.key, fresh: false, n_ctx: g.n_ctx, since: self.shared.clock.now() });
             }
         }
     }
 }
 
-/// Permission to run (and to use a model, in `pool`). Dropping it frees the slot and, when no
-/// one else uses the model, the model.
+/// Permission to run (and to use a model, in `pool`). Dropping it frees the slot. The model
+/// stays loaded until its keep-alive runs out, or until another request needs the memory.
 pub struct Lease {
     shared: Arc<Shared>,
+    id: u64,
     kind: WorkKind,
     pool: Option<Pool>,
     key: Option<String>,
     fresh: bool,
+    n_ctx: u32,
     since: Instant,
 }
 
@@ -334,15 +694,20 @@ impl Lease {
         self.pool
     }
 
-    /// The model has to be loaded (it was not in memory).
+    /// The model has to be loaded (it was not in memory, or its context grew).
     pub fn fresh(&self) -> bool {
         self.fresh
+    }
+
+    /// Context to load when [`Lease::fresh`] is set. A reused model keeps the larger one it already has.
+    pub fn n_ctx(&self) -> u32 {
+        self.n_ctx
     }
 
     /// Others wait for memory this lease holds and its quantum is over: checkpoint and drop it.
     pub fn should_yield(&self) -> bool {
         let Some(pool) = self.pool else { return false };
-        if self.since.elapsed() < self.shared.quantum {
+        if self.shared.clock.now().saturating_duration_since(self.since) < self.shared.quantum {
             return false;
         }
         let s = self.shared.state.lock().expect("scheduler lock");
@@ -352,27 +717,27 @@ impl Lease {
 
 impl Drop for Lease {
     fn drop(&mut self) {
-        let (kind, key) = (self.kind, self.key.clone());
-        let unloaded = self.shared.update(|s| {
-            if let Some(n) = s.running.get_mut(&kind) {
-                *n = n.saturating_sub(1);
+        let (kind, key, agent) = (self.kind, self.key.clone(), self.id);
+        // Keep-alive expiry (and handing the model to a job already waiting for it) happens in
+        // the schedule that follows, so an idle model is unloaded in one place.
+        self.shared.update(|s, now| {
+            // A stuck call whose slot was given back by `reclaim` has nothing to count again.
+            let abandoned = s.abandoned.remove(&agent);
+            if !abandoned {
+                if let Some(n) = s.running.get_mut(&kind) {
+                    *n = n.saturating_sub(1);
+                }
             }
-            let mut unloaded = None;
             if let Some(key) = &key {
                 if let Some(i) = s.loaded.iter().position(|m| &m.key == key) {
+                    s.loaded[i].holders.remove(&agent);
                     s.loaded[i].leases = s.loaded[i].leases.saturating_sub(1);
-                    let wanted = s.line.iter().any(|t| t.model.as_ref().is_some_and(|m| &m.key == key));
-                    if s.loaded[i].leases == 0 && !wanted {
-                        let m = s.loaded.remove(i);
-                        unloaded = Some((m.key, m.pool));
+                    if s.loaded[i].leases == 0 {
+                        s.loaded[i].idle_since = Some(now);
                     }
                 }
             }
-            unloaded
         });
-        if let Some((key, pool)) = unloaded {
-            (self.shared.on_unload)(&key, pool);
-        }
     }
 }
 
@@ -386,12 +751,25 @@ mod tests {
         let unloaded = Arc::new(Mutex::new(Vec::new()));
         let u = unloaded.clone();
         // Generous slots: these tests are about memory unless they set limits.
-        let budget = Budget { gpu_memory_gb: gpu, ram_memory_gb: ram, agent: 8, transcription: 8, indexing: 8, web_search: 8, provider_calls: 8 };
-        (Scheduler::new(budget, Duration::from_millis(quantum_ms), move |key, _| u.lock().unwrap().push(key.to_string())), unloaded)
+        let budget = Budget { gpu_memory_gb: gpu, ram_memory_gb: ram, agent: 8, transcription: 8, indexing: 8, web_search: 8, provider_calls: 8, ..Budget::default() };
+        // These tests predate keep-alive: an idle model is unloaded at once.
+        (Scheduler::new(budget, Duration::from_millis(quantum_ms), Duration::ZERO, move |key, _| u.lock().unwrap().push(key.to_string())), unloaded)
+    }
+
+    /// Keep-alive tests: the clock moves only when `advance` is called.
+    fn manual(gpu: f32, keep: Duration) -> (Scheduler, Arc<Mutex<Vec<String>>>) {
+        let unloaded = Arc::new(Mutex::new(Vec::new()));
+        let u = unloaded.clone();
+        let budget = Budget { gpu_memory_gb: gpu, ram_memory_gb: 0.0, agent: 8, transcription: 8, indexing: 8, web_search: 8, provider_calls: 8, ..Budget::default() };
+        (Scheduler::new_manual(budget, Duration::from_secs(1000), keep, move |key, _| u.lock().unwrap().push(key.to_string())), unloaded)
     }
 
     fn model(key: &str, gb: u64, device: Device) -> Option<ModelNeed> {
-        Some(ModelNeed { key: key.into(), bytes: gb * GB, device })
+        Some(ModelNeed { key: key.into(), bytes: gb * GB, device, n_ctx: 0 })
+    }
+
+    fn model_ctx(key: &str, gb: u64, n_ctx: u32) -> Option<ModelNeed> {
+        Some(ModelNeed { key: key.into(), bytes: gb * GB, device: Device::Gpu, n_ctx })
     }
 
     fn take(t: &mut Ticket) -> Lease {
@@ -444,7 +822,7 @@ mod tests {
         let mut a = s.request(WorkKind::Agent, model("llm", 6, Device::Gpu), false);
         let la = take(&mut a);
         // Same model, but its slot (agent: 1) is busy: it waits for the slot.
-        s.set_budget(Budget { gpu_memory_gb: 8.0, ram_memory_gb: 0.0, agent: 1, transcription: 8, indexing: 8, web_search: 8, provider_calls: 8 });
+        s.set_budget(Budget { gpu_memory_gb: 8.0, ram_memory_gb: 0.0, agent: 1, transcription: 8, indexing: 8, web_search: 8, provider_calls: 8, ..Budget::default() });
         let mut b = s.request(WorkKind::Agent, model("llm", 6, Device::Gpu), false);
         assert_eq!(b.waiting_for(), Some(Wait::Slot(WorkKind::Agent)));
         drop(la);
@@ -475,7 +853,7 @@ mod tests {
     #[test]
     fn slots_limit_each_kind_and_light_work_passes_a_memory_wait() {
         let (s, _) = sched(4.0, 0.0, 1000);
-        let budget = Budget { gpu_memory_gb: 4.0, ram_memory_gb: 0.0, web_search: 2, agent: 8, transcription: 8, indexing: 8, provider_calls: 8 };
+        let budget = Budget { gpu_memory_gb: 4.0, ram_memory_gb: 0.0, web_search: 2, agent: 8, transcription: 8, indexing: 8, provider_calls: 8, ..Budget::default() };
         s.set_budget(budget);
         let mut w1 = s.request(WorkKind::WebSearch, None, false);
         let mut w2 = s.request(WorkKind::WebSearch, None, false);
@@ -523,5 +901,141 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
         drop(la);
         assert!(h.join().unwrap().unwrap());
+    }
+
+    #[test]
+    fn the_keep_alive_sweep_unloads_and_returns() {
+        // The sweep locks the state for its wait and then locks it again in `update`: if the
+        // wait's guard outlives that statement, the keep-alive thread deadlocks with the lock
+        // held, and every lease request after it hangs too.
+        let unloaded = Arc::new(Mutex::new(Vec::new()));
+        let u = unloaded.clone();
+        let budget = Budget { gpu_memory_gb: 8.0, ram_memory_gb: 0.0, agent: 8, transcription: 8, indexing: 8, web_search: 8, provider_calls: 8, ..Budget::default() };
+        let s = Scheduler::new(budget, Duration::from_secs(1000), Duration::from_millis(50), move |key, _| u.lock().unwrap().push(key.to_string()));
+        let mut first = s.request(WorkKind::Agent, model("llm", 1, Device::Gpu), false);
+        drop(take(&mut first));
+        let swept = s.clone();
+        let stop = AtomicBool::new(false);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            swept.sweep_wait(&stop);
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(5)).expect("the sweep returns instead of deadlocking");
+        assert_eq!(*unloaded.lock().unwrap(), ["llm"], "the idle model expired");
+        let mut again = s.request(WorkKind::Agent, model("llm", 1, Device::Gpu), false);
+        assert!(take(&mut again).fresh(), "the scheduler still hands out leases");
+    }
+
+    #[test]
+    fn the_keeper_does_not_spin_on_a_model_a_queued_job_wants() {
+        // `expire` keeps an expired model a queued job wants. If the keeper still waits for that
+        // expiry, every sweep returns at once with a zero timeout and spins at full CPU until the
+        // job takes the model.
+        let (s, unloaded) = manual(8.0, Duration::from_secs(10));
+        let mut idle = s.request(WorkKind::Agent, model("llm", 1, Device::Gpu), false);
+        drop(take(&mut idle));
+        // One Agent slot: the job below queues for it and wants the idle model.
+        s.set_budget(Budget { gpu_memory_gb: 8.0, ram_memory_gb: 0.0, agent: 1, transcription: 8, indexing: 8, web_search: 8, provider_calls: 8, ..Budget::default() });
+        let mut holder = s.request(WorkKind::Agent, model("other", 1, Device::Gpu), false);
+        let held = take(&mut holder);
+        let mut queued = s.request(WorkKind::Agent, model("llm", 1, Device::Gpu), false);
+        assert_eq!(queued.waiting_for(), Some(Wait::Slot(WorkKind::Agent)));
+        assert!(queued.try_take().is_none(), "it waits for the slot, not fails");
+        s.advance(Duration::from_secs(10));
+        assert!(unloaded.lock().unwrap().is_empty(), "a wanted model is not unloaded");
+        let state = s.shared.state.lock().unwrap();
+        assert_eq!(state.time_until_expiry(s.shared.clock.now()), None, "the keeper has nothing to wake for");
+        drop(state);
+        drop(held);
+    }
+
+    #[test]
+    fn an_idle_model_is_reused_within_keep_alive_and_unloaded_after_it() {
+        let (s, unloaded) = manual(8.0, Duration::from_secs(300));
+        let mut first = s.request(WorkKind::Agent, model("llm", 1, Device::Gpu), false);
+        drop(take(&mut first));
+        s.advance(Duration::from_secs(299));
+        assert!(unloaded.lock().unwrap().is_empty(), "still inside keep-alive");
+        let resident = &s.status().loaded;
+        assert_eq!(resident.len(), 1);
+        assert_eq!(resident[0].idle, Duration::from_secs(299));
+        assert_eq!(resident[0].unloads_in, Some(Duration::from_secs(1)));
+        let mut again = s.request(WorkKind::Agent, model("llm", 1, Device::Gpu), false);
+        let lease = take(&mut again);
+        assert!(!lease.fresh(), "reused, not reloaded");
+        drop(lease);
+        // The second use resets the idle clock.
+        s.advance(Duration::from_secs(300));
+        assert_eq!(*unloaded.lock().unwrap(), ["llm"]);
+        assert!(s.status().loaded.is_empty());
+    }
+
+    #[test]
+    fn memory_pressure_evicts_the_least_recently_used_idle_model_and_wanted_last() {
+        let (s, unloaded) = manual(8.0, Duration::from_secs(300));
+        let mut older = s.request(WorkKind::Agent, model("older", 3, Device::Gpu), false);
+        drop(take(&mut older));
+        s.advance(Duration::from_secs(10));
+        let mut newer = s.request(WorkKind::Indexing, model("newer", 3, Device::Gpu), false);
+        drop(take(&mut newer));
+        s.advance(Duration::from_secs(10));
+        // 6 GB taken of 8. A 3 GB model needs one of them. The older idle one goes.
+        let mut third = s.request(WorkKind::Transcription, model("third", 3, Device::Gpu), false);
+        let _lease = take(&mut third);
+        assert_eq!(*unloaded.lock().unwrap(), ["older"]);
+        let left: Vec<_> = s.status().loaded.iter().map(|m| m.key.clone()).collect();
+        assert!(left.contains(&"newer".into()) && left.contains(&"third".into()), "{left:?}");
+
+        // Same pressure, but waiting work wants the older model: the newer idle one goes instead.
+        drop(_lease);
+        // third is idle too. Free the pool back to older + newer by unloading everyone.
+        s.set_keep_alive(Duration::ZERO);
+        assert!(s.status().loaded.is_empty());
+        unloaded.lock().unwrap().clear();
+        s.set_keep_alive(Duration::from_secs(300));
+
+        let mut older = s.request(WorkKind::Agent, model("older", 3, Device::Gpu), false);
+        drop(take(&mut older));
+        s.advance(Duration::from_secs(10));
+        let mut newer = s.request(WorkKind::Indexing, model("newer", 3, Device::Gpu), false);
+        drop(take(&mut newer));
+        s.set_wanted(HashSet::from(["older".into()]));
+        let mut third = s.request(WorkKind::Transcription, model("third", 3, Device::Gpu), false);
+        let _lease = take(&mut third);
+        assert_eq!(*unloaded.lock().unwrap(), ["newer"], "the wanted model is evicted last");
+        assert!(s.status().loaded.iter().any(|m| m.key == "older"));
+    }
+
+    #[test]
+    fn different_contexts_share_one_load_and_a_larger_one_reloads_once() {
+        let (s, unloaded) = manual(8.0, Duration::from_secs(300));
+        // Queued together: one load, at the larger context, and the smaller request reuses it.
+        let mut pad = s.request(WorkKind::Agent, model("pad", 5, Device::Gpu), false);
+        let held = take(&mut pad);
+        let mut big = s.request(WorkKind::Agent, model_ctx("llm", 4, 12_288), false);
+        let mut small = s.request(WorkKind::Indexing, model_ctx("llm", 2, 8192), false);
+        assert!(big.try_take().is_none() && small.waiting_for().is_some());
+        drop(held);
+        let large = take(&mut big);
+        assert!(large.fresh());
+        assert_eq!(large.n_ctx(), 12_288, "the largest context that fits");
+        drop(large);
+        let reused = take(&mut small);
+        assert!(!reused.fresh());
+        assert_eq!(reused.n_ctx(), 12_288);
+        drop(reused);
+        assert!(unloaded.lock().unwrap().iter().all(|key| key == "pad"), "the model itself was not reloaded");
+
+        // A still larger context is one reload, and shrinking afterwards does not reload again.
+        let mut bigger = s.request(WorkKind::Agent, model_ctx("llm", 6, 16_384), false);
+        let grown = take(&mut bigger);
+        assert!(grown.fresh());
+        assert_eq!(grown.n_ctx(), 16_384);
+        drop(grown);
+        let mut back = s.request(WorkKind::Agent, model_ctx("llm", 2, 8192), false);
+        let again = take(&mut back);
+        assert!(!again.fresh(), "no ping-pong back to the smaller context");
+        assert_eq!(again.n_ctx(), 16_384);
     }
 }

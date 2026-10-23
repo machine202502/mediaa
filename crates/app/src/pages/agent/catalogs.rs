@@ -3,6 +3,7 @@
 //! in tabs (`egui_dock`), like an editor: many tabs, scrolling, close / close others / close all.
 
 use crate::app::App;
+use crate::tab_strip::TAB_HEIGHT;
 use crate::theme;
 
 use eframe::egui::{self, Color32, RichText};
@@ -17,7 +18,7 @@ use mediaa_core::library::human_duration;
 use mediaa_core::transcript;
 use mediaa_core::catalogs::{ai_dir, Catalogs, NodeId, NodeKind};
 use mediaa_core::agent::AnalysisOptions;
-use mediaa_core::queue::Queue;
+use mediaa_queue::TaskId;
 
 use mediaa_core::MediaKind;
 use super::chat::Chat;
@@ -617,8 +618,8 @@ enum TabCmd {
     OpenAt(PathBuf, f64),
     Reveal(PathBuf),
     Analyse { path: PathBuf, from: Option<Stage>, options: AnalysisOptions, remember: bool },
-    Stop(mediaa_core::queue::TaskId),
-    ResumeTask(mediaa_core::queue::TaskId),
+    Stop(TaskId),
+    ResumeTask(TaskId),
 }
 
 /// The width of every tab in the dock: short titles are padded, long ones are cut.
@@ -627,6 +628,78 @@ const TAB_WIDTH: f32 = 180.0;
 /// The room a title gets inside [`TAB_WIDTH`]: the tab minus the tab button's 2×8 px text spacing
 /// and the 24 px close button.
 const TAB_TITLE_WIDTH: f32 = TAB_WIDTH - 16.0 - 24.0;
+
+/// Width egui_dock reserves at the right end of a tab row for its "close all" button.
+const CLOSE_ALL_WIDTH: f32 = 24.0;
+
+/// The shortest scroll handle, as for the chat tabs ([`theme::tab_row_scroll`]).
+const MIN_HANDLE: f32 = 12.0;
+
+/// The bar under a recording tab row: where the track and the handle are, and how far the tabs
+/// are pushed out of view.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScrollBar {
+    track: egui::Rect,
+    handle: egui::Rect,
+    overflow: f32,
+}
+
+/// The bar of a row `rect` wide holding `tabs` tabs, `None` when they fit. The strip is the
+/// [`theme::TAB_SCROLL_BAR`] under the [`TAB_HEIGHT`] tall row: the tab bar is that much taller
+/// and gives the strip back as its bottom inner margin, so the row never moves (see [`tabs`]).
+fn scroll_bar_of(rect: egui::Rect, tabs: usize, spacing: f32, scroll: f32) -> Option<ScrollBar> {
+    if tabs == 0 {
+        return None;
+    }
+    let available = (rect.width() - CLOSE_ALL_WIDTH).max(0.0);
+    let actual = tabs as f32 * TAB_WIDTH + (tabs - 1) as f32 * spacing;
+    let overflow = actual - available;
+    // Under one point is floating-point noise during tab drawing, as in egui_dock itself.
+    if overflow <= 1.0 {
+        return None;
+    }
+    let track = egui::Rect::from_min_size(
+        egui::pos2(rect.left(), rect.top() + TAB_HEIGHT),
+        egui::vec2(rect.width(), theme::TAB_SCROLL_BAR),
+    );
+    let handle_w = (track.width() * available / actual).max(MIN_HANDLE).min(track.width());
+    let ratio = (-scroll).clamp(0.0, overflow) / overflow;
+    let handle = egui::Rect::from_min_size(
+        egui::pos2(track.left() + (track.width() - handle_w) * ratio, track.top()),
+        egui::vec2(handle_w, track.height()),
+    );
+    Some(ScrollBar { track, handle, overflow })
+}
+
+/// Draws, and lets the user drag, the thin bar under every tab row. egui_dock's own bar is
+/// 7.5 px, drawn only on overflow, and it takes its space only then — so it is turned off in
+/// [`tabs`] and this paints the chat tabs' bar in the strip that is always reserved instead.
+fn tab_scroll_bar(ui: &mut egui::Ui, dock: &mut DockState<Tab>, spacing: f32) {
+    let p = theme::palette(ui);
+    for (path, leaf) in dock.iter_leaves_mut() {
+        // DockArea::show_inside draws the main surface only; windows have stale rects.
+        if !path.surface.is_main() {
+            continue;
+        }
+        let Some(bar) = scroll_bar_of(leaf.rect, leaf.tabs.len(), spacing, leaf.scroll) else {
+            // The tabs fit (or were closed): there is nothing hidden to scroll back to.
+            leaf.scroll = 0.0;
+            continue;
+        };
+        ui.painter().rect_filled(bar.track, egui::CornerRadius::ZERO, p.border);
+        let id = ui.id().with(("catalog_tab_scroll", path.surface, path.node));
+        let resp = ui.interact(bar.handle, id, egui::Sense::click_and_drag());
+        let travel = bar.track.width() - bar.handle.width();
+        if resp.dragged() && travel > 0.0 {
+            leaf.scroll = (leaf.scroll - resp.drag_delta().x * bar.overflow / travel)
+                .clamp(-bar.overflow, 0.0);
+        }
+        // The handle has moved with the scroll this frame.
+        let handle = scroll_bar_of(leaf.rect, leaf.tabs.len(), spacing, leaf.scroll)
+            .map_or(bar.handle, |bar| bar.handle);
+        ui.painter().rect_filled(handle, egui::CornerRadius::same(2), p.text_weak);
+    }
+}
 
 /// The full title of a tab: the catalog node's name (or the file name), with the folder chat icon.
 fn tab_title(cat: &Catalogs, tab: &Tab) -> String {
@@ -761,12 +834,18 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
     let mut style = egui_dock::Style::from_egui(ui.style());
     // No maximum width in egui_dock: the title is cut to the tab's width instead (see `tab_title_job`).
     style.tab.minimum_width = Some(TAB_WIDTH);
+    // The row keeps its 24 px and gives the 3 px strip under it to our bar (see `tab_scroll_bar`).
+    style.tab_bar.height = TAB_HEIGHT + theme::TAB_SCROLL_BAR;
+    style.tab_bar.inner_margin = egui::Margin { bottom: theme::TAB_SCROLL_BAR as i8, ..egui::Margin::ZERO };
+    style.tab_bar.show_scroll_bar_on_overflow = false;
+    let tab_spacing = style.tab.spacing;
     *dock = std::mem::replace(dock, DockState::new(Vec::new())).with_translations(translations());
     DockArea::new(dock)
         .style(style)
         .show_leaf_close_all_buttons(true)
         .show_leaf_collapse_buttons(false)
         .show_inside(ui, &mut viewer);
+    tab_scroll_bar(ui, dock, tab_spacing);
     // Only the tabs in view play.
     for (_, tab) in dock.iter_all_tabs_mut() {
         if let Body::Studio(s) = &mut tab.body {
@@ -813,15 +892,23 @@ pub fn tabs(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             TabCmd::Stop(id) => {
-                let ai = ai_dir(&library_dir(&app.settings));
-                if let Err(e) = Queue::open(&ai).and_then(|q| q.cancel(id)) {
-                    app.error(format!("{e:#}"));
+                match app.agent.services() {
+                    Some(s) => {
+                        if let Err(e) = s.sched.cancel(id) {
+                            app.error(format!("{e:#}"));
+                        }
+                    }
+                    None => app.error(t!("studio.agent_not_ready").to_string()),
                 }
             }
             TabCmd::ResumeTask(id) => {
-                let ai = ai_dir(&library_dir(&app.settings));
-                if let Err(e) = Queue::open(&ai).and_then(|q| q.resume(id)) {
-                    app.error(format!("{e:#}"));
+                match app.agent.services() {
+                    Some(s) => {
+                        if let Err(e) = s.sched.resume(id) {
+                            app.error(format!("{e:#}"));
+                        }
+                    }
+                    None => app.error(t!("studio.agent_not_ready").to_string()),
                 }
             }
         }
@@ -836,9 +923,10 @@ fn analyse(app: &App, path: &Path, from: Option<Stage>, options: AnalysisOptions
     anyhow::ensure!(agent.models.speech_recognition.is_some(), "{}", t!("studio.no_recognizer"));
     let options = options.resolved(&agent.models);
     let ai = ai_dir(&library_dir(&app.settings));
+    let services = app.agent.services().ok_or_else(|| anyhow::anyhow!("{}", t!("studio.agent_not_ready")))?;
     match from {
-        Some(from) => pipeline::restart(&ai, path, from, options)?,
-        None => pipeline::start(&ai, path, options)?,
+        Some(from) => pipeline::restart(&services.sched, &ai, path, from, options)?,
+        None => pipeline::start(&services.sched, &ai, path, options)?,
     };
     Ok(())
 }
@@ -887,5 +975,60 @@ mod tests {
         assert_eq!(job.wrap.overflow_character, Some('…'));
         assert_eq!(job.sections.len(), 1);
         assert_eq!(job.sections[0].format.color, Color32::PLACEHOLDER, "egui_dock colours the tab");
+    }
+
+    fn row(top: f32, width: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(10.0, top), egui::vec2(width, 400.0))
+    }
+
+    #[test]
+    fn no_bar_while_the_tabs_fit() {
+        // 4 × 180 fits 900 − 24 with room to spare.
+        assert_eq!(scroll_bar_of(row(50.0, 900.0), 4, 0.0, 0.0), None);
+        assert_eq!(scroll_bar_of(row(50.0, 900.0), 0, 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn the_bar_is_a_three_pixel_strip_under_the_row() {
+        let bar = scroll_bar_of(row(50.0, 900.0), 6, 0.0, 0.0).unwrap();
+        assert_eq!(bar.track.left(), 10.0);
+        assert_eq!(bar.track.width(), 900.0, "the bar spans the row");
+        assert_eq!(bar.track.top(), 50.0 + TAB_HEIGHT, "under the tabs, not in them");
+        assert_eq!(bar.track.height(), theme::TAB_SCROLL_BAR);
+        assert_eq!(bar.overflow, 6.0 * TAB_WIDTH - (900.0 - CLOSE_ALL_WIDTH));
+        // The handle is the visible part of the row, as egui_dock sizes it.
+        assert!((bar.handle.width() - 900.0 * 876.0 / 1080.0).abs() < 0.01);
+        assert_eq!(bar.handle.top(), bar.track.top());
+    }
+
+    #[test]
+    fn the_handle_shows_how_far_the_row_is_scrolled() {
+        let rect = row(0.0, 900.0);
+        let overflow = 6.0 * TAB_WIDTH - (900.0 - CLOSE_ALL_WIDTH);
+        let at = |scroll: f32| scroll_bar_of(rect, 6, 0.0, scroll).unwrap().handle;
+        let start = at(0.0);
+        let end = at(-overflow);
+        assert_eq!(start.left(), rect.left(), "the handle starts at the left of the row");
+        assert!((end.right() - rect.right()).abs() < 0.01, "the end of the row at full scroll");
+        let middle = at(-overflow / 2.0);
+        assert!((middle.center().x - rect.center().x).abs() < 0.01);
+        assert_eq!(at(-overflow * 2.0), end, "scrolling past the end is clamped");
+        assert_eq!(at(50.0), start, "and before the start too");
+    }
+
+    #[test]
+    fn spacing_between_tabs_counts_as_hidden_width() {
+        let bar = scroll_bar_of(row(0.0, 500.0), 3, 4.0, 0.0).unwrap();
+        assert_eq!(bar.overflow, 3.0 * TAB_WIDTH + 2.0 * 4.0 - (500.0 - CLOSE_ALL_WIDTH));
+        assert!(bar.overflow / (bar.track.width() - bar.handle.width()) > 0.0);
+    }
+
+    #[test]
+    fn a_narrow_handle_keeps_its_minimum_and_fits_the_track() {
+        let bar = scroll_bar_of(row(0.0, 300.0), 20, 0.0, 0.0).unwrap();
+        assert!(bar.handle.width() >= MIN_HANDLE);
+        assert!(bar.handle.width() <= bar.track.width());
+        let tiny = scroll_bar_of(row(0.0, 10.0), 20, 0.0, 0.0).unwrap();
+        assert_eq!(tiny.handle.width(), tiny.track.width(), "no room: the handle is the whole track");
     }
 }

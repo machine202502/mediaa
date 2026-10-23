@@ -10,6 +10,7 @@ tests). **Subagents** implement; the lead decides which subagent model gets whic
 goal is to save the user's money: the lead does simple things itself when that is cheaper than
 a brief and a review, and otherwise picks the cheapest subagent that will do the task well.
 Subagent models and how to run them: [workflow/dev-context.md](workflow/dev-context.md), «Как работаем».
+How to be the lead (model, limits, commits, notifications): [workflow/lead.md](workflow/lead.md).
 
 ## Documents (they reference each other)
 
@@ -18,15 +19,18 @@ Subagent models and how to run them: [workflow/dev-context.md](workflow/dev-cont
   that is finished or rejected is removed from todos.md and recorded here.
 - [workflow/dev-context.md](workflow/dev-context.md): reference for working on the project (build,
   tests, code map, test data, workflow, pitfalls).
-- [workflow/process.md](workflow/process.md): what is in progress now — the task, its step, which subagent runs it
-  and a link to its log. It starts with a short «Сейчас» block (task, step, what runs right now and
-  since when, what is next, running subagents, Claude limits) so the user sees the state at a
-  glance; closed tasks are one line each at the end. The lead updates it whenever work starts or
-  finishes, including its own live checks.
+- [workflow/lead.md](workflow/lead.md): how to be the lead. Tool-specific steps (which limit command,
+  which notification tool) live there, not here.
+- [workflow/process.md](workflow/process.md): what is in progress now, **only as tables** — one
+  table per batch of work, batches one after another (newest last), columns «Шаг | Что |
+  Исполнитель | Состояние | Лог»; no prose blocks, no closed tasks. Every line of work is a row:
+  subagent runs, the lead's own steps (design, prompt texts, reviews, live checks) and questions
+  waiting for the user. The lead updates it whenever work starts or finishes. Format and the
+  limits table: [workflow/lead.md](workflow/lead.md).
 - **Closing a task is part of the task, never an offer.** When a task is finished, before
   reporting it or committing: record it in done.md under «Сделано» (rejected ideas go under
-  «Отклонено»), remove it from todos.md, mark it closed in process.md. After the commit, add its
-  hash to process.md at once.
+  «Отклонено»), remove it from todos.md, mark its rows done in process.md. After the commit, add
+  the hash to its done.md entry and remove the finished batch tables from process.md.
 - [workflow/agent.md](workflow/agent.md): the agent's architecture and phases.
 - [workflow/engine.md](workflow/engine.md), [workflow/topics.md](workflow/topics.md), [workflow/pipeline.md](workflow/pipeline.md): designs (contracts) of larger tasks.
 

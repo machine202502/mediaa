@@ -161,6 +161,15 @@ mod tests {
             "{assembled}"
         );
         assert!(assembled.contains("The subtopics may become sections") && !assembled.contains("Transcript of the topic"), "{assembled}");
+
+        // The corrective ask after a cut-off breakdown; `tokens`
+        // is the limit the previous answer hit.
+        let shorter = render("outline/detail_shorter.j2", context! { tokens => 1819 });
+        insta::assert_snapshot!("outline_detail_shorter", shorter);
+        assert_eq!(
+            shorter,
+            "Your answer was cut off at the limit of 1819 tokens, so it is not valid JSON. Write the whole answer again, shorter, so that it fits: fewer and shorter items, the same sections, nothing new."
+        );
     }
 
     fn tools() -> Vec<minijinja::Value> {
@@ -177,6 +186,8 @@ mod tests {
         let plain = render("agent/system.j2", context! { kind => "recording", web => false, card, tools => tools(), facts => Vec::<String>::new(), summary => "" });
         insta::assert_snapshot!("agent_system_recording", plain);
         assert!(!plain.contains("web_search") && plain.contains("Cite the moments you rely on as [m:ss], with times"));
+        let pointed = "cite the replies.\n- The user may point at a part of the recording:";
+        assert!(plain.contains(pointed), "the part-of-the-recording rule follows the topic map: {plain}");
         assert!(plain.contains("in playback.\n\nTools:\n- search: "), "one blank line between the card and the tools");
 
         let card = render(
@@ -190,6 +201,7 @@ mod tests {
         let full = render("agent/system.j2", context! { kind => "folder", web => true, card, tools => tools(), facts => ["Анна — руководитель"], summary => "Говорили о сроках." });
         insta::assert_snapshot!("agent_system_folder_web_memory", full);
         assert!(full.contains("#1 «Планёрка», 27:10. About: Сроки; Бюджет\n#2 «Звонок», 3:05\n#3 «Новое», 1:00 — not transcribed yet\n"));
+        assert!(full.contains(pointed), "the part-of-the-recording rule follows the topic map: {full}");
         assert!(full.contains("- When the user asks to check the internet") && full.contains("[#2 12:30] (the recording's number"));
         assert!(full.contains("\n\nRemembered in this chat:\n- Анна — руководитель\n\nThe earlier conversation, summarised:\nГоворили о сроках."));
     }
@@ -298,8 +310,6 @@ mod tests {
 
     #[test]
     fn calculator_time_and_provider_texts() {
-        // Exactly what the code wrote before the move to templates.
-        assert_eq!(tool("step_title"), "3-8 words saying what this step does, in the user's language");
         assert_eq!(render("errors/arguments_not_json.j2", context! { tool => "search", error => "EOF", raw => "{" }), "the arguments of search are not JSON (EOF): {");
         assert_eq!(render("errors/empty_expression.j2", ()), "empty expression");
         assert_eq!(render("errors/cannot_evaluate.j2", context! { expr => "2+", error => "bad" }), "cannot evaluate \"2+\": bad");
@@ -324,6 +334,24 @@ mod tests {
 
 Write its title in Russian:"), "{user}");
         assert!(user.ends_with("Title:") && !user.contains("→"), "no example to copy: {user}");
+    }
+
+    #[test]
+    fn quote_and_step_title_prompts() {
+        let quote = render("agent/quote.j2", context! { label => "@s1", start => "1:40", end => "2:29", text => "Отчёт в пятницу" });
+        insta::assert_snapshot!("agent_quote", quote);
+        assert_eq!(quote.trim_end_matches('\n'), "(quoting @s1 1:40–2:29: \"Отчёт в пятницу\")");
+        let system = render("chat/step_title_system.j2", ());
+        insta::assert_snapshot!("step_title_system", system);
+        assert!(system.contains("Keep speaker labels like @s1 as they are."));
+        let phrase = render(
+            "chat/step_title.j2",
+            context! { question => "Когда отчёт?", tool => "search", purpose => "Finds places.", arguments => "{\"query\":\"отчёт\"}", language => "Russian" },
+        );
+        insta::assert_snapshot!("step_title", phrase);
+        assert!(phrase.contains("The question: Когда отчёт?\nThe tool: search — Finds places.\nIts arguments: {\"query\":\"отчёт\"}\n\nWrite in Russian"), "{phrase}");
+        assert!(phrase.trim_end().ends_with("Phrase:"), "{phrase}");
+        assert!(!phrase.contains("Ищу"), "no example a small model could copy: {phrase}");
     }
 
     #[test]

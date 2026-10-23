@@ -5,11 +5,12 @@
 
 use mediaa_engine::llm::{split_thinking, Part, ThinkSplitter};
 use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Device, Engine, Priority, Thinking};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::sync::atomic::AtomicBool;
 
 /// Who wrote a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Role {
     System,
     User,
@@ -37,7 +38,7 @@ impl From<Role> for ChatRole {
 }
 
 /// A message of a chat with the model.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
@@ -63,7 +64,7 @@ pub struct ToolSpec {
 /// One step of the model.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
-    Tool { thought: String, title: String, tool: String, args: Value },
+    Tool { thought: String, tool: String, args: Value },
     Answer { thought: String, text: String },
 }
 
@@ -122,7 +123,7 @@ pub fn step_schema(tools: &[ToolSpec], may_answer: bool, thinking: bool) -> Valu
     };
     let mut options: Vec<Value> = tools
         .iter()
-        .map(|t| option(json!({"action": {"const": t.name}, "title": {"type": "string", "maxLength": 80}, "args": t.params}), vec!["action", "title", "args"]))
+        .map(|t| option(json!({"action": {"const": t.name}, "args": t.params}), vec!["action", "args"]))
         .collect();
     if may_answer || tools.is_empty() {
         // First: models lean towards the first option once they have what they need.
@@ -145,7 +146,7 @@ pub fn parse_step(text: &str) -> anyhow::Result<Step> {
     }
     anyhow::ensure!(!action.is_empty(), "the step has no action: {text}");
     let tool = action;
-    Ok(Step::Tool { thought: s("thought"), title: s("title"), tool, args: o.get("args").cloned().unwrap_or(Value::Object(Map::new())) })
+    Ok(Step::Tool { thought: s("thought"), tool, args: o.get("args").cloned().unwrap_or(Value::Object(Map::new())) })
 }
 
 /// Streams the text of the `answer` field out of a step's JSON while it is being written:
@@ -408,6 +409,8 @@ mod tests {
         let options = s["oneOf"].as_array().unwrap();
         assert_eq!(options.len(), 3);
         assert_eq!(options[1]["properties"]["action"]["const"], "search");
+        assert!(options[1]["properties"].get("title").is_none(), "the step has no title field");
+        assert_eq!(options[1]["required"], json!(["thought", "action", "args"]));
         assert!(options[0]["properties"]["answer"].is_object(), "the answer first");
         // Without tools: the answer only.
         assert_eq!(step_schema(&[], false, false)["required"], json!(["thought", "action", "answer"]));
@@ -551,7 +554,7 @@ mod tests {
     #[test]
     fn steps_parse() {
         let t = parse_step(r#"{"thought":"ищу","action":"search","title":"Ищу бюджет","args":{"q":"бюджет"}}"#).unwrap();
-        assert_eq!(t, Step::Tool { thought: "ищу".into(), title: "Ищу бюджет".into(), tool: "search".into(), args: json!({"q": "бюджет"}) });
+        assert_eq!(t, Step::Tool { thought: "ищу".into(), tool: "search".into(), args: json!({"q": "бюджет"}) }, "a leftover title is ignored");
         assert_eq!(parse_step(r#" {"thought":"","action":"answer","answer":" Да. "} "#).unwrap(), Step::Answer { thought: String::new(), text: "Да.".into() });
         assert!(parse_step("не json").is_err());
         assert!(parse_step(r#"{"thought":"x"}"#).is_err());

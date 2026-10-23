@@ -292,11 +292,27 @@ pub struct Budget {
     pub indexing: u32,
     pub web_search: u32,
     pub provider_calls: u32,
+    /// How long an idle local model stays loaded, in seconds. The settings page does not edit this yet.
+    #[serde(default = "default_keep_alive_secs")]
+    pub keep_alive_secs: u64,
+}
+
+fn default_keep_alive_secs() -> u64 {
+    300
 }
 
 impl Default for Budget {
     fn default() -> Self {
-        Self { gpu_memory_gb: 8.0, ram_memory_gb: 8.0, agent: 2, transcription: 1, indexing: 1, web_search: 2, provider_calls: 4 }
+        Self {
+            gpu_memory_gb: 8.0,
+            ram_memory_gb: 8.0,
+            agent: 2,
+            transcription: 1,
+            indexing: 1,
+            web_search: 2,
+            provider_calls: 4,
+            keep_alive_secs: default_keep_alive_secs(),
+        }
     }
 }
 
@@ -582,6 +598,9 @@ mod tests {
         assert_eq!(back.devices.get(ModelRole::SpeechRecognition), Device::Cpu);
         assert_eq!(back.devices.get(ModelRole::Agent), Device::Auto);
         assert_eq!(back.budget.gpu_memory_gb, 5.5);
+        assert_eq!(back.budget.keep_alive_secs, 300);
+        let bare: Budget = toml::from_str("gpu_memory_gb = 1.0\n").unwrap();
+        assert_eq!(bare.keep_alive_secs, 300);
     }
 
     #[test]

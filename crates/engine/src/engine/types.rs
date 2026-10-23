@@ -4,6 +4,10 @@ use crate::engine::EngineError;
 use crate::hub;
 use crate::llm;
 use mediaa_core::agent::ModelSource;
+use std::time::Duration;
+
+/// How long an idle model stays loaded when a budget does not say. Zero unloads it at once.
+pub const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(5 * 60);
 
 pub use mediaa_core::agent::Device;
 
@@ -210,10 +214,16 @@ pub struct Gpu {
 /// A model the engine keeps in memory.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedModel {
+    /// The loaded file (a model spec the engine resolved to a path).
     pub model: String,
     pub pool: Pool,
+    /// Memory the loaded model takes (weights and context).
     pub bytes: u64,
     pub users: u32,
+    /// How long the model has been unused. Zero while a job uses it.
+    pub idle: Duration,
+    /// How soon an idle model is unloaded. `None` while a job uses it.
+    pub unloads_in: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,16 +250,28 @@ pub struct WaitingModel {
     pub progress: Option<Progress>,
 }
 
-/// Memory the engine may use for models.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Memory the engine may use for models, and how long an idle model stays loaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
     pub gpu_bytes: u64,
     pub ram_bytes: u64,
+    /// How long an idle model stays loaded. Zero unloads it as soon as its last job finishes.
+    pub keep_alive: Duration,
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self { gpu_bytes: 0, ram_bytes: 0, keep_alive: DEFAULT_KEEP_ALIVE }
+    }
 }
 
 impl From<mediaa_core::agent::Budget> for Budget {
     fn from(budget: mediaa_core::agent::Budget) -> Budget {
-        Budget { gpu_bytes: budget.gpu_bytes(), ram_bytes: budget.ram_bytes() }
+        Budget {
+            gpu_bytes: budget.gpu_bytes(),
+            ram_bytes: budget.ram_bytes(),
+            keep_alive: Duration::from_secs(budget.keep_alive_secs),
+        }
     }
 }
 
@@ -459,8 +481,11 @@ mod tests {
     #[test]
     fn a_budget_comes_from_the_settings_in_bytes() {
         let settings = mediaa_core::agent::Budget { gpu_memory_gb: 2.0, ram_memory_gb: 0.5, ..Default::default() };
-        assert_eq!(Budget::from(settings.clone()), Budget { gpu_bytes: 2 << 30, ram_bytes: 1 << 29 });
+        assert_eq!(Budget::from(settings.clone()), Budget { gpu_bytes: 2 << 30, ram_bytes: 1 << 29, keep_alive: DEFAULT_KEEP_ALIVE });
+        let custom = mediaa_core::agent::Budget { keep_alive_secs: 12, ..settings };
+        assert_eq!(Budget::from(custom).keep_alive, Duration::from_secs(12));
         assert_eq!(Budget::from(settings).ram_bytes, 536_870_912);
+        assert_eq!(Budget::default().keep_alive, DEFAULT_KEEP_ALIVE);
     }
 
     #[test]

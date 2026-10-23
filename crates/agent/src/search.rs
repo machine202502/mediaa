@@ -78,8 +78,8 @@ pub fn search_files(engine: &dyn Engine, slots: &Slots, settings: &AgentSettings
                 n_ctx: Some(EMBED_CTX),
                 device: Some(device(ModelRole::Embedding)),
                 hf_token: hf_token.clone(),
-            })?;
-            found.into_iter().next().filter(|v| !v.is_empty()).ok_or_else(|| anyhow::anyhow!("the engine returned no embedding"))
+            }, &cancel)?;
+            found.into_iter().next().filter(|v| !v.is_empty()).ok_or_else(|| anyhow::anyhow!("the model returned no embedding"))
         };
         run().map_err(|e| log::info!("search without meaning: {e:#}")).ok()
     });
@@ -113,7 +113,7 @@ pub fn search_files(engine: &dyn Engine, slots: &Slots, settings: &AgentSettings
                 n_ctx: Some(EMBED_CTX),
                 device: Some(device(ModelRole::Reranker)),
                 hf_token: hf_token.clone(),
-            })?;
+            }, &cancel)?;
             let mut scores = vec![0.0; hits.len()];
             for result in results {
                 if let Some(score) = scores.get_mut(result.index) {

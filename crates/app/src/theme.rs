@@ -63,6 +63,32 @@ pub fn palette(ui: &egui::Ui) -> Palette {
     }
 }
 
+/// Height of the horizontal bar under a tab row. Reserved even when the bar is hidden,
+/// so the row does not grow when the tabs stop fitting.
+pub const TAB_SCROLL_BAR: f32 = 3.0;
+
+/// Solid (not floating) horizontal scroll for every tab row: a 3 px muted bar in the
+/// palette, with its strip of space always taken. Call on the `Ui` that owns the
+/// `ScrollArea`, before showing it. Only that `Ui` is restyled.
+pub fn tab_row_scroll(ui: &mut egui::Ui) {
+    let p = palette(ui);
+    let mut scroll = egui::style::ScrollStyle::solid();
+    scroll.bar_width = TAB_SCROLL_BAR;
+    scroll.bar_inner_margin = 0.0;
+    scroll.bar_outer_margin = 0.0;
+    scroll.handle_min_length = 12.0;
+    // Handle colour is the inactive widget fill; the track is `extreme_bg_color`.
+    scroll.foreground_color = false;
+    ui.style_mut().spacing.scroll = scroll;
+    let visuals = ui.visuals_mut();
+    let radius = CornerRadius::same(2);
+    visuals.widgets.inactive.bg_fill = p.text_weak;
+    visuals.widgets.inactive.corner_radius = radius;
+    visuals.widgets.hovered.corner_radius = radius;
+    visuals.widgets.active.corner_radius = radius;
+    visuals.extreme_bg_color = p.border;
+}
+
 fn visuals(p: &Palette, dark: bool) -> Visuals {
     let mut v = if dark { Visuals::dark() } else { Visuals::light() };
     let r = CornerRadius::same(6);
@@ -271,6 +297,12 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Respon
 /// [`icon_button`] in a box of the given side — for rows whose height must not change when the
 /// button appears (a smaller box keeps the row's geometry).
 pub fn icon_button_sized(ui: &mut egui::Ui, icon: &str, tooltip: &str, side: f32) -> egui::Response {
+    icon_face(ui, icon, tooltip, side).on_hover_text(tooltip)
+}
+
+/// The same square as [`icon_button_sized`] without a tooltip, so the caller can attach one
+/// without a shadow.
+pub fn icon_face(ui: &mut egui::Ui, icon: &str, label: &str, side: f32) -> egui::Response {
     // Painted by hand at a fixed size: egui buttons that show their frame only on hover grow
     // by the frame stroke, which nudges the whole row sideways.
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
@@ -296,8 +328,8 @@ pub fn icon_button_sized(ui: &mut egui::Ui, icon: &str, tooltip: &str, side: f32
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip));
-    resp.on_hover_text(tooltip)
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label));
+    resp
 }
 
 /// Segmented control: a row of mutually exclusive options.
@@ -410,6 +442,22 @@ pub fn equal_cards(
 
 #[cfg(test)]
 mod tests {
+    /// The tab-row bar is a solid 3 px strip in the palette, not a floating overlay.
+    #[test]
+    fn tab_row_scroll_is_thin_solid_and_muted() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            super::tab_row_scroll(ui);
+            let scroll = ui.spacing().scroll;
+            assert!(!scroll.floating);
+            assert_eq!(scroll.bar_width, super::TAB_SCROLL_BAR);
+            assert_eq!(scroll.allocated_width(), super::TAB_SCROLL_BAR);
+            let p = super::palette(ui);
+            assert_eq!(ui.visuals().widgets.inactive.bg_fill, p.text_weak);
+            assert_eq!(ui.visuals().extreme_bg_color, p.border);
+        });
+        harness.run();
+    }
+
     /// Windows always has Segoe UI Symbol: file names with `⧸` render.
     #[cfg(windows)]
     #[test]

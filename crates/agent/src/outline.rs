@@ -12,16 +12,16 @@
 
 use crate::assistant::{Message, Role};
 use crate::prompts;
-use crate::slots::Slots;
-use crate::worker::{Checkpoints, TaskHandler};
-use mediaa_core::agent::{AgentSettings, AnalysisOptions, ModelRole, WorkKind};
+use crate::run::{Host, Stage, Work};
+use crate::scope::Scope;
+use mediaa_core::agent::{AgentSettings, AnalysisOptions, ModelRole};
 use mediaa_core::library::human_duration;
 use mediaa_core::outline::{
     self, Chapter, ChunkVector, Digest, FineLine, Item, Part, PlanTopic, Quote, Section, SectionKind, Window, DIGEST_SCHEMA, WINDOW_WORDS,
 };
-use mediaa_core::queue::{Child, NewTask, Queue, Task};
+use mediaa_queue::{Child, NewTask, Resource, Store, Task};
 use mediaa_core::transcript::{self, Reply, Transcript};
-use mediaa_engine::{ChatMessage, ChatRequest, Device, EmbedKind, EmbeddingsRequest, Engine, Priority};
+use mediaa_engine::{ChatMessage, ChatRequest, Device, EmbedKind, EmbeddingsRequest, Engine, Priority, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -62,6 +62,10 @@ const ANSWER_OVERHEAD_TOKENS: u32 = 64;
 /// Spare past a full answer (a quarter of it), so a sentence can run past the length the prompt
 /// asks for and the JSON still closes instead of being cut.
 const ANSWER_MARGIN_DIV: u32 = 4;
+/// Tokens the chat template adds around the system and user text.
+const TEMPLATE_OVERHEAD_TOKENS: u32 = 32;
+/// Tokens left free at the end of the context (the engine refuses a prompt that fills it).
+const CTX_RESERVE: u32 = 8;
 
 /// Lengths a full digest is budgeted for. The prompts ask the model to stay near them; the
 /// schema does not enforce them.
@@ -87,10 +91,45 @@ fn digest_tokens() -> u32 {
     answer_tokens(chars, items)
 }
 
-/// The limit of the sections of a topic (from the caps of [`outline::sections_schema`]).
+/// The limit a full answer was budgeted for when the schema capped each text
+/// ([`outline::SECTION_TEXT_CHARS`]). 13.9 stopped enforcing those caps, so this is only the
+/// floor: a topic whose text is longer is budgeted from that text ([`topic_section_tokens`]).
 fn sections_tokens() -> u32 {
     let chars = outline::SECTIONS_MAX * (outline::SECTION_TITLE_CHARS + outline::SECTION_ITEMS_MAX * outline::SECTION_TEXT_CHARS);
     answer_tokens(chars, outline::SECTIONS_MAX * (outline::SECTION_ITEMS_MAX + 1))
+}
+
+/// The answer limit for one breakdown: the schema floor, or the topic's own text when that is
+/// larger, with the same margin. `source_chars` / `source_items` are the transcript (or the
+/// points the sections are assembled from), not the character caps the schema used to enforce.
+fn topic_section_tokens(source_chars: usize, source_items: usize) -> u32 {
+    let chars = source_chars.min(OUTLINE_CTX as usize * CHARS_PER_TOKEN as usize * 8);
+    let items = source_items.clamp(1, 10_000);
+    answer_tokens(chars, items).max(sections_tokens())
+}
+
+/// Tokens of a prompt text at [`CHARS_PER_TOKEN`].
+fn text_tokens(text: &str) -> u32 {
+    (text.chars().count() as u32).div_ceil(CHARS_PER_TOKEN)
+}
+
+/// How many tokens the sections call may spend, and whether a full answer still fits in
+/// [`OUTLINE_CTX`] next to the prompt.
+struct SectionBudget {
+    max_tokens: u32,
+    /// The limit before it was shrunk to the context window.
+    wanted: u32,
+    prompt_tokens: u32,
+    fits: bool,
+}
+
+fn section_budget(system: &str, user: &str, source_chars: usize, source_items: usize) -> SectionBudget {
+    let prompt_tokens = text_tokens(system).saturating_add(text_tokens(user)).saturating_add(TEMPLATE_OVERHEAD_TOKENS);
+    let wanted = topic_section_tokens(source_chars, source_items);
+    let room = OUTLINE_CTX.saturating_sub(prompt_tokens).saturating_sub(CTX_RESERVE);
+    let fits = room > 0 && wanted <= room;
+    let max_tokens = wanted.min(room).max(1);
+    SectionBudget { max_tokens, wanted, prompt_tokens, fits }
 }
 
 /// The limit of the points of one window of a long topic (from the caps of
@@ -258,8 +297,151 @@ fn merge_sections(sections: Vec<Section>) -> Vec<Section> {
     out
 }
 
+/// One model answer: the text and the token usage, when the engine reported it.
+struct ModelText {
+    text: String,
+    usage: Option<Usage>,
+}
+
+/// Sections parsed from a call, and the note for the task details when the answer was cut or
+/// does not fit the context.
+struct SectionAnswer {
+    raw: RawSections,
+    note: Option<String>,
+}
+
+/// The breakdown of one topic and, when the answer was cut or does not fit, why.
+struct Breakdown {
+    sections: Vec<Section>,
+    note: Option<String>,
+}
+
+/// The byte just after the `[` of the `"sections"` array.
+fn sections_array_at(text: &str) -> Option<usize> {
+    let key = text.find("\"sections\"")?;
+    let after = key + "\"sections\"".len();
+    let rel = text[after..].find('[')?;
+    Some(after + rel + 1)
+}
+
+/// The end (exclusive) of the object that starts at `start`, when its braces close.
+/// An object cut off mid-item has no end: a repair crate would close it and keep the cut section.
+fn closed_object_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut i = start;
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if c == b'\\' {
+                escape = true;
+            } else if c == b'"' {
+                in_string = false;
+            }
+        } else {
+            match c {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_sections(text: &str) -> Option<RawSections> {
+    serde_json::from_str(text.trim()).ok()
+}
+
+/// Sections whose objects closed completely. The one the answer was cut inside is dropped.
+fn closed_sections(text: &str) -> RawSections {
+    if let Some(raw) = parse_sections(text) {
+        return raw;
+    }
+    let mut sections = Vec::new();
+    let Some(mut i) = sections_array_at(text) else {
+        return RawSections { sections };
+    };
+    let bytes = text.as_bytes();
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] == b']' {
+            break;
+        }
+        if bytes[i] == b',' {
+            i += 1;
+            continue;
+        }
+        if bytes[i] != b'{' {
+            break;
+        }
+        let Some(end) = closed_object_end(bytes, i) else { break };
+        let Ok(section) = serde_json::from_str::<RawSection>(&text[i..end]) else { break };
+        sections.push(section);
+        i = end;
+    }
+    RawSections { sections }
+}
+
+fn nonempty_sections(raw: &RawSections) -> usize {
+    raw.sections.iter().filter(|section| section.items.iter().any(|item| !item.text.trim().is_empty())).count()
+}
+
+fn end_line(text: &str) -> usize {
+    text.lines().count().max(1)
+}
+
+fn hit_token_limit(usage: Option<Usage>, max_tokens: u32) -> bool {
+    usage.is_some_and(|u| u.completion_tokens >= max_tokens)
+}
+
+fn hit_context(usage: Option<Usage>) -> bool {
+    usage.is_some_and(|u| u.prompt_tokens.saturating_add(u.completion_tokens) + 1 >= OUTLINE_CTX)
+}
+
+/// What the task details say. `cut_text` is the answer that did not close; `kept` is how many
+/// sections of that answer closed (`None` when a later complete answer replaced it).
+fn section_note(cut_text: Option<&str>, kept: Option<usize>, budget: &SectionBudget, first: Option<Usage>, second: Option<Usage>) -> Option<String> {
+    let mut bits = Vec::new();
+    if let Some(text) = cut_text {
+        let line = end_line(text);
+        match kept {
+            Some(k) => bits.push(format!("cut at line {line} after {k} complete sections")),
+            None => bits.push(format!("the first answer was cut at line {line}")),
+        }
+        if hit_token_limit(first, budget.max_tokens) || hit_token_limit(second, budget.max_tokens) {
+            bits.push(format!("hit the limit of {} tokens", budget.max_tokens));
+        } else if hit_context(first) || hit_context(second) {
+            bits.push(format!("hit the context window of {OUTLINE_CTX} tokens"));
+        }
+    }
+    if !budget.fits {
+        bits.push(format!(
+            "the prompt (~{} tokens) and the answer ({} tokens) do not fit the context of {OUTLINE_CTX} tokens",
+            budget.prompt_tokens, budget.wanted
+        ));
+    }
+    if bits.is_empty() {
+        None
+    } else {
+        Some(bits.join(": "))
+    }
+}
+
 /// A point of one window of a long topic, as the model wrote it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RawPoint {
     #[serde(default)]
     time: String,
@@ -275,6 +457,10 @@ struct RawPoints {
 
 fn chat_request(model: &str, system: String, user: String, schema: Value, max_tokens: u32, device: Device, hf_token: Option<&str>) -> ChatRequest {
     let messages = [Message::new(Role::System, system), Message::new(Role::User, user)];
+    chat_request_messages(model, &messages, schema, max_tokens, device, hf_token)
+}
+
+fn chat_request_messages(model: &str, messages: &[Message], schema: Value, max_tokens: u32, device: Device, hf_token: Option<&str>) -> ChatRequest {
     ChatRequest {
         model: model.to_string(),
         messages: messages.iter().map(|m| ChatMessage::new(m.role.into(), m.content.clone())).collect(),
@@ -424,20 +610,45 @@ impl Ask<'_> {
         Ok(answer.same)
     }
 
+    fn complete(&self, messages: &[Message], schema: Value, max_tokens: u32) -> anyhow::Result<ModelText> {
+        let request = chat_request_messages(self.model, messages, schema, max_tokens, self.device, self.hf_token);
+        let answer = self.engine.chat(&request, self.cancel, &mut |_| true)?;
+        Ok(ModelText { text: answer.content, usage: answer.usage })
+    }
+
     /// The sections of a topic, from its transcript or from the points of its windows; the item
-    /// times are checked by the caller, against the topic's replies.
-    fn sections(&self, user: String) -> anyhow::Result<RawSections> {
-        let request = chat_request(
-            self.model,
-            prompts::render("outline/detail_system.j2", ()),
-            user,
-            outline::sections_schema(),
-            sections_tokens(),
-            self.device,
-            self.hf_token,
-        );
-        let text = self.engine.chat(&request, self.cancel, &mut |_| true)?.content;
-        serde_json::from_str(text.trim()).map_err(|e| anyhow::anyhow!("the model's sections are not valid: {e}"))
+    /// times are checked by the caller, against the topic's replies. `source_chars` and
+    /// `source_items` are that text: the answer limit is taken from them, then shrunk so the
+    /// prompt and the answer fit [`OUTLINE_CTX`]. A cut-off JSON is asked once to be shorter;
+    /// sections that closed completely are kept either way.
+    fn sections(&self, user: String, source_chars: usize, source_items: usize) -> anyhow::Result<SectionAnswer> {
+        let system = prompts::render("outline/detail_system.j2", ());
+        let budget = section_budget(&system, &user, source_chars, source_items);
+        let schema = outline::sections_schema();
+        let mut messages = vec![Message::new(Role::System, system), Message::new(Role::User, user)];
+        let first = self.complete(&messages, schema.clone(), budget.max_tokens)?;
+        if let Some(raw) = parse_sections(&first.text) {
+            return Ok(SectionAnswer { raw, note: section_note(None, None, &budget, first.usage, None) });
+        }
+        let retry = prompts::render("outline/detail_shorter.j2", minijinja::context! { tokens => budget.max_tokens });
+        messages.push(Message::new(Role::Assistant, first.text.clone()));
+        messages.push(Message::new(Role::User, retry));
+        let second = self.complete(&messages, schema, budget.max_tokens)?;
+        if let Some(raw) = parse_sections(&second.text) {
+            if nonempty_sections(&raw) > 0 {
+                let note = section_note(Some(&first.text), None, &budget, first.usage, second.usage);
+                return Ok(SectionAnswer { raw, note });
+            }
+        }
+        let from_second = closed_sections(&second.text);
+        let (raw, cut_text) = if nonempty_sections(&from_second) > 0 {
+            (from_second, second.text)
+        } else {
+            (closed_sections(&first.text), first.text)
+        };
+        let kept = nonempty_sections(&raw);
+        let note = section_note(Some(&cut_text), Some(kept), &budget, first.usage, second.usage);
+        Ok(SectionAnswer { raw, note })
     }
 
     /// The points of one window of a long topic.
@@ -522,6 +733,18 @@ fn topic_replies(replies: &[Reply], topic: &PlanTopic, with_end: bool) -> Vec<Re
         .collect()
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DigestCursor {
+    done: usize,
+    parts: Vec<Digest>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct DetailCursor {
+    done: usize,
+    points: Vec<RawPoint>,
+}
+
 /// The digest of one topic: one call when its text fits a window, else the digests of its
 /// windows and then a digest of those. Every quote is checked against the topic's replies.
 fn digest_topic(ask: &Ask<'_>, replies: &[Reply], topic: &PlanTopic, with_end: bool, previous: Option<&str>, language: &str) -> anyhow::Result<Digest> {
@@ -570,7 +793,7 @@ fn part_context(parts: &[Part]) -> Vec<minijinja::Value> {
 /// the points of every window and one more call that assembles the sections from them (the
 /// transcript is not read again). Every item's time is checked against the topic's replies like
 /// a quote: an unconfirmed time becomes `None`, the item stays.
-fn detail_topic(ask: &Ask<'_>, replies: &[Reply], language: &str, chapter: &Chapter, last: bool) -> anyhow::Result<Vec<Section>> {
+fn detail_topic(ask: &Ask<'_>, replies: &[Reply], language: &str, chapter: &Chapter, last: bool) -> anyhow::Result<Breakdown> {
     let topic = PlanTopic { start: chapter.start, end: chapter.end };
     let picked = topic_replies(replies, &topic, last);
     // Short lines with their own times: one long reply would otherwise give every item the
@@ -580,39 +803,45 @@ fn detail_topic(ask: &Ask<'_>, replies: &[Reply], language: &str, chapter: &Chap
     let (title, summary) = (&chapter.digest.title, &chapter.digest.summary);
     let (start, end) = (human_duration(chapter.start), human_duration(chapter.end));
     let parts = part_context(&chapter.digest.parts);
-    if words <= WINDOW_WORDS {
+    let parsed = if words <= WINDOW_WORDS {
         let text = lines.iter().map(|l| l.text.clone()).collect::<Vec<_>>().join("\n");
+        let source_chars = text.chars().count();
+        let source_items = lines.len();
         let user = prompts::render(
             "outline/detail.j2",
             minijinja::context! { title, summary, start, end, language, parts, points => Vec::<minijinja::Value>::new(), text },
         );
-        return Ok(ask.sections(user)?.into_sections(&lines));
-    }
-    let windows = outline::windows_of_lines(&lines, WINDOW_WORDS);
-    let n = windows.len();
-    let mut points: Vec<RawPoint> = Vec::new();
-    for (i, window) in windows.iter().enumerate() {
+        ask.sections(user, source_chars, source_items)?
+    } else {
+        let windows = outline::windows_of_lines(&lines, WINDOW_WORDS);
+        let n = windows.len();
+        let mut points: Vec<RawPoint> = Vec::new();
+        for (i, window) in windows.iter().enumerate() {
+            let user = prompts::render(
+                "outline/detail_window.j2",
+                minijinja::context! {
+                    title, summary,
+                    start => human_duration(window.start),
+                    end => human_duration(window.end),
+                    number => i + 1,
+                    parts => n,
+                    language,
+                    text => &window.text,
+                },
+            );
+            points.extend(ask.points(user)?);
+        }
+        let source_chars: usize = points.iter().map(|point| point.text.chars().count()).sum();
+        let source_items = points.len();
+        let points: Vec<minijinja::Value> =
+            points.iter().map(|point| minijinja::context! { time => &point.time, text => &point.text }).collect();
         let user = prompts::render(
-            "outline/detail_window.j2",
-            minijinja::context! {
-                title, summary,
-                start => human_duration(window.start),
-                end => human_duration(window.end),
-                number => i + 1,
-                parts => n,
-                language,
-                text => &window.text,
-            },
+            "outline/detail.j2",
+            minijinja::context! { title, summary, start, end, language, parts, points, text => "" },
         );
-        points.extend(ask.points(user)?);
-    }
-    let points: Vec<minijinja::Value> =
-        points.iter().map(|point| minijinja::context! { time => &point.time, text => &point.text }).collect();
-    let user = prompts::render(
-        "outline/detail.j2",
-        minijinja::context! { title, summary, start, end, language, parts, points, text => "" },
-    );
-    Ok(ask.sections(user)?.into_sections(&lines))
+        ask.sections(user, source_chars, source_items)?
+    };
+    Ok(Breakdown { sections: parsed.raw.into_sections(&lines), note: parsed.note })
 }
 
 /// The title of a task in the queue: the file (what the task is about; the queue page builds the
@@ -637,7 +866,7 @@ pub fn topics_task(path: &Path, options: &AnalysisOptions) -> NewTask {
 
 /// The plan task of the topics of a recording.
 pub fn plan_task(path: &Path, options: &AnalysisOptions) -> NewTask {
-    NewTask::new(PLAN_KIND, &file_title(path), &json!({ "path": path, "options": options }))
+    analysis_leaf(NewTask::new(PLAN_KIND, &file_title(path), &json!({ "path": path, "options": options })), path)
 }
 
 /// The composite task of the breakdown of every final topic.
@@ -655,7 +884,7 @@ pub fn detail_tasks(path: &Path, options: &AnalysisOptions, chapters: &[Chapter]
             let words: usize = topic_replies(replies, &topic, i + 1 == chapters.len()).iter().map(|r| r.words.len()).sum();
             let title = topic_title(&chapter.digest.title, i + 1);
             Child::new(
-                NewTask::new(DETAIL_KIND, &title, &json!({ "path": path, "options": options, "topic": i }))
+                analysis_leaf(NewTask::new(DETAIL_KIND, &title, &json!({ "path": path, "options": options, "topic": i })), path)
                     .units(words as f64 / 1000.0)
                     .priority(TOPIC_PRIORITY),
             )
@@ -784,6 +1013,7 @@ struct Embed<'a> {
     model: String,
     device: Device,
     hf_token: Option<&'a str>,
+    cancel: &'a AtomicBool,
     cache: HashMap<String, Vec<f64>>,
     /// Set after the first failure: the merge goes on with the chunk similarities alone.
     failed: bool,
@@ -807,7 +1037,7 @@ impl Embed<'_> {
                 device: Some(self.device),
                 hf_token: self.hf_token.map(str::to_string),
             };
-            match self.engine.embeddings(&request) {
+            match self.engine.embeddings(&request, self.cancel) {
                 Ok(vectors) if vectors.len() == missing.len() && vectors.iter().all(|v| !v.is_empty()) => {
                     for (text, vector) in missing.into_iter().zip(vectors) {
                         self.cache.insert(text, vector.into_iter().map(f64::from).collect());
@@ -1040,20 +1270,21 @@ impl Merger<'_, '_> {
 /// `outline-merged` says the table is final. The digest-stage chapters are kept in `outline-topics`
 /// so the merge can be re-run alone.
 #[allow(clippy::too_many_arguments)]
+/// One merge decision. `None`: another decision remains (its state is in the transcript).
+/// `Some(n)`: the chapters are final and there are `n` of them.
 fn merge_stage(
     t: &Transcript,
     ask: &Ask<'_>,
     language: &str,
     embedding: Option<(&str, Device)>,
     hf_token: Option<&str>,
-    cp: &mut Checkpoints,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<Option<usize>> {
     if t.meta(MERGED_KEY)?.is_some() {
         if let Some(json) = t.meta(FINAL_KEY)? {
             write_chapters(t, &serde_json::from_str::<Vec<Chapter>>(&json)?)?;
             t.remove_meta(FINAL_KEY)?;
         }
-        return Ok(t.chapters()?.len());
+        return Ok(Some(t.chapters()?.len()));
     }
     let chapters = t.chapters()?;
     if t.meta(TOPICS_KEY)?.is_none() {
@@ -1061,13 +1292,13 @@ fn merge_stage(
     }
     if chapters.len() < 2 {
         t.set_meta(MERGED_KEY, "1")?;
-        return Ok(chapters.len());
+        return Ok(Some(chapters.len()));
     }
     let chunks = t.chunks_with_embeddings()?;
     if chunks.is_empty() || chunks.iter().any(|(_, embedding)| embedding.is_none()) {
         log::info!("outline merge: the chunks have no embeddings, so the topics are not merged");
         t.set_meta(MERGED_KEY, "1")?;
-        return Ok(chapters.len());
+        return Ok(Some(chapters.len()));
     }
     let vectors: Vec<ChunkVector> = chunks
         .into_iter()
@@ -1075,31 +1306,25 @@ fn merge_stage(
         .collect();
     let Some(thresholds) = thresholds(&outline::boundary_similarities(&vectors)) else {
         t.set_meta(MERGED_KEY, "1")?;
-        return Ok(chapters.len());
+        return Ok(Some(chapters.len()));
     };
     let state = match t.meta(MERGE_KEY)?.and_then(|json| serde_json::from_str::<MergeState>(&json).ok()) {
         Some(state) if state.fits(chapters.len()) => state,
         _ => MergeState::fresh(chapters.len()),
     };
-    let embed = embedding.map(|(model, device)| Embed { engine: ask.engine, model: model.to_string(), device, hf_token, cache: HashMap::new(), failed: false });
+    let embed = embedding.map(|(model, device)| Embed { engine: ask.engine, model: model.to_string(), device, hf_token, cancel: ask.cancel, cache: HashMap::new(), failed: false });
     let mut merger = Merger { ask, language, chapters: &chapters, chunk_sums: chunk_sums(&vectors, &chapters), embed, thresholds, state };
-    let keep = json!({ "stage": "merge" });
-    cp.save(&keep, &Value::Null, 0.97)?;
-    loop {
-        let more = merger.step()?;
-        t.set_meta(MERGE_KEY, &serde_json::to_string(&merger.state)?)?;
-        let merged = 1.0 - merger.state.runs.len() as f32 / chapters.len() as f32;
-        cp.save(&keep, &Value::Null, 0.97 + 0.02 * merged)?;
-        if !more {
-            break;
-        }
+    let more = merger.step()?;
+    t.set_meta(MERGE_KEY, &serde_json::to_string(&merger.state)?)?;
+    if more {
+        return Ok(None);
     }
     let final_chapters = merger.finish();
     t.set_meta(FINAL_KEY, &serde_json::to_string(&final_chapters)?)?;
     t.set_meta(MERGED_KEY, "1")?;
     write_chapters(t, &final_chapters)?;
     t.remove_meta(FINAL_KEY)?;
-    Ok(final_chapters.len())
+    Ok(Some(final_chapters.len()))
 }
 
 /// Everything a topic task needs from the recording once the model is known.
@@ -1139,9 +1364,14 @@ fn open_run(ai_dir: &Path, path: &Path, settings: &AgentSettings) -> anyhow::Res
 
 /// Completes the task together with the children it has just planned, in one transaction. The
 /// worker completes it again afterwards with no children, which changes nothing.
-fn complete_with_children(ai_dir: &Path, task: &Task, result: &Value, children: &[Child]) -> anyhow::Result<()> {
-    Queue::open(ai_dir)?.complete_with(task.id, result, children)?;
+fn complete_with_children(store: &dyn Store, task: &Task, result: &Value, children: Vec<Child>) -> anyhow::Result<()> {
+    store.complete_with(task.id, result, children)?;
     Ok(())
+}
+
+fn analysis_leaf(task: NewTask, path: &Path) -> NewTask {
+    let id = transcript::file_id(path).unwrap_or_default();
+    task.resource(Resource::Llm).scope(&id).analysis(&id)
 }
 
 /// A task of the topics stage: the plan, a digest, the merge or a detail. One structure for all
@@ -1149,35 +1379,34 @@ fn complete_with_children(ai_dir: &Path, task: &Task, result: &Value, children: 
 pub struct TopicTask {
     kind: &'static str,
     ai_dir: PathBuf,
-    slots: Slots,
     settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>,
 }
 
 impl TopicTask {
-    fn new(kind: &'static str, ai_dir: &Path, slots: Slots, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> TopicTask {
-        TopicTask { kind, ai_dir: ai_dir.to_path_buf(), slots, settings }
+    fn new(kind: &'static str, ai_dir: &Path, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> TopicTask {
+        TopicTask { kind, ai_dir: ai_dir.to_path_buf(), settings }
     }
 }
 
 /// The handlers of the topics stage and the details, one per task kind.
-pub fn handlers(ai_dir: &Path, slots: Slots, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Vec<Box<dyn TaskHandler>> {
+pub fn stages(ai_dir: &Path, settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>) -> Vec<Arc<dyn Stage>> {
     [PLAN_KIND, DIGEST_KIND, MERGE_KIND, DETAIL_KIND]
         .into_iter()
-        .map(|kind| Box::new(TopicTask::new(kind, ai_dir, slots.clone(), settings.clone())) as Box<dyn TaskHandler>)
+        .map(|kind| Arc::new(TopicTask::new(kind, ai_dir, settings.clone())) as Arc<dyn Stage>)
         .collect()
 }
 
-impl TaskHandler for TopicTask {
-    fn kind(&self) -> &'static str {
-        self.kind
+impl Stage for TopicTask {
+    fn handles(&self, kind: &str) -> bool {
+        kind == self.kind
     }
 
-    fn run(&self, task: &Task, cp: &mut Checkpoints) -> anyhow::Result<Value> {
+    fn chunk(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work> {
         match self.kind {
-            PLAN_KIND => self.plan(task, cp),
-            DIGEST_KIND => self.digest(task, cp),
-            MERGE_KIND => self.merge(task, cp),
-            DETAIL_KIND => self.detail(task, cp),
+            PLAN_KIND => self.plan(task, cancel, host),
+            DIGEST_KIND => self.digest(task, cancel, host),
+            MERGE_KIND => self.merge(task, cancel, host),
+            DETAIL_KIND => self.detail(task, cancel, host),
             other => anyhow::bail!("unknown topic task {other}"),
         }
     }
@@ -1186,11 +1415,11 @@ impl TaskHandler for TopicTask {
 impl TopicTask {
     /// The boundary plan: the chapters with placeholders, then a digest per topic and one merge
     /// after all of them. A restored plan (a restart in the middle) only adds the children.
-    fn plan(&self, task: &Task, cp: &mut Checkpoints) -> anyhow::Result<Value> {
+    fn plan(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work> {
         let input: Input = serde_json::from_value(task.input.clone())?;
         let settings = (self.settings)();
         let Some(run) = open_run(&self.ai_dir, &input.path, &settings)? else {
-            return Ok(json!({ "topics": 0, "skipped": "the agent model is not local" }));
+            return Ok(Work::Done(json!({ "topics": 0, "skipped": "the agent model is not local" })));
         };
         let t = &run.transcript;
         let topics = match load_plan(t)? {
@@ -1210,39 +1439,45 @@ impl TopicTask {
         if known.len() != topics.len() || known.iter().zip(&topics).any(|(c, topic)| (c.start - topic.start).abs() > 0.01 || (c.end - topic.end).abs() > 0.01) {
             write_chapters(t, &placeholders)?;
         }
-        cp.save(&json!({ "stage": "plan" }), &Value::Null, 0.03)?;
-
+        let _ = cancel;
         let mut children = Vec::with_capacity(topics.len() + 1);
         for (i, topic) in topics.iter().enumerate() {
             let words: usize = topic_replies(&run.dialog, topic, i + 1 == topics.len()).iter().map(|r| r.words.len()).sum();
             children.push(Child::new(
-                NewTask::new(DIGEST_KIND, &topic_title("", i + 1),&json!({ "path": input.path, "options": input.options, "topic": i }))
-                    .units(words as f64 / 1000.0)
-                    .priority(TOPIC_PRIORITY),
+                analysis_leaf(
+                    NewTask::new(DIGEST_KIND, &topic_title("", i + 1), &json!({ "path": input.path, "options": input.options, "topic": i })),
+                    &input.path,
+                )
+                .units(words as f64 / 1000.0)
+                .priority(TOPIC_PRIORITY)
+                .model(&run.model),
             ));
         }
         let all: Vec<usize> = (0..topics.len()).collect();
         children.push(
             Child::new(
-                NewTask::new(MERGE_KIND, &file_title(&input.path), &json!({ "path": input.path, "options": input.options }))
-                    .units(topics.len() as f64)
-                    .priority(TOPIC_PRIORITY),
+                analysis_leaf(
+                    NewTask::new(MERGE_KIND, &file_title(&input.path), &json!({ "path": input.path, "options": input.options })),
+                    &input.path,
+                )
+                .units(topics.len() as f64)
+                .priority(TOPIC_PRIORITY)
+                .model(&run.model),
             )
             .after(&all),
         );
         let minutes = run.dialog.last().map_or(0.0, |r| r.end) / 60.0;
         let result = json!({ "topics": topics.len(), "minutes": minutes });
-        complete_with_children(&self.ai_dir, task, &result, &children)?;
-        Ok(result)
+        complete_with_children(host.store.as_ref(), task, &result, children)?;
+        Ok(Work::Done(result))
     }
 
-    /// The digest of one topic; a topic whose digest is already in the table (a restart after
-    /// the checkpoint) is not asked again.
-    fn digest(&self, task: &Task, cp: &mut Checkpoints) -> anyhow::Result<Value> {
+    /// The digest of one topic, one window per chunk. A topic whose digest is already written is kept.
+    fn digest(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work> {
         let input: TopicInput = serde_json::from_value(task.input.clone())?;
         let settings = (self.settings)();
         let Some(run) = open_run(&self.ai_dir, &input.path, &settings)? else {
-            return Ok(json!({ "topic": input.topic, "skipped": "the agent model is not local" }));
+            return Ok(Work::Done(json!({ "topic": input.topic, "skipped": "the agent model is not local" })));
         };
         let t = &run.transcript;
         let plan = load_plan(t)?.ok_or_else(|| anyhow::anyhow!("the topic plan is missing"))?;
@@ -1251,107 +1486,154 @@ impl TopicTask {
             !chapter.digest.title.trim().is_empty() && (chapter.start - topic.start).abs() < 0.01 && (chapter.end - topic.end).abs() < 0.01
         });
         if let Some(chapter) = already {
-            return Ok(json!({ "topic": input.topic, "title": chapter.digest.title, "kept": true }));
+            return Ok(Work::Done(json!({ "topic": input.topic, "title": chapter.digest.title, "kept": true })));
         }
-        let _lease = self.slots.request(WorkKind::Indexing, false).wait(cp.stopping())?;
-        let engine = cp.engine();
-        let ask = Ask {
-            engine: engine.as_ref(),
-            model: &run.model,
-            device: run.device,
-            hf_token: run.hf_token.as_deref(),
-            cancel: cp.stopping(),
-        };
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(Work::Stopped);
+        }
+        let scope = Scope::attach(host.store.clone(), task.id, host.engine.clone(), task.scope.clone());
+        let engine = scope.engine();
+        let ask = Ask { engine: engine.as_ref(), model: &run.model, device: run.device, hf_token: run.hf_token.as_deref(), cancel: cancel.as_ref() };
+        let picked = topic_replies(&run.dialog, &topic, input.topic + 1 == plan.len());
+        let words: usize = picked.iter().map(|r| r.words.len()).sum();
         let previous = t.chapters()?.iter().take(input.topic).rev().find(|c| !c.digest.title.is_empty()).map(|c| c.digest.title.clone());
-        let started = std::time::Instant::now();
-        let digest = digest_topic(&ask, &run.dialog, &topic, input.topic + 1 == plan.len(), previous.as_deref(), run.language)?;
-        log::info!(
-            "outline of {}: topic {}/{} in {:.1} s",
-            input.path.display(),
-            input.topic + 1,
-            plan.len(),
-            started.elapsed().as_secs_f32()
-        );
+        if words <= WINDOW_WORDS {
+            let digest = digest_topic(&ask, &run.dialog, &topic, input.topic + 1 == plan.len(), previous.as_deref(), run.language)?;
+            t.put_chapter(input.topic, &Chapter { start: topic.start, end: topic.end, digest: digest.clone() })?;
+            return Ok(Work::Done(json!({ "topic": input.topic, "title": digest.title })));
+        }
+        let windows = outline::windows(&picked, WINDOW_WORDS);
+        let n = windows.len().max(1);
+        let mut cursor: DigestCursor = serde_json::from_value(task.cursor.clone()).unwrap_or_default();
+        if cursor.done < windows.len() {
+            let mut part = ask.digest(&windows[cursor.done], cursor.done, n, if cursor.done == 0 { previous.as_deref() } else { cursor.parts.last().map(|p| p.title.as_str()) })?;
+            part.quotes = outline::verified_quotes(&part.quotes, &picked);
+            cursor.parts.push(part);
+            cursor.done += 1;
+            return Ok(Work::More {
+                cursor: serde_json::to_value(&cursor)?,
+                partial: Value::Null,
+                progress: cursor.done as f32 / n as f32,
+            });
+        }
+        let digest = ask.reduce(run.language, previous.as_deref(), &cursor.parts)?;
         t.put_chapter(input.topic, &Chapter { start: topic.start, end: topic.end, digest: digest.clone() })?;
-        cp.save(&json!({ "topic": input.topic }), &Value::Null, 1.0)?;
-        Ok(json!({ "topic": input.topic, "title": digest.title }))
+        Ok(Work::Done(json!({ "topic": input.topic, "title": digest.title })))
     }
 
     /// The merge; when the options ask for details, it adds the `details` composite with one
     /// `topic-detail` per final topic in the same transaction.
-    fn merge(&self, task: &Task, cp: &mut Checkpoints) -> anyhow::Result<Value> {
+    fn merge(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work> {
         let input: Input = serde_json::from_value(task.input.clone())?;
         let settings = (self.settings)();
         let Some(run) = open_run(&self.ai_dir, &input.path, &settings)? else {
-            return Ok(json!({ "chapters": 0, "skipped": "the agent model is not local" }));
+            return Ok(Work::Done(json!({ "chapters": 0, "skipped": "the agent model is not local" })));
         };
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(Work::Stopped);
+        }
         let t = &run.transcript;
-        let _lease = self.slots.request(WorkKind::Indexing, false).wait(cp.stopping())?;
-        let engine = cp.engine();
-        let ask = Ask {
-            engine: engine.as_ref(),
-            model: &run.model,
-            device: run.device,
-            hf_token: run.hf_token.as_deref(),
-            cancel: cp.stopping(),
+        let scope = Scope::attach(host.store.clone(), task.id, host.engine.clone(), task.scope.clone());
+        let engine = scope.engine();
+        let ask = Ask { engine: engine.as_ref(), model: &run.model, device: run.device, hf_token: run.hf_token.as_deref(), cancel: cancel.as_ref() };
+        let chapters = merge_stage(t, &ask, run.language, run.embedding.as_deref().map(|model| (model, run.embedding_device)), run.hf_token.as_deref())?;
+        let Some(chapters) = chapters else {
+            let n = task.cursor.get("n").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
+            return Ok(Work::More { cursor: json!({ "n": n }), partial: Value::Null, progress: 0.98 });
         };
-        let chapters = merge_stage(
-            t,
-            &ask,
-            run.language,
-            run.embedding.as_deref().map(|model| (model, run.embedding_device)),
-            run.hf_token.as_deref(),
-            cp,
-        )?;
         let final_chapters = t.chapters()?;
         let children = if input.options.details && !final_chapters.is_empty() {
-            vec![
-                Child::new(details_task(&input.path).priority(TOPIC_PRIORITY))
-                    .with_children(detail_tasks(&input.path, &input.options, &final_chapters, &run.dialog)),
-            ]
+            vec![Child::new(details_task(&input.path).priority(TOPIC_PRIORITY)).with_children(detail_tasks(&input.path, &input.options, &final_chapters, &run.dialog))]
         } else {
             Vec::new()
         };
         let result = json!({ "chapters": chapters });
         if children.is_empty() {
-            // Nothing to add: the worker completes the task itself, once.
-            return Ok(result);
+            return Ok(Work::Done(result));
         }
-        complete_with_children(&self.ai_dir, task, &result, &children)?;
-        Ok(result)
+        complete_with_children(host.store.as_ref(), task, &result, children)?;
+        Ok(Work::Done(result))
     }
 
     /// The breakdown of one final topic, written into its chapter (`Digest.sections`).
-    fn detail(&self, task: &Task, cp: &mut Checkpoints) -> anyhow::Result<Value> {
+    fn detail(&self, task: &Task, cancel: &Arc<AtomicBool>, host: &Host) -> anyhow::Result<Work> {
         let input: TopicInput = serde_json::from_value(task.input.clone())?;
         let settings = (self.settings)();
         let Some(run) = open_run(&self.ai_dir, &input.path, &settings)? else {
-            return Ok(json!({ "topic": input.topic, "skipped": "the agent model is not local" }));
+            return Ok(Work::Done(json!({ "topic": input.topic, "skipped": "the agent model is not local" })));
         };
         let t = &run.transcript;
         let chapters = t.chapters()?;
         let chapter = chapters.get(input.topic).cloned().ok_or_else(|| anyhow::anyhow!("topic {} is not in the outline", input.topic + 1))?;
-        // A restart after the checkpoint: the sections are written, the task was released.
         if !chapter.digest.sections.is_empty() {
             let items: usize = chapter.digest.sections.iter().map(|s| s.items.len()).sum();
-            return Ok(json!({ "topic": input.topic, "sections": chapter.digest.sections.len(), "items": items, "kept": true }));
+            return Ok(Work::Done(json!({ "topic": input.topic, "sections": chapter.digest.sections.len(), "items": items, "kept": true })));
         }
-        let _lease = self.slots.request(WorkKind::Indexing, false).wait(cp.stopping())?;
-        let engine = cp.engine();
-        let ask = Ask {
-            engine: engine.as_ref(),
-            model: &run.model,
-            device: run.device,
-            hf_token: run.hf_token.as_deref(),
-            cancel: cp.stopping(),
-        };
-        let sections = detail_topic(&ask, &run.dialog, run.language, &chapter, input.topic + 1 == chapters.len())?;
-        let items: usize = sections.iter().map(|s| s.items.len()).sum();
-        let mut chapter = chapter;
-        chapter.digest.sections = sections;
-        t.put_chapter(input.topic, &chapter)?;
-        cp.save(&json!({ "topic": input.topic }), &Value::Null, 1.0)?;
-        Ok(json!({ "topic": input.topic, "sections": chapter.digest.sections.len(), "items": items }))
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(Work::Stopped);
+        }
+        let scope = Scope::attach(host.store.clone(), task.id, host.engine.clone(), task.scope.clone());
+        let engine = scope.engine();
+        let ask = Ask { engine: engine.as_ref(), model: &run.model, device: run.device, hf_token: run.hf_token.as_deref(), cancel: cancel.as_ref() };
+        let topic = PlanTopic { start: chapter.start, end: chapter.end };
+        let last = input.topic + 1 == chapters.len();
+        let picked = topic_replies(&run.dialog, &topic, last);
+        let words: usize = picked.iter().map(|r| r.words.len()).sum();
+        if words <= WINDOW_WORDS {
+            let breakdown = detail_topic(&ask, &run.dialog, run.language, &chapter, last)?;
+            return self.write_detail(t, input.topic, task.id, chapter, breakdown);
+        }
+        let lines = outline::fine_lines(&picked);
+        let windows = outline::windows_of_lines(&lines, WINDOW_WORDS);
+        let n = windows.len().max(1);
+        let mut cursor: DetailCursor = serde_json::from_value(task.cursor.clone()).unwrap_or_default();
+        if cursor.done < windows.len() {
+            let window = &windows[cursor.done];
+            let user = prompts::render(
+                "outline/detail_window.j2",
+                minijinja::context! {
+                    title => &chapter.digest.title,
+                    summary => &chapter.digest.summary,
+                    start => human_duration(window.start),
+                    end => human_duration(window.end),
+                    number => cursor.done + 1,
+                    parts => n,
+                    language => run.language,
+                    text => &window.text,
+                },
+            );
+            cursor.points.extend(ask.points(user)?);
+            cursor.done += 1;
+            return Ok(Work::More { cursor: serde_json::to_value(&cursor)?, partial: Value::Null, progress: cursor.done as f32 / (n as f32 + 1.0) });
+        }
+        let (title, summary) = (&chapter.digest.title, &chapter.digest.summary);
+        let (start, end) = (human_duration(chapter.start), human_duration(chapter.end));
+        let parts = part_context(&chapter.digest.parts);
+        let source_chars: usize = cursor.points.iter().map(|point| point.text.chars().count()).sum();
+        let source_items = cursor.points.len();
+        let points: Vec<minijinja::Value> = cursor.points.iter().map(|point| minijinja::context! { time => &point.time, text => &point.text }).collect();
+        let user = prompts::render(
+            "outline/detail.j2",
+            minijinja::context! { title, summary, start, end, language => run.language, parts, points, text => "" },
+        );
+        let parsed = ask.sections(user, source_chars, source_items)?;
+        let breakdown = Breakdown { sections: parsed.raw.into_sections(&lines), note: parsed.note };
+        self.write_detail(t, input.topic, task.id, chapter, breakdown)
+    }
+
+    fn write_detail(&self, t: &Transcript, topic: usize, task_id: i64, mut chapter: Chapter, breakdown: Breakdown) -> anyhow::Result<Work> {
+        if let Some(note) = &breakdown.note {
+            log::warn!("task {task_id} topic-detail: {note}");
+        }
+        let items: usize = breakdown.sections.iter().map(|s| s.items.len()).sum();
+        let sections = breakdown.sections.len();
+        chapter.digest.sections = breakdown.sections;
+        t.put_chapter(topic, &chapter)?;
+        let mut result = json!({ "topic": topic, "sections": sections, "items": items });
+        if let Some(note) = breakdown.note {
+            result["cut"] = json!(note);
+        }
+        Ok(Work::Done(result))
     }
 }
 
@@ -1548,7 +1830,7 @@ mod tests {
         // The chunks are identical (1.0) but the descriptions unrelated (0.0): the mean 0.5 is
         // clearly different, so the topics stay apart.
         let chunk_sums = sums(&[&[[1.0, 0.0]], &[[1.0, 0.0]]]);
-        let embed = Some(Embed { engine: &fake, model: "ggml-org/embeddinggemma-300M-GGUF".into(), device: Device::Auto, hf_token: None, cache: HashMap::new(), failed: false });
+        let embed = Some(Embed { engine: &fake, model: "ggml-org/embeddinggemma-300M-GGUF".into(), device: Device::Auto, hf_token: None, cancel: &cancel, cache: HashMap::new(), failed: false });
         let mut m = merger(&ask, &chapters, chunk_sums, Thresholds { different: 0.5, similar: 0.9 }, embed);
         assert!(!m.step().unwrap());
         assert_eq!(m.finish().len(), 2);
@@ -1595,24 +1877,49 @@ mod tests {
     fn settings() -> AgentSettings {
         let mut settings = AgentSettings::default();
         settings.models.embedding = None;
+        // The fake hands whole answers out in call order, so two digests at once would let a
+        // topic take another topic's answer. One model call at a time makes the order the ids'.
+        settings.budget.agent = 1;
         settings
     }
 
-    fn topic_handlers(ai: &Path, settings: &AgentSettings) -> Vec<Box<dyn TaskHandler>> {
-        let slots = Slots::new(settings.budget.clone());
+    fn topic_sched(ai: &Path, engine: Arc<dyn Engine>, settings: &AgentSettings) -> Arc<mediaa_queue::Scheduler> {
+        let sched = crate::run::open_scheduler(ai, &settings.budget).unwrap();
+        let slots = crate::slots::Slots::new(settings.budget.clone());
         let s = settings.clone();
         let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || s.clone());
-        handlers(ai, slots, current)
+        crate::run::register_stages(&sched, ai, engine, slots, current, Arc::new(crate::run::Streams::default()));
+        sched
     }
 
-    /// Runs the queue to the end; returns whether a task was done.
-    fn drain(q: &Queue, engine: &Arc<dyn Engine>, handlers: &[Box<dyn TaskHandler>]) -> bool {
-        let stop = AtomicBool::new(false);
-        let mut ran = false;
-        while crate::worker::run_next(q, engine, handlers, &stop).unwrap() {
-            ran = true;
+    /// Runs the queue to the end.
+    fn drain(sched: &mediaa_queue::Scheduler) {
+        crate::run::drain(sched, std::time::Duration::from_secs(60));
+    }
+
+    /// Pause everything still going and wait until no chunk is inside a model call.
+    fn pause_until_quiet(sched: &mediaa_queue::Scheduler) {
+        let store = sched.store();
+        for task in store.list().unwrap() {
+            if !task.status.is_finished() && task.status != mediaa_queue::Status::Paused {
+                let _ = sched.pause(task.id);
+            }
         }
-        ran
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while store.list().unwrap().iter().any(|task| matches!(task.status, mediaa_queue::Status::Running | mediaa_queue::Status::Stopping)) {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            let _ = sched.tick();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        // A paused row stays paused across a reopen. The tests drop the scheduler to
+        // imitate a restart, so the unfinished rows have to be queued again first.
+        for task in store.list().unwrap() {
+            if task.status == mediaa_queue::Status::Paused {
+                let _ = sched.resume(task.id);
+            }
+        }
     }
 
     fn digest_json(title: &str, quotes: &str) -> String {
@@ -1631,7 +1938,7 @@ mod tests {
     /// the details; everything ends done.
     #[test]
     fn topics_run_as_plan_digests_merge_and_details() {
-        use mediaa_core::queue::TaskStatus;
+        use mediaa_queue::Status as TaskStatus;
         use mediaa_engine::testing::FakeEngine;
 
         let (_dir, ai, file, id) = recording();
@@ -1647,13 +1954,14 @@ mod tests {
             &section,
         ]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
-        let queue = Queue::open(&ai).unwrap();
+        let sched = topic_sched(&ai, engine, &settings);
         let options = AnalysisOptions::default();
-        let (topics, planned) = queue
-            .enqueue_tree(topics_task(&file, &options).scope(&id), &[Child::new(plan_task(&file, &options).scope(&id))])
+        let (topics, planned) = sched
+            .enqueue_tree(topics_task(&file, &options).scope(&id), vec![Child::new(plan_task(&file, &options).scope(&id))])
             .unwrap();
         let plan = planned[0];
-        assert!(drain(&queue, &engine, &topic_handlers(&ai, &settings)));
+        drain(&sched);
+        let queue = sched.store();
 
         let tasks = queue.list().unwrap();
         let failed: Vec<_> = tasks.iter().filter(|t| t.status != TaskStatus::Done).map(|t| (&t.kind, t.status, &t.error)).collect();
@@ -1692,7 +2000,7 @@ mod tests {
     /// chain goes on.
     #[test]
     fn a_restart_in_the_middle_does_not_redo_a_digest() {
-        use mediaa_core::queue::TaskStatus;
+        use mediaa_queue::Status as TaskStatus;
         use mediaa_engine::testing::FakeEngine;
 
         let (_dir, ai, file, id) = recording();
@@ -1708,41 +2016,43 @@ mod tests {
             &section,
         ]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
-        let queue = Queue::open(&ai).unwrap();
+        let sched = topic_sched(&ai, engine.clone(), &settings);
         let options = AnalysisOptions::default();
-        queue
-            .enqueue_tree(topics_task(&file, &options).scope(&id), &[Child::new(plan_task(&file, &options).scope(&id))])
+        sched
+            .enqueue_tree(topics_task(&file, &options).scope(&id), vec![Child::new(plan_task(&file, &options).scope(&id))])
             .unwrap();
-        // Only the plan first: it brings the digests and the merge.
-        let plan_only: Vec<Box<dyn TaskHandler>> = topic_handlers(&ai, &settings).into_iter().filter(|h| h.kind() == PLAN_KIND).collect();
-        drain(&queue, &engine, &plan_only);
-        // The program closes after the first digest: the worker stops at its checkpoint and the
-        // digest goes back to the queue with its chapter already written.
-        let stop = AtomicBool::new(true);
-        assert!(crate::worker::run_next(&queue, &engine, &topic_handlers(&ai, &settings), &stop).unwrap());
+        // Stop once a digest has been written. A later chunk is not asked again.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while fake.chats().is_empty() {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            sched.tick().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        pause_until_quiet(&sched);
+        let mid = fake.chats().len();
+        assert!((1..6).contains(&mid), "stopped in the middle, {mid} calls");
         let t = Transcript::open(&ai, &id).unwrap();
         assert_eq!(t.chapters().unwrap()[0].digest.title, "Тема раз");
         drop(t);
-        assert_eq!(fake.chats().len(), 1);
+        drop(sched);
 
-        // Starting again: the first digest is in the table, so it is not asked again.
-        let queue = Queue::open(&ai).unwrap();
-        queue.requeue_running().unwrap();
-        drain(&queue, &engine, &topic_handlers(&ai, &settings));
-        let tasks = queue.list().unwrap();
+        let sched = topic_sched(&ai, engine, &settings);
+        drain(&sched);
+        let tasks = sched.store().list().unwrap();
         assert!(tasks.iter().all(|t| t.status == TaskStatus::Done), "{tasks:?}");
         let t = Transcript::open(&ai, &id).unwrap();
         let titles: Vec<String> = t.chapters().unwrap().iter().map(|c| c.digest.title.clone()).collect();
         assert_eq!(titles, ["Тема раз", "Тема два", "Тема три"]);
         assert!(t.chapters().unwrap().iter().all(|c| !c.digest.sections.is_empty()));
-        assert_eq!(fake.chats().len(), 6, "three digests and three details — the stopped digest was not asked twice");
-        assert!(fake.chats()[1].texts[1].contains("реплика6 обсуждение"), "the next call is the second topic: {}", fake.chats()[1].texts[1]);
+        assert_eq!(fake.chats().len(), 6, "three digests and three details — a written digest was not asked twice");
     }
 
     /// A stop after one detail: its sections are in the chapter, so the detail is not asked again.
     #[test]
     fn a_restart_in_the_middle_does_not_redo_a_detail() {
-        use mediaa_core::queue::TaskStatus;
+        use mediaa_queue::Status as TaskStatus;
         use mediaa_engine::testing::FakeEngine;
 
         let (_dir, ai, file, id) = recording();
@@ -1758,32 +2068,30 @@ mod tests {
             &section,
         ]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
-        let queue = Queue::open(&ai).unwrap();
+        let sched = topic_sched(&ai, engine.clone(), &settings);
         let options = AnalysisOptions::default();
-        queue
-            .enqueue_tree(topics_task(&file, &options).scope(&id), &[Child::new(plan_task(&file, &options).scope(&id))])
+        sched
+            .enqueue_tree(topics_task(&file, &options).scope(&id), vec![Child::new(plan_task(&file, &options).scope(&id))])
             .unwrap();
-        // The plan, the digests and the merge; the merge leaves the details in the queue.
-        let before: Vec<Box<dyn TaskHandler>> = topic_handlers(&ai, &settings)
-            .into_iter()
-            .filter(|h| [PLAN_KIND, DIGEST_KIND, MERGE_KIND].contains(&h.kind()))
-            .collect();
-        drain(&queue, &engine, &before);
-        assert_eq!(fake.chats().len(), 3);
-        // The program closes after the first detail: its chapter is written, the task released.
-        let details_only: Vec<Box<dyn TaskHandler>> =
-            topic_handlers(&ai, &settings).into_iter().filter(|h| h.kind() == DETAIL_KIND).collect();
-        let stop = AtomicBool::new(true);
-        assert!(crate::worker::run_next(&queue, &engine, &details_only, &stop).unwrap());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while fake.chats().len() < 4 {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            sched.tick().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        pause_until_quiet(&sched);
+        let mid = fake.chats().len();
+        assert!((4..6).contains(&mid), "stopped during the details, {mid} calls");
         let t = Transcript::open(&ai, &id).unwrap();
-        assert!(!t.chapters().unwrap()[0].digest.sections.is_empty());
+        assert!(t.chapters().unwrap().iter().any(|c| !c.digest.sections.is_empty()));
         drop(t);
-        assert_eq!(fake.chats().len(), 4);
+        drop(sched);
 
-        let queue = Queue::open(&ai).unwrap();
-        queue.requeue_running().unwrap();
-        drain(&queue, &engine, &topic_handlers(&ai, &settings));
-        let tasks = queue.list().unwrap();
+        let sched = topic_sched(&ai, engine, &settings);
+        drain(&sched);
+        let tasks = sched.store().list().unwrap();
         assert!(tasks.iter().all(|t| t.status == TaskStatus::Done), "{tasks:?}");
         assert_eq!(fake.chats().len(), 6, "the stopped detail was not asked twice");
     }
@@ -1791,7 +2099,7 @@ mod tests {
     /// The details are off: the merge finishes the topics and starts nothing.
     #[test]
     fn without_the_details_option_the_merge_starts_nothing() {
-        use mediaa_core::queue::TaskStatus;
+        use mediaa_queue::Status as TaskStatus;
         use mediaa_engine::testing::FakeEngine;
 
         let (_dir, ai, file, id) = recording();
@@ -1799,13 +2107,14 @@ mod tests {
         let fake = FakeEngine::new();
         fake.chat_answers(&[&digest_json("Тема раз", "[]"), &digest_json("Тема два", "[]"), &digest_json("Тема три", "[]")]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
-        let queue = Queue::open(&ai).unwrap();
+        let sched = topic_sched(&ai, engine, &settings);
         let options = AnalysisOptions { details: false, ..AnalysisOptions::default() };
-        let topics = queue
-            .enqueue_tree(topics_task(&file, &options).scope(&id), &[Child::new(plan_task(&file, &options).scope(&id))])
+        let topics = sched
+            .enqueue_tree(topics_task(&file, &options).scope(&id), vec![Child::new(plan_task(&file, &options).scope(&id))])
             .unwrap()
             .0;
-        drain(&queue, &engine, &topic_handlers(&ai, &settings));
+        drain(&sched);
+        let queue = sched.store();
 
         let tasks = queue.list().unwrap();
         assert!(tasks.iter().all(|t| t.status == TaskStatus::Done), "{tasks:?}");
@@ -1859,7 +2168,9 @@ mod tests {
             end: replies.last().unwrap().end,
             digest: Digest { title: "Отчёт".into(), summary: "сводка".into(), ..Digest::default() },
         };
-        let sections = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
+        let breakdown = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
+        assert!(breakdown.note.is_none(), "{:?}", breakdown.note);
+        let sections = breakdown.sections;
         let calls = fake.chats();
         assert_eq!(calls.len(), 3, "the points of two windows and one call that assembles the sections");
         assert!(calls[0].texts[1].contains("Part 1 of 2"), "{}", calls[0].texts[1]);
@@ -1889,7 +2200,9 @@ mod tests {
             end: 25.0,
             digest: Digest { title: "Отчёт".into(), summary: "сводка".into(), ..Digest::default() },
         };
-        let sections = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
+        let breakdown = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
+        assert!(breakdown.note.is_none(), "{:?}", breakdown.note);
+        let sections = breakdown.sections;
         assert_eq!(fake.chats().len(), 1, "a short topic: one call");
         assert!(fake.chats()[0].texts[1].contains("Transcript of the topic"));
         assert_eq!(sections[0].title, "Итоги");
@@ -1920,7 +2233,9 @@ mod tests {
             end: 50.0,
             digest: Digest { title: "Длинный монолог".into(), summary: "сводка".into(), ..Digest::default() },
         };
-        let sections = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
+        let breakdown = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
+        assert!(breakdown.note.is_none(), "{:?}", breakdown.note);
+        let sections = breakdown.sections;
         let prompt = &fake.chats()[0].texts[1];
         assert!(prompt.contains("[00:00] слово0 "), "{prompt}");
         assert!(prompt.contains("[00:26] слово51"), "the second line has its own time: {prompt}");
@@ -1944,7 +2259,9 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let ask = Ask { engine: &fake, model: "unsloth/Qwen3.5-4B-GGUF", device: Device::Auto, hf_token: None, cancel: &cancel };
         let chapter = Chapter { start: 0.0, end: 3.0, digest: Digest { title: "Ролик".into(), summary: "сводка".into(), ..Digest::default() } };
-        let sections = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
+        let breakdown = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
+        assert!(breakdown.note.is_none(), "{:?}", breakdown.note);
+        let sections = breakdown.sections;
         assert_eq!(sections.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Предлагаемые действия", "Другие"]);
         let texts: Vec<&str> = sections[0].items.iter().map(|i| i.text.as_str()).collect();
         assert_eq!(texts, ["лайкнуть видео", "подписаться"], "the order is kept, the repeat dropped");
@@ -1983,5 +2300,126 @@ mod tests {
             "quotes": quotes,
         });
         fits(&serde_json::to_string(&digest).unwrap(), digest_tokens());
+    }
+
+    /// An answer cut inside the third section. The first two objects are closed.
+    fn cut_off_sections() -> String {
+        "{\n\"sections\":[\n\
+         {\"title\":\"Первый\",\"kind\":\"list\",\"items\":[{\"text\":\"один\"}]},\n\
+         {\"title\":\"Второй\",\"kind\":\"steps\",\"items\":[{\"text\":\"два\"}]},\n\
+         {\"title\":\"Третий\",\"kind\":\"list\",\"items\":[{\"text\":\"три"
+            .into()
+    }
+
+    #[test]
+    fn a_section_cut_off_mid_item_is_dropped() {
+        let raw = closed_sections(&cut_off_sections());
+        assert_eq!(raw.sections.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Первый", "Второй"]);
+        // A quote inside a closed section is not the end of that section.
+        let quoted = r#"{"sections":[{"title":"A","kind":"list","items":[{"text":"say \"hi\""}]},{"title":"B","kind":"list","items":[{"text":"cut"}"#;
+        let raw = closed_sections(quoted);
+        assert_eq!(raw.sections.len(), 1);
+        assert_eq!(raw.sections[0].items[0].text, "say \"hi\"");
+    }
+
+    #[test]
+    fn a_cut_off_answer_keeps_the_sections_that_closed() {
+        use mediaa_engine::testing::FakeEngine;
+
+        let fake = FakeEngine::new();
+        let cut = cut_off_sections();
+        fake.chat_answers(&[&cut, &cut]);
+        fake.chat_usage(Some(Usage { prompt_tokens: 10, completion_tokens: 12_000 }));
+        let replies = [saying(0.0, "один два")];
+        let cancel = AtomicBool::new(false);
+        let ask = Ask { engine: &fake, model: "unsloth/Qwen3.5-4B-GGUF", device: Device::Auto, hf_token: None, cancel: &cancel };
+        let chapter = Chapter { start: 0.0, end: 2.0, digest: Digest { title: "Тема".into(), summary: "сводка".into(), ..Digest::default() } };
+        let breakdown = detail_topic(&ask, &replies, "Russian", &chapter, true).unwrap();
+        assert_eq!(breakdown.sections.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Первый", "Второй"]);
+        let calls = fake.chats();
+        assert_eq!(calls.len(), 2, "the cut answer and one shorter retry, then the closed sections");
+        let note = breakdown.note.expect("the cut is reported");
+        assert!(note.contains("after 2 complete sections"), "{note}");
+        assert!(note.contains(&format!("hit the limit of {} tokens", calls[0].max_tokens)), "{note}");
+        assert_eq!(calls[0].max_tokens, calls[1].max_tokens);
+    }
+
+    #[test]
+    fn a_cut_off_answer_is_asked_once_to_be_shorter_and_the_task_says_why() {
+        use mediaa_queue::Status as TaskStatus;
+        use mediaa_engine::testing::FakeEngine;
+
+        let (_dir, ai, file, id) = recording();
+        let t = Transcript::open(&ai, &id).unwrap();
+        let replies = t.dialog().unwrap();
+        let chapter = Chapter {
+            start: replies[0].start,
+            end: replies.last().unwrap().end,
+            digest: Digest { title: "Тема".into(), summary: "сводка".into(), ..Digest::default() },
+        };
+        write_chapters(&t, &[chapter]).unwrap();
+        drop(t);
+
+        let fake = FakeEngine::new();
+        fake.chat_usage(Some(Usage { prompt_tokens: 10, completion_tokens: 12_000 }));
+        let shorter = sections_json(r#"[{"text":"реплика1 обсуждение"}]"#);
+        let cut = cut_off_sections();
+        fake.chat_answers(&[&cut, &shorter]);
+        let engine: Arc<dyn Engine> = Arc::new(fake.clone());
+        let settings = settings();
+        let sched = topic_sched(&ai, engine, &settings);
+        let options = AnalysisOptions::default();
+        let task_id = sched
+            .enqueue(NewTask::new(DETAIL_KIND, "Тема", &json!({ "path": file, "options": options, "topic": 0 })).resource(Resource::Llm).scope(&id).analysis(&id))
+            .unwrap();
+        drain(&sched);
+
+        let task = sched.store().get(task_id).unwrap().unwrap();
+        assert_eq!(task.status, TaskStatus::Done, "{:?}", task.error);
+        let note = task.result.unwrap()["cut"].as_str().unwrap().to_string();
+        let calls = fake.chats();
+        assert_eq!(calls.len(), 2, "one retry, not a third call");
+        assert_eq!(calls[1].messages, 4, "system, task, the cut answer, the shorter ask");
+        assert_eq!(
+            calls[1].texts[3],
+            prompts::render("outline/detail_shorter.j2", minijinja::context! { tokens => calls[0].max_tokens })
+        );
+        assert!(note.contains("the first answer was cut at line"), "{note}");
+        assert!(note.contains(&format!("hit the limit of {} tokens", calls[0].max_tokens)), "{note}");
+        let saved = Transcript::open(&ai, &id).unwrap().chapters().unwrap();
+        assert_eq!(saved[0].digest.sections[0].items[0].text, "реплика1 обсуждение");
+    }
+
+    /// The old schema caps are only a floor. A larger topic raises the limit, with the margin,
+    /// and a prompt that leaves no room for that answer is clamped to the context.
+    #[test]
+    fn the_section_limit_follows_the_topic_and_the_context() {
+        assert_eq!(topic_section_tokens(10, 1), sections_tokens(), "a short topic keeps the floor");
+        let chars = 14_000;
+        let wanted = topic_section_tokens(chars, 10);
+        assert!(wanted > sections_tokens(), "the topic is larger than the old schema caps");
+        let bare = (chars as u32).div_ceil(CHARS_PER_TOKEN);
+        assert!(wanted >= bare + bare / ANSWER_MARGIN_DIV, "{wanted} has no margin over {bare}");
+        let user = "я".repeat(chars);
+        let fitting = section_budget("sys", &user, chars, 10);
+        assert!(fitting.fits, "prompt {} + {} tokens", fitting.prompt_tokens, fitting.wanted);
+        assert_eq!(fitting.max_tokens, wanted);
+
+        let medium = "я".repeat(6_000);
+        let clamped = section_budget("sys", &medium, 30_000, 20);
+        assert!(!clamped.fits, "prompt {} wanted {}", clamped.prompt_tokens, clamped.wanted);
+        assert!(clamped.prompt_tokens + CTX_RESERVE < OUTLINE_CTX);
+        assert!(clamped.max_tokens < clamped.wanted);
+        assert!(clamped.prompt_tokens + clamped.max_tokens + CTX_RESERVE <= OUTLINE_CTX);
+
+        let huge = "я".repeat(40_000);
+        let cramped = section_budget("sys", &huge, huge.chars().count(), 80);
+        assert!(!cramped.fits);
+        assert!(cramped.max_tokens < cramped.wanted);
+        // The prompt alone is past the window, so the answer is held to one token.
+        assert!(cramped.prompt_tokens > OUTLINE_CTX);
+        assert_eq!(cramped.max_tokens, 1);
+        let note = section_note(None, None, &cramped, None, None).unwrap();
+        assert!(note.contains(&format!("do not fit the context of {OUTLINE_CTX} tokens")), "{note}");
     }
 }

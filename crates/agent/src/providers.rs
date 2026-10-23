@@ -51,7 +51,13 @@ pub fn chat_completion_stream(p: &Provider, body: &serde_json::Value, on_chunk: 
     if !p.api_key.trim().is_empty() {
         req = req.bearer_auth(p.api_key.trim());
     }
-    let resp = req.send().map_err(|e| anyhow::anyhow!("{url}: {e}"))?;
+    let resp = {
+        // The request waits for the first byte: a sign of life before it is enough for the
+        // watchdog, the stream below reports on every event.
+        mediaa_core::pulse::beat();
+        req.send().map_err(|e| anyhow::anyhow!("{url}: {e}"))?
+    };
+    mediaa_core::pulse::beat();
     let status = resp.status();
     match status.as_u16() {
         200..=299 => {}
@@ -60,6 +66,7 @@ pub fn chat_completion_stream(p: &Provider, body: &serde_json::Value, on_chunk: 
         _ => anyhow::bail!("{url}: {status} {}", resp.text().unwrap_or_default().chars().take(300).collect::<String>()),
     }
     for line in std::io::BufReader::new(resp).lines() {
+        mediaa_core::pulse::beat();
         let line = line?;
         let Some(data) = line.strip_prefix("data:").map(str::trim) else { continue };
         if data == "[DONE]" {

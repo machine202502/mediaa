@@ -3,7 +3,7 @@ use super::super::{answer, ask, Brain, Message, Piece, Step, ToolSpec, Tools};
 use super::*;
 use crate::slots::Slots;
 use mediaa_core::agent::{AgentSettings, Budget};
-use mediaa_core::queue::TaskStatus;
+use mediaa_queue::Status as TaskStatus;
 use mediaa_engine::testing::FakeEngine;
 use std::time::{Duration, Instant};
 
@@ -36,7 +36,7 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     assert_eq!(engine.chats().len(), 3, "the search, the draft and the check");
 
     // The queue: the answer, and under it every step of the model and every tool call.
-    let q = Queue::open(ai).unwrap();
+    let q = scope.store();
     let root = q.get(scope.task()).unwrap().unwrap();
     assert_eq!((root.kind.as_str(), root.status, root.scope.as_deref()), ("chat", TaskStatus::Done, Some("rec")));
     assert_eq!(root.title, "Когда отчёт?");
@@ -58,10 +58,10 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     let check = &engine.chats()[2];
     assert!(check.json_schema.as_ref().is_some_and(|s| s.contains("changed")), "{:?}", check.json_schema);
     assert!(check.texts.iter().any(|t| t.contains("Отчёт отправляем в пятницу.")), "{:?}", check.texts);
-    // A tool: the title the model gave, what it was and what it cost (the query's embedding).
+    // A tool: the plain label (the titles model is not used here), what it was and what it cost.
     let tool = &children[1];
-    assert_eq!(tool.title, "Ищу отчёт");
-    assert_eq!(tool.detail["tool"], "search");
+    assert_eq!(tool.title, "Поиск");
+    assert_eq!(tool.detail["tool"], "Поиск");
     assert_eq!(tool.detail["args"], r#"{"query":"отчёт"}"#);
     assert!(tool.detail["result_chars"].as_u64().unwrap() > 0);
     assert_eq!(tool.stats.model_calls, 1);
@@ -82,7 +82,7 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     assert_eq!(
         live.timeline.entries,
         [
-            StepEntry { title: "Ищу отчёт".into(), tool: "search".into(), status: "nothing".into() },
+            StepEntry { title: "Поиск".into(), tool: "search".into(), status: "nothing".into() },
             StepEntry { title: "Черновик ответа".into(), tool: "draft".into(), status: "found".into() },
             StepEntry { title: "Проверка ответа".into(), tool: "verify".into(), status: "nothing".into() },
             Answer { text: "В пятницу [0:10].".into(), section: false },
@@ -156,7 +156,7 @@ fn stop_ends_the_answer_at_once_and_what_comes_later_is_dropped() {
     assert_eq!(t.chat_memory(chat).unwrap(), None, "a stopped answer saves nothing of the worker's");
 
     // The queue: the answer and its running step are cancelled, not done or failed.
-    let q = Queue::open(ai).unwrap();
+    let q = scope.store();
     assert_eq!(q.get(scope.task()).unwrap().unwrap().status, TaskStatus::Cancelled);
     let children = q.children(scope.task()).unwrap();
     assert_eq!(children.len(), 1);
@@ -211,7 +211,7 @@ fn a_failed_answer_is_a_failed_task_and_the_chat_keeps_what_it_learned() {
     });
     assert_eq!(outcome, Outcome::Failed("the provider is down".into()));
     assert_eq!(run.live().state, State::Failed("the provider is down".into()));
-    let task = Queue::open(ai).unwrap().get(scope.task()).unwrap().unwrap();
+    let task = scope.store().get(scope.task()).unwrap().unwrap();
     assert_eq!((task.status, task.error.as_deref()), (TaskStatus::Failed, Some("the provider is down")));
     assert!(t.messages(chat).unwrap().is_empty(), "no answer was stored");
     assert!(t.chat_memory(chat).unwrap().unwrap().contains("кратко"));

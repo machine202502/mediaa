@@ -20,7 +20,7 @@ pub mod logging;
 pub mod naming;
 pub mod outline;
 pub mod pacer;
-pub mod queue;
+pub mod pulse;
 pub mod retrieval;
 pub mod paths;
 pub mod screenshot;

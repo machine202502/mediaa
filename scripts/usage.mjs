@@ -9,6 +9,7 @@
 //
 // grok-limit reads the weekly subscription % from the official `grok` TUI (`/usage`).
 // It never reads ~/.grok/auth.json and never calls an xAI endpoint itself.
+// A Grok lead has no get_usage: it snapshots without --claude-5h / --claude-week.
 // A missing part is recorded as unavailable. Snapshot and the two readers print JSON
 // and do not throw.
 
@@ -778,8 +779,10 @@ export function renderUsageReport(runs, snaps) {
         "# Расход по исполнителям",
         "",
         "Новые строки сверху. Цена DeepSeek — токены × прайс. Цена Grok — оценка xAI (оплата подпиской).",
-        "Вход Claude включает cache read и cache write. Лимиты Claude общие для головы и Sonnet:",
+        "Вход Claude включает cache read и cache write. Лимиты Claude общие для головы Claude и Sonnet:",
         "разность снимка вокруг запуска Sonnet включает и работу головы, разделить их нельзя.",
+        "Голова Grok снимок пишет без чисел Claude (`get_usage` у неё нет): в столбцах Claude — «не снят»,",
+        "неделя Grok берётся из `node scripts/usage.mjs grok-limit`.",
         "",
         "## Запуски",
         "",

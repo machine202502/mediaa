@@ -98,7 +98,7 @@ fn ok(resp: reqwest::blocking::Response, what: &str) -> anyhow::Result<reqwest::
         200..=299 => Ok(resp),
         // An HTML page instead of the API's JSON: the address is blocked before the key is looked at.
         403 if resp.headers().get(reqwest::header::CONTENT_TYPE).is_some_and(|t| t.to_str().is_ok_and(|t| t.starts_with("text/html"))) => {
-            anyhow::bail!("{what} refuses requests from this network (403); set a proxy below or pick another engine")
+            anyhow::bail!("{what} refuses requests from this network (403); set a proxy below or pick another search service")
         }
         401 | 403 => anyhow::bail!("{what}: the key was rejected ({})", resp.status()),
         429 => anyhow::bail!("{what}: too many requests, try later"),

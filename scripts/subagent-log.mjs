@@ -5,6 +5,8 @@
 //   with agent-*.meta.json (task description, model);
 // * runs of scripts/subagent.sh (DeepSeek, Grok…): target/subagents/<run>/stream.jsonl with task.md, model,
 //   name (optional), result.json. Grok's stream is streaming-json (flat events or ACP session updates).
+// * Grok's built-in subagents: ~/.grok/sessions/<cwd>/<parent>/subagents/**/meta.json points at the
+//   child session; the dialog is that child's updates.jsonl. GROK_HOME overrides ~/.grok.
 //
 //   node scripts/subagent-log.mjs once            render every transcript once
 //   node scripts/subagent-log.mjs watch           keep rendering what changes (every 3 s); one at a time
@@ -292,12 +294,23 @@ export function grokRunFacts(events, usage) {
     };
 }
 
+/// Grok ACP `timestamp` is unix seconds. Claude lines are ISO strings or milliseconds.
+/// A bare `new Date(seconds)` lands in 1970 and names the log that way.
+export function startedAt(value, fallbackMs) {
+    if (typeof value === "number" && Number.isFinite(value)) return new Date(value < 1e12 ? value * 1000 : value);
+    if (typeof value === "string" && value.trim()) {
+        const d = new Date(value);
+        if (!Number.isNaN(d.getTime())) return d;
+    }
+    return new Date(fallbackMs);
+}
+
 function whenOf(e) {
     const u = acpUpdate(e);
     const ms = e?._meta?.agentTimestampMs || e?.params?._meta?.agentTimestampMs || u?._meta?.agentTimestampMs;
     let iso = "";
     if (Number.isFinite(ms)) iso = new Date(ms).toISOString();
-    else if (typeof e?.timestamp === "number") iso = new Date(e.timestamp < 1e12 ? e.timestamp * 1000 : e.timestamp).toISOString();
+    else if (typeof e?.timestamp === "number") iso = startedAt(e.timestamp, NaN).toISOString();
     else if (typeof e?.timestamp === "string") iso = e.timestamp;
     const t = time(iso);
     return t && t !== "Invalid Date" ? t : "";
@@ -435,6 +448,12 @@ function grokState(src, events, mtime) {
         return { status: alive ? "работает" : "остановлен (журнал давно не менялся)", finished: false, summary: [] };
     }
     const facts = grokRunFacts(events, null);
+    // A built-in subagent's summary names the model even when the stream has no modelUsage.
+    if (src.model && !facts.models.includes(src.model)) facts.models.push(src.model);
+    if (src.model && /fast/i.test(src.model) && !facts.fast.includes(src.model)) {
+        facts.fast.push(src.model);
+        facts.warning = FAST_WARNING(facts.fast);
+    }
     const fast = facts.fast.length > 0;
     const maxTurns = facts.subtype === "error_max_turns";
     const ok = facts.subtype === "success" && !fast;
@@ -525,6 +544,106 @@ function firstTask(events) {
     return "";
 }
 
+const grokHome = () => process.env.GROK_HOME || path.join(os.homedir(), ".grok");
+const normPath = (p) => path.resolve(String(p || "")).replace(/[\\/]+$/, "").toLowerCase();
+
+function readJson(file) {
+    try {
+        return JSON.parse(fs.readFileSync(file, "utf8"));
+    } catch {
+        return null;
+    }
+}
+
+/// First user_message_chunk text (Grok sessions store the task there, not as a Claude user line).
+function userChunkText(events) {
+    for (const e of events) {
+        if (acpUpdate(e)?.sessionUpdate !== "user_message_chunk") continue;
+        const t = chunkText(e);
+        if (t.trim()) return t;
+    }
+    return "";
+}
+
+/// Child sessions of Grok's built-in subagents whose parent or child cwd is this repo.
+/// `meta.json` (SubagentMeta) lives under `<parent>/subagents/` and names `child_session_id`.
+export function grokBuiltinSources(sessionsDir, repoPath) {
+    const repoN = normPath(repoPath);
+    const byId = new Map();
+    let groups = [];
+    try {
+        groups = fs.readdirSync(sessionsDir, { withFileTypes: true });
+    } catch {
+        return [];
+    }
+    for (const group of groups) {
+        if (!group.isDirectory()) continue;
+        const groupDir = path.join(sessionsDir, group.name);
+        let sessions = [];
+        try {
+            sessions = fs.readdirSync(groupDir, { withFileTypes: true });
+        } catch {
+            continue;
+        }
+        for (const session of sessions) {
+            if (!session.isDirectory()) continue;
+            const dir = path.join(groupDir, session.name);
+            const updates = path.join(dir, "updates.jsonl");
+            if (!fs.existsSync(updates)) continue;
+            byId.set(session.name, { dir, updates });
+        }
+    }
+    const out = [];
+    const seen = new Set();
+    for (const { dir } of byId.values()) {
+        const sub = path.join(dir, "subagents");
+        if (!fs.existsSync(sub)) continue;
+        const parent = readJson(path.join(dir, "summary.json"));
+        const parentCwd = parent?.info?.cwd || "";
+        const metas = [];
+        const walk = (folder, depth) => {
+            if (depth > 3) return;
+            let entries = [];
+            try {
+                entries = fs.readdirSync(folder, { withFileTypes: true });
+            } catch {
+                return;
+            }
+            for (const entry of entries) {
+                const abs = path.join(folder, entry.name);
+                if (entry.isDirectory()) walk(abs, depth + 1);
+                else if (entry.name === "meta.json") metas.push(abs);
+            }
+        };
+        walk(sub, 0);
+        for (const metaPath of metas) {
+            const meta = readJson(metaPath);
+            const childId = meta?.child_session_id;
+            if (!childId || seen.has(childId)) continue;
+            const childCwd = meta.child_cwd || parentCwd;
+            if (normPath(childCwd) !== repoN && normPath(parentCwd) !== repoN) continue;
+            const child = byId.get(childId);
+            if (!child) continue;
+            seen.add(childId);
+            const childSummary = readJson(path.join(child.dir, "summary.json"));
+            out.push({
+                key: `grok-builtin:${childId}`,
+                file: child.updates,
+                kind: "grok-builtin",
+                title: meta.description || childSummary?.generated_title || "подагент Grok",
+                model: meta.effective_model_id || childSummary?.current_model_id || "",
+                task: typeof meta.prompt === "string" ? meta.prompt : "",
+                sessionId: childId,
+                parentSession: meta.parent_session_id || parent?.info?.id || "",
+                subagentId: meta.subagent_id || "",
+                agentType: meta.subagent_type || "",
+                effort: childSummary?.reasoning_effort || "",
+            });
+        }
+    }
+    return out;
+}
+
 /// Every transcript: { key, file (the JSONL), title, model, task, started, status, summary }.
 function sources() {
     const out = [];
@@ -549,6 +668,8 @@ function sources() {
     if (fs.existsSync(runs)) {
         for (const r of fs.readdirSync(runs)) out.push(runSource(path.join(runs, r)));
     }
+    // Grok's built-in subagents (child sessions), not the lead's own session.
+    out.push(...grokBuiltinSources(path.join(grokHome(), "sessions"), repo));
     return out.filter((s) => s && fs.existsSync(s.file));
 }
 
@@ -597,6 +718,9 @@ function continueLines(src) {
     if (src.kind === "script") {
         const dir = relTo(repo, src.dir);
         return ["Продолжить в той же сессии:", "", `\`scripts/subagent.sh resume ${dir} MESSAGE_FILE --max-turns N\``];
+    }
+    if (src.kind === "grok-builtin") {
+        return [`Встроенный подагент Grok остановился на лимите ходов. Продолжить ту же сессию: \`resume_from\` \`${src.subagentId || src.sessionId || "?"}\`.`];
     }
     return ["Подагент Claude Code остановился на лимите ходов: запустите его снова или продолжите работу над задачей сами."];
 }
@@ -875,6 +999,10 @@ function runningWatcher() {
 function processLines(src, events) {
     const session = events.find((e) => e.session_id || e.sessionId);
     const sid = session?.session_id || session?.sessionId || "";
+    if (src.kind === "grok-builtin") {
+        const effort = src.effort ? `, effort ${src.effort}` : "";
+        return [`* **Процессы:** встроенный подагент Grok \`${src.agentType || "?"}\`${effort}, родитель \`${src.parentSession || "?"}\`, сессия \`${src.sessionId || "?"}\``];
+    }
     if (src.kind === "script") {
         const r = (f) => readText(path.join(src.dir, f));
         const bin = r("provider") === "grok" ? "grok" : "claude";
@@ -912,7 +1040,7 @@ function register(src, events, title, model, started) {
     const p = (n) => String(n).padStart(2, "0");
     const when = `${started.getFullYear()}-${p(started.getMonth() + 1)}-${p(started.getDate())} ${p(started.getHours())}:${p(started.getMinutes())}:${p(started.getSeconds())}`;
     const procs = processLines(src, events)[0].replace(/^\* \*\*Процессы:\*\* /, "").replace(/\|/g, "/");
-    const session = path.basename(path.dirname(path.dirname(src.file)));
+    const session = src.sessionId || path.basename(path.dirname(path.dirname(src.file)));
     fs.appendFileSync(reg, `| ${when} | ${title.replace(/\|/g, "/")} | ${model} | ${procs} | \`${session}\` | \`${src.file}\` |\n`);
 }
 
@@ -953,18 +1081,23 @@ function render(src, index, env = {}) {
     }
     const events = readJsonl(src.file);
     if (!events.length) return false;
-    const task = src.kind === "script" ? readText(path.join(src.dir, "task.md")) : firstTask(events);
+    const task =
+        src.kind === "script"
+            ? readText(path.join(src.dir, "task.md"))
+            : src.kind === "grok-builtin"
+              ? src.task || userChunkText(events) || firstTask(events)
+              : firstTask(events);
     const title = src.title || task.split("\n").find((l) => l.trim()) || "задача";
-    const startIso = events.find((e) => e.timestamp)?.timestamp;
-    const started = startIso ? new Date(startIso) : new Date(mtime);
+    const startRaw = events.find((e) => e.timestamp != null && e.timestamp !== "")?.timestamp;
+    const started = startedAt(startRaw, mtime);
     const streamModels = isGrok(src, events) ? collectModels(events, null) : [];
     const model = streamModels.length ? streamModels.join(", ") : src.model || events.find((e) => e.type === "system" && e.model)?.model || "";
     if (!index[src.key]) {
         // A run of scripts/subagent.sh is already named that way: its log takes the same name.
         const named = src.kind === "script" && /^\d{4}-\d\d-\d\d_\d\d-\d\d_/.test(path.basename(src.dir));
         index[src.key] = named ? `${path.basename(src.dir)}.md` : `${stamp(started)}_${shortModel(model)}_${slug(title)}.md`;
-        // scripts/subagent.sh registers its runs itself; Claude Code's subagents are registered here.
-        if (src.kind === "claude") register(src, events, title, model, started);
+        // scripts/subagent.sh registers its runs itself. Claude Code's and Grok's built-in subagents are registered here.
+        if (src.kind === "claude" || src.kind === "grok-builtin") register(src, events, title, model, started);
     }
     const { status, summary, finished } = state(src, events, mtime);
     const archived = Boolean(index[`${src.key}#archived`]);
@@ -973,7 +1106,7 @@ function render(src, index, env = {}) {
     const md = [
         `# ${title}`,
         "",
-        `* **Модель:** ${model || "?"}`,
+        `* **Модель:** ${model || "?"}${src.effort ? ` (effort ${src.effort})` : ""}`,
         `* **Статус:** ${status}`,
         `* **Начало:** ${started.toLocaleString("ru-RU")} · **обновлено:** ${new Date(mtime).toLocaleString("ru-RU")}`,
         ...processLines(src, events),

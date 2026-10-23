@@ -18,4 +18,4 @@ pub mod slots;
 pub mod tools;
 pub mod web;
 pub mod transcribe;
-pub mod worker;
+pub mod run;

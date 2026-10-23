@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod budget;
 pub mod catalogs;
 pub mod chat;
+pub mod composer;
 pub mod dialog;
 pub mod engine_state;
 pub mod markdown;
@@ -18,31 +19,41 @@ pub mod timeline;
 pub mod topics;
 
 use eframe::egui;
-use mediaa_agent::diarize::Diarize;
-use mediaa_agent::index::Index;
-use mediaa_agent::outline;
+use mediaa_agent::run::{self, Feed, Streams};
 use mediaa_agent::slots::Slots;
-use mediaa_agent::transcribe::Transcribe;
-use mediaa_agent::worker::{self, TaskHandler};
-use mediaa_core::agent::AgentSettings;
+use mediaa_core::agent::{AgentSettings, Budget, WorkKind};
 use mediaa_engine::Engine;
+use mediaa_queue::Scheduler;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-/// The queue worker of a library's `.ai` folder (transcription and the other background tasks);
-/// stops when dropped (at the next checkpoint of its task).
-struct Worker {
+/// The queue of a library's `.ai` folder. Dropping it asks the host thread to stop.
+struct Hosted {
     dir: PathBuf,
     stop: Arc<AtomicBool>,
-    /// The settings its tasks see.
     settings: Arc<RwLock<AgentSettings>>,
+    sched: Arc<Scheduler>,
+    streams: Arc<Streams>,
+    feed: Arc<Feed>,
+    /// Pool sizes the scheduler was opened with. A change opens it again.
+    pools: (u32, u32, u32, u32, u64),
 }
 
-impl Drop for Worker {
+impl Drop for Hosted {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
     }
+}
+
+fn pool_key(budget: &Budget) -> (u32, u32, u32, u32, u64) {
+    (
+        budget.limit(WorkKind::Transcription),
+        budget.limit(WorkKind::Indexing),
+        budget.limit(WorkKind::Agent),
+        budget.limit(WorkKind::ProviderCalls),
+        budget.gpu_bytes().saturating_add(budget.ram_bytes()),
+    )
 }
 
 pub struct AgentUi {
@@ -58,7 +69,7 @@ pub struct AgentUi {
     engine_budget: mediaa_engine::Budget,
     /// Limits of the app's own model work (the engine has its own queue of loaded models).
     slots: Slots,
-    worker: Option<Worker>,
+    hosted: Option<Hosted>,
 }
 
 impl AgentUi {
@@ -72,7 +83,7 @@ impl AgentUi {
             engine,
             engine_budget: budget.clone().into(),
             slots: Slots::new(budget.clone()),
-            worker: None,
+            hosted: None,
         }
     }
 
@@ -93,33 +104,37 @@ impl AgentUi {
             self.engine.set_budget(budget);
             self.engine_budget = budget;
         }
-        if let Some(w) = &self.worker {
-            if w.dir == ai_dir {
-                let stale = *w.settings.read().expect("settings lock") != *agent;
+        let pools = pool_key(&agent.budget);
+        if let Some(hosted) = &self.hosted {
+            if hosted.dir == ai_dir && hosted.pools == pools {
+                let stale = *hosted.settings.read().expect("settings lock") != *agent;
                 if stale {
-                    *w.settings.write().expect("settings lock") = agent.clone();
+                    *hosted.settings.write().expect("settings lock") = agent.clone();
                 }
                 return;
             }
         }
-        // A new library: a worker of its own.
-        self.worker = None;
+        // A new library, or new pool sizes: a host of its own. Recover continues runs the
+        // previous process left in the file.
+        self.hosted = None;
         let settings = Arc::new(RwLock::new(agent.clone()));
         let s = settings.clone();
         let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || s.read().expect("settings lock").clone());
         let slots = self.slots.clone();
         let engine = self.engine.clone();
-        let mut handlers: Vec<Box<dyn TaskHandler>> = vec![
-            Box::new(Transcribe::new(ai_dir, slots.clone(), current.clone())),
-            Box::new(Diarize::new(ai_dir, slots.clone(), current.clone())),
-            Box::new(Index::new(ai_dir, slots.clone(), current.clone())),
-        ];
-        // The topics stage: the plan, a digest per topic, the merge and a detail per topic.
-        handlers.extend(outline::handlers(ai_dir, slots, current));
+        let streams = Arc::new(Streams::default());
+        let feed = Arc::new(Feed::default());
         let stop = Arc::new(AtomicBool::new(false));
-        match worker::spawn(ai_dir.to_path_buf(), engine, handlers, stop.clone()) {
-            Ok(_) => self.worker = Some(Worker { dir: ai_dir.to_path_buf(), stop, settings }),
-            Err(e) => log::error!("agent worker: {e}"),
+        match run::open_scheduler(ai_dir, &agent.budget) {
+            Ok(sched) => {
+                run::register_stages(&sched, ai_dir, engine.clone(), slots, current, streams.clone());
+                if let Err(e) = run::spawn_host(sched.clone(), engine, feed.clone(), stop.clone()) {
+                    log::error!("agent queue: {e}");
+                    return;
+                }
+                self.hosted = Some(Hosted { dir: ai_dir.to_path_buf(), stop, settings, sched, streams, feed, pools });
+            }
+            Err(e) => log::error!("agent queue: {e:#}"),
         }
     }
 }
@@ -132,12 +147,23 @@ pub struct Services {
     pub engine: Arc<dyn Engine>,
     pub slots: Slots,
     pub settings: Arc<RwLock<AgentSettings>>,
+    pub sched: Arc<Scheduler>,
+    pub streams: Arc<Streams>,
+    pub feed: Arc<Feed>,
 }
 
 impl AgentUi {
     /// The services of the current library (after [`AgentUi::tick`]).
     pub fn services(&self) -> Option<Services> {
-        let worker = self.worker.as_ref()?;
-        Some(Services { ai_dir: worker.dir.clone(), engine: self.engine.clone(), slots: self.slots.clone(), settings: worker.settings.clone() })
+        let hosted = self.hosted.as_ref()?;
+        Some(Services {
+            ai_dir: hosted.dir.clone(),
+            engine: self.engine.clone(),
+            slots: self.slots.clone(),
+            settings: hosted.settings.clone(),
+            sched: hosted.sched.clone(),
+            streams: hosted.streams.clone(),
+            feed: hosted.feed.clone(),
+        })
     }
 }

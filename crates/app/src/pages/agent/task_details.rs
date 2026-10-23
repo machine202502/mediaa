@@ -9,7 +9,7 @@ use crate::theme;
 use chrono::NaiveDateTime;
 use eframe::egui::{self, FontId, RichText};
 use egui_phosphor::regular as icon;
-use mediaa_core::queue::{elapsed, Stats, Task, TaskId, TaskStatus};
+use mediaa_queue::{elapsed, Stats, Status as TaskStatus, Task, TaskId};
 use mediaa_platform::clipboard;
 use rust_i18n::t;
 use serde_json::Value;
@@ -92,13 +92,23 @@ pub struct Facts {
     pub progress: String,
     pub stats: String,
     pub tool: String,
+    /// Why a topic detail stopped early (`result.cut`), already in the user's language.
+    pub cut: String,
+    /// Why the watchdog interrupted the run (`detail.hang`), empty once the task has finished.
+    pub hang: String,
 }
 
-pub fn facts_of(task: &Task, stats: &Stats, locale: &str) -> Facts {
+pub fn facts_of(task: &Task, stats: &Stats, now_ms: i64, locale: &str) -> Facts {
+    // A running task is not over: whatever `finished_ms` an earlier attempt left is not its end.
+    let finished = if matches!(task.status, TaskStatus::Running | TaskStatus::Stopping) { None } else { task.finished_ms };
     Facts {
         label: task_label::label_in(locale, &task.kind, &task.title),
         status: status_text(task.status, locale),
-        error: task.error.clone().unwrap_or_default(),
+        // Why it waits or why it was cancelled, in the user's language; a real failure otherwise.
+        error: {
+            let note = queue::note_text(task.note.as_ref(), locale);
+            if note.is_empty() { task.error.clone().unwrap_or_default() } else { note }
+        },
         kind: task.kind.clone(),
         recording: task.title.clone(),
         scope: task.scope.clone().unwrap_or_default(),
@@ -106,18 +116,64 @@ pub fn facts_of(task: &Task, stats: &Stats, locale: &str) -> Facts {
         options: options_text(&task.input),
         models: stats.models.join(", "),
         started: stamp(task.started_ms),
-        finished: stamp(task.finished_ms),
-        duration: if task.started_ms.is_some() { clock(elapsed(task, task.finished_ms.unwrap_or(task.started_ms.unwrap_or(0)))) } else { String::new() },
+        finished: stamp(finished),
+        // A running task counts up to now, not to its start.
+        duration: if task.started_ms.is_some() { clock(elapsed(task, now_ms)) } else { String::new() },
         progress: format!("{} %", (task.progress.clamp(0.0, 1.0) * 100.0).round() as i32),
         stats: queue::stats_text(stats),
         tool: queue::tool_text(&task.detail).unwrap_or_default(),
+        cut: cut_text(task.result.as_ref(), locale),
+        hang: task
+            .detail
+            .get("hang")
+            .and_then(|value| serde_json::from_value::<mediaa_queue::Note>(value.clone()).ok())
+            .map(|note| queue::note_text(Some(&note), locale))
+            .unwrap_or_default(),
     }
+}
+
+/// The note of a topic detail that stopped before the model finished. The agent stores it in
+/// English, in a few fixed shapes; each part is translated, anything else is shown as it came.
+pub fn cut_text(result: Option<&Value>, locale: &str) -> String {
+    let Some(note) = result.and_then(|r| r.get("cut")).and_then(Value::as_str) else { return String::new() };
+    note.split(": ").map(|part| cut_part(part.trim(), locale)).collect::<Vec<_>>().join(": ")
+}
+
+fn cut_part(part: &str, locale: &str) -> String {
+    let tokens = |value: &str| t!("details.cut_token_limit", tokens = value, locale = locale).to_string();
+    if let Some(rest) = part.strip_prefix("cut at line ") {
+        if let Some((line, kept)) = rest.split_once(" after ") {
+            if let Some(kept) = kept.strip_suffix(" complete sections") {
+                return t!("details.cut_at_line", line = line, kept = kept, locale = locale).into();
+            }
+        }
+    }
+    if let Some(line) = part.strip_prefix("the first answer was cut at line ") {
+        return t!("details.cut_first", line = line, locale = locale).into();
+    }
+    if let Some(limit) = part.strip_prefix("hit the limit of ").and_then(|r| r.strip_suffix(" tokens")) {
+        return tokens(limit);
+    }
+    if let Some(limit) = part.strip_prefix("hit the context window of ").and_then(|r| r.strip_suffix(" tokens")) {
+        return t!("details.cut_context", tokens = limit, locale = locale).into();
+    }
+    if let Some(rest) = part.strip_prefix("the prompt (~") {
+        if let Some((prompt, rest)) = rest.split_once(" tokens) and the answer (") {
+            if let Some((answer, context)) = rest.split_once(" tokens) do not fit the context of ") {
+                if let Some(context) = context.strip_suffix(" tokens") {
+                    return t!("details.cut_does_not_fit", prompt = prompt, answer = answer, context = context, locale = locale).into();
+                }
+            }
+        }
+    }
+    part.to_string()
 }
 
 fn status_text(status: TaskStatus, locale: &str) -> String {
     match status {
         TaskStatus::Queued => t!("queue.queued", locale = locale),
         TaskStatus::Running => t!("queue.running", locale = locale),
+        TaskStatus::Stopping => t!("queue.stopping", locale = locale),
         TaskStatus::Waiting => t!("queue.status_waiting", locale = locale),
         TaskStatus::Paused => t!("queue.paused", locale = locale),
         TaskStatus::Done => t!("queue.done", locale = locale),
@@ -183,6 +239,12 @@ pub fn report_text(facts: &Facts, hint: &str, log: &str, locale: &str) -> String
     if !facts.tool.is_empty() {
         out.push(line("tool", &facts.tool));
     }
+    if !facts.cut.is_empty() {
+        out.push(line("cut", &facts.cut));
+    }
+    if !facts.hang.is_empty() {
+        out.push(line("hang", &facts.hang));
+    }
     if !hint.is_empty() {
         out.push(hint.to_string());
     }
@@ -206,6 +268,8 @@ fn field_label(key: &str, locale: &str) -> String {
         "progress" => t!("details.progress", locale = locale).into(),
         "stats" => t!("details.stats", locale = locale).into(),
         "tool" => t!("details.tool", locale = locale).into(),
+        "cut" => t!("details.cut", locale = locale).into(),
+        "hang" => t!("details.hang", locale = locale).into(),
         "error" => t!("details.error", locale = locale).into(),
         "log" => t!("details.log", locale = locale).into(),
         _ => key.to_string(),
@@ -334,10 +398,11 @@ pub enum Cmd {
 
 /// The details window. `copied` is the «Скопировано» mark; it keeps its place either way.
 /// `stats` is the task and everything under it (a composite's own counters are often empty).
-pub fn show(ctx: &egui::Context, task: &Task, stats: &Stats, log: &str, copied: &mut bool, roster: &super::mentions::Roster) -> Option<Cmd> {
+/// `now_ms` is the page's clock: a running task's duration counts up to it.
+pub fn show(ctx: &egui::Context, task: &Task, stats: &Stats, now_ms: i64, log: &str, copied: &mut bool, roster: &super::mentions::Roster) -> Option<Cmd> {
     let mut open = true;
     let mut cmd = None;
-    let facts = facts_of(task, stats, &rust_i18n::locale());
+    let facts = facts_of(task, stats, now_ms, &rust_i18n::locale());
     let hint = hint_for(&facts.error);
     let hint_line = hint.map(|h| hint_text(h, &rust_i18n::locale())).unwrap_or_default();
     let failed = task.status == TaskStatus::Failed || !facts.error.is_empty();
@@ -378,6 +443,12 @@ pub fn show(ctx: &egui::Context, task: &Task, stats: &Stats, log: &str, copied: 
                 }
                 if !facts.tool.is_empty() {
                     field(ui, &field_label("tool", &locale), &facts.tool);
+                }
+                if !facts.cut.is_empty() {
+                    field(ui, &field_label("cut", &locale), &facts.cut);
+                }
+                if !facts.hang.is_empty() {
+                    field(ui, &field_label("hang", &locale), &facts.hang);
                 }
                 if failed {
                     if !hint_line.is_empty() {
@@ -438,7 +509,8 @@ fn field_value(ui: &mut egui::Ui, label: &str, value: &str, roster: Option<&supe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaa_core::queue::{Stats, TaskStatus};
+    use mediaa_queue::Role;
+    use mediaa_queue::{Stats, Status as TaskStatus};
     use serde_json::json;
 
     fn task(error: &str) -> Task {
@@ -454,6 +526,7 @@ mod tests {
             result: None,
             progress: 0.4,
             error: Some(error.into()),
+            note: None,
             attempts: 1,
             created_ms: 0,
             updated_ms: 4_000,
@@ -465,12 +538,20 @@ mod tests {
             stats: Stats { model_calls: 3, prompt_tokens: 100, completion_tokens: 20, model_ms: 500, models: vec!["Qwen/Qwen3.5-4B".into()] },
             detail: Value::Null,
             units: 1.0,
+            resource: None,
+            memory: 0,
+            model: None,
+            role: Role::Work,
+            gen: 0,
+            yield_cont: false,
+            heartbeat_ms: None,
+            stop_intent: None,
         }
     }
 
     #[test]
     fn the_facts_name_the_task_its_input_and_its_models() {
-        let facts = facts_of(&task("boom"), &task("boom").stats, "ru");
+        let facts = facts_of(&task("boom"), &task("boom").stats, 5_000, "ru");
         assert_eq!(facts.label, "Индекс: interview.mp4");
         assert_eq!(facts.status, "ошибка");
         assert_eq!(facts.kind, "index");
@@ -485,10 +566,91 @@ mod tests {
     }
 
     #[test]
+    fn a_running_task_counts_its_duration_up_to_now() {
+        let mut t = task("");
+        t.status = TaskStatus::Running;
+        t.finished_ms = None;
+        // Started at 1 s; the window asks at 90 s: the time it has been running, not «0:00».
+        assert_eq!(facts_of(&t, &t.stats, 90_000, "ru").duration, "1:29");
+        // A stamp left by an earlier attempt is not this run's end.
+        t.finished_ms = Some(2_000);
+        let running = facts_of(&t, &t.stats, 90_000, "ru");
+        assert_eq!((running.duration.as_str(), running.finished.as_str()), ("1:29", ""));
+        // A finished task keeps the time it took.
+        t.status = TaskStatus::Done;
+        t.finished_ms = Some(4_000);
+        assert_eq!(facts_of(&t, &t.stats, 90_000, "ru").duration, "0:03");
+    }
+
+    #[test]
+    fn the_reason_the_watchdog_interrupted_the_task_is_shown() {
+        let mut t = task("");
+        t.status = TaskStatus::Queued;
+        t.detail = json!({"hang": {"kind": "hang", "resource": "llm", "idle_s": 300}});
+        let facts = facts_of(&t, &t.stats, 5_000, "ru");
+        assert_eq!(
+            facts.hang,
+            "модель не отвечает дольше 5 мин — вызов прерван, задача продолжит с последней точки"
+        );
+        let report = report_text(&facts, "", "", "ru");
+        assert!(report.contains("Прервано") && report.contains("не отвечает"), "{report}");
+        assert!(
+            facts_of(&t, &t.stats, 5_000, "en").hang.starts_with("the model has not responded"),
+            "{}",
+            facts_of(&t, &t.stats, 5_000, "en").hang
+        );
+        // A task that finished, or one that never hung, has no note.
+        t.detail = Value::Null;
+        assert_eq!(facts_of(&t, &t.stats, 5_000, "ru").hang, "");
+    }
+
+    #[test]
+    fn a_note_is_shown_instead_of_an_older_error_and_in_the_window_language() {
+        let mut t = task("boom");
+        t.note = Some(mediaa_queue::failure_note("Темы: rec"));
+        assert_eq!(facts_of(&t, &t.stats, 5_000, "ru").error, "из-за ошибки в Темы: rec");
+        assert_eq!(facts_of(&t, &t.stats, 5_000, "en").error, "because of a failure in Темы: rec");
+        t.note = None;
+        assert_eq!(facts_of(&t, &t.stats, 5_000, "ru").error, "boom");
+    }
+
+    #[test]
+    fn a_cut_topic_detail_says_why_it_stopped() {
+        let mut t = task("");
+        t.kind = "topic-detail".into();
+        t.result = Some(json!({
+            "cut": "cut at line 103 after 2 complete sections: hit the limit of 1819 tokens"
+        }));
+        let ru = facts_of(&t, &t.stats, 5_000, "ru");
+        assert!(ru.cut.contains("строке 103") && ru.cut.contains("1819"), "{}", ru.cut);
+        assert!(!ru.cut.contains("complete sections"), "{}", ru.cut);
+        let en = facts_of(&t, &t.stats, 5_000, "en").cut;
+        assert!(en.contains("line 103") && en.contains("limit") && en.contains("1819"), "{en}");
+        let report = report_text(&facts_of(&t, &t.stats, 5_000, "en"), "", "", "en");
+        assert!(report.contains(&en), "{report}");
+
+        // The other shapes the agent writes, and an unknown one as it came.
+        t.result = Some(json!({
+            "cut": "the first answer was cut at line 40: hit the context window of 8192 tokens"
+        }));
+        let text = facts_of(&t, &t.stats, 5_000, "en").cut;
+        assert!(text.contains("first answer") && text.contains("40") && text.contains("8192"), "{text}");
+        t.result = Some(json!({
+            "cut": "the prompt (~7000 tokens) and the answer (2000 tokens) do not fit the context of 8192 tokens"
+        }));
+        let text = facts_of(&t, &t.stats, 5_000, "ru").cut;
+        assert!(text.contains("7000") && text.contains("2000") && text.contains("8192"), "{text}");
+        t.result = Some(json!({ "cut": "something new" }));
+        assert_eq!(facts_of(&t, &t.stats, 5_000, "ru").cut, "something new");
+        t.result = None;
+        assert_eq!(facts_of(&t, &t.stats, 5_000, "ru").cut, "");
+    }
+
+    #[test]
     fn speakers_count_as_the_input_when_there_are_no_options() {
         let mut t = task("x");
         t.input = json!({"path": "a.wav", "speakers": 2});
-        assert_eq!(facts_of(&t, &t.stats, "en").options, r#"{"speakers":2}"#);
+        assert_eq!(facts_of(&t, &t.stats, 5_000, "en").options, r#"{"speakers":2}"#);
     }
 
     #[test]
@@ -514,7 +676,7 @@ mod tests {
     #[test]
     fn the_report_carries_the_error_the_hint_and_the_log() {
         let sample = task("model.onnx: the voice activity model does not load");
-        let facts = facts_of(&sample, &sample.stats, "en");
+        let facts = facts_of(&sample, &sample.stats, 5_000, "en");
         let hint = hint_text(Hint::ModelMissing, "en");
         let log = "2026-10-21 21:07:01.123 [ERROR] mediaa_agent::worker: task 7 index (interview.mp4) failed: model.onnx: the voice activity model does not load\n";
         let text = report_text(&facts, &hint, log, "en");

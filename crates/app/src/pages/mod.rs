@@ -94,7 +94,7 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                         .inner_margin(Margin::symmetric(12, 4))
                         .stroke(Stroke::new(1.0, p.border)),
                 )
-                .show(ui, |ui| sub_nav(app, ui, &pages, section == Section::Agent));
+                .show(ui, |ui| sub_nav(app, ui, &pages));
         }
     }
 
@@ -221,7 +221,7 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
 
 /// Sub-pages of a section as compact tabs in one row; a red dot marks the page of the
 /// recording in progress (the shell remembers the last sub-page of each section).
-fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)], engine_chip: bool) {
+fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)]) {
     let p = theme::palette(ui);
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -244,12 +244,6 @@ fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)], eng
                 let c = resp.rect.right_center() - egui::vec2(10.0, 0.0);
                 ui.painter().circle_filled(c, 3.5, p.danger);
             }
-        }
-        if engine_chip {
-            // The engine of every Agent page, on the right of its sub-navigation.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                app.agent.engine_state.chip(ui);
-            });
         }
     });
 }

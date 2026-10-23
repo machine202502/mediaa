@@ -14,7 +14,7 @@ use mediaa_agent::scope::Scope;
 use mediaa_agent::slots::Slots;
 use mediaa_core::agent::{AgentSettings, ModelRole};
 use mediaa_core::catalogs::ai_dir;
-use mediaa_core::queue::{Queue, TaskId};
+use mediaa_queue::TaskId;
 use mediaa_core::transcript::{self, Transcript};
 use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Engine, LocalEngine, Priority};
 use serde::Serialize;
@@ -342,9 +342,9 @@ fn begin_scope(
 }
 
 fn read_stats(dir: &Path, id: TaskId) -> anyhow::Result<TurnStats> {
-    let queue = Queue::open(dir)?;
-    let mut total = mediaa_core::queue::Stats::default();
-    for task in queue.subtree(id)? {
+    let store = mediaa_agent::run::open_store(dir)?;
+    let mut total = mediaa_queue::Stats::default();
+    for task in store.subtree(id)? {
         total.add(&task.stats);
     }
     Ok(TurnStats {

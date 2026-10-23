@@ -72,13 +72,15 @@ impl Roster {
         if who.recording.is_some() && !who.title.is_empty() { format!("{name} ({})", who.title) } else { name }
     }
 
-    /// What completing a row inserts. One recording: `@<current name>`. A folder: `@sN#R`,
-    /// because the same name can belong to two recordings and only the label tells them apart.
-    pub fn insertion(who: &Who) -> String {
-        match who.recording {
-            Some(r) => speakers::folder_label(who.index, r),
-            None => format!("@{}", Self::row_label(who)),
-        }
+    /// The name without `@` for a label (`@s1`, `@s1#2`). Unknown labels use «Говорящий N».
+    /// `None` when `label` is not a speaker label.
+    pub fn name_of(&self, label: &str) -> Option<String> {
+        let parsed = speakers::parse_label(label)?;
+        let who = self.speakers.iter().find(|w| w.index == parsed.index && w.recording == parsed.recording);
+        Some(match who {
+            Some(w) => Self::row_label(w),
+            None => Self::unnamed(parsed.index),
+        })
     }
 
     /// `@<name>` of a speaker becomes the label the model reads.
@@ -160,16 +162,13 @@ mod tests {
         assert_eq!(renamed.render("@s1"), "@Олег");
         // The user's own spelling stays (it is not a stored label).
         assert_eq!(renamed.render("привет @Антон"), "привет @Антон");
-        assert_eq!(Roster::insertion(&who(0, "Антон")), "@Антон");
-        assert_eq!(Roster::insertion(&who(1, "")), format!("@{}", t!("studio.speaker", n = 2)));
     }
 
     #[test]
-    fn a_folder_row_names_the_recording_and_inserts_a_label() {
+    fn a_folder_row_names_the_recording() {
         let who = Who { index: 1, recording: Some(3), name: "Анна".into(), title: "Планёрка".into() };
         let roster = Roster { speakers: vec![who.clone(), Who { index: 1, recording: Some(4), name: "Анна".into(), title: "Стендап".into() }] };
         assert_eq!(Roster::row_label(&who), "Анна (Планёрка)");
-        assert_eq!(Roster::insertion(&who), "@s2#3");
         assert_eq!(roster.render("см. @s2#3"), "см. @Анна (Планёрка)");
         assert_eq!(roster.to_model("@s2#3"), "@s2#3");
         // The same name in two recordings is not guessed.

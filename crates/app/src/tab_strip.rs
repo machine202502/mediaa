@@ -9,7 +9,7 @@ use std::hash::Hash;
 
 /// Width of a tab: titles are cut to it.
 pub const TAB_WIDTH: f32 = 140.0;
-/// Height of a tab (the strip is a little taller with its scroll bar).
+/// Height of a tab. The strip is always this plus [`theme::TAB_SCROLL_BAR`].
 pub const TAB_HEIGHT: f32 = 24.0;
 /// Room between a tab's edge and its title.
 const PAD: f32 = 8.0;
@@ -64,14 +64,18 @@ pub fn tab_strip<I: Copy + Eq + Hash>(
     }
 
     let mut action = None;
-    ui.scope(|ui| {
-        // A wheel over the strip scrolls it, as it does in VS Code.
-        ui.style_mut().always_scroll_the_only_direction = true;
-        egui::ScrollArea::horizontal()
-            .id_salt(strip_id.with("area"))
-            .auto_shrink([false, true])
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-            .show(ui, |ui| {
+    // The bar's strip is reserved whether or not the bar is drawn, so titles do not move.
+    let strip_h = TAB_HEIGHT + theme::TAB_SCROLL_BAR;
+    let (strip_rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), strip_h), Sense::hover());
+    let mut row = ui.new_child(egui::UiBuilder::new().max_rect(strip_rect));
+    // A wheel over the strip scrolls it, as it does in VS Code.
+    row.style_mut().always_scroll_the_only_direction = true;
+    theme::tab_row_scroll(&mut row);
+    egui::ScrollArea::horizontal()
+        .id_salt(strip_id.with("area"))
+        .auto_shrink([false, false])
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+        .show(&mut row, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     for (i, tab) in tabs.iter().enumerate() {
@@ -146,8 +150,7 @@ pub fn tab_strip<I: Copy + Eq + Hash>(
                         }
                     }
                 });
-            });
-    });
+        });
     action
 }
 
@@ -184,5 +187,31 @@ mod tests {
         closed.get_by_label("Закрыть").click();
         closed.run();
         assert!(matches!(closed.state(), Some(TabAction::Closed(1))), "the «×» closes the current tab");
+    }
+
+    fn strip_height(n: usize, width: f32) -> f32 {
+        let tabs: Vec<Tab<i64>> = (0..n).map(|i| Tab::new(i as i64, format!("Вкладка {i}"), i == 0)).collect();
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            move |ui, height: &mut f32| {
+                ui.set_width(width);
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let y = ui.cursor().min.y;
+                tab_strip(ui, "height", &tabs, "Закрыть", &crate::pages::agent::mentions::Roster::default());
+                *height = ui.cursor().min.y - y;
+            },
+            0.0,
+        );
+        harness.run();
+        *harness.state()
+    }
+
+    /// One tab and a row that does not fit reserve the same bar strip.
+    #[test]
+    fn the_row_height_does_not_depend_on_the_bar() {
+        let one = strip_height(1, 400.0);
+        let many = strip_height(8, 400.0);
+        let expected = TAB_HEIGHT + theme::TAB_SCROLL_BAR;
+        assert!((one - expected).abs() < 0.5, "one tab: {one} != {expected}");
+        assert!((many - one).abs() < 0.5, "overflow changed the row: {one} -> {many}");
     }
 }

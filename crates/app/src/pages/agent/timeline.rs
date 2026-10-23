@@ -181,13 +181,63 @@ fn thinking_row(ui: &mut egui::Ui, id: impl Hash + std::fmt::Debug, text: &str, 
         });
 }
 
-/// The title shown for a step. The draft and the check use the interface's language; the text
-/// stored with the answer stays the one the queue shows.
+/// The title shown for a step. A plain label follows the interface language. A phrase the titles
+/// model wrote stays as stored. An internal tool name is never shown.
 fn step_title(tool: &str, title: &str) -> String {
-    match tool {
-        "verify" => t!("studio.verify_step").to_string(),
-        _ => title.to_string(),
+    shown_in(&rust_i18n::locale(), tool, title)
+}
+
+fn tool_label(locale: &str, key: &str) -> String {
+    match key {
+        "outline" => t!("chat.tool_outline", locale = locale),
+        "topic" => t!("chat.tool_topic", locale = locale),
+        "search" => t!("chat.tool_search", locale = locale),
+        "read" => t!("chat.tool_read", locale = locale),
+        "mentions" => t!("chat.tool_mentions", locale = locale),
+        "speakers" => t!("chat.tool_speakers", locale = locale),
+        "calculator" => t!("chat.tool_calculator", locale = locale),
+        "time" => t!("chat.tool_time", locale = locale),
+        "scan" => t!("chat.tool_scan", locale = locale),
+        "rename_speakers" => t!("chat.tool_rename_speakers", locale = locale),
+        "delegate" => t!("chat.tool_delegate", locale = locale),
+        "remember" => t!("chat.tool_remember", locale = locale),
+        "plan" => t!("chat.tool_plan", locale = locale),
+        "say" => t!("chat.tool_say", locale = locale),
+        "web_search" => t!("chat.tool_web_search", locale = locale),
+        "web_read" => t!("chat.tool_web_read", locale = locale),
+        "recordings" => t!("chat.tool_recordings", locale = locale),
+        _ => t!("chat.tool_step", locale = locale),
     }
+    .into()
+}
+
+/// `title` is a plain label (either language) or empty or the tool's own name.
+fn plain_label(tool: &str, title: &str) -> bool {
+    if title.is_empty() || title == tool {
+        return true;
+    }
+    for locale in ["ru", "en"] {
+        if title == tool_label(locale, tool) {
+            return true;
+        }
+        if tool == "outline" && title == tool_label(locale, "topic") {
+            return true;
+        }
+    }
+    false
+}
+
+fn shown_in(locale: &str, tool: &str, title: &str) -> String {
+    if tool == "verify" {
+        return t!("studio.verify_step", locale = locale).into();
+    }
+    if tool == "draft" {
+        return t!("studio.draft_step", locale = locale).into();
+    }
+    if tool == "outline" && (title == tool_label("ru", "topic") || title == tool_label("en", "topic")) {
+        return tool_label(locale, "topic");
+    }
+    if plain_label(tool, title) { tool_label(locale, tool) } else { title.to_string() }
 }
 
 /// The draft, folded until the user opens it. Its text is the step's result.
@@ -395,6 +445,25 @@ mod tests {
         // A stopped answer keeps its timeline in the message it stored.
         let stopped = [user(), section(), message(Author::Agent, "", json!({ "steps": [], "timeline": tl.to_value(), "stopped": true }))];
         assert_eq!(hidden_sections(&stopped, false), [false, true, false]);
+    }
+
+    #[test]
+    fn a_step_shows_a_label_or_a_phrase_and_never_the_tool_name() {
+        use mediaa_agent::assistant::step_title::caption;
+        for tool in ["search", "read", "outline", "time", "say", "recordings"] {
+            assert_eq!(shown_in("ru", tool, ""), caption(tool, false, false), "{tool}");
+            assert_eq!(shown_in("en", tool, ""), caption(tool, false, true), "{tool}");
+            assert_ne!(shown_in("en", tool, tool), tool, "{tool}");
+            assert_ne!(shown_in("ru", tool, ""), tool);
+        }
+        // A Russian label follows the interface when it switches to English.
+        assert_eq!(shown_in("en", "search", "Поиск"), "Search");
+        assert_eq!(shown_in("en", "outline", "Разбор темы"), caption("outline", true, true));
+        assert_eq!(shown_in("ru", "outline", "Topic breakdown"), caption("outline", true, false));
+        // A phrase stays, in either language. "Ищу" is not a label.
+        assert_eq!(shown_in("ru", "search", "Ищу"), "Ищу");
+        assert_eq!(shown_in("en", "search", "Ищу"), "Ищу");
+        assert_eq!(shown_in("en", "nope", "nope"), caption("nope", false, true));
     }
 
     #[test]

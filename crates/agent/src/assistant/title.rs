@@ -110,7 +110,7 @@ pub fn work(scope: &Scope, settings: &AgentSettings, ai_dir: &Path, store: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaa_core::queue::{Queue, TaskStatus};
+    use mediaa_queue::Status as TaskStatus;
     use mediaa_engine::testing::FakeEngine;
     use std::sync::Arc;
 
@@ -158,7 +158,7 @@ mod tests {
         assert_eq!(chats[0].max_tokens, TITLE_TOKENS);
         assert!(chats[0].texts[1].contains("Russian") && chats[0].texts[1].contains("првиет"), "{:?}", chats[0].texts);
         // The queue: a finished chat-title task with the call in its stats.
-        let task = Queue::open(ai).unwrap().get(scope.task()).unwrap().unwrap();
+        let task = scope.store().get(scope.task()).unwrap().unwrap();
         assert_eq!((task.kind.as_str(), task.status, task.inline), ("chat-title", TaskStatus::Done, true));
         assert_eq!((task.stats.model_calls, task.stats.models.clone()), (1, vec!["unsloth/Qwen3-0.6B-GGUF".to_string()]));
         assert_eq!(task.result.as_ref().unwrap()["title"], "Приветствие");
@@ -176,7 +176,7 @@ mod tests {
         work(&scope, &AgentSettings::default(), ai, "rec", chat, "когда отчёт?", &AtomicBool::new(false));
         let t = Transcript::open(ai, "rec").unwrap();
         assert_eq!(t.chat_title(chat).unwrap().as_deref(), Some("Когда отчёт?"));
-        let task = Queue::open(ai).unwrap().get(scope.task()).unwrap().unwrap();
+        let task = scope.store().get(scope.task()).unwrap().unwrap();
         assert_eq!(task.status, TaskStatus::Failed);
         assert_eq!(task.error.as_deref(), Some("the model wrote no title: \"  \"; the title is the first message"));
 
@@ -198,7 +198,7 @@ mod tests {
         let cancel = AtomicBool::new(true);
         assert_eq!(work(&scope, &AgentSettings::default(), ai, "rec", chat, "привет", &cancel), None);
         assert_eq!(Transcript::open(ai, "rec").unwrap().chat_title(chat).unwrap().as_deref(), Some(""));
-        assert_eq!(Queue::open(ai).unwrap().get(scope.task()).unwrap().unwrap().status, TaskStatus::Cancelled);
+        assert_eq!(scope.store().get(scope.task()).unwrap().unwrap().status, TaskStatus::Cancelled);
     }
 
     /// The titles model (Qwen3-0.6B) names three first messages, thinking off.

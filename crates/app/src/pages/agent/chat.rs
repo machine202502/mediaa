@@ -3,27 +3,31 @@
 //! that seek the player; an answer is its timeline (steps, reasoning, text; see `timeline`), and
 //! a chat is named once by the titles model after its first question.
 
+use super::composer::{self, Field};
 use super::mentions::{self, Roster};
-use super::studio::{panel, StudioAction};
+use super::studio::{self, panel, StudioAction};
+use super::topics;
 use super::Services;
 use crate::player::Player;
 use crate::tab_strip::{self, Tab, TabAction};
 use crate::theme;
-use eframe::egui::{self, Rect, RichText};
+use eframe::egui::{self, FontId, Rect, RichText};
 use egui_phosphor::regular as icon;
-use mediaa_agent::assistant::folder::Item;
-use mediaa_agent::assistant::chat::{self as answering, Run, State};
-use mediaa_agent::assistant::{self, title, Memory, Recording, Turn};
-use mediaa_agent::scope::Scope as TaskScope;
+use mediaa_agent::assistant::chat::Live;
+use mediaa_agent::assistant::queued::{self, ANSWER_KIND, TITLE_KIND};
+use mediaa_agent::assistant::{quote, step_title, title, Event, StepRecord};
+#[cfg(test)]
+use mediaa_agent::assistant::Turn;
+use mediaa_agent::models::local_spec;
 use mediaa_agent::tools::parse_time;
-use mediaa_core::chat::{Author, ChatId, ChatInfo, ChatMessage};
+use mediaa_core::agent::{AgentSettings, ModelSource};
+use mediaa_core::chat::{Author, ChatId, ChatInfo, ChatMessage, Timeline, TimelineEntry};
 use mediaa_core::speakers::{self, Popup};
 use mediaa_core::transcript::{self, Transcript};
+use mediaa_queue::{Resource, Task, WaitReason};
 use rust_i18n::t;
 use super::timeline;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// How often the chats are re-read (another studio of the same file may write).
@@ -101,6 +105,7 @@ pub fn linkify(text: &str, bare_times: bool) -> String {
 }
 
 /// A chat's earlier questions with their answers.
+#[cfg(test)]
 pub fn history(messages: &[ChatMessage]) -> Vec<Turn> {
     // An answer may come as several messages (sections sent first).
     let mut turns: Vec<Turn> = Vec::new();
@@ -121,57 +126,10 @@ pub fn history(messages: &[ChatMessage]) -> Vec<Turn> {
     turns
 }
 
-/// An answer being written: the task in the queue, shared with the thread that writes it.
-struct Running {
-    run: Run,
-    chat: ChatId,
-    /// Sections of the answer stored as messages that the pane has read.
-    stored: usize,
-}
-
 /// Where a clicked citation goes.
 enum Jump {
     Here(f64),
     Open(PathBuf, f64),
-}
-
-/// What an answer is about, for the thread writing it.
-enum Target {
-    /// A recording, with the player's length and position when it plays here.
-    File(PathBuf, Option<(f64, f64)>),
-    Folder(Vec<PathBuf>),
-}
-
-/// What the agent knows of a transcribed recording; `timing`: the player's length and position.
-fn recording_of(ai: &Path, id: &str, path: &Path, timing: Option<(f64, f64)>) -> anyhow::Result<Recording> {
-    let t = Transcript::open(ai, id)?;
-    let replies = t.dialog()?;
-    let duration = timing.map_or_else(|| replies.last().map_or(0.0, |r| r.end), |(d, _)| d);
-    Ok(Recording {
-        title: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
-        duration,
-        diarized: replies.iter().any(|r| r.speaker.is_some()),
-        names: t.speaker_names()?,
-        replies,
-        chapters: t.chapters()?,
-        position: timing.map(|(_, p)| p),
-    })
-}
-
-/// The recordings of a folder; those not transcribed yet are listed with their titles only.
-fn items_of(ai: &Path, files: &[PathBuf]) -> Vec<Item> {
-    files
-        .iter()
-        .filter_map(|path| {
-            let id = transcript::file_id(path).ok()?;
-            let recording = if Transcript::exists(ai, &id) {
-                recording_of(ai, &id, path, None).map_err(|e| log::warn!("{}: {e:#}", path.display())).ok()?
-            } else {
-                Recording { title: path.file_stem().unwrap_or_default().to_string_lossy().into_owned(), ..Recording::default() }
-            };
-            Some(Item { recording, file_id: id, path: path.clone() })
-        })
-        .collect()
 }
 
 /// What a chat talks about.
@@ -196,10 +154,12 @@ pub struct Chat {
     /// The first read has chosen a tab (before that `current` is merely unset).
     loaded: bool,
     messages: Vec<ChatMessage>,
-    input: String,
-    running: Option<Running>,
-    /// The title task of a new chat is running; set when it is over.
-    titling: Option<Arc<AtomicBool>>,
+    /// What the user is typing: plain text plus mention and quote chips.
+    draft: Field,
+    /// Sections of the answer on screen that the pane has already read.
+    shown_sections: usize,
+    /// Cursor into the library's event feed.
+    feed_at: usize,
     /// Chats whose title task was started again in this session (once each).
     retitled: std::collections::HashSet<ChatId>,
     error: Option<String>,
@@ -237,9 +197,9 @@ impl Chat {
             current: None,
             loaded: false,
             messages: Vec::new(),
-            input: String::new(),
-            running: None,
-            titling: None,
+            draft: Field::default(),
+            shown_sections: 0,
+            feed_at: 0,
             retitled: std::collections::HashSet::new(),
             error: None,
             confirm_delete: None,
@@ -320,11 +280,11 @@ impl Chat {
         }
     }
 
-    /// Sends the typed question: stored at once, answered in the background.
+    /// Sends the typed question: stored at once, answered by a queue task.
     fn send(&mut self, services: &Services, player: Option<&Player>) {
-        let question = self.input.trim().to_string();
+        let question = self.draft.to_message().trim().to_string();
         let Some(t) = self.transcript() else { return };
-        if question.is_empty() || self.running.is_some() {
+        if question.is_empty() || self.blocks_input(Some(services)) {
             return;
         }
         let new_chat = self.current.is_none();
@@ -351,52 +311,39 @@ impl Chat {
             }
         };
         self.current = Some(chat);
-        let history = history(&self.messages);
-        self.input.clear();
+        self.draft = Field::default();
         self.error = None;
         self.refresh(true);
 
-        let (s, ai) = (services.clone(), self.ai_dir.clone());
-        let (store, target) = match &self.scope {
-            Scope::File { path, file_id } => (file_id.clone().unwrap_or_default(), Target::File(path.clone(), player.map(|p| (p.duration(), p.position())))),
-            Scope::Folder { store, files } => (store.clone(), Target::Folder(files.clone())),
-        };
+        let store = self.store_key();
         if new_chat {
-            self.start_title(&s, &store, chat, &question);
+            self.start_title(services, &store, chat, &question);
         }
-        // The answer is a task of the queue from the first moment: it shows there while it waits.
-        let input = serde_json::json!({ "chat": chat, "question": question });
-        let scope = match TaskScope::begin(&ai, s.engine.clone(), "chat", &title::task_title(&question), &input, Some(&store)) {
-            Ok(scope) => scope,
-            Err(e) => {
-                self.error = Some(format!("{e:#}"));
-                return;
-            }
+        let settings = services.settings.read().expect("settings lock").clone();
+        let (resource, model) = answer_resource(&settings);
+        let input = match &self.scope {
+            Scope::File { path, .. } => serde_json::json!({
+                "chat": chat,
+                "store": store,
+                "question": question,
+                "locale": rust_i18n::locale().to_string(),
+                "path": path,
+                "file_id": store,
+                "duration": player.map(|p| p.duration()),
+                "position": player.map(|p| p.position()),
+            }),
+            Scope::Folder { files, .. } => serde_json::json!({
+                "chat": chat,
+                "store": store,
+                "question": question,
+                "locale": rust_i18n::locale().to_string(),
+                "files": files,
+            }),
         };
-        let run = Run::new(&scope);
-        let worker_run = run.clone();
-        let _ = std::thread::Builder::new().name("agent-answer".into()).spawn(move || {
-            let settings = s.settings.read().expect("settings lock").clone();
-            let mut memory: Memory = Transcript::open(&ai, &store)
-                .and_then(|t| t.chat_memory(chat))
-                .map_err(|e| log::warn!("chat memory: {e:#}"))
-                .ok()
-                .flatten()
-                .and_then(|m| serde_json::from_str(&m).ok())
-                .unwrap_or_default();
-            let cancel = worker_run.cancel.clone();
-            answering::work(&worker_run, &scope, &ai, &store, chat, &mut memory, |memory, on_event| match &target {
-                Target::File(path, timing) => {
-                    let recording = recording_of(&ai, &store, path, *timing)?;
-                    assistant::ask(&scope, &s.slots, &settings, &ai, &store, &recording, &history, memory, &question, &cancel, on_event)
-                }
-                Target::Folder(files) => {
-                    let items = items_of(&ai, files);
-                    assistant::ask_folder(&scope, &s.slots, &settings, &ai, &items, &history, memory, &question, &cancel, on_event)
-                }
-            });
-        });
-        self.running = Some(Running { run, chat, stored: 0 });
+        let task = queued::answer_task(&store, chat, &question, input, resource, model.as_deref());
+        if let Err(e) = services.sched.enqueue(task) {
+            self.error = Some(format!("{e:#}"));
+        }
     }
 
     /// The key of the store the chats live in.
@@ -408,103 +355,186 @@ impl Chat {
     }
 
     /// A chat whose title task never finished (the program was closed meanwhile) is named again
-    /// when it is opened — once.
+    /// when it is opened — once. A running answer does not block it.
     fn retitle(&mut self, services: &Services) {
-        if self.running.is_some() || self.titling.is_some() {
+        let Some((chat, question)) = retitle_candidate(&self.chats, self.current, &self.messages, &self.retitled) else { return };
+        let store = self.store_key();
+        if title_pending(services, &store, chat) {
             return;
         }
-        let Some((chat, question)) = retitle_candidate(&self.chats, self.current, &self.messages, &self.retitled) else { return };
         self.retitled.insert(chat);
-        let store = self.store_key();
         self.start_title(services, &store, chat, &question);
     }
 
-    /// Names a new chat: a task of the queue asks the titles model, once; the first question
-    /// (trimmed and capitalised) is the title when the task cannot be started or fails.
+    /// Names a chat: one small task for the titles model. The first question (trimmed and
+    /// capitalised) is the title when the task cannot be started.
     fn start_title(&mut self, services: &Services, store: &str, chat: ChatId, question: &str) {
-        let ai = self.ai_dir.clone();
-        // The queue shows what was typed. The titles model reads labels (`@Антон` → `@s1`).
-        let for_model = self.roster().to_model(question);
-        let input = serde_json::json!({ "chat": chat, "question": for_model });
-        let scope = TaskScope::begin(&ai, services.engine.clone(), "chat-title", &title::task_title(question), &input, Some(store));
-        let scope = match scope {
-            Ok(scope) => scope,
-            Err(e) => {
-                log::warn!("the title task was not started: {e:#}");
-                if let Some(t) = self.transcript() {
-                    let _ = t.set_chat_title(chat, &title::fallback_title(question));
-                }
-                return;
-            }
-        };
-        let done = Arc::new(AtomicBool::new(false));
-        self.titling = Some(done.clone());
-        let (settings, store, question) = (services.settings.clone(), store.to_string(), for_model);
-        let _ = std::thread::Builder::new().name("chat-title".into()).spawn(move || {
-            let settings = settings.read().expect("settings lock").clone();
-            title::work(&scope, &settings, &ai, &store, chat, &question, &AtomicBool::new(false));
-            done.store(true, Ordering::Release);
-        });
-    }
-
-    fn poll(&mut self, ctx: &egui::Context) {
-        // The title is ready (or the first question stands in for it): the tabs read it.
-        if let Some(done) = &self.titling {
-            ctx.request_repaint_after(Duration::from_millis(300));
-            if done.load(Ordering::Acquire) {
-                self.titling = None;
-                self.refresh(true);
+        if title_pending(services, store, chat) {
+            return;
+        }
+        let for_model = self.roster().to_model(&quote::expand(question));
+        let settings = services.settings.read().expect("settings lock").clone();
+        let model = settings.models.titles.as_ref().and_then(|source| local_spec(source).ok());
+        let task = queued::title_task(store, chat, question, &for_model, model.as_deref());
+        if let Err(e) = services.sched.enqueue(task) {
+            log::warn!("the title task was not started: {e:#}");
+            if let Some(t) = self.transcript() {
+                let _ = t.set_chat_title(chat, &title::fallback_title(question));
             }
         }
-        let Some(r) = &mut self.running else { return };
-        ctx.request_repaint_after(Duration::from_millis(200));
-        let (stored, state) = {
-            let live = r.run.live();
-            (live.stored, live.state.clone())
-        };
-        // A section of a long answer is a message now.
-        let said = stored != r.stored;
-        r.stored = stored;
-        match state {
-            State::Running => {
-                if said {
-                    self.refresh(true);
-                }
-            }
-            // A stop is not an error; the pane stored the stopped answer itself.
-            State::Done | State::Stopped => {
-                self.running = None;
-                self.refresh(true);
-            }
-            State::Failed(e) => {
-                self.error = Some(e);
-                self.running = None;
+    }
+
+    fn poll(&mut self, ctx: &egui::Context, services: Option<&Services>) {
+        let Some(services) = services else { return };
+        let (next, events, gap) = services.feed.since(self.feed_at);
+        let restarted = next < self.feed_at;
+        self.feed_at = next;
+        let store = self.store_key();
+        if gap || restarted || events.iter().any(|event| event.scope.as_deref() == Some(store.as_str())) {
+            self.refresh(true);
+        }
+        let Ok(tasks) = services.sched.store().list() else { return };
+        let any = tasks.iter().any(|task| task.kind == ANSWER_KIND && task.scope.as_deref() == Some(store.as_str()) && !task.status.is_finished());
+        if any {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+        let Some(chat) = self.current else { return };
+        let Some(task) = queued::running_answer(&tasks, &store, chat) else { return };
+        if let Some(live) = services.streams.get(task.id) {
+            if live.stored != self.shown_sections {
+                self.shown_sections = live.stored;
                 self.refresh(true);
             }
         }
     }
 
-    /// Stops the answer at once: it ends in the chat here and now (the worker may take longer to
-    /// notice; whatever it brings later is dropped) and the next question can be asked.
-    fn stop(&mut self) {
-        let Some(r) = self.running.take() else { return };
-        if let Some(t) = self.transcript() {
-            if let Err(e) = r.run.stop(&t, r.chat) {
+    /// Stops this chat's answer. The partial text is stored here; the chunk writes nothing more.
+    fn stop(&mut self, services: &Services) {
+        let Some(chat) = self.current else { return };
+        let Ok(tasks) = services.sched.store().list() else { return };
+        let (id, busy) = {
+            let Some(task) = queued::running_answer(&tasks, &self.store_key(), chat) else { return };
+            (task.id, queued::answer_busy(task))
+        };
+        if !busy {
+            // Still waiting: nothing was written, so cancelling leaves no partial message.
+            if let Err(e) = services.sched.cancel(id) {
                 self.error = Some(format!("{e:#}"));
             }
+            self.refresh(true);
+            return;
+        }
+        services.streams.update(id, |live| {
+            live.apply(&Event::Stopped);
+            live.close();
+        });
+        if let Some(t) = self.transcript() {
+            if let Some(mut live) = services.streams.get(id) {
+                // A phrase that finished before this stop is part of the stored timeline.
+                let found = step_title::phrases(&tasks, id);
+                apply_phrases(&mut live.timeline.entries, &found);
+                for (index, phrase) in &found {
+                    if let Some(step) = live.steps.get_mut(*index) {
+                        step.title = phrase.clone();
+                    }
+                }
+                let details = serde_json::json!({
+                    "steps": live.steps,
+                    "forced": false,
+                    "timeline": live.timeline.to_value(),
+                    "stopped": true,
+                    "task": id,
+                });
+                if let Err(e) = t.add_message(chat, Author::Agent, live.timeline.draft(), &details) {
+                    self.error = Some(format!("{e:#}"));
+                }
+            }
+        }
+        if let Err(e) = services.sched.cancel(id) {
+            self.error = Some(format!("{e:#}"));
         }
         self.refresh(true);
     }
 
+    fn blocks_input(&self, services: Option<&Services>) -> bool {
+        let Some(services) = services else { return false };
+        let Some(chat) = self.current else { return false };
+        let Ok(tasks) = services.sched.store().list() else { return false };
+        queued::running_answer(&tasks, &self.store_key(), chat).is_some()
+    }
+
+    fn busy_tabs(&self, services: Option<&Services>) -> Vec<ChatId> {
+        let Some(services) = services else { return Vec::new() };
+        let Ok(tasks) = services.sched.store().list() else { return Vec::new() };
+        let store = self.store_key();
+        tasks
+            .iter()
+            .filter(|task| task.kind == ANSWER_KIND && task.scope.as_deref() == Some(store.as_str()) && !task.status.is_finished())
+            .filter_map(|task| task.input.get("chat").and_then(|v| v.as_i64()))
+            .collect()
+    }
+
+    fn live_now(&self, services: Option<&Services>) -> Option<Live> {
+        let services = services?;
+        let chat = self.current?;
+        let tasks = services.sched.store().list().ok()?;
+        let task = queued::running_answer(&tasks, &self.store_key(), chat)?;
+        if !queued::answer_busy(task) {
+            return None;
+        }
+        let id = task.id;
+        let live = services.streams.get(id)?;
+        (!live.closed()).then_some(with_live_phrases(live, &tasks, id))
+    }
+
+    /// The cursor of an answer that is waiting in a fresh process, so the continuation line can
+    /// show before the next chunk is claimed.
+    fn parked_answer(&self, services: Option<&Services>) -> Option<Parked> {
+        let services = services?;
+        let chat = self.current?;
+        let tasks = services.sched.store().list().ok()?;
+        let task = queued::running_answer(&tasks, &self.store_key(), chat)?;
+        let has_live = services.streams.get(task.id).is_some();
+        if !continued_cursor(&task.cursor, has_live) {
+            return None;
+        }
+        let mut timeline = Timeline::from_details(&serde_json::json!({ "timeline": task.cursor.get("timeline").cloned().unwrap_or(serde_json::Value::Null) }));
+        let mut steps: Vec<StepRecord> = serde_json::from_value(task.cursor.get("steps").cloned().unwrap_or(serde_json::Value::Null)).unwrap_or_default();
+        let found = step_title::phrases(&tasks, task.id);
+        apply_phrases(&mut timeline.entries, &found);
+        for (index, phrase) in &found {
+            if let Some(step) = steps.get_mut(*index) {
+                step.title = phrase.clone();
+            }
+        }
+        Some(Parked { timeline, steps })
+    }
+
+    fn waiting_line(&self, services: Option<&Services>) -> Option<String> {
+        let services = services?;
+        let chat = self.current?;
+        let tasks = services.sched.store().list().ok()?;
+        let store = self.store_key();
+        let queued = tasks.iter().filter(|task| {
+            task.kind == ANSWER_KIND
+                && task.scope.as_deref() == Some(store.as_str())
+                && task.input.get("chat").and_then(|v| v.as_i64()) == Some(chat)
+                && !task.status.is_finished()
+                && !queued::answer_busy(task)
+        }).max_by_key(|task| task.id)?;
+        Some(wait_line(services, queued, &store, &self.chats))
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, rect: Rect, player: Option<&mut Player>, services: Option<&Services>, p: theme::Palette) -> Option<StudioAction> {
         self.refresh(false);
-        self.poll(ui.ctx());
+        self.poll(ui.ctx(), services);
         if let Some(s) = services {
             self.retitle(s);
         }
         ui.ctx().request_repaint_after(REFRESH);
         let roster = self.roster();
         let body = panel(ui, rect, &t!("studio.chat"), p);
+        syntax_hint(ui, rect, &roster);
         let mut seek = None;
         ui.scope_builder(egui::UiBuilder::new().max_rect(body.shrink2(egui::vec2(10.0, 8.0))), |ui| {
             if !self.ready() {
@@ -514,32 +544,49 @@ impl Chat {
             // Dev: `MEDIAA_DEV_ASK=<question>` asks it once (UI checks).
             if let (false, Some(s), Ok(q)) = (self.dev_asked, services, std::env::var("MEDIAA_DEV_ASK")) {
                 self.dev_asked = true;
-                self.input = q;
+                self.draft.set_plain(&q);
                 self.send(s, player.as_deref());
             }
-            self.chats_bar(ui, &roster);
+            self.chats_bar(ui, &roster, services);
             let input_h = 86.0;
             let bare = self.bare_times();
+            let live = self.live_now(services);
+            let parked = self.parked_answer(services);
+            let tasks = services.and_then(|s| s.sched.store().list().ok());
             let list = Rect::from_min_max(ui.cursor().min, egui::pos2(ui.max_rect().max.x, ui.max_rect().max.y - input_h));
+            let mut typed_seek = None;
             ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
                     // Long words and wide Markdown never widen the pane.
                     ui.set_max_width(ui.available_width());
-                    if self.messages.is_empty() && self.running.is_none() {
+                    if self.messages.is_empty() && live.is_none() && parked.is_none() {
                         theme::hint(ui, t!("studio.chat_hint"));
                     }
-                    let hidden = timeline::hidden_sections(&self.messages, self.running.is_some());
+                    let hidden = timeline::hidden_sections(&self.messages, live.is_some());
                     for (n, m) in self.messages.iter().enumerate() {
                         if hidden[n] {
                             continue;
                         }
-                        if let Some(t) = message_ui(ui, n, m, bare, &roster, p) {
+                        let overlaid = tasks.as_ref().map(|tasks| with_phrases(m, tasks));
+                        let view = overlaid.as_ref().unwrap_or(m);
+                        if let Some(t) = message_ui(ui, n, view, bare, &roster, p) {
                             seek = Some(t);
                         }
                     }
-                    if let Some(r) = &self.running {
-                        let live = r.run.live().clone();
-                        if let Some(t) = timeline::live_ui(ui, &live, bare, &roster, p) {
+                    if let Some(line) = self.waiting_line(services) {
+                        theme::hint(ui, line);
+                    }
+                    if let Some(live) = &live {
+                        if live.continuing {
+                            theme::hint(ui, t!("studio.continuing"));
+                        }
+                        if let Some(t) = timeline::live_ui(ui, live, bare, &roster, p) {
+                            seek = Some(t);
+                        }
+                    } else if let Some(parked) = &parked {
+                        // Queued after a crash between chunks: the cursor has steps and this process has no live stream.
+                        theme::hint(ui, t!("studio.continuing"));
+                        if let Some(t) = timeline::timeline_ui(ui, "parked", &parked.timeline.entries, &parked.steps, false, false, bare, &roster, p) {
                             seek = Some(t);
                         }
                     }
@@ -549,7 +596,14 @@ impl Chat {
                 });
             });
             let input = Rect::from_min_max(egui::pos2(ui.max_rect().min.x, ui.max_rect().max.y - input_h + 6.0), ui.max_rect().max);
-            ui.scope_builder(egui::UiBuilder::new().max_rect(input), |ui| self.input_ui(ui, player.as_deref(), services, &roster));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(input), |ui| {
+                typed_seek = self.input_ui(ui, player.as_deref(), services, &roster);
+            });
+            if seek.is_none() {
+                if let Some(t) = typed_seek {
+                    seek = Some(t.to_string());
+                }
+            }
         });
         self.delete_dialog(ui.ctx(), &roster);
         // A citation: this recording's player, or (in a folder) the recording it names.
@@ -576,8 +630,9 @@ impl Chat {
     }
 
     /// Tabs of the open chats, «+» (a new chat) and «История» (the archive, right of «+»).
-    fn chats_bar(&mut self, ui: &mut egui::Ui, roster: &Roster) {
-        let tabs = tab_list(&self.chats, &self.open, self.current, &t!("studio.new_chat"));
+    fn chats_bar(&mut self, ui: &mut egui::Ui, roster: &Roster, services: Option<&Services>) {
+        let busy = self.busy_tabs(services);
+        let tabs = tab_list(&self.chats, &self.open, self.current, &t!("studio.new_chat"), &busy);
         let archived = self.archived.clone();
         let salt = self.salt();
         let mut select = None;
@@ -640,17 +695,15 @@ impl Chat {
                 }
             });
         });
-        // A running answer keeps the pane on its chat: switching and closing wait, as before.
-        if self.running.is_none() {
-            if let Some(choice) = select {
-                self.select(choice);
-            }
-            if let Some(chat) = close {
-                self.close_tab(chat);
-            }
-            if let Some(chat) = restore {
-                self.restore_chat(chat);
-            }
+        // An answer belongs to its chat: switching, closing and restoring stay available.
+        if let Some(choice) = select {
+            self.select(choice);
+        }
+        if let Some(chat) = close {
+            self.close_tab(chat);
+        }
+        if let Some(chat) = restore {
+            self.restore_chat(chat);
         }
         if let Some(info) = confirm {
             self.confirm_delete = Some(info);
@@ -665,6 +718,7 @@ impl Chat {
         }
         self.current = choice;
         self.messages.clear();
+        self.shown_sections = 0;
         if choice.is_some() {
             self.refresh(true);
         } else {
@@ -687,6 +741,7 @@ impl Chat {
         if self.current == Some(chat) {
             self.current = neighbour_after_close(&self.open, at);
             self.messages.clear();
+            self.shown_sections = 0;
         }
         self.refresh(true);
     }
@@ -702,6 +757,7 @@ impl Chat {
         self.open = open;
         self.current = Some(chat);
         self.messages.clear();
+        self.shown_sections = 0;
         self.refresh(true);
     }
 
@@ -740,7 +796,7 @@ impl Chat {
         }
     }
 
-    fn input_ui(&mut self, ui: &mut egui::Ui, player: Option<&Player>, services: Option<&Services>, roster: &Roster) {
+    fn input_ui(&mut self, ui: &mut egui::Ui, player: Option<&Player>, services: Option<&Services>, roster: &Roster) -> Option<f64> {
         // Keys of the list are taken before the editor, so arrows do not move the caret and
         // Enter does not send.
         if self.mention_open {
@@ -768,44 +824,135 @@ impl Chat {
             }
         }
         let id = ui.id().with("ask");
+        self.draft.relabel(|label| roster.name_of(label).unwrap_or_default());
+        self.take_quote(ui, id);
         if let Some(byte) = self.mention_caret.take() {
-            place_cursor(ui, id, &self.input, byte);
+            place_cursor(ui, id, &self.draft.text, byte);
         }
+        self.nudge_chips(ui, id);
+        let chips = self.draft.chips.clone();
+        let clocks = self.draft.clocks();
+        let p = theme::palette(ui);
+        let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| composer::layout(ui, text.as_str(), &chips, &clocks, wrap, p.text, p.accent, p.accent_soft);
+        let saved = self.draft.text.clone();
+        let saved_chips = self.draft.chips.clone();
         let editor = ui.horizontal(|ui| {
-            let running = self.running.is_some();
-            let edit = egui::TextEdit::multiline(&mut self.input).id(id).hint_text(t!("studio.ask_hint")).desired_rows(3).desired_width(ui.available_width() - 36.0);
-            // Disabled while an answer runs (the row stays; typing does not).
-            let out = ui.add_enabled_ui(!running, |ui| edit.show(ui)).inner;
+            let running = self.blocks_input(services);
+            let out = {
+                let edit = egui::TextEdit::multiline(&mut self.draft.text).id(id).hint_text(t!("studio.ask_hint")).desired_rows(3).desired_width(ui.available_width() - 36.0);
+                let edit = edit.layouter(&mut layouter);
+                // Disabled while this chat's answer is unfinished (the row stays; typing does not).
+                ui.add_enabled_ui(!running, |ui| edit.show(ui)).inner
+            };
             let resp = &out.response;
             let enter = resp.has_focus() && !self.mention_open && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
-            if enter {
-                self.input = self.input.trim_end_matches(['\n', '\r']).to_string();
+            if self.draft.text != saved {
+                self.draft.chips = saved_chips;
+                let new = std::mem::replace(&mut self.draft.text, saved);
+                if let Some(at) = self.draft.reconcile(new) {
+                    place_cursor(ui, id, &self.draft.text, at);
+                }
             }
+            if let Some(byte) = caret_byte(ui, id, &self.draft.text) {
+                let snapped = self.draft.snap(byte);
+                if snapped != byte {
+                    place_cursor(ui, id, &self.draft.text, snapped);
+                }
+            }
+            if enter {
+                let cut = self.draft.text.trim_end_matches(['\n', '\r']).to_string();
+                if cut.len() != self.draft.text.len() {
+                    self.draft.text = cut;
+                    let end = self.draft.text.len();
+                    self.draft.chips.retain(|c| c.end <= end);
+                }
+            }
+            let seek = resp.hover_pos().or(resp.interact_pointer_pos()).and_then(|pos| {
+                let cursor = out.galley.cursor_from_pos(pos - out.galley_pos);
+                let byte = chars_to_byte(&self.draft.text, cursor.index.0);
+                let hit = self.draft.seek_at(byte);
+                if hit.is_some() && resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                resp.clicked().then_some(hit).flatten()
+            });
             ui.vertical(|ui| {
                 if running {
                     if theme::icon_button(ui, icon::STOP, &t!("studio.stop")).clicked() {
-                        self.stop();
+                        if let Some(s) = services {
+                            self.stop(s);
+                        }
                     }
-                } else if (theme::icon_button(ui, icon::PAPER_PLANE_RIGHT, &t!("studio.send")).clicked() || enter) && !self.input.trim().is_empty() {
+                } else if (theme::icon_button(ui, icon::PAPER_PLANE_RIGHT, &t!("studio.send")).clicked() || enter) && !self.draft.to_message().trim().is_empty() {
                     match services {
                         Some(s) => self.send(s, player),
                         None => self.error = Some(t!("studio.agent_not_ready").into()),
                     }
                 }
             });
-            (resp.response.rect, out.cursor_range)
+            (resp.response.rect, out.cursor_range, seek)
         });
-        let (rect, cursor) = editor.inner;
+        let (rect, cursor, seek) = editor.inner;
         self.sync_mentions(ui, roster, rect, cursor);
+        seek
     }
 
-    /// Inserts the selected speaker in place of the `@` being typed.
+    /// A quote left by «Ответить» on this recording, inserted as one chip.
+    fn take_quote(&mut self, ui: &egui::Ui, id: egui::Id) {
+        let Scope::File { path, .. } = &self.scope else { return };
+        let key = path.to_string_lossy().into_owned();
+        let quote_id = composer::quote_id(&key);
+        let Some(quote) = ui.ctx().data(|d| d.get_temp::<composer::Quote>(quote_id)) else { return };
+        ui.ctx().data_mut(|d| d.remove::<composer::Quote>(quote_id));
+        let at = caret_byte(ui, id, &self.draft.text).unwrap_or(self.draft.text.len());
+        self.draft.insert_quote(at, &quote);
+        if let Some(chip) = self.draft.chips.iter().rev().find(|c| matches!(c.kind, composer::Kind::Quote { .. })) {
+            self.mention_caret = Some((chip.end + 1).min(self.draft.text.len()));
+        }
+    }
+
+    /// Backspace, Delete and the arrows treat a chip as one character.
+    fn nudge_chips(&mut self, ui: &mut egui::Ui, id: egui::Id) {
+        if !ui.memory(|m| m.has_focus(id)) {
+            return;
+        }
+        let Some(byte) = caret_byte(ui, id, &self.draft.text) else { return };
+        if let Some(start) = self.draft.chips.iter().find(|c| c.end == byte).map(|c| c.start) {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)) {
+                self.draft.backspace_at(byte);
+                place_cursor(ui, id, &self.draft.text, start);
+                return;
+            }
+        }
+        if self.draft.chips.iter().any(|c| c.start == byte) && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)) {
+            self.draft.delete_at(byte);
+            place_cursor(ui, id, &self.draft.text, byte);
+            return;
+        }
+        if let Some(to) = self.draft.arrow(byte, false) {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)) {
+                place_cursor(ui, id, &self.draft.text, to);
+                return;
+            }
+        }
+        if let Some(to) = self.draft.arrow(byte, true) {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)) {
+                place_cursor(ui, id, &self.draft.text, to);
+            }
+        }
+    }
+
+    /// Inserts the selected speaker in place of the `@` being typed. Only the list creates a chip.
     fn insert_mention(&mut self, roster: &Roster) {
         let Some(&row) = self.mention_rows.get(self.mention.selected) else { return };
         let Some(who) = roster.speakers.get(row) else { return };
-        let (text, caret) = speakers::insert(&self.input, self.mention.at, &self.mention_query, &Roster::insertion(who));
-        self.input = text;
-        self.mention_caret = Some(caret);
+        let label = match who.recording {
+            Some(r) => speakers::folder_label(who.index, r),
+            None => speakers::label(who.index),
+        };
+        self.draft.insert_mention(self.mention.at, &self.mention_query, &label, &Roster::row_label(who));
+        let caret = self.draft.chips.iter().rev().find(|c| matches!(&c.kind, composer::Kind::Mention { label: l } if l == &label)).map(|c| (c.end + 1).min(self.draft.text.len()));
+        self.mention_caret = caret;
         // The inserted `@` sits at the same index; leave it closed until the next `@`.
         self.mention.dismiss(self.mention.at);
         self.mention_open = false;
@@ -815,8 +962,8 @@ impl Chat {
 
     /// Follows the caret: `@` opens the list above the editor (an overlay, so the row stays put).
     fn sync_mentions(&mut self, ui: &mut egui::Ui, roster: &Roster, rect: Rect, cursor: Option<egui::text::CCursorRange>) {
-        let byte = cursor.map(|r| chars_to_byte(&self.input, r.primary.index.0)).unwrap_or(self.input.len());
-        let query = speakers::mention_query(&self.input, byte);
+        let byte = cursor.map(|r| chars_to_byte(&self.draft.text, r.primary.index.0)).unwrap_or(self.draft.text.len());
+        let query = self.draft.mention_query(byte);
         let rows = query.as_ref().map(|q| speakers::matching(&roster.speakers, &q.query, |i| t!("studio.speaker", n = i + 1).into())).unwrap_or_default();
         self.mention.update(query.as_ref(), rows.len());
         self.mention_open = self.mention.is_open(query.as_ref(), rows.len());
@@ -870,6 +1017,104 @@ fn chars_to_byte(text: &str, chars: usize) -> usize {
     text.char_indices().nth(chars).map(|(i, _)| i).unwrap_or(text.len())
 }
 
+/// The caret as a byte, when it is a single point (a selection is left to the editor).
+fn caret_byte(ui: &egui::Ui, id: egui::Id, text: &str) -> Option<usize> {
+    let state = egui::text_edit::TextEditState::load(ui.ctx(), id)?;
+    let range = state.cursor.char_range()?;
+    if range.primary.index != range.secondary.index {
+        return None;
+    }
+    Some(chars_to_byte(text, range.primary.index.0))
+}
+
+/// «i» just after the chat title. The right edge of the header belongs to the pane button.
+fn syntax_hint(ui: &mut egui::Ui, pane: Rect, roster: &Roster) {
+    let title = t!("studio.chat").to_string();
+    let title_w = ui.fonts_mut(|f| f.layout_no_wrap(title, FontId::proportional(12.0), egui::Color32::PLACEHOLDER)).size().x;
+    let side = theme::ICON_BUTTON;
+    let x = pane.left() + 12.0 + title_w + 4.0;
+    if x + side > pane.right() - side - 8.0 {
+        return;
+    }
+    let y = pane.top() + (studio::PANE_HEAD - side) / 2.0;
+    let rect = Rect::from_min_size(egui::pos2(x, y), egui::vec2(side, side));
+    let resp = ui.interact(rect, ui.id().with("chat-syntax"), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let p = theme::palette(ui);
+        let color = if resp.hovered() { p.text } else { p.text_weak };
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon::INFO, FontId::proportional(14.0), color);
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    topics::text_tip(&resp, &t!("chat.syntax"), roster);
+}
+
+/// A crash between chunks: the task is still queued, its cursor already has steps, and this
+/// process has no live stream. A yield in the same process still has the stream.
+fn continued_cursor(cursor: &serde_json::Value, has_live: bool) -> bool {
+    if has_live || cursor.is_null() {
+        return false;
+    }
+    cursor.get("steps").and_then(|v| v.as_array()).is_some_and(|steps| !steps.is_empty())
+}
+
+struct Parked {
+    timeline: Timeline,
+    steps: Vec<StepRecord>,
+}
+
+fn apply_phrases(entries: &mut [TimelineEntry], phrases: &[(usize, String)]) {
+    for (index, phrase) in phrases {
+        let mut n = 0;
+        for entry in entries.iter_mut() {
+            if let TimelineEntry::Step { title, .. } = entry {
+                if n == *index {
+                    *title = phrase.clone();
+                    break;
+                }
+                n += 1;
+            }
+        }
+    }
+}
+
+fn with_live_phrases(mut live: Live, tasks: &[Task], answer: i64) -> Live {
+    let found = step_title::phrases(tasks, answer);
+    if found.is_empty() {
+        return live;
+    }
+    apply_phrases(&mut live.timeline.entries, &found);
+    for (index, phrase) in found {
+        if let Some(step) = live.steps.get_mut(index) {
+            step.title = phrase;
+        }
+    }
+    live
+}
+
+fn with_phrases(message: &ChatMessage, tasks: &[Task]) -> ChatMessage {
+    let Some(id) = message.details.get("task").and_then(|v| v.as_i64()) else {
+        return message.clone();
+    };
+    let found = step_title::phrases(tasks, id);
+    if found.is_empty() {
+        return message.clone();
+    }
+    let mut message = message.clone();
+    let mut timeline = message.timeline();
+    apply_phrases(&mut timeline.entries, &found);
+    message.details["timeline"] = timeline.to_value();
+    if let Some(steps) = message.details.get_mut("steps").and_then(|v| v.as_array_mut()) {
+        for (index, phrase) in &found {
+            if let Some(step) = steps.get_mut(*index).and_then(|v| v.as_object_mut()) {
+                step.insert("title".to_string(), serde_json::json!(phrase));
+            }
+        }
+    }
+    message
+}
+
 /// What a chat is called on screen: its title, or «Новый чат» until the titles model has
 /// written one.
 fn shown_title(title: &str) -> String {
@@ -894,11 +1139,15 @@ fn retitle_candidate(chats: &[ChatInfo], current: Option<ChatId>, messages: &[Ch
 /// The tabs to draw: the open chats in their tab order, and «Новый чат» while no chat is
 /// current (a new chat is stored only with its first question); a chat whose title is not
 /// written yet is called the same.
-fn tab_list(chats: &[ChatInfo], open: &[ChatId], current: Option<ChatId>, new_title: &str) -> Vec<Tab<Option<ChatId>>> {
+fn tab_list(chats: &[ChatInfo], open: &[ChatId], current: Option<ChatId>, new_title: &str, busy: &[ChatId]) -> Vec<Tab<Option<ChatId>>> {
     let mut tabs: Vec<Tab<Option<ChatId>>> = open
         .iter()
         .filter_map(|&id| chats.iter().find(|c| c.id == id))
-        .map(|c| Tab::new(Some(c.id), if c.title.is_empty() { new_title.to_string() } else { c.title.clone() }, current == Some(c.id)))
+        .map(|c| {
+            let title = if c.title.is_empty() { new_title.to_string() } else { c.title.clone() };
+            let title = if busy.contains(&c.id) { format!("● {title}") } else { title };
+            Tab::new(Some(c.id), title, current == Some(c.id))
+        })
         .collect();
     if current.is_none() {
         tabs.push(Tab::new(None, new_title, true).fixed());
@@ -926,6 +1175,55 @@ fn with_restored(open: &[ChatId], chat: ChatId) -> Vec<ChatId> {
     out
 }
 
+/// Local model uses the `llm` pool; a provider model uses the provider pool.
+fn answer_resource(settings: &AgentSettings) -> (Resource, Option<String>) {
+    match settings.models.agent.as_ref() {
+        Some(ModelSource::Provider { model, .. }) => (Resource::Provider, Some(model.clone())),
+        Some(source) => (Resource::Llm, local_spec(source).ok()),
+        None => (Resource::Llm, None),
+    }
+}
+
+/// A title task for this chat that has not finished.
+fn title_pending(services: &Services, store: &str, chat: ChatId) -> bool {
+    let Ok(tasks) = services.sched.store().list() else { return false };
+    tasks.iter().any(|task| {
+        task.kind == TITLE_KIND && task.scope.as_deref() == Some(store) && task.input.get("chat").and_then(|v| v.as_i64()) == Some(chat) && !task.status.is_finished()
+    })
+}
+
+/// Why this chat's answer has not started. A busy local model names the chat that holds it.
+fn wait_line(services: &Services, task: &Task, store: &str, chats: &[ChatInfo]) -> String {
+    let reason = services.sched.snapshot().ok().and_then(|snap| snap.tasks.into_iter().find(|view| view.task.id == task.id).and_then(|view| view.wait));
+    let holder = services.sched.store().list().ok().and_then(|tasks| {
+        tasks.into_iter().find(|other| {
+            other.kind == ANSWER_KIND
+                && other.scope.as_deref() == Some(store)
+                && queued::answer_busy(other)
+                && other.resource == Some(Resource::Llm)
+                && other.input.get("chat").and_then(|v| v.as_i64()) != task.input.get("chat").and_then(|v| v.as_i64())
+        })
+    });
+    let model_wait = matches!(reason.as_ref(), Some(WaitReason::Turn | WaitReason::Resource(Resource::Llm)));
+    if model_wait {
+        if let Some(other) = holder {
+            let id = other.input.get("chat").and_then(|v| v.as_i64());
+            let title = id.and_then(|id| chats.iter().find(|c| c.id == id)).map(|c| shown_title(&c.title)).unwrap_or_else(|| t!("studio.new_chat").into());
+            return t!("studio.wait_model_chat", title = title).into();
+        }
+    }
+    match reason {
+        Some(WaitReason::Dependency) => t!("queue.wait_dependency"),
+        Some(WaitReason::Resource(Resource::Speech)) => t!("queue.wait_speech"),
+        Some(WaitReason::Resource(Resource::Embed)) => t!("queue.wait_embed"),
+        Some(WaitReason::Resource(Resource::Provider)) => t!("queue.wait_provider"),
+        Some(WaitReason::Memory) => t!("queue.wait_memory_pool"),
+        Some(WaitReason::Paused) => t!("queue.wait_paused"),
+        _ => t!("studio.wait_turn"),
+    }
+    .into()
+}
+
 /// A chat's date for the history list.
 fn chat_date(ms: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ms).map(|d| d.with_timezone(&chrono::Local).format("%d.%m.%Y").to_string()).unwrap_or_default()
@@ -936,14 +1234,15 @@ fn chat_date(ms: i64) -> String {
 fn message_ui(ui: &mut egui::Ui, n: usize, m: &ChatMessage, bare_times: bool, roster: &Roster, p: theme::Palette) -> Option<String> {
     match m.author {
         Author::User => {
+            let mut seek = None;
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                 egui::Frame::new().fill(p.accent_soft).corner_radius(10).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                     ui.set_max_width(ui.available_width() * 0.85);
-                    mentions::show(ui, &m.text, roster, egui::FontId::proportional(13.5), p.text, false, p);
+                    seek = composer::show_user(ui, &m.text, |label| roster.name_of(label), FontId::proportional(13.5), p.text, p.accent, p.accent_soft).map(|t| t.to_string());
                 });
             });
             ui.add_space(timeline::GAP);
-            None
+            seek
         }
         Author::Agent => {
             let timeline = m.timeline();
@@ -958,6 +1257,9 @@ fn message_ui(ui: &mut egui::Ui, n: usize, m: &ChatMessage, bare_times: bool, ro
                 let steps: Vec<mediaa_agent::assistant::StepRecord> = serde_json::from_value(m.details["steps"].clone()).unwrap_or_default();
                 seek = timeline::timeline_ui(ui, ("message", n), &timeline.entries, &steps, true, forced, bare_times, roster, p);
             }
+            if m.details["continuing"].as_bool() == Some(true) {
+                theme::hint(ui, t!("studio.continuing"));
+            }
             if m.stopped() {
                 theme::hint(ui, t!("studio.stopped"));
             }
@@ -970,6 +1272,15 @@ fn message_ui(ui: &mut egui::Ui, n: usize, m: &ChatMessage, bare_times: bool, ro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_queued_cursor_with_steps_continues_only_when_there_is_no_live_stream() {
+        let cursor = serde_json::json!({ "steps": [{ "title": "Поиск" }] });
+        assert!(continued_cursor(&cursor, false));
+        assert!(!continued_cursor(&cursor, true), "a yield in this process still has the stream");
+        assert!(!continued_cursor(&serde_json::Value::Null, false));
+        assert!(!continued_cursor(&serde_json::json!({ "steps": [] }), false));
+    }
 
     #[test]
     fn a_chat_without_a_title_is_named_again_once() {
@@ -1019,13 +1330,13 @@ mod tests {
         assert_eq!(neighbour_after_close(&without_chat(&open, 5), 0), Some(7));
         // The only tab closed: the new-chat state.
         assert_eq!(neighbour_after_close(&without_chat(&[5], 5), 0), None);
-        let tabs = tab_list(&chats, &[], None, "Новый чат");
+        let tabs = tab_list(&chats, &[], None, "Новый чат", &[]);
         assert_eq!(tabs.len(), 1, "only «Новый чат»");
         assert_eq!(tabs[0].id, None);
         assert!(tabs[0].active && !tabs[0].closable, "there is no stored chat to close");
 
         // «+»: the chat tabs stay, the new-chat tab is added last and is current.
-        let tabs = tab_list(&chats, &open, None, "Новый чат");
+        let tabs = tab_list(&chats, &open, None, "Новый чат", &[]);
         assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), [Some(5), Some(7), Some(9), None]);
         assert!(tabs.last().is_some_and(|t| t.active) && tabs[..3].iter().all(|t| !t.active));
 
@@ -1035,7 +1346,7 @@ mod tests {
         open = with_restored(&open, 7);
         assert_eq!(open, [5, 9, 7], "a closed tab does not keep its place");
         assert_eq!(with_restored(&open, 7), open, "already open");
-        let tabs = tab_list(&chats, &open, Some(7), "Новый чат");
+        let tabs = tab_list(&chats, &open, Some(7), "Новый чат", &[]);
         assert_eq!(tabs.iter().map(|t| t.id).collect::<Vec<_>>(), [Some(5), Some(9), Some(7)]);
         assert!(tabs[2].active && tabs[..2].iter().all(|t| !t.active));
     }
@@ -1044,8 +1355,10 @@ mod tests {
     fn a_chat_without_a_title_is_a_new_chat_until_it_is_named() {
         let info = |id: ChatId, title: &str| ChatInfo { id, title: title.into(), created_ms: 1, messages: 2 };
         let chats = [info(5, ""), info(7, "Приветствие")];
-        let tabs = tab_list(&chats, &[5, 7], Some(5), "Новый чат");
+        let tabs = tab_list(&chats, &[5, 7], Some(5), "Новый чат", &[]);
         assert_eq!(tabs.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Новый чат", "Приветствие"]);
+        let marked = tab_list(&chats, &[5, 7], Some(5), "Новый чат", &[7]);
+        assert_eq!(marked.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(), ["Новый чат", "● Приветствие"]);
         assert_eq!(shown_title(""), t!("studio.new_chat"));
         assert_eq!(shown_title("Сроки"), "Сроки");
     }

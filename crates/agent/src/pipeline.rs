@@ -8,9 +8,9 @@
 
 use mediaa_core::agent::AnalysisOptions;
 use mediaa_core::outline::Chapter;
-use mediaa_core::queue::{Child, Filter, KindGroup, NewTask, Queue, Task, TaskId};
 use mediaa_core::retrieval::Chunk;
 use mediaa_core::transcript::{self, Reply, Transcript};
+use mediaa_queue::{Child, Filter, KindGroup, NewTask, Resource, Scheduler, Task, TaskId};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -117,7 +117,7 @@ fn stage_input(stage: Stage, path: &Path, options: &AnalysisOptions) -> Value {
 }
 
 /// Enqueues the composite analysis and its stages in one transaction; returns the composite's id.
-fn enqueue_analysis(ai_dir: &Path, path: &Path, options: &AnalysisOptions, from: Stage) -> anyhow::Result<TaskId> {
+fn enqueue_analysis(sched: &Scheduler, ai_dir: &Path, path: &Path, options: &AnalysisOptions, from: Stage) -> anyhow::Result<TaskId> {
     let id = transcript::file_id(path)?;
     let mut stages = stages(from, options);
     anyhow::ensure!(!stages.is_empty(), "no analysis stage to run from {from:?}");
@@ -128,7 +128,7 @@ fn enqueue_analysis(ai_dir: &Path, path: &Path, options: &AnalysisOptions, from:
     }
     let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let minutes = mediaa_media::info::probe(path).ok().and_then(|info| info.duration_secs()).unwrap_or(0.0) / 60.0;
-    let root = NewTask::new(ANALYSIS_KIND, &name, &json!({ "path": path })).composite().scope(&id);
+    let root = NewTask::new(ANALYSIS_KIND, &name, &json!({ "path": path })).composite().scope(&id).analysis(&id);
     let mut children = Vec::with_capacity(stages.len());
     for (i, stage) in stages.iter().enumerate() {
         let child = match stage {
@@ -144,40 +144,48 @@ fn enqueue_analysis(ai_dir: &Path, path: &Path, options: &AnalysisOptions, from:
             }
             _ => {
                 let kind = stage.kind().expect("only stages with a task are in the chain");
-                Child::new(NewTask::new(kind, &name, &stage_input(*stage, path, options)).scope(&id).units(minutes).priority(10))
+                Child::new(stage_task(kind, &name, &stage_input(*stage, path, options), &id).units(minutes).priority(10))
             }
         };
         children.push(if i == 0 { child } else { child.after(&[i - 1]) });
     }
-    Ok(Queue::open(ai_dir)?.enqueue_tree(root, &children)?.0)
+    Ok(sched.enqueue_tree(root, children)?.0)
+}
+
+fn stage_task(kind: &str, name: &str, input: &Value, id: &str) -> NewTask {
+    let resource = match kind {
+        "transcribe" | "diarize" => Resource::Speech,
+        "index" => Resource::Embed,
+        _ => Resource::Llm,
+    };
+    NewTask::new(kind, name, input).resource(resource).scope(id).analysis(id)
 }
 
 /// Starts the analysis of `path`: the composite task and the chosen stages, with the stages the
 /// options turn off left out. Earlier data (a previous transcription) is not touched.
-pub fn start(ai_dir: &Path, path: &Path, options: AnalysisOptions) -> anyhow::Result<TaskId> {
-    enqueue_analysis(ai_dir, path, &options, Stage::Transcribe)
+pub fn start(sched: &Scheduler, ai_dir: &Path, path: &Path, options: AnalysisOptions) -> anyhow::Result<TaskId> {
+    enqueue_analysis(sched, ai_dir, path, &options, Stage::Transcribe)
 }
 
 /// Rebuilds `path` from `from`: cancels the unfinished work of the recording, forgets the data
 /// of `from` and every later stage that will run, and queues a new analysis of those stages.
-pub fn restart(ai_dir: &Path, path: &Path, from: Stage, options: AnalysisOptions) -> anyhow::Result<TaskId> {
+pub fn restart(sched: &Scheduler, ai_dir: &Path, path: &Path, from: Stage, options: AnalysisOptions) -> anyhow::Result<TaskId> {
     let id = transcript::file_id(path)?;
     let chain = stages(from, &options);
     anyhow::ensure!(!chain.is_empty(), "no analysis stage to run from {from:?}");
-    let queue = Queue::open(ai_dir)?;
     // Only the analysis: a chat answer about the same recording keeps running.
-    queue.cancel_analysis(&id)?;
+    sched.cancel_analysis(&id)?;
     for stage in chain {
         stage.reset(ai_dir, &id)?;
     }
-    enqueue_analysis(ai_dir, path, &options, from)
+    enqueue_analysis(sched, ai_dir, path, &options, from)
 }
 
 /// The unfinished analysis of the recording with `id`, if there is one.
-pub fn active(ai_dir: &Path, id: &str) -> anyhow::Result<Option<Task>> {
-    let queue = Queue::open(ai_dir)?;
+pub fn active(sched: &Scheduler, id: &str) -> anyhow::Result<Option<Task>> {
     let filter = Filter { scope: Some(id.to_string()), group: KindGroup::Analysis };
-    Ok(queue
+    Ok(sched
+        .store()
         .top_level(&filter)?
         .into_iter()
         .filter(|t| t.kind == ANALYSIS_KIND && !t.status.is_finished())
@@ -205,10 +213,9 @@ pub fn readiness(ai_dir: &Path, id: &str) -> anyhow::Result<Readiness> {
 
 /// Raises the priority of the unfinished `topic-detail` of topic `topic` of the recording, so the
 /// interface (P5) gets the breakdown it is waiting for first; returns how many tasks were raised.
-pub fn prioritize_detail(ai_dir: &Path, file_id: &str, topic: usize) -> anyhow::Result<usize> {
-    let queue = Queue::open(ai_dir)?;
+pub fn prioritize_detail(sched: &Scheduler, file_id: &str, topic: usize) -> anyhow::Result<usize> {
     let mut raised = 0;
-    for task in queue.list()? {
+    for task in sched.store().list()? {
         if task.kind != crate::outline::DETAIL_KIND || task.status.is_finished() || task.scope.as_deref() != Some(file_id) {
             continue;
         }
@@ -216,7 +223,7 @@ pub fn prioritize_detail(ai_dir: &Path, file_id: &str, topic: usize) -> anyhow::
         if input.topic != topic {
             continue;
         }
-        queue.set_priority(task.id, crate::outline::DETAIL_PRIORITY)?;
+        sched.set_priority(task.id, crate::outline::DETAIL_PRIORITY)?;
         raised += 1;
     }
     Ok(raised)
@@ -227,12 +234,12 @@ mod tests {
     use super::*;
     use mediaa_core::agent::{AgentSettings, ModelChoices, ModelSource};
     use mediaa_core::outline::Digest;
-    use mediaa_core::queue::{Queue, TaskStatus};
     use mediaa_core::transcript::Word;
     use mediaa_engine::Engine;
     use mediaa_engine::testing::FakeEngine;
-    use std::sync::atomic::AtomicBool;
+    use mediaa_queue::{Scheduler, Status as TaskStatus, Store};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     /// A short silent PCM WAV the media decoder can read.
     fn wav(path: &Path, seconds: f64) {
@@ -260,24 +267,43 @@ mod tests {
         AgentSettings { models, ..AgentSettings::default() }
     }
 
-    fn handlers(ai: &Path, settings: &AgentSettings) -> Vec<Box<dyn crate::worker::TaskHandler>> {
+    fn opened(ai: &Path, engine: Arc<dyn Engine>, settings: &AgentSettings) -> Arc<Scheduler> {
+        let sched = crate::run::open_scheduler(ai, &settings.budget).unwrap();
         let slots = crate::slots::Slots::new(settings.budget.clone());
         let s = settings.clone();
-        let settings: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || s.clone());
-        let mut handlers: Vec<Box<dyn crate::worker::TaskHandler>> = vec![
-            Box::new(crate::transcribe::Transcribe::new(ai, slots.clone(), settings.clone())),
-            Box::new(crate::diarize::Diarize::new(ai, slots.clone(), settings.clone())),
-            Box::new(crate::index::Index::new(ai, slots.clone(), settings.clone())),
-        ];
-        handlers.extend(crate::outline::handlers(ai, slots, settings));
-        handlers
+        let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || s.clone());
+        crate::run::register_stages(&sched, ai, engine, slots, current, Arc::new(crate::run::Streams::default()));
+        sched
     }
 
     /// Runs the queue to the end; the fake answers the outline with a valid digest and a section
     /// per topic.
-    fn drain(q: &Queue, engine: &Arc<dyn Engine>, handlers: &[Box<dyn crate::worker::TaskHandler>]) {
-        let stop = AtomicBool::new(false);
-        while crate::worker::run_next(q, engine, handlers, &stop).unwrap() {}
+    fn drain(sched: &Scheduler) {
+        crate::run::drain(sched, Duration::from_secs(60));
+    }
+
+    /// Waits until the task and everything under it is finished. [`drain`] cannot be used when
+    /// the queue also holds an inline task with no runner (a chat answer): it is never finished,
+    /// so the drain would sit until its limit.
+    fn drain_tree(sched: &Scheduler, root: mediaa_queue::TaskId) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let tree = sched.store().subtree(root).unwrap();
+            let unfinished = tree.iter().any(|task| !task.status.is_finished());
+            if !unfinished && sched.live().is_empty() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{} is not finished: {:?}",
+                root,
+                tree.iter().map(|task| (task.kind.as_str(), task.status, task.error.as_deref())).collect::<Vec<_>>()
+            );
+            sched.tick().unwrap();
+            if !sched.live().is_empty() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
     }
 
     const DIGEST: &str = r#"{"title":"Тема","summary":"сводка","decisions":[],"actions":[],"questions":[],"topics":[],"quotes":[]}"#;
@@ -294,13 +320,13 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
         let settings = settings(ModelChoices::default());
-        let queue = Queue::open(&ai).unwrap();
         let fake = FakeEngine::new();
         fake.chat_answers(&[DIGEST, SECTIONS]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
-        let task = start(&ai, &media, AnalysisOptions::default()).unwrap();
-        let handlers = handlers(&ai, &settings);
-        drain(&queue, &engine, &handlers);
+        let sched = opened(&ai, engine, &settings);
+        let task = start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
+        drain(&sched);
+        let queue = sched.store();
 
         let analysis = queue.get(task).unwrap().unwrap();
         assert_eq!(analysis.status, TaskStatus::Done, "{:?}", analysis.error);
@@ -327,17 +353,17 @@ mod tests {
         let ai = tmp.path().join(".ai");
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
-        let queue = Queue::open(&ai).unwrap();
-        let fake = FakeEngine::new();
-        let engine: Arc<dyn Engine> = Arc::new(fake);
-        let handlers = handlers(&ai, &settings(ModelChoices::default()));
+        let settings = settings(ModelChoices::default());
+        let engine: Arc<dyn Engine> = Arc::new(FakeEngine::new());
+        let sched = opened(&ai, engine, &settings);
+        let queue = sched.store();
 
         // Without the index there are no topics either (details need topics).
         let options = AnalysisOptions { diarize: false, speakers: Some(2), index: false, topics: true, details: true };
-        let task = start(&ai, &media, options).unwrap();
+        let task = start(&sched, &ai, &media, options).unwrap();
         assert_eq!(queue.children(task).unwrap().len(), 1);
         assert_eq!(queue.children(task).unwrap()[0].kind, "transcribe");
-        drain(&queue, &engine, &handlers);
+        drain(&sched);
         assert_eq!(queue.get(task).unwrap().unwrap().status, TaskStatus::Done);
         let ready = readiness(&ai, &id(&media)).unwrap();
         assert_eq!(ready, Readiness { replies: true, speakers: false, index: false, topics: false, details: false });
@@ -351,12 +377,13 @@ mod tests {
         wav(&media, 3.0);
         let models = ModelChoices { diarization: Some(ModelSource::HuggingFace { repo: "fails/model".into() }), ..ModelChoices::default() };
         let settings = settings(models);
-        let queue = Queue::open(&ai).unwrap();
         let fake = FakeEngine::new();
         fake.chat_answers(&[DIGEST, SECTIONS]);
         let engine: Arc<dyn Engine> = Arc::new(fake);
-        let task = start(&ai, &media, AnalysisOptions::default()).unwrap();
-        drain(&queue, &engine, &handlers(&ai, &settings));
+        let sched = opened(&ai, engine, &settings);
+        let task = start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
+        drain(&sched);
+        let queue = sched.store();
 
         let children = queue.children(task).unwrap();
         assert!(children.iter().all(|t| t.status == TaskStatus::Done), "{children:?}");
@@ -374,13 +401,13 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
         let settings = settings(ModelChoices::default());
-        let queue = Queue::open(&ai).unwrap();
         let fake = FakeEngine::new();
         fake.chat_answers(&[DIGEST, SECTIONS, DIGEST, SECTIONS]);
         let engine: Arc<dyn Engine> = Arc::new(fake);
-        let handlers = handlers(&ai, &settings);
-        start(&ai, &media, AnalysisOptions::default()).unwrap();
-        drain(&queue, &engine, &handlers);
+        let sched = opened(&ai, engine, &settings);
+        let queue = sched.store();
+        start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
+        drain(&sched);
         let t = Transcript::open(&ai, &id(&media)).unwrap();
         let replies = t.dialog().unwrap();
         t.rename_speaker(0, "Дана").unwrap();
@@ -389,13 +416,13 @@ mod tests {
         let speakers = replies.iter().filter_map(|r| r.speaker).collect::<Vec<_>>();
 
         // An analysis that has not finished yet: the restart must cancel it.
-        let running = start(&ai, &media, AnalysisOptions::default()).unwrap();
-        let restarted = restart(&ai, &media, Stage::Index, AnalysisOptions::default()).unwrap();
+        let running = start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
+        let restarted = restart(&sched, &ai, &media, Stage::Index, AnalysisOptions::default()).unwrap();
         assert_eq!(queue.get(running).unwrap().unwrap().status, TaskStatus::Cancelled, "running analysis cancelled");
         let kinds: Vec<String> = queue.children(restarted).unwrap().into_iter().map(|t| t.kind).collect();
         assert_eq!(kinds, ["index", "topics"], "only the index and what follows it");
 
-        drain(&queue, &engine, &handlers);
+        drain(&sched);
         assert_eq!(queue.get(restarted).unwrap().unwrap().status, TaskStatus::Done);
         let t = Transcript::open(&ai, &id(&media)).unwrap();
         assert_eq!(t.dialog().unwrap().iter().filter_map(|r| r.speaker).collect::<Vec<_>>(), speakers, "speakers kept");
@@ -414,19 +441,19 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
         let settings = settings(ModelChoices::default());
-        let queue = Queue::open(&ai).unwrap();
         let fake = FakeEngine::new();
         fake.chat_answers(&[DIGEST, SECTIONS, SECTIONS]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
-        let handlers = handlers(&ai, &settings);
-        start(&ai, &media, AnalysisOptions::default()).unwrap();
-        drain(&queue, &engine, &handlers);
+        let sched = opened(&ai, engine, &settings);
+        let queue = sched.store();
+        start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
+        drain(&sched);
         let t = Transcript::open(&ai, &id(&media)).unwrap();
         assert!(t.chapters().unwrap().iter().all(|c| !c.digest.sections.is_empty()));
 
         // A chat answer about the same recording is not the analysis: the restart leaves it.
         let answer = queue.begin_inline("answer", "тест", &json!({}), None, Some(&id(&media))).unwrap();
-        let restarted = restart(&ai, &media, Stage::Details, AnalysisOptions::default()).unwrap();
+        let restarted = restart(&sched, &ai, &media, Stage::Details, AnalysisOptions::default()).unwrap();
         assert_eq!(queue.get(answer).unwrap().unwrap().status, TaskStatus::Running, "the chat answer survives");
         let kinds: Vec<String> = queue.children(restarted).unwrap().into_iter().map(|t| t.kind).collect();
         assert_eq!(kinds, ["details"], "only the details");
@@ -435,7 +462,7 @@ mod tests {
         let t = Transcript::open(&ai, &id(&media)).unwrap();
         assert!(t.chapters().unwrap().iter().all(|c| c.digest.sections.is_empty()), "the old details are dropped");
 
-        drain(&queue, &engine, &handlers);
+        drain_tree(&sched, restarted);
         assert_eq!(queue.get(restarted).unwrap().unwrap().status, TaskStatus::Done);
         let ready = readiness(&ai, &id(&media)).unwrap();
         assert!(ready.details, "the details are built again");
@@ -448,28 +475,37 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
         let settings = settings(ModelChoices::default());
-        let queue = Queue::open(&ai).unwrap();
         let fake = FakeEngine::new();
         fake.chat_answers(&[DIGEST, SECTIONS, DIGEST, SECTIONS, SECTIONS]);
         let engine: Arc<dyn Engine> = Arc::new(fake);
-        let handlers = handlers(&ai, &settings);
-        start(&ai, &media, AnalysisOptions::default()).unwrap();
-        drain(&queue, &engine, &handlers);
+        let mut sched = opened(&ai, engine.clone(), &settings);
+        start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
+        drain(&sched);
         for from in [Stage::Topics, Stage::Details] {
-            let root = restart(&ai, &media, from, AnalysisOptions::default()).unwrap();
-            let before = queue.subtree(root).unwrap();
+            let root = restart(&sched, &ai, &media, from, AnalysisOptions::default()).unwrap();
+            let before = sched.store().subtree(root).unwrap();
             assert!(
                 before.iter().filter(|t| t.kind == "details" || t.kind == "topics" || t.kind == ANALYSIS_KIND).all(|t| t.status == TaskStatus::Running),
                 "{from:?}: a stage that can run makes its composites go: {:?}",
                 before.iter().map(|t| (&t.kind, t.status)).collect::<Vec<_>>()
             );
             // The program is closed and opened again while the work is half done.
-            let first = crate::worker::run_next(&queue, &engine, &handlers, &AtomicBool::new(false)).unwrap();
-            assert!(first);
-            queue.requeue_running().unwrap();
-            drain(&queue, &engine, &handlers);
-            for t in queue.subtree(root).unwrap() {
-                assert_eq!(t.status, TaskStatus::Done, "{from:?}: {} {}", t.kind, t.title);
+            sched.tick().unwrap();
+            drop(sched);
+            sched = opened(&ai, engine.clone(), &settings);
+            drain(&sched);
+            let tree = sched.store().subtree(root).unwrap();
+            for t in &tree {
+                assert_eq!(
+                    t.status,
+                    TaskStatus::Done,
+                    "{from:?}: {} {} ({}) {:?}; tree: {:?}",
+                    t.kind,
+                    t.title,
+                    t.id,
+                    t.error,
+                    tree.iter().map(|t| (t.id, t.kind.as_str(), t.status, t.error.as_deref())).collect::<Vec<_>>()
+                );
             }
         }
     }
@@ -481,16 +517,16 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
         let settings = settings(ModelChoices::default());
-        let queue = Queue::open(&ai).unwrap();
         let fake = FakeEngine::new();
         fake.chat_answers(&[DIGEST, SECTIONS]);
         let engine: Arc<dyn Engine> = Arc::new(fake);
-        let handlers = handlers(&ai, &settings);
-        start(&ai, &media, AnalysisOptions::default()).unwrap();
-        drain(&queue, &engine, &handlers);
+        let sched = opened(&ai, engine, &settings);
+        start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
+        drain(&sched);
         // The details again, this time unfinished: their tasks wait in the queue.
-        restart(&ai, &media, Stage::Details, AnalysisOptions::default()).unwrap();
+        restart(&sched, &ai, &media, Stage::Details, AnalysisOptions::default()).unwrap();
         let id = id(&media);
+        let queue = sched.store();
         let target = queue
             .list()
             .unwrap()
@@ -498,10 +534,10 @@ mod tests {
             .find(|t| t.kind == "topic-detail" && t.status == TaskStatus::Queued)
             .unwrap();
         assert_eq!(target.priority, 10, "the usual priority of a topic task");
-        assert_eq!(prioritize_detail(&ai, &id, 0).unwrap(), 1);
+        assert_eq!(prioritize_detail(&sched, &id, 0).unwrap(), 1);
         assert_eq!(queue.get(target.id).unwrap().unwrap().priority, crate::outline::DETAIL_PRIORITY);
-        assert_eq!(prioritize_detail(&ai, &id, 5).unwrap(), 0, "no such topic");
-        assert_eq!(prioritize_detail(&ai, "another recording", 0).unwrap(), 0);
+        assert_eq!(prioritize_detail(&sched, &id, 5).unwrap(), 0, "no such topic");
+        assert_eq!(prioritize_detail(&sched, "another recording", 0).unwrap(), 0);
     }
 
     #[test]
@@ -583,40 +619,61 @@ mod tests {
         let ai = tmp.path().join(".ai");
         let media = tmp.path().join("talk.wav");
         wav(&media, 1.0);
-        assert!(active(&ai, &id(&media)).unwrap().is_none());
-        let task = start(&ai, &media, AnalysisOptions::default()).unwrap();
-        assert_eq!(active(&ai, &id(&media)).unwrap().map(|t| t.id), Some(task));
+        let settings = settings(ModelChoices::default());
+        let sched = opened(&ai, Arc::new(FakeEngine::new()), &settings);
+        assert!(active(&sched, &id(&media)).unwrap().is_none());
+        let task = start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
+        assert_eq!(active(&sched, &id(&media)).unwrap().map(|t| t.id), Some(task));
     }
 
     /// The analysis graph, stopped once the topics composite has digests and the details
-    /// composite has its `topic-detail` children. Later stages are still queued.
+    /// composite has its `topic-detail` children. The tick that queues the details can also run
+    /// them, so they may already be done by the time the graph is stopped.
     fn analysis_graph() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let ai = tmp.path().join(".ai");
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
         let settings = settings(ModelChoices::default());
-        let queue = Queue::open(&ai).unwrap();
         let fake = FakeEngine::new();
         fake.chat_answers(&[DIGEST, DIGEST, DIGEST, SECTIONS, SECTIONS]);
         let engine: Arc<dyn Engine> = Arc::new(fake);
-        let handlers = handlers(&ai, &settings);
-        start(&ai, &media, AnalysisOptions::default()).unwrap();
-        let stop = AtomicBool::new(false);
+        let sched = opened(&ai, engine, &settings);
+        start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
         let mut saw_detail = false;
-        for _ in 0..40 {
-            if queue.list().unwrap().iter().any(|t| t.kind == "topic-detail") {
+        let wait_for_detail = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < wait_for_detail {
+            if sched.store().list().unwrap().iter().any(|t| t.kind == "topic-detail") {
                 saw_detail = true;
                 break;
             }
-            assert!(crate::worker::run_next(&queue, &engine, &handlers, &stop).unwrap(), "the graph ended before the details");
+            sched.tick().unwrap();
+            std::thread::sleep(Duration::from_millis(2));
         }
         assert!(saw_detail, "no topic-detail was queued");
-        let kinds: std::collections::HashSet<String> = queue.list().unwrap().into_iter().map(|t| t.kind).collect();
+        for task in sched.store().list().unwrap() {
+            if !task.status.is_finished() {
+                let _ = sched.pause(task.id);
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while sched.store().list().unwrap().iter().any(|t| matches!(t.status, TaskStatus::Running | TaskStatus::Stopping)) {
+            if Instant::now() > deadline {
+                break;
+            }
+            let _ = sched.tick();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        for task in sched.store().list().unwrap() {
+            if task.status == TaskStatus::Paused {
+                let _ = sched.resume(task.id);
+            }
+        }
+        let kinds: std::collections::HashSet<String> = sched.store().list().unwrap().into_iter().map(|t| t.kind).collect();
         for kind in ["analysis", "transcribe", "diarize", "index", "topics", "topics-plan", "topic-digest", "topics-merge", "details", "topic-detail"] {
             assert!(kinds.contains(kind), "{kind} missing from {kinds:?}");
         }
-        drop(queue);
+        drop(sched);
         tmp
     }
 
@@ -642,8 +699,8 @@ mod tests {
         }
     }
 
-    fn assert_rule(q: &Queue, seed: u64, step: usize) {
-        use mediaa_core::queue::{composite_status, ChildState};
+    fn assert_rule(q: &dyn Store, seed: u64, step: usize) {
+        use mediaa_queue::{composite_status, ChildState};
         use std::collections::{HashMap, HashSet};
         let tasks = q.list().unwrap();
         let by_id: HashMap<_, _> = tasks.iter().map(|t| (t.id, t)).collect();
@@ -668,13 +725,9 @@ mod tests {
             if children.is_empty() || task.inline {
                 continue;
             }
-            let states: Vec<ChildState> = children
-                .iter()
-                .map(|child| {
-                    let blocked = q.needs(child.id).unwrap().iter().any(|dep| by_id.get(dep).is_some_and(|other| other.status != TaskStatus::Done));
-                    ChildState::of(child.status, blocked)
-                })
-                .collect();
+            // The same rule the store applies, including a dependency behind another task.
+            let world = q.world().unwrap();
+            let states: Vec<ChildState> = children.iter().map(|child| mediaa_queue::state::child_state(&world, child)).collect();
             let expected = composite_status(&states).unwrap();
             assert_eq!(task.status, expected, "seed {seed} step {step}: {} {} {:?}", task.kind, task.title, states);
             if matches!(task.status, TaskStatus::Running | TaskStatus::Waiting | TaskStatus::Paused) {
@@ -683,35 +736,43 @@ mod tests {
         }
     }
 
-    struct FinishKind(&'static str);
+    struct FinishKind;
 
-    impl crate::worker::TaskHandler for FinishKind {
-        fn kind(&self) -> &'static str {
-            self.0
+    impl crate::run::Stage for FinishKind {
+        fn handles(&self, kind: &str) -> bool {
+            matches!(kind, "transcribe" | "diarize" | "index" | "topics-plan" | "topic-digest" | "topics-merge" | "topic-detail")
         }
-        fn run(&self, _task: &mediaa_core::queue::Task, _cp: &mut crate::worker::Checkpoints) -> anyhow::Result<serde_json::Value> {
-            Ok(json!({}))
+        fn chunk(&self, _task: &mediaa_queue::Task, _cancel: &Arc<std::sync::atomic::AtomicBool>, _host: &crate::run::Host) -> anyhow::Result<crate::run::Work> {
+            Ok(crate::run::Work::Done(json!({})))
         }
     }
 
-    fn drain_with_a_fake_handler(q: &Queue, seed: u64) {
-        let handlers: Vec<Box<dyn crate::worker::TaskHandler>> = ["transcribe", "diarize", "index", "topics-plan", "topic-digest", "topics-merge", "topic-detail"]
-            .into_iter()
-            .map(|kind| Box::new(FinishKind(kind)) as Box<dyn crate::worker::TaskHandler>)
-            .collect();
-        let engine: Arc<dyn Engine> = Arc::new(FakeEngine::new());
-        let stop = AtomicBool::new(false);
+    fn drain_with_a_fake_handler(store: Arc<dyn Store>, seed: u64) {
+        let settings = AgentSettings::default();
+        let sched = Scheduler::new(store.clone(), crate::run::pools(&settings.budget));
+        let host = crate::run::Host {
+            ai_dir: std::env::temp_dir(),
+            engine: Arc::new(FakeEngine::new()),
+            store: store.clone(),
+            slots: crate::slots::Slots::new(settings.budget.clone()),
+            settings: Arc::new(AgentSettings::default),
+            streams: Arc::new(crate::run::Streams::default()),
+        };
+        sched.register(Box::new(crate::run::StageRunner::new(host, vec![Arc::new(FinishKind)])));
         for step in 0..400 {
-            let tasks = q.list().unwrap();
+            let tasks = store.list().unwrap();
             if tasks.iter().all(|t| t.status.is_finished()) {
                 return;
             }
             for task in tasks.iter().filter(|t| t.status == TaskStatus::Paused) {
-                q.resume(task.id).unwrap();
+                sched.resume(task.id).unwrap();
             }
-            if !crate::worker::run_next(q, &engine, &handlers, &stop).unwrap() {
-                let left: Vec<_> = q.list().unwrap().into_iter().filter(|t| !t.status.is_finished()).map(|t| format!("{} {} {:?}", t.id, t.kind, t.status)).collect();
+            if sched.tick().is_err() {
+                let left: Vec<_> = store.list().unwrap().into_iter().filter(|t| !t.status.is_finished()).map(|t| format!("{} {} {:?}", t.id, t.kind, t.status)).collect();
                 panic!("seed {seed} step {step} stuck with {left:?}");
+            }
+            if !sched.live().is_empty() {
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
         panic!("seed {seed} did not finish");
@@ -720,13 +781,25 @@ mod tests {
     #[test]
     fn restarting_a_failed_detail_runs_every_ancestor() {
         let graph = analysis_graph();
-        let q = Queue::open(&graph.path().join(".ai")).unwrap();
+        let q = crate::run::open_store(&graph.path().join(".ai")).unwrap();
         let mut details: Vec<_> = q.list().unwrap().into_iter().filter(|t| t.kind == "topic-detail").map(|t| t.id).collect();
         details.sort_unstable();
         let failed = details.pop().unwrap();
         for id in &details {
-            q.complete(*id, &json!({})).unwrap();
+            if q.get(*id).unwrap().unwrap().status != TaskStatus::Done {
+                // A child the stop left paused cannot be completed; resume it first.
+                let _ = q.resume(*id);
+                q.complete(*id, &json!({})).unwrap();
+            }
         }
+        // The tick that queues the details runs them too, so by the time the graph is stopped
+        // every detail may already be done. A finished detail says nothing about its parents,
+        // so it is started again first, as «повторить» does in the interface.
+        if q.get(failed).unwrap().unwrap().status.is_finished() {
+            q.restart(failed).unwrap();
+        }
+        let details = q.get(failed).unwrap().unwrap().parent.unwrap();
+        assert_eq!(q.get(details).unwrap().unwrap().status, TaskStatus::Running, "a detail can be failed only while the details are unfinished");
         q.fail(failed, "model crashed").unwrap();
         let mut ancestor = q.get(failed).unwrap().unwrap().parent;
         let mut depth = 0;
@@ -759,8 +832,8 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let ai = dir.path().join(".ai");
             copy_dir(&source, &ai);
-            let q = Queue::open(&ai).unwrap();
-            assert_rule(&q, seed, 0);
+            let q = crate::run::open_store(&ai).unwrap();
+            assert_rule(q.as_ref(), seed, 0);
             let mut rng = Rng(seed);
             for step in 1..=24 {
                 let tasks = q.list().unwrap();
@@ -775,10 +848,10 @@ mod tests {
                     3 => q.restart(id).unwrap(),
                     4 => q.fail(id, "boom").unwrap(),
                     _ => q.complete(id, &json!({})).unwrap(),
-                }
-                assert_rule(&q, seed, step);
+                };
+                assert_rule(q.as_ref(), seed, step);
             }
-            drain_with_a_fake_handler(&q, seed);
+            drain_with_a_fake_handler(q.clone(), seed);
             assert!(q.list().unwrap().iter().all(|t| t.status.is_finished()), "seed {seed}");
         }
     }

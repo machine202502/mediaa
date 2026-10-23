@@ -47,17 +47,57 @@ const SPEED_TRACK: f32 = 84.0;
 /// always its track, for every value and while hovered.
 const KNOB: f32 = topics::KNOB;
 
+/// Which pane fills the studio. The other panes are hidden; the sizes stay for the restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+enum Maximized {
+    #[default]
+    None,
+    Dialog,
+    Chat,
+}
+
 /// Layout choices shared by all studios (kept across restarts).
 #[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 struct Layout {
     sizes: [f32; 3],
     show_video: bool,
     cinema: bool,
+    maximized: Maximized,
+    /// Follow the player in the dialog: highlight, scroll, and clicks that seek.
+    sync: bool,
 }
 
 impl Default for Layout {
     fn default() -> Self {
-        Self { sizes: PANES, show_video: true, cinema: false }
+        Self { sizes: PANES, show_video: true, cinema: false, maximized: Maximized::None, sync: true }
+    }
+}
+
+impl Layout {
+    /// One pane fills the studio. Again on the same pane restores. Cinema turns off.
+    fn toggle_max(&mut self, which: Maximized) {
+        if self.maximized == which {
+            self.maximized = Maximized::None;
+        } else {
+            self.maximized = which;
+            self.cinema = false;
+        }
+    }
+
+    /// Video fills the studio. A maximized pane turns off; the pane sizes stay.
+    fn toggle_cinema(&mut self) {
+        self.cinema = !self.cinema;
+        if self.cinema {
+            self.show_video = true;
+            self.maximized = Maximized::None;
+        }
+    }
+
+    fn toggle_video(&mut self) {
+        self.show_video = !self.show_video;
+        if !self.show_video {
+            self.cinema = false;
+        }
     }
 }
 
@@ -92,7 +132,7 @@ impl Studio {
 
     /// Moves playback to `t` seconds (a search hit opened from the catalog).
     pub fn seek(&mut self, t: f64) {
-        self.player.seek(t);
+        self.player.jump(t);
     }
 
     pub fn pause(&mut self) {
@@ -117,28 +157,43 @@ impl Studio {
         let before = layout;
         let p = theme::palette(ui);
         let mut action = None;
+        self.player.set_links(layout.sync);
 
         let full = ui.available_rect_before_wrap();
         let top = Rect::from_min_size(full.min, egui::vec2(full.width(), 44.0));
         let bar = Rect::from_min_max(egui::pos2(full.min.x, full.max.y - 60.0), full.max);
         let stage = Rect::from_min_max(egui::pos2(full.min.x + 6.0, top.max.y), egui::pos2(full.max.x - 6.0, bar.min.y - 2.0));
 
-        // Title bar: tools · title · (room for more tools).
+        // Title bar: icon tools, then the title. The three tools stay, even when the third is off.
         ui.scope_builder(egui::UiBuilder::new().max_rect(top.shrink2(egui::vec2(10.0, 6.0))), |ui| {
             ui.horizontal_centered(|ui| {
-                if ui.add(theme::secondary(icon::ARROW_SQUARE_OUT, &t!("studio.open"))).clicked() {
+                let open = theme::icon_face(ui, icon::ARROW_SQUARE_OUT, &t!("studio.open"), theme::ICON_BUTTON);
+                tip(&open, &t!("studio.open"));
+                if open.clicked() {
                     action = Some(StudioAction::Open(self.path.clone()));
                 }
-                if ui.add(theme::secondary(icon::FOLDER_OPEN, &t!("lib.reveal"))).clicked() {
+                let reveal = theme::icon_face(ui, icon::FOLDER_OPEN, &t!("lib.reveal"), theme::ICON_BUTTON);
+                tip(&reveal, &t!("lib.reveal"));
+                if reveal.clicked() {
                     action = Some(StudioAction::Reveal(self.path.clone()));
                 }
-                ui.add_space(12.0);
-                ui.add(egui::Label::new(RichText::new(title).size(18.0).strong()).truncate()).on_hover_text(self.path.to_string_lossy());
+                let known = self.dialog.has_speakers();
+                let names_tip = if known { t!("studio.names") } else { t!("studio.names_none") };
+                let names = ui.add_enabled_ui(known, |ui| theme::icon_face(ui, icon::USERS_THREE, &names_tip, theme::ICON_BUTTON)).inner;
+                tip(&names, &names_tip);
+                if known && names.clicked() {
+                    self.dialog.open_names();
+                }
+                let title_label = ui.add(egui::Label::new(RichText::new(title).size(18.0).strong()).truncate());
+                tip(&title_label, &self.path.to_string_lossy());
             });
         });
 
         self.stage(ui, stage, &mut layout, services, p);
         self.transport(ui, bar, &mut layout, p);
+        if layout.maximized != Maximized::None && !self.dialog.blocks_escape() && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            layout.maximized = Maximized::None;
+        }
 
         if layout != before {
             ui.ctx().data_mut(|d| d.insert_persisted(layout_id(), layout));
@@ -149,6 +204,14 @@ impl Studio {
 
     /// The panes and the sashes between them.
     fn stage(&mut self, ui: &mut egui::Ui, rect: Rect, layout: &mut Layout, services: Option<&Services>, p: theme::Palette) {
+        if layout.maximized == Maximized::Dialog {
+            self.dialog_pane(ui, rect, layout, services, p);
+            return;
+        }
+        if layout.maximized == Maximized::Chat {
+            self.chat_pane(ui, rect, layout, services, p);
+            return;
+        }
         let show_video = self.video && layout.show_video;
         if self.video && layout.cinema {
             self.video_pane(ui, rect, p);
@@ -172,18 +235,9 @@ impl Studio {
                 Rect::from_min_max(egui::pos2(at, rect.min.y), egui::pos2(at + len, rect.max.y))
             };
             match i {
-                0 => {
-                    if let Some(a) = self.dialog.ui(ui, pane, &mut self.player, services, p) {
-                        self.pending = Some(a);
-                    }
-                }
+                0 => self.dialog_pane(ui, pane, layout, services, p),
                 1 => self.video_pane(ui, pane, p),
-                _ if !self.dialog.has_replies() => chat_later(ui, pane, p),
-                _ => {
-                    if let Some(a) = self.chat.ui(ui, pane, Some(&mut self.player), services, p) {
-                        self.pending = Some(a);
-                    }
-                }
+                _ => self.chat_pane(ui, pane, layout, services, p),
             }
             at += len;
             if let Some(&next) = order.get(n + 1) {
@@ -213,6 +267,33 @@ impl Studio {
                 }
                 at += SASH;
             }
+        }
+    }
+
+    fn dialog_pane(&mut self, ui: &mut egui::Ui, pane: Rect, layout: &mut Layout, services: Option<&Services>, p: theme::Palette) {
+        let mut chrome = super::dialog::Chrome { sync: layout.sync, maximized: layout.maximized == Maximized::Dialog };
+        if let Some(a) = self.dialog.ui(ui, pane, &mut self.player, services, p, &mut chrome) {
+            self.pending = Some(a);
+        }
+        layout.sync = chrome.sync;
+        if chrome.maximized {
+            layout.maximized = Maximized::Dialog;
+            layout.cinema = false;
+        } else if layout.maximized == Maximized::Dialog {
+            layout.maximized = Maximized::None;
+        }
+    }
+
+    fn chat_pane(&mut self, ui: &mut egui::Ui, pane: Rect, layout: &mut Layout, services: Option<&Services>, p: theme::Palette) {
+        if !self.dialog.has_replies() {
+            chat_later(ui, pane, p);
+        } else if let Some(a) = self.chat.ui(ui, pane, Some(&mut self.player), services, p) {
+            self.pending = Some(a);
+        }
+        let on = layout.maximized == Maximized::Chat;
+        let (glyph, text) = if on { (icon::ARROWS_IN, t!("studio.restore")) } else { (icon::ARROWS_OUT, t!("studio.maximize")) };
+        if edge_button(ui, pane, true, glyph, &text, "chat").clicked() {
+            layout.toggle_max(Maximized::Chat);
         }
     }
 
@@ -266,19 +347,13 @@ impl Studio {
                 if let Some(b) = boxes.cinema {
                     let (ic, tip) = if layout.cinema { (icon::CORNERS_IN, t!("studio.cinema_off")) } else { (icon::CORNERS_OUT, t!("studio.cinema")) };
                     if at(ui, b, ROW_H, |ui| toggle_button(ui, ic, &tip, layout.cinema, p)).clicked() {
-                        layout.cinema = !layout.cinema;
-                        if layout.cinema {
-                            layout.show_video = true;
-                        }
+                        layout.toggle_cinema();
                     }
                 }
                 if let Some(b) = boxes.camera {
                     let (ic, tip) = if layout.show_video { (icon::VIDEO_CAMERA, t!("studio.hide_video")) } else { (icon::VIDEO_CAMERA_SLASH, t!("studio.show_video")) };
                     if at(ui, b, ROW_H, |ui| toggle_button(ui, ic, &tip, !layout.show_video, p)).clicked() {
-                        layout.show_video = !layout.show_video;
-                        if !layout.show_video {
-                            layout.cinema = false;
-                        }
+                        layout.toggle_video();
                     }
                 }
                 ui.painter().text(boxes.label.center(), egui::Align2::CENTER_CENTER, label, FontId::monospace(12.0), p.text);
@@ -313,7 +388,7 @@ impl Studio {
                     if resp.dragged() {
                         player.scrub(t);
                     } else {
-                        player.seek(t);
+                        player.jump(t);
                     }
                 }
                 if resp.drag_stopped() {
@@ -420,9 +495,9 @@ pub enum StudioAction {
     /// options as the default for the next analysis.
     Analyse { path: PathBuf, from: Option<Stage>, options: AnalysisOptions, remember: bool },
     /// Cancel the running analysis of the recording.
-    Stop(mediaa_core::queue::TaskId),
+    Stop(mediaa_queue::TaskId),
     /// Continue a failed task.
-    ResumeTask(mediaa_core::queue::TaskId),
+    ResumeTask(mediaa_queue::TaskId),
     /// Open a recording at a time (a citation in a folder's chat).
     OpenAt(PathBuf, f64),
 }
@@ -435,14 +510,59 @@ fn chat_later(ui: &mut egui::Ui, rect: Rect, p: theme::Palette) {
     });
 }
 
+/// Height of a pane header. The same in the normal and the maximized state.
+pub(super) const PANE_HEAD: f32 = 30.0;
+
 /// A pane frame with its title row; returns the body rect.
 pub(super) fn panel(ui: &egui::Ui, rect: Rect, title: &str, p: theme::Palette) -> Rect {
+    panel_insets(ui, rect, title, 12.0, 12.0, p)
+}
+
+/// [`panel`] with room kept free on the left and the right of the title, for header buttons.
+pub(super) fn panel_insets(ui: &egui::Ui, rect: Rect, title: &str, left: f32, right: f32, p: theme::Palette) -> Rect {
     let painter = ui.painter_at(rect);
     painter.rect(rect, CornerRadius::same(12), p.card, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
-    let head = Rect::from_min_size(rect.min, egui::vec2(rect.width(), 30.0));
+    let head = Rect::from_min_size(rect.min, egui::vec2(rect.width(), PANE_HEAD));
     painter.hline(head.x_range(), head.max.y, Stroke::new(1.0, p.border));
-    painter.text(head.left_center() + egui::vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, title, FontId::proportional(12.0), p.text_weak);
+    let text = Rect::from_min_max(egui::pos2(head.left() + left, head.top()), egui::pos2(head.right() - right, head.bottom()));
+    let mut clip = ui.painter_at(text);
+    clip.set_clip_rect(text.intersect(ui.clip_rect()));
+    clip.text(text.left_center(), egui::Align2::LEFT_CENTER, title, FontId::proportional(12.0), p.text_weak);
     Rect::from_min_max(egui::pos2(rect.min.x + 1.0, head.max.y + 1.0), rect.max - egui::vec2(1.0, 1.0))
+}
+
+/// A tooltip without a shadow, shown on a disabled button too.
+pub(crate) fn tip(resp: &egui::Response, text: &str) {
+    let mut tip = if resp.enabled() { egui::Tooltip::for_enabled(resp) } else { egui::Tooltip::for_disabled(resp) };
+    tip.popup = tip.popup.frame(super::topics::tooltip_frame(resp.ctx.global_style().as_ref()));
+    tip.show(|ui| {
+        ui.label(text);
+    });
+}
+
+/// The expand / collapse icon in a pane header. `right` puts it on the right edge.
+pub(crate) fn edge_button(ui: &mut egui::Ui, pane: Rect, right: bool, glyph: &str, text: &str, salt: &str) -> egui::Response {
+    let x = if right { pane.right() - 4.0 - theme::ICON_BUTTON } else { pane.left() + 4.0 };
+    let y = pane.top() + (PANE_HEAD - theme::ICON_BUTTON) / 2.0;
+    let rect = Rect::from_min_size(egui::pos2(x, y), egui::vec2(theme::ICON_BUTTON, theme::ICON_BUTTON));
+    let resp = ui.interact(rect, ui.id().with(("pane-tool", salt)), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let p = theme::palette(ui);
+        let (fill, stroke, color) = if resp.is_pointer_button_down_on() {
+            (p.accent, p.accent, p.on_accent)
+        } else if resp.hovered() {
+            (p.accent_soft, p.accent, p.text)
+        } else {
+            (Color32::TRANSPARENT, Color32::TRANSPARENT, p.text)
+        };
+        ui.painter().rect(rect, CornerRadius::same(6), fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, glyph, FontId::proportional(14.0), color);
+    }
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    tip(&resp, text);
+    resp
 }
 
 /// An icon button that stays highlighted while `on`.
@@ -492,7 +612,32 @@ mod tests {
     fn speeds_include_normal_and_layout_defaults() {
         assert!(SPEEDS.contains(&1.0) && SPEEDS.windows(2).all(|w| w[0] < w[1]));
         let l = Layout::default();
-        assert!(l.show_video && !l.cinema && l.sizes == PANES);
+        assert!(l.show_video && !l.cinema && l.sync && l.maximized == Maximized::None && l.sizes == PANES);
+    }
+
+    #[test]
+    fn maximize_restores_the_same_sizes_and_yields_to_cinema() {
+        let mut layout = Layout::default();
+        let sizes = [2.0, 3.0, 4.0];
+        layout.sizes = sizes;
+        layout.cinema = true;
+        layout.toggle_max(Maximized::Dialog);
+        assert_eq!(layout.maximized, Maximized::Dialog);
+        assert!(!layout.cinema, "a pane and the video-only view are not on together");
+        assert_eq!(layout.sizes, sizes);
+        layout.toggle_max(Maximized::Chat);
+        assert_eq!(layout.maximized, Maximized::Chat);
+        assert_eq!(layout.sizes, sizes, "switching panes keeps the split");
+        layout.toggle_max(Maximized::Chat);
+        assert_eq!(layout.maximized, Maximized::None);
+        assert_eq!(layout.sizes, sizes, "restore brings the same split back");
+        layout.toggle_max(Maximized::Dialog);
+        layout.toggle_cinema();
+        assert!(layout.cinema && layout.show_video && layout.maximized == Maximized::None);
+        assert_eq!(layout.sizes, sizes);
+        layout.toggle_video();
+        assert!(!layout.show_video && !layout.cinema);
+        assert_eq!(layout.sizes, sizes);
     }
 
     /// The visible part of a control inside its box: an icon's glyph, a label's text or a

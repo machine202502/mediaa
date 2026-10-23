@@ -6,7 +6,6 @@
 //! download shows its progress, and a downloaded model can be deleted.
 
 use super::super::header;
-use super::engine_state::gb;
 use crate::app::App;
 use crate::theme;
 use crossbeam_channel::Receiver;
@@ -14,7 +13,7 @@ use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
 use mediaa_agent::assistant::hf_token;
 use mediaa_agent::check::{Ready, Status};
-use mediaa_engine::{Engine, Health, ModelFormat, ModelInspect, ModelInfo, ProgressCallback};
+use mediaa_engine::{Engine, ModelFormat, ModelInspect, ModelInfo, ProgressCallback};
 use mediaa_core::agent::{AgentSettings, Device, ModelRole, ModelSource};
 use mediaa_core::library::human_size;
 use rust_i18n::t;
@@ -55,7 +54,7 @@ impl Inspect {
                 Err(crossbeam_channel::TryRecvError::Empty) => {}
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     self.run = None;
-                    self.answer = Some(Err(t!("engine.no_answer").to_string()));
+                    self.answer = Some(Err(t!("agent.models_no_answer").to_string()));
                 }
             }
         }
@@ -275,7 +274,7 @@ impl ModelsUi {
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     let role = self.downloads[i].role;
                     self.downloads.remove(i);
-                    self.note(role, FetchInput::Thread(Err(t!("engine.no_answer").to_string())));
+                    self.note(role, FetchInput::Thread(Err(t!("agent.models_no_answer").to_string())));
                 }
             }
         }
@@ -299,7 +298,7 @@ impl ModelsUi {
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     let role = self.deletes[i].role;
                     self.deletes.remove(i);
-                    self.errors.insert(role, t!("engine.no_answer").to_string());
+                    self.errors.insert(role, t!("agent.models_no_answer").to_string());
                 }
             }
         }
@@ -527,40 +526,14 @@ fn status_line(ui: &mut egui::Ui, s: &Status) {
     }
 }
 
-/// The engine's state: it is this program, so there is nothing to set up here.
-fn engine_card(ui: &mut egui::Ui, health: &Option<Health>, loading: bool, error: Option<&str>) {
-    theme::card(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        theme::section(ui, icon::ENGINE, &t!("engine.title"));
-        theme::row(ui, &t!("engine.status"), |ui| {
-            let p = theme::palette(ui);
-            if loading {
-                ui.spinner();
-                theme::hint(ui, t!("engine.checking"));
-            } else if let Some(h) = health {
-                ui.label(RichText::new(format!("{}  {}", icon::CHECK_CIRCLE, t!("engine.running"))).color(p.success));
-                theme::hint(ui, format!("{} {}", h.name, h.version));
-            } else {
-                let text = t!("engine.failed", error = error.unwrap_or_default());
-                ui.add(egui::Label::new(RichText::new(format!("{}  {text}", icon::WARNING)).color(p.danger)).wrap());
-            }
-        });
-        if let Some(h) = health {
-            if !h.models_dir.is_empty() {
-                theme::row(ui, &t!("engine.models_dir"), |ui| theme::hint(ui, &h.models_dir));
-            }
-            if h.gpus.is_empty() {
-                theme::row(ui, &t!("engine.gpus"), |ui| theme::hint(ui, t!("engine.no_gpus")));
-            } else {
-                for g in &h.gpus {
-                    theme::row(ui, &t!("engine.gpus"), |ui| {
-                        ui.label(RichText::new(&g.name).strong());
-                        theme::hint(
-                            ui,
-                            t!("engine.gpu_line", backend = g.backend, total = gb(g.memory_total), free = gb(g.memory_free)),
-                        );
-                    });
-                }
+/// The folder local models live in, and a way to open it.
+fn models_folder(app: &mut App, ui: &mut egui::Ui) {
+    let dir = mediaa_core::paths::models_dir();
+    theme::row(ui, &t!("agent.models_folder"), |ui| {
+        theme::hint(ui, dir.display().to_string());
+        if theme::icon_button(ui, icon::FOLDER_OPEN, &t!("lib.reveal")).clicked() {
+            if let Err(e) = mediaa_platform::files::reveal(&dir) {
+                app.error(format!("{e:#}"));
             }
         }
     });
@@ -739,7 +712,7 @@ fn repository_rows(app: &mut App, ui: &mut egui::Ui, row: RoleRow, engine: &Arc<
         FetchClick::Stop => stopped = true,
         FetchClick::Delete => app.agent.models.confirm_delete = Some((role, repo_id(&spec))),
         FetchClick::Download => {
-            let offline = app.agent.engine_state.error().unwrap_or(&t!("engine.not_running")).to_string();
+            let offline = app.agent.engine_state.error().unwrap_or(&t!("agent.models_offline")).to_string();
             fetch = fetch_next(fetch, FetchInput::Press { on_disk: downloaded, online, offline });
             if matches!(fetch.state, FetchState::Fetching { .. }) {
                 let token = hf_token(&app.settings.agent);
@@ -885,14 +858,12 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     if app.agent.models.poll(&app.settings.agent, &engine, token.clone(), online, ui.ctx()) {
         app.agent.engine_state.refresh_now();
     }
-    // The engine state of this frame (the poller's last answer).
-    let health = app.agent.engine_state.health().cloned();
-    let loading = app.agent.engine_state.loading();
-    let engine_error = app.agent.engine_state.error().map(str::to_string);
     let downloaded: HashSet<String> = app.agent.engine_state.models().iter().map(|m: &ModelInfo| m.spec.clone()).collect();
 
     header(ui, &t!("agent.models_title"), "");
-    engine_card(ui, &health, loading, engine_error.as_deref());
+    models_folder(app, ui);
+    // Why nothing can be checked or downloaded, in model terms (the engine is this program).
+    app.agent.engine_state.offline_hint(ui);
     ui.add_space(6.0);
     let mut changed = false;
 

@@ -4,7 +4,7 @@
 
 use crate::theme;
 use crossbeam_channel::Receiver;
-use eframe::egui::{self, CornerRadius, Margin, RichText, Stroke};
+use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
 use mediaa_engine::{Engine, Health, ModelInfo, Status};
 use rust_i18n::t;
@@ -46,7 +46,7 @@ impl EngineState {
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => ctx.request_repaint_after(Duration::from_millis(200)),
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    self.answer = Some(Err(t!("engine.no_answer").to_string()));
+                    self.answer = Some(Err(t!("agent.models_no_answer").to_string()));
                     self.run = None;
                     self.next = Some(Instant::now() + POLL_EVERY);
                 }
@@ -116,37 +116,7 @@ impl EngineState {
         self.snapshot().is_some()
     }
 
-    /// The engine chip of the Agent header: green when it works, red when it does not.
-    pub fn chip(&self, ui: &mut egui::Ui) {
-        let p = theme::palette(ui);
-        let (color, text, tip) = if self.loading() {
-            (p.text_weak, t!("engine.checking").to_string(), None)
-        } else if self.online() {
-            (p.success, t!("engine.running").to_string(), Some(self.running_tooltip()))
-        } else {
-            let error = self.error().unwrap_or_default();
-            (p.danger, t!("engine.not_running").to_string(), Some(t!("engine.failed", error = error).to_string()))
-        };
-        let resp = egui::Frame::new()
-            .fill(p.card)
-            .stroke(Stroke::new(1.0, p.border))
-            .corner_radius(CornerRadius::same(10))
-            .inner_margin(Margin::symmetric(8, 2))
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-                    ui.painter().circle_filled(rect.center(), 4.0, color);
-                    ui.label(RichText::new(text).size(12.0).color(p.text));
-                });
-            })
-            .response;
-        if let Some(tip) = tip {
-            resp.on_hover_text(tip);
-        }
-    }
-
-    /// What every page shows while the engine does not work; `true` when it did not.
+    /// What every page shows while the models are not reachable; `true` when they are not.
     pub fn offline_hint(&self, ui: &mut egui::Ui) -> bool {
         if self.online() {
             return false;
@@ -154,32 +124,14 @@ impl EngineState {
         if self.loading() {
             ui.horizontal(|ui| {
                 ui.spinner();
-                theme::hint(ui, t!("engine.checking"));
+                theme::hint(ui, t!("agent.models_loading"));
             });
             return true;
         }
         let p = theme::palette(ui);
-        let text = t!("engine.failed", error = self.error().unwrap_or_default());
+        let text = t!("agent.models_unavailable", error = self.error().unwrap_or_default());
         ui.add(egui::Label::new(RichText::new(format!("{}  {text}", icon::WARNING)).color(p.danger)).wrap());
         true
-    }
-
-    /// Version, GPUs and the models folder of the engine.
-    fn running_tooltip(&self) -> String {
-        let Some(s) = self.snapshot() else {
-            return String::new();
-        };
-        let mut lines = vec![format!("{} · {}", s.health.name, t!("engine.version", version = s.health.version))];
-        if s.health.gpus.is_empty() {
-            lines.push(t!("engine.no_gpus").to_string());
-        }
-        for g in &s.health.gpus {
-            lines.push(format!("{} · {} · {} GB", g.name, g.backend, gb(g.memory_total)));
-        }
-        if !s.health.models_dir.is_empty() {
-            lines.push(format!("{}: {}", t!("engine.models_dir"), s.health.models_dir));
-        }
-        lines.join("\n")
     }
 }
 

@@ -251,6 +251,7 @@ impl LocalModel {
                 batch.add(*t, pos as i32, &[0], pos == tokens.len() - 1)?;
             }
             ctx.decode(&mut batch)?;
+            mediaa_core::pulse::beat();
         }
 
         // The grammar (when asked for) constrains the text; while the model reasons it is left
@@ -304,6 +305,7 @@ impl LocalModel {
                     batch.add(*t, (pos + i) as i32, &[0], i == ids.len() - 1)?;
                 }
                 ctx.decode(&mut batch)?;
+                mediaa_core::pulse::beat();
                 pos += ids.len();
                 out.extend(closing.as_bytes());
                 last = batch.n_tokens() - 1;
@@ -336,6 +338,8 @@ impl LocalModel {
             batch.clear();
             batch.add(token, pos as i32, &[0], true)?;
             ctx.decode(&mut batch)?;
+            // Every generated token is a sign of life for the watchdog.
+            mediaa_core::pulse::beat();
             pos += 1;
             last = 0;
         }

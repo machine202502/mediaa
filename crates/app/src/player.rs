@@ -36,6 +36,8 @@ pub struct Player {
     audio: Option<Arc<AudioOut>>,
     cancel: Arc<AtomicBool>,
     dragging: bool,
+    /// Clicks on a reply, a word or a time. The transport bar uses [`Player::jump`] and ignores this.
+    links: bool,
 }
 
 impl Player {
@@ -62,6 +64,7 @@ impl Player {
             audio,
             cancel: Arc::new(AtomicBool::new(false)),
             dragging: false,
+            links: true,
         };
         p.restart(0.0);
         p
@@ -119,7 +122,20 @@ impl Player {
         }
     }
 
+    /// Whether a click in the dialog, the topics or the chat may move playback.
+    pub fn set_links(&mut self, on: bool) {
+        self.links = on;
+    }
+
+    /// Moves to `t` when [`Player::set_links`] is on. A click while sync is off does nothing.
     pub fn seek(&mut self, t: f64) {
+        if self.links {
+            self.jump(t);
+        }
+    }
+
+    /// Moves to `t` whatever sync says (the transport bar, opening a recording at a time).
+    pub fn jump(&mut self, t: f64) {
         self.restart(t);
     }
 
@@ -254,7 +270,7 @@ impl Player {
     pub fn end_scrub(&mut self) {
         if self.dragging {
             self.dragging = false;
-            self.seek(self.pos);
+            self.jump(self.pos);
         }
     }
 }

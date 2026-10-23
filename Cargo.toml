@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/media", "crates/platform", "crates/engine", "crates/agent", "crates/app", "crates/eval"]
+members = ["crates/core", "crates/media", "crates/platform", "crates/engine", "crates/agent", "crates/app", "crates/eval", "crates/queue"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ mediaa-platform = { path = "crates/platform" }
 mediaa-media = { path = "crates/media" }
 mediaa-engine = { path = "crates/engine" }
 mediaa-agent = { path = "crates/agent" }
+mediaa-queue = { path = "crates/queue" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

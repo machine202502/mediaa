@@ -106,6 +106,19 @@ impl Timeline {
         self.entries.push(TimelineEntry::Step { title: title.to_string(), tool: tool.to_string(), status: status.to_string() });
     }
 
+    /// The `index`-th tool step (thinking and answer entries do not count) gets `title`.
+    /// `false` when there is no such step.
+    pub fn set_step_title(&mut self, index: usize, title: &str) -> bool {
+        let Some(slot) = self.entries.iter_mut().filter_map(|entry| match entry {
+            TimelineEntry::Step { title, .. } => Some(title),
+            _ => None,
+        }).nth(index) else {
+            return false;
+        };
+        *slot = title.to_string();
+        true
+    }
+
     /// The last tool call is over.
     pub fn finish_step(&mut self, status: &str) {
         if let Some(TimelineEntry::Step { status: s, .. }) = self.entries.iter_mut().rev().find(|e| matches!(e, TimelineEntry::Step { .. })) {
@@ -278,6 +291,37 @@ impl Transcript {
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+
+    /// Writes `phrase` into the `index`-th tool step of the agent message for the answer task
+    /// `answer` (`details.task`). A chat with no such message, or no such step, is left as it is.
+    /// Returns whether the phrase is now that step's title.
+    pub fn set_step_phrase(&self, chat: ChatId, answer: i64, index: usize, phrase: &str) -> anyhow::Result<bool> {
+        if phrase.is_empty() {
+            return Ok(false);
+        }
+        let rows = {
+            let mut q = self.db.prepare("SELECT id, details FROM messages WHERE chat = ?1 AND role = 'agent' ORDER BY id DESC")?;
+            let mapped = q.query_map([chat], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        for (id, raw) in rows {
+            let mut details: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+            if details.get("task").and_then(|v| v.as_i64()) != Some(answer) {
+                continue;
+            }
+            let mut timeline = Timeline::from_details(&details);
+            if !timeline.set_step_title(index, phrase) {
+                return Ok(false);
+            }
+            details["timeline"] = timeline.to_value();
+            if let Some(step) = details.get_mut("steps").and_then(|v| v.as_array_mut()).and_then(|steps| steps.get_mut(index)).and_then(|v| v.as_object_mut()) {
+                step.insert("title".to_string(), serde_json::Value::String(phrase.to_string()));
+            }
+            self.db.execute("UPDATE messages SET details = ?1 WHERE id = ?2", params![details.to_string(), id])?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +399,43 @@ mod tests {
         assert_eq!(messages[0].timeline(), tl, "the saved details give the same timeline");
         assert!(messages[0].stopped() && !messages[1].stopped());
         assert!(messages[1].timeline().is_empty(), "an answer from before timelines has none");
+    }
+
+    #[test]
+    fn a_step_phrase_stays_in_the_stored_timeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = Transcript::open(dir.path(), "f").unwrap();
+        let chat = t.create_chat("Сроки").unwrap();
+        let mut tl = Timeline::default();
+        tl.thinking("хм");
+        tl.step("Поиск", "search", "found");
+        tl.step("Чтение записи", "read", "found");
+        t.add_message(
+            chat,
+            Author::Agent,
+            "В пятницу",
+            &json!({"task": 7, "steps": [{"title": "Поиск"}, {"title": "Чтение записи"}], "timeline": tl.to_value()}),
+        )
+        .unwrap();
+        t.add_message(chat, Author::Agent, "Другой", &json!({"task": 8, "timeline": [{"kind": "step", "title": "Поиск", "tool": "search", "status": "found"}]})).unwrap();
+        assert!(t.set_step_phrase(chat, 7, 1, "Читаю про отчёт").unwrap());
+        assert!(!t.set_step_phrase(chat, 7, 5, "мимо").unwrap(), "no such step");
+        assert!(!t.set_step_phrase(chat, 9, 0, "мимо").unwrap(), "no such answer");
+        assert!(!t.set_step_phrase(chat, 7, 0, "").unwrap(), "an empty phrase is not a title");
+        let messages = t.messages(chat).unwrap();
+        let timeline = messages[0].timeline();
+        let titles: Vec<_> = timeline.entries.iter().filter_map(|e| match e {
+            TimelineEntry::Step { title, .. } => Some(title.as_str()),
+            _ => None,
+        }).collect();
+        assert_eq!(titles, ["Поиск", "Читаю про отчёт"]);
+        assert_eq!(messages[0].details["steps"][1]["title"], "Читаю про отчёт");
+        assert_eq!(messages[0].details["steps"][0]["title"], "Поиск");
+        assert_eq!(
+            messages[1].timeline().entries[0],
+            TimelineEntry::Step { title: "Поиск".into(), tool: "search".into(), status: "found".into() },
+            "another answer is left as it was"
+        );
     }
 
     #[test]

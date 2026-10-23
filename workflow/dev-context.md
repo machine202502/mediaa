@@ -4,11 +4,12 @@
 работаем и на что уже наступали.
 
 Связанные документы:
-* [process.md](process.md) — что сейчас в работе: задача, шаг, исполнитель, ссылка на лог.
+* [process.md](process.md) — что сейчас в работе: только таблицы по партиям (шаг, что, исполнитель, состояние, лог).
 * [todos.md](todos.md) — задачи и идеи, которые можно взять в работу.
 * [done.md](done.md) — что уже сделано и от каких идей отказались.
 * [agent.md](agent.md) — архитектура агента и таблица фаз.
 * [../CLAUDE.md](../CLAUDE.md) — обязательные правила проекта для ИИ-ассистентов.
+* [lead.md](lead.md) — как быть головой: модель, лимиты, коммиты, уведомления, кого послать.
 
 ---
 
@@ -56,7 +57,8 @@
 
 | Крейт | Что внутри |
 |---|---|
-| `crates/core` | настройки (`settings.rs`, `agent.rs`: `AgentSettings`, `WebSettings`, роли моделей и их умолчания `default_source`), `secrets.rs` (keychain), `transcript.rs` (БД записи `.ai/media/<id>.db`, SCHEMA 4), `queue.rs`, `retrieval.rs`, `outline.rs`, `chat.rs`, `catalogs.rs`, `paths.rs` (`models_dir()` — папка моделей движка) |
+| `crates/core` | настройки (`settings.rs`, `agent.rs`: `AgentSettings`, `WebSettings`, роли моделей и их умолчания `default_source`), `secrets.rs` (keychain), `transcript.rs` (БД записи `.ai/media/<id>.db`, SCHEMA 4), `retrieval.rs`, `outline.rs`, `chat.rs`, `catalogs.rs`, `paths.rs` (`models_dir()` — папка моделей движка) |
+| `crates/queue` | очередь задач `mediaa-queue`: состояния, хранилище (SQLite/память), планировщик с пулами и справедливостью, события, снимок для UI — проект [queue.md](queue.md) |
 | `crates/agent` | `slots.rs` (слоты по видам работ: сколько задач каждого вида одновременно), `models.rs` (спека модели для движка), `transcribe.rs`, `index.rs`, `outline.rs`, `search.rs`, `check.rs` (проверка моделей), `providers.rs` (OpenAI-совместимые, SSE), `web.rs` (поиск и чтение страниц), `prompts.rs` (шаблоны), `live.rs` (движок для `#[ignore]`-тестов), `assistant/` (агент). Модели не запускает и не скачивает — всё это в движке |
 | `crates/engine` | движок моделей — библиотека `mediaa_engine` (workflow/engine.md): трейт `Engine` и `LocalEngine` (`engine/`), `llm.rs`/`local.rs` (llama.cpp), `embed.rs`, `speech.rs` (sherpa-onnx), `runtime.rs` (модели под бюджет), `scheduler.rs` (пулы памяти), `hub.rs` (загрузки с HF), `testing.rs` (фейковый движок для тестов, feature `testing`) |
 | `crates/agent/src/assistant` | `mod.rs` (цикл `answer`, `ask`, `ask_folder`, промпт, проверка цитат, бенч), `brain.rs` (шаг агента как JSON по грамматике), `provider.rs`, `tools.rs` (инструменты по записи), `folder.rs` (чат по папке), `scan.rs`, `memory.rs`, `internet.rs` (web_search / web_read, фильтр ссылок) |
@@ -140,6 +142,11 @@ cargo test --release -q -p mediaa-agent bench_on_a_recording -- --ignored --noca
   Отдельный процесс движка не нужен; недостающие модели тест скачает сам.
 
 * Флаги (взаимоисключающие, проверяются по порядку):
+  * `MEDIAA_BENCH_FROM=<transcribe|diarize|index|topics|details>` — анализ с указанного этапа на
+    уже готовой библиотеке: `pipeline::restart` ставит этот этап и всё, что после него, а
+    готовые задачи и данные записи переиспользуются. `MEDIAA_BENCH_FROM=index` — быстрый способ
+    поймать зависание индексации на уже распознанной записи, не гоняя распознавание (155 с) и
+    диаризацию (795 с) заново. Печатает задачи с временем и готовность записи.
   * `MEDIAA_BENCH_ANALYSIS=1` — весь анализ записи с нуля через очередь, как кнопка «Распознать»:
     распознавание → диаризация → индекс → темы → разбор; печатает задачи с временем и ошибками и
     готовность записи. С `MEDIAA_TEST_MODELS` = папка моделей приложения проверяет настоящие модели.
@@ -196,7 +203,9 @@ cargo run --release -p mediaa-eval -- run --cases evals/local/hh-experience/case
 
 ## 3. Как работаем
 
-* **Роли.**
+* **Роли.** Как быть головой — [lead.md](lead.md) (модель Grok только `grok-4.7`, не fast;
+  коммит только по явному слову на этот раз; лимиты; вёрстка; process.md — только таблицы; промпты; закрытие
+  задач; уведомления).
   * **Голова** — модель, с которой общается пользователь; какая именно — неважно,
     пользователь выбирает её сам. Голова продумывает решение, пишет самодостаточное задание
     и проверяет результат (дифф, тесты). За ней же — решения, которые требуют контекста
@@ -225,8 +234,10 @@ cargo run --release -p mediaa-eval -- run --cases evals/local/hh-experience/case
     `~/.secrets/deepseek.key` или `DEEPSEEK_API_KEY`). Можно запускать
     несколько параллельно, если они не трогают одни файлы.
 * **Лимиты Claude управляют распределением работы** (решение пользователя). Перед раздачей
-  задач голова смотрит `get_usage` (инструмент приложения: 5-часовой и недельный лимиты плана; их
-  тратят голова и подагенты Sonnet, DeepSeek и Grok — нет):
+  задач голова Claude смотрит `get_usage` (инструмент приложения: 5-часовой и недельный лимиты плана; их
+  тратят голова и подагенты Sonnet, DeepSeek и Grok — нет). У головы Grok этого инструмента нет:
+  неделя Grok — `node scripts/usage.mjs grok-limit`, баланс DeepSeek — `node scripts/usage.mjs deepseek-balance`,
+  снимок серии — `snapshot` без `--claude-5h` (см. [lead.md](lead.md)). Пороги Claude:
   * 5-часовой < 60 % — как обычно; 60–85 % — Sonnet только для самого сложного, остальное
     DeepSeek/Grok, голове — проект, проверка, промпты; > 85 % — Sonnet не запускать;
   * **работа не останавливается** (решение пользователя): чем ближе лимит, тем мельче голова
@@ -253,11 +264,12 @@ cargo run --release -p mediaa-eval -- run --cases evals/local/hh-experience/case
   в режиме без интерфейса этой команды нет. Если окно изменилось и разбор не удался, в отчёте
   «лимит Grok не снят», токены и оценка xAI остаются.
   **Часть головы.** В начале и в конце каждой серии и вокруг каждого запуска Sonnet голова
-  вызывает `node scripts/usage.mjs snapshot --label "start|end …" --claude-5h N --claude-week N`
-  с числами из `get_usage` (их видит только голова). Перед закрытием серии —
-  `node scripts/usage.mjs report`, и итог серии пишется в done.md. Лимиты Claude общие для
-  головы и Sonnet: разность включает работу головы, точное разделение недоступно — это
-  помечено в отчёте.
+  вызывает `node scripts/usage.mjs snapshot --label "start|end …"`. Голова Claude добавляет
+  `--claude-5h N --claude-week N` из `get_usage` (их видит только она). Голова Grok эти флаги
+  не передаёт: Claude в снимке «не снят», лимит Grok и баланс DeepSeek пишутся сами.
+  Перед закрытием серии — `node scripts/usage.mjs report`, и итог серии пишется в done.md.
+  Лимиты Claude общие для головы Claude и Sonnet: разность включает работу головы, точное
+  разделение недоступно — это помечено в отчёте.
 * **Grok** (`grok`, Grok Build CLI, подписка пользователя) — установлен и вошёл в аккаунт;
   может быть исполнителем (`grok -p` / `--prompt-file`, `--output-format json`, `--max-turns`,
   `--resume`, `--allow`/`--deny`, `--effort`). **Всегда `-m grok-4.7`, никогда fast-режим
@@ -304,7 +316,11 @@ cargo run --release -p mediaa-eval -- run --cases evals/local/hh-experience/case
 
 ### Подагенты на Grok
 
-* Запуск: `scripts/subagent.sh run --provider grok [--effort none|minimal|low|medium|high|xhigh|max] [--max-turns N] [--name TITLE] TASK_FILE`.
+* Два способа. Голова Grok в своём сеансе зовёт встроенного исполнителя (`.grok/agents/implementer.md`,
+  `implementer-low`, `implementer-high`): модель `grok-4.7`, effort в файле, запреты — хук
+  `scripts/grok-implementer-deny.mjs`. Отдельный процесс — команда ниже. Кого когда звать —
+  [lead.md](lead.md).
+* Запуск: `scripts/subagent.sh run --provider grok` [--effort none|minimal|low|medium|high|xhigh|max] [--max-turns N] [--name TITLE] TASK_FILE`.
   Уровень рассуждений по умолчанию — `medium` (решение пользователя: high думает слишком долго); простое — `low`, по-настоящему сложное — `high` или `max`. Модель всегда `-m grok-4.7`:
   в `modelUsage` она называется `grok-4.7-build`. **Никогда** fast (`grok-4.7-build-fast`) —
   он тратит отдельные лимиты подписки. После каждого запуска скрипт смотрит `modelUsage`
@@ -341,7 +357,9 @@ cargo run --release -p mediaa-eval -- run --cases evals/local/hh-experience/case
   * `follow RUN_DIR` — один запуск `scripts/subagent.sh` (скрипт делает это сам).
 * Источники: штатные подагенты Claude Code —
   `~/.claude/projects/<проект>/<сессия>/subagents/agent-*.jsonl` (+ `.meta.json` с описанием
-  и моделью); запуски DeepSeek и Grok — `target/subagents/<запуск>/stream.jsonl`.
+  и моделью); запуски DeepSeek и Grok через скрипт — `target/subagents/<запуск>/stream.jsonl`;
+  встроенные подагенты Grok — `~/.grok/sessions/<каталог>/<сессия родителя>/subagents/**/meta.json`,
+  диалог — `updates.jsonl` сессии ребёнка (`child_session_id`). Сессию самой головы зеркало не пишет.
 * У запусков DeepSeek давать понятное имя: `scripts/subagent.sh run --name "7.1 Вкладки …" TASK_FILE`,
   у штатных — поле `description` при запуске.
 * Команды `scripts/subagent.sh status RUN_DIR` (сколько работает, жив ли процесс, последний шаг)
@@ -413,9 +431,11 @@ cargo run --release -p mediaa-eval -- run --cases evals/local/hh-experience/case
   существует только один из двух путей. Тесты — `node --test scripts/subagent-log.test.mjs`.
 * **Лимит ходов.** Запуск, остановленный на `--max-turns`, имеет статус «остановлен на лимите
   ходов», а в итоге лога — готовая команда `resume`.
-* **Автозапуск зеркала.** Хук `SessionStart` в `.claude/settings.local.json` выполняет
-  `node scripts/subagent-log.mjs watch --detach`: наблюдатель запускается в фоне при старте
-  каждой сессии Claude Code в проекте; второй не запустится (PID в `subagents/.watch.pid`).
+* **Автозапуск зеркала.** Хук `SessionStart` в `.claude/settings.local.json` и такой же хук
+  в `.grok/hooks/session-start.json` выполняют `node scripts/subagent-log.mjs watch --detach`:
+  наблюдатель запускается в фоне при старте сессии; второй не запустится (PID в
+  `subagents/.watch.pid`). Хуки проекта Grok работают, когда папка доверена (`--trust` или
+  `/hooks-trust`).
 
 ---
 

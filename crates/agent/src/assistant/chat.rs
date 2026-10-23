@@ -14,10 +14,10 @@
 use super::{Answer, Event, Memory, StepRecord, WaitReason};
 use crate::scope::Scope;
 use mediaa_core::chat::{Author, ChatId, Timeline, STEP_RUNNING};
-use mediaa_core::queue::{Queue, TaskId};
+use mediaa_queue::{Store, TaskId};
 use mediaa_core::transcript::Transcript;
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -45,8 +45,21 @@ pub struct Live {
     /// grows).
     pub stored: usize,
     pub state: State,
+    /// The answer continues after the process was restarted (the pane says so, once).
+    pub continuing: bool,
     /// Nothing more is accepted: the answer is over (or was stopped).
     closed: bool,
+}
+
+impl Live {
+    /// The pane stopped the answer: later events from the chunk are dropped.
+    pub fn close(&mut self) {
+        self.closed = true;
+    }
+
+    pub fn closed(&self) -> bool {
+        self.closed
+    }
 }
 
 impl Default for Live {
@@ -57,11 +70,19 @@ impl Default for Live {
 
 impl Live {
     pub fn new() -> Live {
-        Live { timeline: Timeline::default(), waiting: None, scanning: None, steps: Vec::new(), stored: 0, state: State::Running, closed: false }
+        Live { timeline: Timeline::default(), waiting: None, scanning: None, steps: Vec::new(), stored: 0, state: State::Running, continuing: false, closed: false }
     }
 
     /// Takes one event of the answer.
     pub fn apply(&mut self, event: &Event) {
+        // `work` closes the state before the ending event, so that one still counts.
+        // Anything after the answer has already ended is dropped.
+        if !matches!(self.state, State::Running) {
+            return;
+        }
+        if self.closed && !matches!(event, Event::Done | Event::Stopped | Event::Failed(_)) {
+            return;
+        }
         if !matches!(event, Event::Waiting { .. }) {
             self.waiting = None;
         }
@@ -113,13 +134,13 @@ pub struct Run {
     pub cancel: Arc<AtomicBool>,
     live: Arc<Mutex<Live>>,
     task: TaskId,
-    dir: PathBuf,
+    store: Arc<dyn Store>,
 }
 
 impl Run {
     /// The run of the answer that is the task of `scope`.
     pub fn new(scope: &Scope) -> Run {
-        Run { cancel: Arc::new(AtomicBool::new(false)), live: Arc::new(Mutex::new(Live::new())), task: scope.task(), dir: scope.dir().to_path_buf() }
+        Run { cancel: Arc::new(AtomicBool::new(false)), live: Arc::new(Mutex::new(Live::new())), task: scope.task(), store: scope.store().clone() }
     }
 
     /// The answer so far.
@@ -141,9 +162,9 @@ impl Run {
         if live.closed {
             return Ok(());
         }
-        live.closed = true;
         live.apply(&Event::Stopped);
-        if let Err(e) = Queue::open(&self.dir).and_then(|q| q.cancel_inline(self.task)) {
+        live.closed = true;
+        if let Err(e) = self.store.cancel(self.task) {
             log::warn!("the stopped answer was not cancelled in the queue: {e:#}");
         }
         t.add_message(chat, Author::Agent, live.timeline.draft(), &live.details(false, true))

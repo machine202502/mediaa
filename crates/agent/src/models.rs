@@ -4,7 +4,7 @@ use anyhow::Context;
 use mediaa_core::agent::ModelSource;
 
 /// The engine's spec of a model: `owner/repo` for a Hugging Face one, the absolute path for a
-/// local one. A provider's model does not run in the engine.
+/// local one. A provider's model does not run locally.
 pub fn local_spec(source: &ModelSource) -> anyhow::Result<String> {
     match source {
         ModelSource::HuggingFace { repo } => Ok(repo.trim().to_string()),
@@ -12,6 +12,6 @@ pub fn local_spec(source: &ModelSource) -> anyhow::Result<String> {
             let path = std::path::absolute(path).with_context(|| format!("the path of a model: {}", path.display()))?;
             Ok(path.display().to_string())
         }
-        ModelSource::Provider { .. } => anyhow::bail!("a provider's model does not run in the engine"),
+        ModelSource::Provider { .. } => anyhow::bail!("a provider's model does not run locally"),
     }
 }

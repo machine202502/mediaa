@@ -1,7 +1,7 @@
 //! The analysis of a recording in the studio: the options window, the «⋯» menu of the dialog
 //! with its confirmation, and the progress of the stages. The decisions (which restarts are
 //! offered, what a restart rebuilds, which parts of the recording are available, the text of a
-//! row) are pure functions on the data of `mediaa_agent::pipeline` and `mediaa_core::queue`,
+//! row) are pure functions on the data of `mediaa_agent::pipeline` and `mediaa_queue`,
 //! tested without a window; the drawing below them only follows them.
 
 use super::topics;
@@ -11,7 +11,7 @@ use egui_phosphor::regular as icon;
 use mediaa_agent::outline::{DETAIL_KIND, DETAILS_KIND, DIGEST_KIND, MERGE_KIND, PLAN_KIND, TOPICS_KIND};
 use mediaa_agent::pipeline::{Readiness, Stage};
 use mediaa_core::agent::AnalysisOptions;
-use mediaa_core::queue::{self, KindStat, Task, TaskId, TaskStatus};
+use mediaa_queue::{self as queue, KindStat, Status as TaskStatus, Task, TaskId};
 use rust_i18n::t;
 use std::time::Duration;
 
@@ -83,33 +83,84 @@ pub enum Command {
     Stop,
 }
 
+/// How a stage of the running analysis is shown in the menu, instead of «Добавить» / «Заново».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Live {
+    /// Queued or waiting on another stage.
+    Queued,
+    /// Running, with the percent done and, for topics and the breakdown, «2 из 7».
+    Running { percent: u8, count: Option<(usize, usize)> },
+    Paused,
+    Failed,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuItem {
     pub command: Command,
-    /// For a stage: redo or add.
+    /// For a stage that is not in the running analysis: redo, add or unavailable.
     pub offer: Option<Offer>,
+    /// For a stage that is in the running analysis and not finished.
+    pub live: Option<Live>,
     pub enabled: bool,
     pub why: Option<Why>,
 }
 
-/// The menu: while an analysis of the recording runs only «Stop» is usable (one rebuild per
-/// recording); otherwise the options window and every stage as the data allows.
-pub fn menu(ready: &Readiness, active: bool, diarization_model: bool) -> Vec<MenuItem> {
+fn live_of(row: &StageRow) -> Option<Live> {
+    match &row.state {
+        RowState::Waiting => Some(Live::Queued),
+        RowState::Running => Some(Live::Running { percent: percent(row.progress), count: row.count }),
+        RowState::Paused => Some(Live::Paused),
+        RowState::Failed(_) => Some(Live::Failed),
+        RowState::Cancelled => Some(Live::Cancelled),
+        RowState::Done | RowState::Off => None,
+    }
+}
+
+fn percent(progress: f32) -> u8 {
+    (progress.clamp(0.0, 1.0) * 100.0).round() as u8
+}
+
+/// The menu. `rows` are the stages of the running analysis (empty when nothing is running):
+/// a stage that is in it and not finished is «в очереди» / «идёт», and «Добавить» is only a
+/// stage that is neither in the data nor in that analysis. While it runs only «Stop» is usable.
+pub fn menu(ready: &Readiness, rows: &[StageRow], active: bool, diarization_model: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
     if active {
-        items.push(MenuItem { command: Command::Stop, offer: None, enabled: true, why: None });
+        items.push(MenuItem { command: Command::Stop, offer: None, live: None, enabled: true, why: None });
     }
     let busy = active.then_some(Why::Busy);
-    items.push(MenuItem { command: Command::Analyse, offer: None, enabled: !active, why: busy });
+    items.push(MenuItem { command: Command::Analyse, offer: None, live: None, enabled: !active, why: busy });
     for stage in Stage::ALL {
+        if let Some(live) = rows.iter().find(|row| row.stage == stage).and_then(live_of) {
+            items.push(MenuItem { command: Command::Stage(stage), offer: None, live: Some(live), enabled: false, why: None });
+            continue;
+        }
         let offer = offer(stage, ready, diarization_model);
         let why = busy.or(match offer {
             Offer::Unavailable(why) => Some(why),
             _ => None,
         });
-        items.push(MenuItem { command: Command::Stage(stage), offer: Some(offer), enabled: why.is_none(), why });
+        items.push(MenuItem { command: Command::Stage(stage), offer: Some(offer), live: None, enabled: why.is_none(), why });
     }
     items
+}
+
+/// Tasks of one analysis as the queue snapshot lists them: the root and every descendant.
+pub fn descendants(tasks: &[Task], root: TaskId) -> Vec<Task> {
+    let mut keep = vec![root];
+    loop {
+        let n = keep.len();
+        for task in tasks {
+            if task.parent.is_some_and(|parent| keep.contains(&parent)) && !keep.contains(&task.id) {
+                keep.push(task.id);
+            }
+        }
+        if keep.len() == n {
+            break;
+        }
+    }
+    tasks.iter().filter(|task| keep.contains(&task.id)).cloned().collect()
 }
 
 /// What a restart from `from` rebuilds: the options it queues and the stages in the chain — `from`
@@ -392,7 +443,7 @@ pub fn rows(analysis: &Task, tree: &[Task], stats: &[KindStat], ready: &Readines
             };
             let mut state = match task.status {
                 TaskStatus::Queued | TaskStatus::Waiting => RowState::Waiting,
-                TaskStatus::Running => RowState::Running,
+                TaskStatus::Running | TaskStatus::Stopping => RowState::Running,
                 TaskStatus::Paused => RowState::Paused,
                 TaskStatus::Done => RowState::Done,
                 TaskStatus::Failed => RowState::Failed(task.error.clone().unwrap_or_default()),
@@ -432,7 +483,7 @@ pub fn total_title(status: TaskStatus, total: Left) -> String {
         TaskStatus::Cancelled => t!("analysis.total_cancelled"),
         TaskStatus::Paused => t!("analysis.total_paused"),
         TaskStatus::Done => t!("analysis.total_done"),
-        TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting => t!("analysis.total", left = left_text(total)),
+        TaskStatus::Queued | TaskStatus::Running | TaskStatus::Waiting | TaskStatus::Stopping => t!("analysis.total", left = left_text(total)),
     }
     .into()
 }
@@ -494,13 +545,13 @@ pub fn short_reason(error: &str) -> String {
 
 /// A spinner in the analysis header: something is running, or the analysis itself is queued or waiting.
 pub fn shows_spinner(status: TaskStatus, rows: &[StageRow]) -> bool {
-    rows.iter().any(|r| r.state == RowState::Running) || matches!(status, TaskStatus::Running | TaskStatus::Queued | TaskStatus::Waiting)
+    rows.iter().any(|r| r.state == RowState::Running) || matches!(status, TaskStatus::Running | TaskStatus::Stopping | TaskStatus::Queued | TaskStatus::Waiting)
 }
 
 /// Topics or the breakdown are being built right now (a restarted part counts).
 pub fn topics_running(tree: &[Task]) -> bool {
     tree.iter().any(|task| {
-        task.status == TaskStatus::Running && matches!(task.kind.as_str(), TOPICS_KIND | PLAN_KIND | DIGEST_KIND | MERGE_KIND | DETAILS_KIND | DETAIL_KIND)
+        matches!(task.status, TaskStatus::Running | TaskStatus::Stopping) && matches!(task.kind.as_str(), TOPICS_KIND | PLAN_KIND | DIGEST_KIND | MERGE_KIND | DETAILS_KIND | DETAIL_KIND)
     })
 }
 
@@ -748,6 +799,19 @@ pub fn menu_label(stage: Stage, offer: Option<Offer>) -> String {
     label
 }
 
+/// «в очереди: индекс» / «идёт: индекс 40%» for a stage of the running analysis.
+pub fn live_label(stage: Stage, live: Live) -> String {
+    let name = stage_name(stage).to_lowercase();
+    match live {
+        Live::Queued => t!("analysis.menu_queued", stage = name).into(),
+        Live::Running { count: Some((done, total)), .. } => t!("analysis.menu_running_count", stage = name, done = done, total = total).into(),
+        Live::Running { percent, .. } => t!("analysis.menu_running", stage = name, progress = format!("{percent}%")).into(),
+        Live::Paused => t!("analysis.menu_paused", stage = name).into(),
+        Live::Failed => t!("analysis.menu_failed", stage = name).into(),
+        Live::Cancelled => t!("analysis.menu_cancelled", stage = name).into(),
+    }
+}
+
 /// The popup of the «⋯» button; returns the chosen command.
 pub fn menu_popup(button: &egui::Response, items: &[MenuItem], p: Palette) -> Option<Command> {
     egui::Popup::menu(button)
@@ -759,7 +823,22 @@ pub fn menu_popup(button: &egui::Response, items: &[MenuItem], p: Palette) -> Op
                 let (glyph, label) = match item.command {
                     Command::Stop => (icon::STOP, t!("analysis.menu_stop").to_string()),
                     Command::Analyse => (icon::ARROWS_CLOCKWISE, t!("analysis.menu_analyse").to_string()),
-                    Command::Stage(stage) => (if item.offer == Some(Offer::Add) { icon::PLUS } else { icon::ARROW_COUNTER_CLOCKWISE }, menu_label(stage, item.offer)),
+                    Command::Stage(stage) => {
+                        let glyph = match item.live {
+                            Some(Live::Queued) => icon::CLOCK,
+                            Some(Live::Running { .. }) => icon::CIRCLE_NOTCH,
+                            Some(Live::Paused) => icon::PAUSE_CIRCLE,
+                            Some(Live::Failed) => icon::WARNING_CIRCLE,
+                            Some(Live::Cancelled) => icon::PROHIBIT,
+                            None if item.offer == Some(Offer::Add) => icon::PLUS,
+                            None => icon::ARROW_COUNTER_CLOCKWISE,
+                        };
+                        let label = match item.live {
+                            Some(live) => live_label(stage, live),
+                            None => menu_label(stage, item.offer),
+                        };
+                        (glyph, label)
+                    }
                 };
                 if entry(ui, glyph, &label, item.enabled, item.why, p) {
                     chosen = Some(item.command);
@@ -913,6 +992,7 @@ impl ConfirmWindow {
 mod tests {
     use super::*;
     use mediaa_agent::outline::{PLAN_KIND, TOPICS_KIND};
+    use mediaa_queue::Role;
     use serde_json::json;
 
     fn ready(replies: bool, speakers: bool, index: bool, topics: bool, details: bool) -> Readiness {
@@ -943,22 +1023,78 @@ mod tests {
 
     #[test]
     fn while_an_analysis_runs_only_stop_is_usable() {
-        let items = menu(&ALL, true, true);
+        let items = menu(&ALL, &[], true, true);
         assert_eq!(items[0].command, Command::Stop);
         assert!(items[0].enabled);
-        assert!(items[1..].iter().all(|i| !i.enabled && i.why == Some(Why::Busy)), "{items:?}");
+        assert!(items[1..].iter().all(|i| !i.enabled && i.why == Some(Why::Busy) && i.live.is_none()), "{items:?}");
         assert_eq!(items.len(), 1 + 1 + Stage::ALL.len());
-        let idle = menu(&ALL, false, true);
+        let idle = menu(&ALL, &[], false, true);
         assert!(idle.iter().all(|i| i.command != Command::Stop));
-        assert!(idle.iter().all(|i| i.enabled));
+        assert!(idle.iter().all(|i| i.enabled && i.live.is_none()));
         assert_eq!(idle[0].command, Command::Analyse);
         let stages: Vec<Command> = idle.iter().skip(1).map(|i| i.command).collect();
         assert_eq!(stages, Stage::ALL.map(Command::Stage));
         // An entry the data does not allow keeps its reason.
-        let bare = menu(&ready(true, false, false, false, false), false, true);
+        let bare = menu(&ready(true, false, false, false, false), &[], false, true);
         let topics = bare.iter().find(|i| i.command == Command::Stage(Stage::Topics)).unwrap();
         assert!(!topics.enabled);
         assert_eq!(topics.why, Some(Why::NeedsIndex));
+        assert_eq!(topics.offer, Some(Offer::Unavailable(Why::NeedsIndex)));
+    }
+
+    fn stage_item(items: &[MenuItem], stage: Stage) -> &MenuItem {
+        items.iter().find(|item| item.command == Command::Stage(stage)).unwrap()
+    }
+
+    /// The flat task list is what [`mediaa_queue::Snapshot`] holds. A stage in that analysis
+    /// is queued or running; «Добавить» is only a stage the run left out.
+    #[test]
+    fn the_menu_reads_the_running_analysis() {
+        let analysis = task(1, "analysis", TaskStatus::Running, None);
+        let mut index = task(2, "index", TaskStatus::Running, Some(1));
+        index.progress = 0.42;
+        let mut topics = task(3, TOPICS_KIND, TaskStatus::Waiting, Some(1));
+        topics.input = json!({ "options": { "details": true } });
+        let flat = vec![analysis.clone(), index, topics, task(9, "transcribe", TaskStatus::Queued, Some(8))];
+        let tree = descendants(&flat, 1);
+        assert!(tree.iter().any(|item| item.id == 2) && tree.iter().all(|item| item.id != 9), "only this analysis");
+        let rows = super::rows(&analysis, &tree, &[], &ready(true, false, false, false, false), 0);
+        let items = menu(&ready(true, false, false, false, false), &rows, true, true);
+        assert!(items[0].command == Command::Stop && items[0].enabled);
+        assert!(!stage_item(&items, Stage::Transcribe).enabled && stage_item(&items, Stage::Transcribe).live.is_none());
+        assert_eq!(stage_item(&items, Stage::Transcribe).offer, Some(Offer::Redo), "the replies are already there");
+        let index = stage_item(&items, Stage::Index);
+        assert_eq!(index.live, Some(Live::Running { percent: 42, count: None }));
+        assert!(index.offer.is_none() && !index.enabled, "running is not «Добавить»");
+        assert!(live_label(Stage::Index, index.live.unwrap()).contains("42%"));
+        assert_eq!(stage_item(&items, Stage::Diarize).offer, Some(Offer::Add), "left out of this run");
+        assert!(stage_item(&items, Stage::Diarize).live.is_none());
+        assert_eq!(stage_item(&items, Stage::Topics).live, Some(Live::Queued));
+        assert_eq!(stage_item(&items, Stage::Details).live, Some(Live::Queued), "the topics will add the breakdown");
+        let queued = live_label(Stage::Topics, Live::Queued);
+        let added = menu_label(Stage::Topics, Some(Offer::Add));
+        assert_ne!(queued, added);
+        assert!(!queued.contains(&added));
+
+        // The same rule for the other states of a stage: the menu says what the run is doing.
+        let row = |stage, state| StageRow { stage, state, progress: 0.0, elapsed: None, left: None, count: None, task: None };
+        let rows = [
+            row(Stage::Diarize, RowState::Paused),
+            row(Stage::Topics, RowState::Failed("no model".into())),
+            row(Stage::Details, RowState::Cancelled),
+        ];
+        let items = menu(&bare_ready(), &rows, true, true);
+        assert_eq!(stage_item(&items, Stage::Diarize).live, Some(Live::Paused));
+        assert_eq!(stage_item(&items, Stage::Topics).live, Some(Live::Failed));
+        assert_eq!(stage_item(&items, Stage::Details).live, Some(Live::Cancelled));
+        for stage in [Stage::Diarize, Stage::Topics, Stage::Details] {
+            let item = stage_item(&items, stage);
+            assert!(item.offer.is_none() && !item.enabled && item.why.is_none(), "{stage:?} is the run, not «Добавить»");
+        }
+    }
+
+    fn bare_ready() -> Readiness {
+        ready(true, false, false, false, false)
     }
 
     #[test]
@@ -1097,6 +1233,7 @@ mod tests {
             result: None,
             progress: 0.0,
             error: None,
+            note: None,
             attempts: 0,
             created_ms: 0,
             updated_ms: 0,
@@ -1108,6 +1245,14 @@ mod tests {
             stats: Default::default(),
             detail: serde_json::Value::Null,
             units: 0.0,
+            resource: None,
+            memory: 0,
+            model: None,
+            role: Role::Work,
+            gen: 0,
+            yield_cont: false,
+            heartbeat_ms: None,
+            stop_intent: None,
         }
     }
 
