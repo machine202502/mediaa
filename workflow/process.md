@@ -234,3 +234,4 @@
 | 3 | Сборка без Vulkan/llama.cpp: `.cargo/config.toml`, `build.rs`, `env.ps1`, `subagent.sh`, `cmake/`, `Directory.Build.targets` | голова | готово | — |
 | 4 | Документы: README, CLAUDE.md, dev-context.md, lead.md, todos.md, done.md | голова | готово | — |
 | 5 | Проверка: `cargo test --workspace` (166), clippy чисто, `node --test scripts/*.test.mjs` (35), release-сборка и запуск живьём | голова | готово | — |
+| 6 | Коммит | голова | готово, `79c41e5` | — |
