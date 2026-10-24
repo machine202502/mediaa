@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node scripts/subagent-log.mjs watch --detach",
+            "command": "node scripts/mirror-hook.mjs",
             "timeout": 15
           }
         ]

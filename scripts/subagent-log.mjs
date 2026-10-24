@@ -1263,7 +1263,10 @@ if (isMain) {
     } else if (cmd === "watch" && arg === "--detach") {
         try {
             const script = path.resolve(process.argv[1]);
-            const child = spawn(process.execPath, [script, "watch"], { detached: true, stdio: "ignore", windowsHide: true });
+            const owner = Number(optionValue(process.argv.slice(3), "--owner"));
+            const args = [script, "watch"];
+            if (Number.isInteger(owner) && owner > 0) args.push("--owner", String(owner));
+            const child = spawn(process.execPath, args, { detached: true, stdio: "ignore", windowsHide: true });
             child.on("error", () => {});
             child.unref();
         } catch {}
