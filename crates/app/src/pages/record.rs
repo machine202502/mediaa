@@ -144,7 +144,11 @@ pub fn profile_editor(
     let changed = std::cell::Cell::new(false);
     let refresh = std::cell::Cell::new(false);
     let mark = |c: bool| changed.set(changed.get() | c);
-    let salt = profile == RecordProfile::Hotkey;
+    let salt = match profile {
+        RecordProfile::App => 0,
+        RecordProfile::Hotkey => 1,
+        RecordProfile::Region => 2,
+    };
     let (r, anim) = settings.profile_mut(profile);
     let kind = r.output;
     let (output, height, fps, quality, hide, cursor) =
@@ -156,7 +160,7 @@ pub fn profile_editor(
         |ui| {
             theme::section(ui, icon::FILM_STRIP, &t!("record.output"));
             theme::row(ui, &t!("record.format"), |ui| {
-                let opts: Vec<(OutputKind, String)> = OutputKind::ALL.iter().map(|k| (*k, k.label().to_string())).collect();
+                let opts: Vec<(OutputKind, String)> = output_kinds(profile).into_iter().map(|k| (k, k.label().to_string())).collect();
                 mark(theme::segmented(ui, output, &opts));
             });
             theme::row(ui, &t!("record.resolution"), |ui| {
@@ -199,19 +203,29 @@ pub fn profile_editor(
                         theme::hint(ui, t!("record.system_audio_linux"));
                     }
                 });
-                theme::row(ui, "", |ui| {
-                    mark(ui.checkbox(every_file, t!("record.audio_every_file")).on_hover_text(t!("record.audio_every_file_hint")).changed());
-                });
+                if profile == RecordProfile::App {
+                    theme::row(ui, "", |ui| {
+                        mark(ui.checkbox(every_file, t!("record.audio_every_file")).on_hover_text(t!("record.audio_every_file_hint")).changed());
+                    });
+                }
                 });
             }
             OutputKind::Anim(fmt) => {
                 theme::section(ui, icon::GIF, &t!("record.animation"));
-                mark(anim_options(ui, anim, Some(fmt), sources_h));
+                mark(anim_options(ui, anim, Some(fmt), sources_h, false));
             }
         },
     );
     *refresh_mics = refresh.get();
     changed.get()
+}
+
+fn output_kinds(profile: RecordProfile) -> Vec<OutputKind> {
+    OutputKind::ALL
+        .iter()
+        .copied()
+        .filter(|kind| profile != RecordProfile::Hotkey || matches!(kind, OutputKind::Video(_)))
+        .collect()
 }
 
 fn source_height(app: &App) -> Option<u32> {
@@ -323,14 +337,22 @@ fn source_details(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-pub fn anim_options(ui: &mut egui::Ui, a: &mut AnimSettings, fmt: Option<AnimFormat>, source_h: Option<u32>) -> bool {
+pub fn anim_options(
+    ui: &mut egui::Ui,
+    a: &mut AnimSettings,
+    fmt: Option<AnimFormat>,
+    source_h: Option<u32>,
+    show_size_timing: bool,
+) -> bool {
     let mut changed = false;
-    theme::row(ui, &t!("anim.fps"), |ui| {
-        changed |= ui.add(egui::Slider::new(&mut a.fps, 1..=50).suffix(" fps")).changed();
-    });
-    theme::row(ui, &t!("record.resolution"), |ui| {
-        changed |= resolution_picker(ui, &mut a.max_height, &ANIM_HEIGHTS, source_h, egui::Id::new(("anim-resolution", fmt.is_some())));
-    });
+    if show_size_timing {
+        theme::row(ui, &t!("anim.fps"), |ui| {
+            changed |= ui.add(egui::Slider::new(&mut a.fps, 1..=50).suffix(" fps")).changed();
+        });
+        theme::row(ui, &t!("record.resolution"), |ui| {
+            changed |= resolution_picker(ui, &mut a.max_height, &ANIM_HEIGHTS, source_h, egui::Id::new(("anim-resolution", fmt.is_some())));
+        });
+    }
     if fmt != Some(AnimFormat::Webp) {
         theme::row(ui, &t!("anim.colors"), |ui| {
             changed |= ui.add(egui::Slider::new(&mut a.gif_colors, 4..=256)).changed();
@@ -389,4 +411,71 @@ pub fn mic_combo(ui: &mut egui::Ui, microphone: &mut MicChoice, mics: &[String],
         }
     });
     (changed, combo.response.clicked())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_kinds;
+    use crate::pages::record::profile_editor;
+    use eframe::egui;
+    use egui_kittest::kittest::Queryable;
+    use mediaa_core::settings::RecordProfile;
+    use mediaa_core::{AnimFormat, OutputKind, Settings, VideoContainer};
+    use rust_i18n::t;
+
+    fn profile_has_audio_every_file(profile: RecordProfile, settings: Settings) -> bool {
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            move |ui: &mut egui::Ui, settings: &mut Settings| {
+                ui.set_width(1100.0);
+                let mut refresh = false;
+                profile_editor(ui, settings, profile, &[], None, &mut refresh);
+            },
+            settings,
+        );
+        harness.run();
+        let label = t!("record.audio_every_file").to_string();
+        harness.query_by_label(&label).is_some()
+    }
+
+    #[test]
+    fn quick_video_offers_only_video_containers() {
+        assert_eq!(
+            output_kinds(RecordProfile::Hotkey),
+            vec![
+                OutputKind::Video(VideoContainer::Mp4),
+                OutputKind::Video(VideoContainer::Mkv),
+            ]
+        );
+        assert_eq!(output_kinds(RecordProfile::Region), OutputKind::ALL.to_vec());
+    }
+
+    #[test]
+    fn animation_editor_shows_one_frame_rate_and_resolution() {
+        let mut settings = Settings::default();
+        settings.region_record.output = OutputKind::Anim(AnimFormat::Webp);
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui: &mut egui::Ui, settings: &mut Settings| {
+                ui.set_width(1100.0);
+                let mut refresh = false;
+                profile_editor(ui, settings, RecordProfile::Region, &[], None, &mut refresh);
+            },
+            settings,
+        );
+        harness.run();
+        let animation_fps = t!("anim.fps").to_string();
+        let video_fps = t!("record.fps").to_string();
+        let resolution = t!("record.resolution").to_string();
+        assert!(harness.query_by_label(&animation_fps).is_none());
+        assert!(harness.query_by_label(&video_fps).is_some());
+        assert_eq!(harness.get_all_by_label(&resolution).count(), 1);
+    }
+
+    #[test]
+    fn single_source_profiles_hide_audio_in_every_file() {
+        assert!(profile_has_audio_every_file(RecordProfile::App, Settings::default()));
+        assert!(!profile_has_audio_every_file(RecordProfile::Hotkey, Settings::default()));
+        let mut settings = Settings::default();
+        settings.region_record.output = OutputKind::Video(VideoContainer::Mkv);
+        assert!(!profile_has_audio_every_file(RecordProfile::Region, settings));
+    }
 }

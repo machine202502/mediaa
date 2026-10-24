@@ -7,6 +7,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
+    PrimaryClick,
     ShowWindow,
     RegionScreenshot,
     FullscreenScreenshot,
@@ -155,7 +156,7 @@ fn install_handlers(tx: Sender<TrayCommand>, ctx: egui::Context) {
             } | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. }
         );
         if left_click {
-            let _ = tx.send(TrayCommand::ShowWindow);
+            let _ = tx.send(TrayCommand::PrimaryClick);
             ctx.request_repaint();
         }
     }));

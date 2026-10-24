@@ -2663,6 +2663,7 @@ dependencies = [
  "cpal",
  "crossbeam-channel",
  "device_query",
+ "hound",
  "image",
  "libc",
  "log",

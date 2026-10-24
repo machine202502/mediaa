@@ -25,7 +25,7 @@ pub fn gif_graph(a: &AnimSettings) -> String {
     format!(
         "[0:v]fps={fps}{scale},split[a][b];[a]palettegen=max_colors={colors}:stats_mode=diff[p];\
          [b][p]paletteuse=dither={dither}:diff_mode=rectangle[v]",
-        fps = a.fps.clamp(1, 50),
+        fps = a.fps.clamp(1, 60),
         scale = scale_step(a.height_limit()),
         colors = a.gif_colors.clamp(4, 256),
         dither = dither_option(a.gif_dither),
@@ -35,7 +35,7 @@ pub fn gif_graph(a: &AnimSettings) -> String {
 pub fn webp_graph(a: &AnimSettings) -> String {
     format!(
         "[0:v]fps={}{}[v]",
-        a.fps.clamp(1, 50),
+        a.fps.clamp(1, 60),
         scale_step(a.height_limit())
     )
 }

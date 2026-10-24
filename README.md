@@ -21,7 +21,12 @@ The window has three sections:
 - **Recording** — full screen, an area, or several windows at once (each window → its own file).
   MP4 / MKV (H.264 + AAC) with microphone and/or system sound, or GIF / animated WebP
   (recorded losslessly, then encoded with a per-clip palette). Pause / resume / stop / cancel from
-  the window or the **tray** (the window hides to the tray while recording).
+  the window or the **tray** (the window hides to the tray while recording). The tray and hotkeys
+  have separate quick-video and region presets: MKV at 60 fps by default, or WebP at high quality.
+  After a recording or a tray screenshot finishes, MediaA opens the Library by default or can save
+  the result and copy its files to the clipboard. Audio and video stopped from the tray or by the
+  stop hotkey use the built-in confirmation chime; stopping from Capture, screenshots and GIF/WebP
+  stay silent.
 - **Audio recording** — microphone and / or system sound into MP3, M4A, WAV, FLAC or OGG (Opus).
   One recording at a time (video or audio); separate start hotkeys, one stop hotkey.
 - **Library** — a gallery of every screenshot, recording and conversion (images, videos,
@@ -33,7 +38,9 @@ The window has three sections:
   the library folder, set in Settings); progress and cancel.
 - **Global hotkeys** (configurable), **dark / light / system theme**, **languages**: English and
   Russian (system language by default). Closing the window hides the app to the **tray** (on by
-  default, switchable in Settings); quitting is done from the tray menu.
+  default, switchable in Settings); a left click starts an area screenshot by default, can open the
+  window instead, and stops and saves a running recording by default; quitting is done from the
+  tray menu.
 
 ## Project layout
 

@@ -4,8 +4,10 @@ use cpal::{FromSample, SizedSample};
 use crossbeam_channel::{bounded, Sender};
 use mediaa_core::audio::AudioSink;
 use mediaa_core::source::AudioSource;
+use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use std::thread::JoinHandle;
 
 pub fn system_audio_supported() -> bool {
@@ -267,4 +269,63 @@ where
         None,
     )?;
     Ok(stream)
+}
+
+const CONFIRMATION_WAV: &[u8] = include_bytes!("../assets/recording-saved.wav");
+
+fn confirmation_samples(target_rate: u32) -> anyhow::Result<Vec<f32>> {
+    let mut reader = hound::WavReader::new(Cursor::new(CONFIRMATION_WAV))?;
+    let spec = reader.spec();
+    anyhow::ensure!(
+        spec.channels == 1 && spec.sample_format == hound::SampleFormat::Int && spec.bits_per_sample == 16,
+        "confirmation sound must be mono 16-bit PCM"
+    );
+    let source: Vec<f32> = reader.samples::<i16>().map(|sample| sample.map(|v| f32::from(v) / 32_768.0)).collect::<Result<_, _>>()?;
+    anyhow::ensure!(!source.is_empty(), "confirmation sound is empty");
+    let count = (source.len() as u64 * u64::from(target_rate) / u64::from(spec.sample_rate)).max(1) as usize;
+    let mut output = Vec::with_capacity(count * 2);
+    for i in 0..count {
+        let position = i as f64 * f64::from(spec.sample_rate) / f64::from(target_rate);
+        let index = position.floor() as usize;
+        let fraction = (position - position.floor()) as f32;
+        let first = source[index.min(source.len() - 1)];
+        let second = source[(index + 1).min(source.len() - 1)];
+        let sample = first + (second - first) * fraction;
+        output.extend([sample, sample]);
+    }
+    Ok(output)
+}
+
+pub fn confirmation_tone() {
+    let out = match AudioOut::open() {
+        Ok(out) => out,
+        Err(e) => {
+            log::warn!("confirmation sound unavailable: {e:#}");
+            return;
+        }
+    };
+    let samples = match confirmation_samples(out.sample_rate()) {
+        Ok(samples) => samples,
+        Err(e) => {
+            log::warn!("confirmation sound is invalid: {e:#}");
+            return;
+        }
+    };
+    let duration = samples.len() as f32 / 2.0 / out.sample_rate() as f32;
+    out.push(&samples);
+    std::thread::sleep(Duration::from_secs_f32(duration + 0.04));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{confirmation_samples, CONFIRMATION_WAV};
+
+    #[test]
+    fn confirmation_tone_comes_from_the_embedded_wav_file() {
+        assert_eq!(&CONFIRMATION_WAV[..4], b"RIFF");
+        let samples = confirmation_samples(48_000).unwrap();
+        assert_eq!(samples.len() % 2, 0);
+        assert!(samples.len() > 35_000);
+        assert!(samples.iter().all(|sample| sample.is_finite() && sample.abs() <= 0.2));
+    }
 }

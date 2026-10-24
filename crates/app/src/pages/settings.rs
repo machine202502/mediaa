@@ -4,7 +4,7 @@ use crate::{hotkeys, i18n, theme};
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
 
-use mediaa_core::settings::{RecordProfile, ScreenChoice, ThemePreference};
+use mediaa_core::settings::{AfterCompletionAction, RecordProfile, ScreenChoice, ThemePreference, TrayClickAction};
 use mediaa_platform::screen::MonitorInfo;
 use rust_i18n::t;
 
@@ -51,8 +51,32 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             });
     }, |ui| {
             theme::section(ui, icon::TRAY, &t!("settings.window"));
+            theme::row(ui, &t!("settings.tray_left_click"), |ui| {
+                let opts = [
+                    (TrayClickAction::OpenWindow, t!("settings.tray_click_open_window").to_string()),
+                    (TrayClickAction::ScreenArea, t!("settings.tray_click_screen_area").to_string()),
+                ];
+                if theme::segmented(ui, &mut app.settings.tray_left_click, &opts) {
+                    changed.set(true);
+                }
+            });
+            theme::row(ui, "", |ui| {
+                if ui.checkbox(&mut app.settings.stop_recording_on_left_click, t!("settings.stop_recording_on_left_click")).changed() {
+                    changed.set(true);
+                }
+            });
             theme::row(ui, "", |ui| {
                 if ui.checkbox(&mut app.settings.close_to_tray, t!("settings.close_to_tray")).changed() {
+                    changed.set(true);
+                }
+            });
+            theme::section(ui, icon::RECORD, &t!("settings.after_completion"));
+            theme::row(ui, &t!("settings.after_completion_action"), |ui| {
+                let opts = [
+                    (AfterCompletionAction::OpenLibrary, t!("settings.after_completion_library").to_string()),
+                    (AfterCompletionAction::CopyFile, t!("settings.after_completion_copy").to_string()),
+                ];
+                if theme::segmented(ui, &mut app.settings.after_completion, &opts) {
                     changed.set(true);
                 }
             });
@@ -178,7 +202,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     });
 
     ui.add_space(8.0);
-    ui.label(RichText::new(format!("{}  {}", icon::KEYBOARD, t!("settings.hotkey_record"))).strong().size(15.0));
+    ui.label(RichText::new(format!("{}  {}", icon::RECORD, t!("settings.hotkey_video"))).strong().size(15.0));
     theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         theme::row(ui, &t!("settings.hotkey_screen"), |ui| {
@@ -193,7 +217,12 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     if crate::pages::record::profile_editor(ui, &mut app.settings, RecordProfile::Hotkey, &app.mic_devices, None, &mut refresh_mics) {
         changed.set(true);
     }
-    ui.add_space(4.0);
+    ui.add_space(8.0);
+    ui.label(RichText::new(format!("{}  {}", icon::SELECTION, t!("settings.region_record"))).strong().size(15.0));
+    if crate::pages::record::profile_editor(ui, &mut app.settings, RecordProfile::Region, &app.mic_devices, None, &mut refresh_mics) {
+        changed.set(true);
+    }
+    ui.add_space(8.0);
     ui.label(RichText::new(format!("{}  {}", icon::MICROPHONE, t!("settings.hotkey_audio"))).strong());
     ui.add_space(2.0);
     let mics = app.mic_devices.clone();

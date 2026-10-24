@@ -11,6 +11,7 @@ anyhow.workspace = true
 log.workspace = true
 image.workspace = true
 crossbeam-channel.workspace = true
+hound.workspace = true
 xcap = "0.9"
 cpal = "0.18"
 clipboard-rs = "0.3"

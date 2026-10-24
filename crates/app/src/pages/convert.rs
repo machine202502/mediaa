@@ -386,7 +386,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                         }
                     }
                     Target::Anim(fmt) => {
-                        changed |= super::record::anim_options(ui, &mut s.anim, Some(fmt), source_h);
+                        changed |= super::record::anim_options(ui, &mut s.anim, Some(fmt), source_h, true);
                         if fmt == mediaa_core::formats::AnimFormat::Webp {
                             effort_row(ui, &mut s.effort);
                         }

@@ -23,8 +23,8 @@ pub enum Purpose {
 #[derive(Debug)]
 pub enum Outcome {
     Cancel,
-    Image { frame: Frame, action: AfterCapture, format: Option<ImageFormat> },
-    Region { monitor: MonitorInfo, rect: Rect },
+    Image { frame: Frame, action: AfterCapture, format: Option<ImageFormat>, after_completion: bool },
+    SelectedRegion { monitor: MonitorInfo, rect: Rect },
     RecordArea { monitor: MonitorInfo, rect: Rect },
 }
 
@@ -43,6 +43,17 @@ fn c32(c: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
 }
 
+fn consume_copy_shortcut(input: &mut egui::InputState) -> bool {
+    let shortcut = input.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::C));
+    let mut semantic = false;
+    input.events.retain(|event| {
+        let copy = matches!(event, egui::Event::Copy);
+        semantic |= copy;
+        !copy
+    });
+    shortcut || semantic
+}
+
 struct TextEdit {
     shape: Shape,
     focus: bool,
@@ -52,6 +63,7 @@ const WINDOW_TITLE: &str = "MediaA area picker";
 
 struct State {
     purpose: Purpose,
+    after_completion: bool,
     shots: Vec<(MonitorInfo, Option<Frame>)>,
     current: usize,
     texture: Option<(usize, egui::TextureHandle)>,
@@ -83,6 +95,7 @@ impl Overlay {
         start: usize,
         first: Frame,
         default_action: AfterCapture,
+        after_completion: bool,
     ) -> Self {
         register_fonts(ctx);
         let current = start.min(monitors.len().saturating_sub(1));
@@ -96,6 +109,7 @@ impl Overlay {
         Self {
             state: Arc::new(Mutex::new(State {
                 purpose,
+                after_completion,
                 shots,
                 current,
                 texture,
@@ -236,7 +250,7 @@ impl State {
 
     fn finish_image(&mut self, action: AfterCapture, format: Option<ImageFormat>) {
         if let Some(frame) = self.result() {
-            self.outcome = Some(Outcome::Image { frame, action, format });
+            self.outcome = Some(Outcome::Image { frame, action, format, after_completion: self.after_completion });
         }
     }
 
@@ -454,17 +468,27 @@ impl State {
             }
             return;
         }
-        let (esc, enter, copy, save, undo, tab, all, arrows, shift) = ctx.input(|i| {
-            let k = |key: Key| i.key_pressed(key);
+        let (esc, enter, copy, save, undo, tab, all, arrows, shift) = ctx.input_mut(|i| {
+            let esc = i.key_pressed(Key::Escape);
+            let enter = i.key_pressed(Key::Enter);
+            let copy = consume_copy_shortcut(i);
+            let save = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::S));
+            let undo = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::Z));
+            let tab = i.key_pressed(Key::Tab);
+            let all = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::A));
+            let arrows = (
+                i.key_pressed(Key::ArrowRight) as i32 - i.key_pressed(Key::ArrowLeft) as i32,
+                i.key_pressed(Key::ArrowDown) as i32 - i.key_pressed(Key::ArrowUp) as i32,
+            );
             (
-                k(Key::Escape),
-                k(Key::Enter),
-                i.modifiers.command && k(Key::C),
-                i.modifiers.command && k(Key::S),
-                i.modifiers.command && k(Key::Z),
-                k(Key::Tab),
-                i.modifiers.command && k(Key::A),
-                (k(Key::ArrowRight) as i32 - k(Key::ArrowLeft) as i32, k(Key::ArrowDown) as i32 - k(Key::ArrowUp) as i32),
+                esc,
+                enter,
+                copy,
+                save,
+                undo,
+                tab,
+                all,
+                arrows,
                 i.modifiers.shift,
             )
         });
@@ -493,8 +517,10 @@ impl State {
         }
         let Some(sel) = self.editor.usable_selection() else { return };
         if self.purpose == Purpose::RecordRegion {
-            if enter {
-                self.outcome = Some(Outcome::Region { monitor: self.monitor(), rect: sel });
+            if copy {
+                self.finish_image(AfterCapture::Copy, None);
+            } else if enter {
+                self.outcome = Some(Outcome::SelectedRegion { monitor: self.monitor(), rect: sel });
             }
             return;
         }
@@ -541,9 +567,9 @@ impl State {
             let btn = |ui: &mut egui::Ui, ic: &str, label: &str| ui.add(egui::Button::new(format!("{ic}  {label}")).min_size(egui::vec2(0.0, 30.0)));
             match self.purpose {
                 Purpose::RecordRegion => {
-                    if ui.add(theme::primary(ui, icon::RECORD, &t!("overlay.record"))).clicked() {
+                    if ui.add(theme::primary(ui, icon::SELECTION, &t!("overlay.choose"))).on_hover_text(t!("overlay.choose_hint")).clicked() {
                         if let Some(rect) = self.editor.usable_selection() {
-                            self.outcome = Some(Outcome::Region { monitor: self.monitor(), rect });
+                            self.outcome = Some(Outcome::SelectedRegion { monitor: self.monitor(), rect });
                         }
                     }
                 }
@@ -753,4 +779,18 @@ fn text_font(ctx: &egui::Context, style: &Style, size: f32) -> FontId {
         },
     };
     FontId::new(size, family)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::consume_copy_shortcut;
+    use eframe::egui;
+
+    #[test]
+    fn semantic_copy_event_is_consumed_once() {
+        let mut input = egui::InputState::default();
+        input.events.push(egui::Event::Copy);
+        assert!(consume_copy_shortcut(&mut input));
+        assert!(!consume_copy_shortcut(&mut input));
+    }
 }

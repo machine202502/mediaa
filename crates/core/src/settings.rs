@@ -1,4 +1,4 @@
-use crate::formats::{AudioFormat, ImageFormat, OutputKind};
+use crate::formats::{AnimFormat, AudioFormat, ImageFormat, OutputKind, VideoContainer};
 use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -215,6 +215,22 @@ impl Default for HotkeySettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayClickAction {
+    OpenWindow,
+    #[default]
+    ScreenArea,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AfterCompletionAction {
+    #[default]
+    OpenLibrary,
+    CopyFile,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ScreenChoice {
@@ -228,6 +244,7 @@ pub enum ScreenChoice {
 pub enum RecordProfile {
     App,
     Hotkey,
+    Region,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -242,11 +259,17 @@ pub struct Settings {
     pub anim: AnimSettings,
     pub hotkey_record: RecordSettings,
     pub hotkey_anim: AnimSettings,
+    pub region_record: RecordSettings,
+    pub region_anim: AnimSettings,
     pub hotkey_screen: ScreenChoice,
     pub audio_record: AudioRecordSettings,
     pub hotkey_audio: AudioRecordSettings,
+    pub region_audio: AudioRecordSettings,
     pub hotkeys: HotkeySettings,
     pub close_to_tray: bool,
+    pub tray_left_click: TrayClickAction,
+    pub stop_recording_on_left_click: bool,
+    pub after_completion: AfterCompletionAction,
 }
 
 impl Default for Settings {
@@ -259,13 +282,28 @@ impl Default for Settings {
             screenshot: ScreenshotSettings::default(),
             record: RecordSettings::default(),
             anim: AnimSettings::default(),
-            hotkey_record: RecordSettings::default(),
+            hotkey_record: RecordSettings {
+                output: OutputKind::Video(VideoContainer::Mkv),
+                ..RecordSettings::default()
+            },
             hotkey_anim: AnimSettings::default(),
+            region_record: RecordSettings {
+                output: OutputKind::Anim(AnimFormat::Webp),
+                ..RecordSettings::default()
+            },
+            region_anim: AnimSettings {
+                webp_quality: 100,
+                ..AnimSettings::default()
+            },
             hotkey_screen: ScreenChoice::Primary,
             audio_record: AudioRecordSettings::default(),
             hotkey_audio: AudioRecordSettings::default(),
+            region_audio: AudioRecordSettings::default(),
             hotkeys: HotkeySettings::default(),
             close_to_tray: true,
+            tray_left_click: TrayClickAction::default(),
+            stop_recording_on_left_click: true,
+            after_completion: AfterCompletionAction::default(),
         }
     }
 }
@@ -304,14 +342,17 @@ impl Settings {
     }
 
     pub fn sanitized(mut self) -> Settings {
-        for r in [&mut self.record, &mut self.hotkey_record] {
+        for r in [&mut self.record, &mut self.hotkey_record, &mut self.region_record] {
             r.fps = r.fps.clamp(1, 60);
             r.video_quality = r.video_quality.clamp(1, 100);
         }
-        for a in [&mut self.anim, &mut self.hotkey_anim] {
+        for a in [&mut self.anim, &mut self.hotkey_anim, &mut self.region_anim] {
             a.fps = a.fps.clamp(1, 50);
             a.gif_colors = a.gif_colors.clamp(4, 256);
             a.webp_quality = a.webp_quality.min(100);
+        }
+        if !matches!(self.hotkey_record.output, OutputKind::Video(_)) {
+            self.hotkey_record.output = OutputKind::Video(VideoContainer::Mkv);
         }
         if self.media_dir.as_os_str().is_empty() {
             self.media_dir = paths::default_media_dir();
@@ -327,6 +368,7 @@ impl Settings {
         match p {
             RecordProfile::App => &self.audio_record,
             RecordProfile::Hotkey => &self.hotkey_audio,
+            RecordProfile::Region => &self.region_audio,
         }
     }
 
@@ -334,6 +376,7 @@ impl Settings {
         match p {
             RecordProfile::App => (&self.record, &self.anim),
             RecordProfile::Hotkey => (&self.hotkey_record, &self.hotkey_anim),
+            RecordProfile::Region => (&self.region_record, &self.region_anim),
         }
     }
 
@@ -341,6 +384,7 @@ impl Settings {
         match p {
             RecordProfile::App => (&mut self.record, &mut self.anim),
             RecordProfile::Hotkey => (&mut self.hotkey_record, &mut self.hotkey_anim),
+            RecordProfile::Region => (&mut self.region_record, &mut self.region_anim),
         }
     }
 }
@@ -361,6 +405,9 @@ mod tests {
         s.record.output = OutputKind::Anim(AnimFormat::Webp);
         s.record.microphone = MicChoice::Device("USB Mic".into());
         s.anim.max_height = 360;
+        s.tray_left_click = TrayClickAction::OpenWindow;
+        s.stop_recording_on_left_click = false;
+        s.after_completion = AfterCompletionAction::CopyFile;
         s.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), s);
     }
@@ -400,6 +447,39 @@ mod tests {
         assert!(Settings::load_from(&path).close_to_tray, "an old file without the key keeps the default");
         std::fs::write(&path, "close_to_tray = false\n").unwrap();
         assert!(!Settings::load_from(&path).close_to_tray);
+    }
+
+    #[test]
+    fn tray_left_click_starts_a_screen_area_by_default() {
+        assert_eq!(TrayClickAction::default(), TrayClickAction::ScreenArea);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.toml");
+        std::fs::write(&path, "close_to_tray = true\n").unwrap();
+        assert_eq!(Settings::load_from(&path).tray_left_click, TrayClickAction::ScreenArea);
+        std::fs::write(&path, "tray_left_click = \"open_window\"\n").unwrap();
+        assert_eq!(Settings::load_from(&path).tray_left_click, TrayClickAction::OpenWindow);
+    }
+
+    #[test]
+    fn tray_left_click_stops_recording_by_default_and_can_be_disabled() {
+        assert!(Settings::default().stop_recording_on_left_click);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.toml");
+        std::fs::write(&path, "tray_left_click = \"open_window\"\n").unwrap();
+        assert!(Settings::load_from(&path).stop_recording_on_left_click);
+        std::fs::write(&path, "stop_recording_on_left_click = false\n").unwrap();
+        assert!(!Settings::load_from(&path).stop_recording_on_left_click);
+    }
+
+    #[test]
+    fn completion_opens_the_library_by_default() {
+        assert_eq!(AfterCompletionAction::default(), AfterCompletionAction::OpenLibrary);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.toml");
+        std::fs::write(&path, "close_to_tray = true\n").unwrap();
+        assert_eq!(Settings::load_from(&path).after_completion, AfterCompletionAction::OpenLibrary);
+        std::fs::write(&path, "after_completion = \"copy_file\"\n").unwrap();
+        assert_eq!(Settings::load_from(&path).after_completion, AfterCompletionAction::CopyFile);
     }
 
     #[test]
@@ -448,6 +528,11 @@ mod tests {
         assert!(r.record_audio && r.system_audio && r.microphone == MicChoice::Auto && r.audio_in_every_file && r.record_cursor);
         assert_eq!((r.fps, r.video_quality, r.output_height), (60, 100, 1080));
         let s = Settings::default();
+        assert_eq!(s.hotkey_record.output, OutputKind::Video(VideoContainer::Mkv));
+        assert_eq!((s.hotkey_record.fps, s.hotkey_record.video_quality), (60, 100));
+        assert!(s.hotkey_record.record_audio && s.hotkey_record.system_audio && s.hotkey_record.microphone == MicChoice::Auto);
+        assert_eq!(s.region_record.output, OutputKind::Anim(AnimFormat::Webp));
+        assert_eq!(s.region_anim.webp_quality, 100);
         assert_eq!(s.hotkey_screen, ScreenChoice::Primary);
         let h = &s.hotkeys;
         assert!([&h.region_screenshot, &h.fullscreen_screenshot, &h.start_video, &h.start_audio, &h.stop_recording].iter().all(|k| k.is_empty()));
@@ -466,8 +551,18 @@ mod tests {
         s.hotkey_audio.format = AudioFormat::Flac;
         assert_eq!(s.audio_profile(RecordProfile::Hotkey).format, AudioFormat::Flac);
         assert_eq!(s.audio_profile(RecordProfile::App).format, AudioFormat::Mp3);
+        assert_eq!(s.audio_profile(RecordProfile::Region).format, AudioFormat::Mp3);
         let a = AudioRecordSettings::default();
         assert_eq!((a.format, a.kbps, a.system_audio), (AudioFormat::Mp3, 192, true));
+    }
+
+    #[test]
+    fn quick_video_profile_rejects_animation_formats() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.toml");
+        std::fs::write(&path, "[hotkey_record]\noutput = { kind = \"anim\", format = \"gif\" }\n").unwrap();
+        let s = Settings::load_from(&path);
+        assert_eq!(s.hotkey_record.output, OutputKind::Video(VideoContainer::Mkv));
     }
 
     #[test]

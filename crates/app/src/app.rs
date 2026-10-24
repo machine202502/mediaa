@@ -7,7 +7,7 @@ use crate::{pages, theme};
 use crossbeam_channel::Receiver;
 use eframe::egui;
 use mediaa_core::geometry::Rect;
-use mediaa_core::settings::{AfterCapture, RecordProfile, ScreenChoice};
+use mediaa_core::settings::{AfterCapture, AfterCompletionAction, AnimSettings, RecordProfile, ScreenChoice, TrayClickAction};
 use mediaa_core::source::{AudioSource, SourceFactory};
 use mediaa_core::{naming, paths, screenshot, Frame, ImageFormat, OutputKind, Settings};
 use mediaa_media::recorder::{RecordingRequest, RecordingSession, SessionEvent};
@@ -44,8 +44,8 @@ pub enum RecordTarget {
 
 #[derive(Debug, Clone)]
 enum Pending {
-    RegionScreenshot { purpose: overlay::Purpose },
-    FullscreenScreenshot(MonitorInfo),
+    RegionScreenshot { purpose: overlay::Purpose, after_completion: bool },
+    FullscreenScreenshot { monitor: MonitorInfo, after_completion: bool },
     WindowScreenshot(u32),
     BeginRecording(RecordTarget, RecordProfile),
 }
@@ -53,7 +53,7 @@ enum Pending {
 pub enum RecState {
     Idle,
     Recording { session: Box<RecordingSession>, events: Receiver<SessionEvent> },
-    Saving { events: Receiver<SessionEvent>, progress: f32, cancel: Arc<AtomicBool> },
+    Saving { events: Receiver<SessionEvent>, progress: f32, cancel: Arc<AtomicBool>, sound_on_completion: bool },
 }
 
 impl RecState {
@@ -306,6 +306,10 @@ impl App {
     }
 
     pub fn start_region_screenshot(&mut self, ctx: &egui::Context, purpose: overlay::Purpose) {
+        self.start_region_screenshot_with_completion(ctx, purpose, false);
+    }
+
+    fn start_region_screenshot_with_completion(&mut self, ctx: &egui::Context, purpose: overlay::Purpose, after_completion: bool) {
         if self.overlay.is_some() {
             return;
         }
@@ -313,10 +317,14 @@ impl App {
         if ctx.input(|i| i.viewport().minimized == Some(true)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         }
-        self.schedule(ctx, Pending::RegionScreenshot { purpose }, false);
+        self.schedule(ctx, Pending::RegionScreenshot { purpose, after_completion }, false);
     }
 
     pub fn start_fullscreen_screenshot(&mut self, ctx: &egui::Context, monitor: Option<MonitorInfo>) {
+        self.start_fullscreen_screenshot_with_completion(ctx, monitor, false);
+    }
+
+    fn start_fullscreen_screenshot_with_completion(&mut self, ctx: &egui::Context, monitor: Option<MonitorInfo>, after_completion: bool) {
         self.refresh_monitors();
         let monitor = monitor
             .or_else(|| self.monitors.get(self.current_monitor_index(ctx)).cloned())
@@ -324,7 +332,7 @@ impl App {
         match monitor {
             Some(m) => {
                 let hide = self.settings.screenshot.hide_window;
-                self.schedule(ctx, Pending::FullscreenScreenshot(m), hide);
+                self.schedule(ctx, Pending::FullscreenScreenshot { monitor: m, after_completion }, hide);
             }
             None => self.error(t!("err.no_display")),
         }
@@ -335,40 +343,76 @@ impl App {
         self.schedule(ctx, Pending::WindowScreenshot(window_id), hide);
     }
 
-    pub fn deliver_image(&mut self, frame: Frame, action: AfterCapture, format: Option<ImageFormat>) {
+    pub fn deliver_image(&mut self, ctx: &egui::Context, frame: Frame, action: AfterCapture, format: Option<ImageFormat>, after_completion: bool) {
         let mut copied = false;
         let mut saved = None;
-        if action.copies() {
+        let copies_file = after_completion && self.settings.after_completion == AfterCompletionAction::CopyFile;
+        if action.copies() && !copies_file {
             match clipboard::copy_image(&frame) {
                 Ok(()) => copied = true,
                 Err(e) => self.error(t!("err.copy_failed", error = format!("{e:#}"))),
             }
         }
-        if action.saves() {
+        if action.saves() || after_completion {
             let fmt = format.unwrap_or(self.settings.screenshot.format);
             let path = naming::media_path(&self.settings.media_dir, "Screenshot", chrono::Local::now(), fmt.extension());
             match screenshot::save(&frame, fmt, &path) {
                 Ok(()) => {
-                    saved = Some(path.file_name().unwrap_or_default().to_string_lossy().into_owned());
+                    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
                     self.lib.files_changed(std::slice::from_ref(&path));
+                    saved = Some((path, name));
                 }
                 Err(e) => self.error(t!("err.save_failed", error = format!("{e:#}"))),
             }
         }
         let size = format!("{}×{}", frame.width, frame.height);
-        let msg = match (copied, saved) {
+        if after_completion {
+            match self.settings.after_completion {
+                AfterCompletionAction::OpenLibrary => {
+                    self.show_window(ctx);
+                    if !self.quit_after_save {
+                        self.page = Page::Library;
+                    }
+                }
+                AfterCompletionAction::CopyFile => match saved.as_ref() {
+                    Some((path, _)) => match clipboard::copy_files(&[path.as_path()]) {
+                        Ok(()) => {
+                            if !self.hidden_by_us {
+                                self.success(t!("toast.shot_file_copied"));
+                            }
+                        }
+                        Err(e) => {
+                            self.show_window(ctx);
+                            self.error(t!("err.copy_failed", error = format!("{e:#}")));
+                            if !self.quit_after_save {
+                                self.page = Page::Library;
+                            }
+                        }
+                    },
+                    None => {
+                        self.show_window(ctx);
+                        if !self.quit_after_save {
+                            self.page = Page::Library;
+                        }
+                    }
+                },
+            }
+        }
+        let msg = match (copied, saved.as_ref().map(|(_, name)| name)) {
             (true, Some(name)) => t!("toast.shot_copied_saved", size = size, name = name),
             (false, Some(name)) => t!("toast.shot_saved", size = size, name = name),
             (true, None) => t!("toast.shot_copied", size = size),
             (false, None) => return,
         };
-        self.success(msg);
+        if !copies_file {
+            self.success(msg);
+        }
     }
 
     fn run_pending(&mut self, ctx: &egui::Context, pending: Pending) {
         log::info!("running {pending:?}");
         match pending {
-            Pending::RegionScreenshot { purpose } => {
+            Pending::RegionScreenshot { purpose, after_completion } => {
                 let start = self.current_monitor_index(ctx).min(self.monitors.len().saturating_sub(1));
                 let Some(monitor) = self.monitors.get(start).cloned() else {
                     self.error(t!("err.no_display"));
@@ -387,7 +431,7 @@ impl App {
                                 self.show_window(ctx);
                             }
                         }
-                        self.overlay = Some(Overlay::new(ctx, purpose, self.monitors.clone(), start, first, after));
+                        self.overlay = Some(Overlay::new(ctx, purpose, self.monitors.clone(), start, first, after, after_completion));
                         ctx.request_repaint();
                     }
                     Err(e) => {
@@ -396,19 +440,24 @@ impl App {
                     }
                 }
             }
-            Pending::FullscreenScreenshot(m) => {
-                let shot = screen::capture_monitor(m.id);
-                self.restore_after_capture(ctx);
+            Pending::FullscreenScreenshot { monitor, after_completion } => {
+                let shot = screen::capture_monitor(monitor.id);
+                if !after_completion {
+                    self.restore_after_capture(ctx);
+                }
                 match shot {
-                    Ok(f) => self.deliver_image(f, self.settings.screenshot.after_capture, None),
-                    Err(e) => self.error(t!("err.capture_failed_detail", error = format!("{e:#}"))),
+                    Ok(f) => self.deliver_image(ctx, f, self.settings.screenshot.after_capture, None, after_completion),
+                    Err(e) => {
+                        self.show_window(ctx);
+                        self.error(t!("err.capture_failed_detail", error = format!("{e:#}")));
+                    }
                 }
             }
             Pending::WindowScreenshot(id) => {
                 let shot = screen::capture_window(id);
                 self.restore_after_capture(ctx);
                 match shot {
-                    Ok(f) => self.deliver_image(f, self.settings.screenshot.after_capture, None),
+                    Ok(f) => self.deliver_image(ctx, f, self.settings.screenshot.after_capture, None, false),
                     Err(e) => self.error(t!("err.window_capture_failed", error = format!("{e:#}"))),
                 }
             }
@@ -446,16 +495,15 @@ impl App {
         }
         match outcome {
             Outcome::Cancel => {}
-            Outcome::Image { frame, action, format } => self.deliver_image(frame, action, format),
-            Outcome::Region { monitor, rect } => {
+            Outcome::Image { frame, action, format, after_completion } => self.deliver_image(ctx, frame, action, format, after_completion),
+            Outcome::SelectedRegion { monitor, rect } => {
                 self.rec.target = pages::record::TargetKind::Region;
-                self.rec.region = Some((monitor.clone(), rect));
+                self.rec.region = Some((monitor, rect));
                 self.page = Page::Record;
                 self.last_capture_page = Page::Record;
-                self.request_recording(ctx, RecordTarget::Region(monitor, rect), RecordProfile::App);
             }
             Outcome::RecordArea { monitor, rect } => {
-                self.request_recording(ctx, RecordTarget::Region(monitor, rect), RecordProfile::Hotkey);
+                self.request_recording(ctx, RecordTarget::Region(monitor, rect), RecordProfile::Region);
             }
         }
     }
@@ -475,6 +523,9 @@ impl App {
         self.refresh_mics();
         let default_mic = mediaa_platform::audio::default_input_device();
         let (r, anim) = self.settings.profile(profile);
+        let fps = r.fps;
+        let max_height = r.max_height();
+        let anim = recording_animation_settings(r.output, fps, max_height, anim);
         let cursor = r.record_cursor;
         let sources: Vec<SourceFactory> = match &target {
             RecordTarget::Audio => Vec::new(),
@@ -519,12 +570,12 @@ impl App {
             sources,
             audio,
             output: if audio_only { OutputKind::Audio(a.format) } else { r.output },
-            fps: r.fps,
+            fps,
             video_quality: r.video_quality,
-            max_height: r.max_height(),
+            max_height,
             audio_in_every_file: r.audio_in_every_file,
             audio_kbps: a.kbps,
-            anim: anim.clone(),
+            anim,
             out_dir: self.settings.media_dir.clone(),
             work_dir: paths::work_dir().join(format!(
                 "{}-{}",
@@ -567,12 +618,25 @@ impl App {
     }
 
     pub fn stop_recording(&mut self, ctx: &egui::Context, save: bool) {
+        self.stop_recording_with_sound(ctx, save, false);
+    }
+
+    fn stop_recording_from_tray(&mut self, ctx: &egui::Context, save: bool) {
+        self.stop_recording_with_sound(ctx, save, true);
+    }
+
+    fn stop_recording_from_hotkey(&mut self, ctx: &egui::Context, save: bool) {
+        self.stop_recording_with_sound(ctx, save, true);
+    }
+
+    fn stop_recording_with_sound(&mut self, ctx: &egui::Context, save: bool, with_sound: bool) {
         match std::mem::replace(&mut self.recorder, RecState::Idle) {
             RecState::Recording { session, events } => {
                 let cancel = Arc::new(AtomicBool::new(false));
                 let audio_only = matches!(session.output(), OutputKind::Audio(_));
+                let sound_on_completion = recording_completion_sound(session.output(), with_sound);
                 session.stop(save, cancel.clone());
-                self.recorder = RecState::Saving { events, progress: 0.0, cancel };
+                self.recorder = RecState::Saving { events, progress: 0.0, cancel, sound_on_completion };
                 if save {
                     self.page = if audio_only { Page::RecordAudio } else { Page::Record };
                 }
@@ -602,18 +666,42 @@ impl App {
                     }
                 }
                 SessionEvent::Finished(paths) => {
+                    let sound_on_completion = matches!(&self.recorder, RecState::Saving { sound_on_completion: true, .. });
                     self.recorder = RecState::Idle;
                     self.lib.files_changed(&paths);
-                    self.show_window(ctx);
-                    let names: Vec<_> = paths
-                        .iter()
-                        .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
-                        .collect();
-                    self.success(t!("toast.saved", names = names.join(", ")));
-                    if !self.quit_after_save {
-                        self.page = Page::Library;
+                    match self.settings.after_completion {
+                        AfterCompletionAction::OpenLibrary => {
+                            self.show_window(ctx);
+                            let names: Vec<_> = paths
+                                .iter()
+                                .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
+                                .collect();
+                            self.success(t!("toast.saved", names = names.join(", ")));
+                            if !self.quit_after_save {
+                                self.page = Page::Library;
+                            }
+                        }
+                        AfterCompletionAction::CopyFile => {
+                            let files: Vec<_> = paths.iter().map(PathBuf::as_path).collect();
+                            match clipboard::copy_files(&files) {
+                                Ok(()) => {
+                                    if sound_on_completion {
+                                        mediaa_platform::audio::confirmation_tone();
+                                    }
+                                    if !self.hidden_by_us {
+                                        self.success(t!("toast.recording_copied"));
+                                    }
+                                }
+                                Err(e) => {
+                                    self.show_window(ctx);
+                                    self.error(t!("err.copy_failed", error = format!("{e:#}")));
+                                    if !self.quit_after_save {
+                                        self.page = Page::Library;
+                                    }
+                                }
+                            }
+                        }
                     }
-
                 }
                 SessionEvent::Cancelled => {
                     self.recorder = RecState::Idle;
@@ -715,13 +803,24 @@ impl App {
         let cmds: Vec<_> = self.tray_rx.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
         for cmd in cmds {
             match cmd {
+                TrayCommand::PrimaryClick => {
+                    let recording = matches!(self.recorder, RecState::Recording { .. });
+                    if tray_click_stops_recording(self.settings.stop_recording_on_left_click, recording) {
+                        self.stop_recording_from_tray(ctx, true);
+                    } else {
+                        match self.settings.tray_left_click {
+                            TrayClickAction::OpenWindow => self.show_window(ctx),
+                            TrayClickAction::ScreenArea => self.start_region_screenshot_with_completion(ctx, overlay::Purpose::Area, true),
+                        }
+                    }
+                }
                 TrayCommand::ShowWindow => self.show_window(ctx),
-                TrayCommand::RegionScreenshot => self.start_region_screenshot(ctx, overlay::Purpose::Area),
-                TrayCommand::FullscreenScreenshot => self.start_fullscreen_screenshot(ctx, None),
+                TrayCommand::RegionScreenshot => self.start_region_screenshot_with_completion(ctx, overlay::Purpose::Area, true),
+                TrayCommand::FullscreenScreenshot => self.start_fullscreen_screenshot_with_completion(ctx, None, true),
                 TrayCommand::StartRecording => self.start_hotkey_recording(ctx),
                 TrayCommand::StartAudio => self.start_audio_recording(ctx, RecordProfile::Hotkey),
                 TrayCommand::PauseResume => self.toggle_pause(),
-                TrayCommand::StopAndSave => self.stop_recording(ctx, true),
+                TrayCommand::StopAndSave => self.stop_recording_from_tray(ctx, true),
                 TrayCommand::CancelRecording => self.stop_recording(ctx, false),
                 TrayCommand::Quit => self.quit(ctx),
             }
@@ -742,7 +841,7 @@ impl App {
                 HotkeyAction::StartVideo | HotkeyAction::StartAudio => {}
                 HotkeyAction::StopRecording => {
                     if matches!(self.recorder, RecState::Recording { .. }) {
-                        self.stop_recording(ctx, true);
+                        self.stop_recording_from_hotkey(ctx, true);
                     }
                 }
             }
@@ -841,6 +940,23 @@ fn close_goes_to_tray(close_to_tray: bool, has_tray: bool, busy: bool) -> bool {
     busy || (close_to_tray && has_tray)
 }
 
+fn tray_click_stops_recording(enabled: bool, recording: bool) -> bool {
+    enabled && recording
+}
+
+fn recording_animation_settings(output: OutputKind, fps: u32, max_height: Option<u32>, animation: &AnimSettings) -> AnimSettings {
+    let mut animation = animation.clone();
+    if matches!(output, OutputKind::Anim(_)) {
+        animation.fps = fps.clamp(1, 60);
+        animation.max_height = max_height.unwrap_or(0);
+    }
+    animation
+}
+
+fn recording_completion_sound(output: OutputKind, with_sound: bool) -> bool {
+    with_sound && matches!(output, OutputKind::Audio(_) | OutputKind::Video(_))
+}
+
 pub fn page_from_args(args: &[String]) -> Option<Page> {
     args.iter().find_map(|a| match a.strip_prefix("--page=")? {
         "screenshot" => Some(Page::Screenshot),
@@ -856,7 +972,8 @@ pub fn page_from_args(args: &[String]) -> Option<Page> {
 
 #[cfg(test)]
 mod tests {
-    use super::{close_goes_to_tray, page_from_args, Page, StartupAction};
+    use super::{close_goes_to_tray, page_from_args, recording_animation_settings, recording_completion_sound, tray_click_stops_recording, Page, StartupAction};
+    use mediaa_core::{AnimFormat, OutputKind, Settings, VideoContainer};
 
     fn parse(args: &[&str]) -> StartupAction {
         StartupAction::from_args(args.iter().map(|s| s.to_string()))
@@ -869,6 +986,33 @@ mod tests {
         assert!(!close_goes_to_tray(true, false, false), "no tray icon: nothing to hide to");
         assert!(close_goes_to_tray(false, true, true), "a recording keeps the app alive");
         assert!(close_goes_to_tray(false, false, true), "a recording keeps the app alive without a tray");
+    }
+
+    #[test]
+    fn tray_click_stops_recording_only_when_enabled_and_recording() {
+        assert!(tray_click_stops_recording(true, true));
+        assert!(!tray_click_stops_recording(false, true));
+        assert!(!tray_click_stops_recording(true, false));
+    }
+
+    #[test]
+    fn animation_recording_uses_the_visible_shared_settings() {
+        let animation = Settings::default().region_anim;
+        let webp = OutputKind::Anim(AnimFormat::Webp);
+        let animation = recording_animation_settings(webp, 60, Some(1080), &animation);
+        assert_eq!((animation.fps, animation.max_height), (60, 1080));
+        let mkv = OutputKind::Video(VideoContainer::Mkv);
+        let animation = Settings::default().region_anim;
+        assert_eq!(recording_animation_settings(mkv, 60, Some(1080), &animation), animation);
+    }
+
+    #[test]
+    fn completion_sound_is_only_for_audio_and_video() {
+        assert!(recording_completion_sound(OutputKind::Video(VideoContainer::Mkv), true));
+        assert!(recording_completion_sound(OutputKind::Audio(mediaa_core::formats::AudioFormat::Mp3), true));
+        assert!(!recording_completion_sound(OutputKind::Video(VideoContainer::Mkv), false));
+        assert!(!recording_completion_sound(OutputKind::Anim(AnimFormat::Webp), true));
+        assert!(!recording_completion_sound(OutputKind::Anim(AnimFormat::Gif), true));
     }
 
     #[test]
