@@ -222,4 +222,4 @@
 | 1 | Плагин `.opencode/plugins/subagents-mirror/` (OpenCode подхватывает сам): запускает `watch --owner <pid сервера>`, node ищется в PATH → nvm → рантайм OpenCode; в `scripts/subagent-log.mjs` — `watch --owner`: выход через 3 с после смерти владельца и перехват наблюдателя, оставшегося без живого владельца | голова | готово, проверено живьём: наблюдатель с owner-процессом умер вместе с ним и убрал `.watch.pid`; в OpenCode владелец — `opencode-cli` | — |
 | 2 | Поиск истории после переезда: каталог Claude — по имени папки проекта и `cwd` сессий (первая строка без `cwd` больше не мешает), Grok — по `sameProject`; найдены 22 журнала Claude и один Grok из `C:\shared-data\reps\gifcap2` | голова | готово | — |
 | 3 | Проверка: `node --test scripts/*.test.mjs` (36), `cargo test -p mediaa-core --test no_comments` (19) | голова | готово | — |
-| 4 | Коммит | пользователь | ждёт разрешения | — |
+| 4 | Коммит | пользователь | готово, `959a9f8` | — |
