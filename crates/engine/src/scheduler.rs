@@ -659,10 +659,14 @@ mod tests {
     }
 
     fn manual(gpu: f32, keep: Duration) -> (Scheduler, Arc<Mutex<Vec<String>>>) {
+        manual_quantum(gpu, keep, Duration::from_secs(1000))
+    }
+
+    fn manual_quantum(gpu: f32, keep: Duration, quantum: Duration) -> (Scheduler, Arc<Mutex<Vec<String>>>) {
         let unloaded = Arc::new(Mutex::new(Vec::new()));
         let u = unloaded.clone();
         let budget = Budget { gpu_memory_gb: gpu, ram_memory_gb: 0.0, agent: 8, transcription: 8, indexing: 8, web_search: 8, provider_calls: 8, ..Budget::default() };
-        (Scheduler::new_manual(budget, Duration::from_secs(1000), keep, move |key, _| u.lock().unwrap().push(key.to_string())), unloaded)
+        (Scheduler::new_manual(budget, quantum, keep, move |key, _| u.lock().unwrap().push(key.to_string())), unloaded)
     }
 
     fn model(key: &str, gb: u64, device: Device) -> Option<ModelNeed> {
@@ -729,14 +733,14 @@ mod tests {
 
     #[test]
     fn round_robin_makes_a_long_holder_yield() {
-        let (s, _) = sched(8.0, 0.0, 30);
+        let (s, _) = manual_quantum(8.0, Duration::ZERO, Duration::from_millis(30));
         let mut a = s.request(WorkKind::Transcription, model("asr", 6, Device::Gpu), false);
         let la = take(&mut a);
         assert!(!la.should_yield(), "no one is waiting");
         let mut b = s.request(WorkKind::Agent, model("llm", 6, Device::Gpu), false);
         assert!(b.try_take().is_none());
         assert!(!la.should_yield(), "within its quantum");
-        std::thread::sleep(Duration::from_millis(40));
+        s.advance(Duration::from_millis(30));
         assert!(la.should_yield(), "quantum over while another job waits for this memory");
         drop(la);
         let mut again = s.request(WorkKind::Transcription, model("asr", 6, Device::Gpu), false);
@@ -799,20 +803,20 @@ mod tests {
 
     #[test]
     fn the_keep_alive_sweep_unloads_and_returns() {
-        let unloaded = Arc::new(Mutex::new(Vec::new()));
-        let u = unloaded.clone();
-        let budget = Budget { gpu_memory_gb: 8.0, ram_memory_gb: 0.0, agent: 8, transcription: 8, indexing: 8, web_search: 8, provider_calls: 8, ..Budget::default() };
-        let s = Scheduler::new(budget, Duration::from_secs(1000), Duration::from_millis(50), move |key, _| u.lock().unwrap().push(key.to_string()));
+        let keep = Duration::from_millis(50);
+        let (s, unloaded) = manual(8.0, keep);
         let mut first = s.request(WorkKind::Agent, model("llm", 1, Device::Gpu), false);
         drop(take(&mut first));
+        s.shared.clock.advance(keep);
         let swept = s.clone();
         let stop = AtomicBool::new(false);
         let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
+        let sweep = std::thread::spawn(move || {
             swept.sweep_wait(&stop);
             let _ = tx.send(());
         });
         rx.recv_timeout(Duration::from_secs(5)).expect("the sweep returns instead of deadlocking");
+        sweep.join().unwrap();
         assert_eq!(*unloaded.lock().unwrap(), ["llm"], "the idle model expired");
         let mut again = s.request(WorkKind::Agent, model("llm", 1, Device::Gpu), false);
         assert!(take(&mut again).fresh(), "the scheduler still hands out leases");

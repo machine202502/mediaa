@@ -5,7 +5,7 @@ use crate::slots::Slots;
 use mediaa_core::agent::{AgentSettings, Budget};
 use mediaa_queue::Status as TaskStatus;
 use mediaa_engine::testing::FakeEngine;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const STEP_SEARCH: &str = r#"{"thought":"","action":"search","title":"Ищу отчёт","args":{"query":"отчёт"}}"#;
 const STEP_ANSWER: &str = r#"{"thought":"","action":"answer","answer":"В пятницу [0:10]."}"#;
@@ -85,7 +85,15 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     );
 }
 
-struct Blocking;
+struct Blocking {
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Blocking {
+    fn wait_for_the_test(&self) -> bool {
+        self.release.lock().unwrap().recv_timeout(Duration::from_secs(5)).is_ok()
+    }
+}
 
 impl Brain for Blocking {
     fn step(&self, _: &[Message], _: &[ToolSpec], _: bool, cancel: &AtomicBool, on_piece: &mut dyn FnMut(Piece)) -> anyhow::Result<Step> {
@@ -94,7 +102,7 @@ impl Brain for Blocking {
         while !cancel.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(5));
         }
-        std::thread::sleep(Duration::from_millis(300));
+        assert!(self.wait_for_the_test(), "the stop waited for the worker's late work");
         on_piece(Piece::Thinking(" Уже поздно."));
         on_piece(Piece::Answer("Поздний ответ."));
         Ok(Step::Answer { thought: String::new(), text: "Поздний ответ.".into() })
@@ -117,24 +125,23 @@ fn stop_ends_the_answer_at_once_and_what_comes_later_is_dropped() {
     let chat = t.create_chat("Сроки").unwrap();
     let scope = Scope::begin(ai, Arc::new(FakeEngine::new()), "chat", "Когда?", &json!({}), Some("rec")).unwrap();
     let run = Run::new(&scope);
-    let stopped_in = std::thread::scope(|s| {
+    let (release, gate) = std::sync::mpsc::channel();
+    let late = Blocking { release: std::sync::Mutex::new(gate) };
+    std::thread::scope(|s| {
         let worker = s.spawn(|| {
             let (rec, mut memory) = (recording(), Memory::default());
             let tools = Tools::new(&rec, &nothing, 4000);
-            work(&run, &scope, ai, "rec", chat, &mut memory, |memory, on_event| answer(&Blocking, &tools, &scope, &[], memory, "Когда?", &run.cancel, None, false, on_event))
+            work(&run, &scope, ai, "rec", chat, &mut memory, |memory, on_event| answer(&late, &tools, &scope, &[], memory, "Когда?", &run.cancel, None, false, on_event))
         });
         while run.live().timeline.is_empty() {
             std::thread::sleep(Duration::from_millis(5));
         }
-        let begun = Instant::now();
         run.stop(&t, chat).unwrap();
-        let took = begun.elapsed();
         assert_eq!(run.live().state, State::Stopped);
-        assert!(!worker.is_finished(), "the worker is still going");
+        assert!(!worker.is_finished(), "the stop does not wait for the worker");
+        release.send(()).unwrap();
         assert_eq!(worker.join().unwrap(), Outcome::Stopped);
-        took
     });
-    assert!(stopped_in < Duration::from_millis(250), "the stop does not wait for the worker: {stopped_in:?}");
 
     let messages = t.messages(chat).unwrap();
     assert_eq!(messages.len(), 1, "no second message from the worker");

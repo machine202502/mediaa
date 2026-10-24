@@ -131,7 +131,7 @@ kill $(cat /tmp/mediaa.pid)
   (`speakers.rttm` с точными временами или `reference.json` с числом говорящих). Замер —
   `bash scripts/live-test.sh LOG mediaa-agent diarization_quality_on_eval_data`; сетка по моделям
   и порогам — `diarization_model_grid_on_eval_data` (лог 2026-10-23:
-  `subagents/artifacts/2026-10-23_06-07_deepseek-flash_14-4-склейка-и-модель-голоса/grid.log`).
+  `subagents/archive/artifacts/2026-10-23_06-07_deepseek-flash_14-4-склейка-и-модель-голоса/grid.log`).
   Модель голоса и пороги выбраны по сетке (модель × порог кластеризации × порог склейки;
   «время» — диаризация записи 11,5 и 15 мин, с):
 
