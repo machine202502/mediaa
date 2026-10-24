@@ -28,6 +28,7 @@
   `settings.close_to_tray`, `settings.close_to_tray_hint` в en и ru.
 * Проверка: `cargo test --workspace` (168), clippy чисто, живьём — WM_CLOSE прячет окно
   (процесс жив, окно невидимо), выход из трея завершает приложение.
+* Коммит `fbad9ba`.
 
 ### 2026-10-25 — Агент вынесен в ветку feature/agent, из main удалён полностью
 
