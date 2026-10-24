@@ -38,6 +38,14 @@ How to be the lead (model, limits, commits, notifications): [workflow/lead.md](w
 
 ## Rules
 
+- **Never push until the user says so.** `git push` (and `--force`, tags, PRs) only on an
+  explicit word from the user for the named branch. Permission for one push never covers the
+  next. Finished work stays local until then; the same goes for commits — see
+  [workflow/lead.md](workflow/lead.md), «Коммиты и пуш». The repository's **git hooks**
+  (`.githooks/`, installed by `node scripts/install-git-hooks.mjs`) stop every `git commit`,
+  `push`, `rebase` and `merge` until the user answers «да» to one question about one exact
+  branch and commit; one «да» covers that one call. `--no-verify` and disabling the hooks are
+  forbidden.
 - **No backward compatibility.** Do not add settings versions, migrations, fallbacks for old
   config fields, deprecated aliases, re-exports "for compatibility" or transitional shims.
   Change the target logic directly; old settings files and data may simply break and be

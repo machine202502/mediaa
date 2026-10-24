@@ -20,6 +20,7 @@ echo "== vcpkg: static FFmpeg ($TRIPLET) =="
 export FFMPEG_DIR="$WORK/vcpkg_installed/$TRIPLET"
 export CARGO_TARGET_DIR="$WORK/target"
 cd "$ROOT"
+git config core.hooksPath .githooks || true
 
 case "$MODE" in
   --test)

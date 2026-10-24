@@ -77,6 +77,16 @@ commit is pinned in `scripts/vcpkg-commit.txt`.
 `env.ps1` (used by all Windows scripts) finds or clones vcpkg, finds `libclang.dll` via
 `vswhere`, builds FFmpeg on the first run and sets `VCPKG_ROOT`, `LIBCLANG_PATH`, `FFMPEG_DIR`.
 
+## Git hooks
+
+`node scripts/install-git-hooks.mjs` (the Windows, Linux and macOS build scripts do it too) sets
+`core.hooksPath` to `.githooks`. Every `git commit`, `push`, `rebase` and `merge` then prints one
+question — «did the human give explicit consent to this push (branch …, commit …)? yes or no» — and
+stops until it is answered. One «yes» allows one call; it is bound to that branch and commit, and
+every answer is logged in `.git/consent.log`. Without a terminal (an agent, CI) the hook refuses and
+explains how to confirm explicitly. `--no-verify` and switching `core.hooksPath` away are forbidden
+by [CLAUDE.md](CLAUDE.md).
+
 **Linux:**
 
 ```bash

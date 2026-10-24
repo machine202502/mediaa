@@ -51,11 +51,11 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             });
     }, |ui| {
             theme::section(ui, icon::TRAY, &t!("settings.window"));
-            if ui.checkbox(&mut app.settings.close_to_tray, t!("settings.close_to_tray")).changed() {
-                changed.set(true);
-            }
-            ui.label(RichText::new(t!("settings.close_to_tray_hint")).size(11.5).color(theme::palette(ui).text_weak));
-            ui.add_space(6.0);
+            theme::row(ui, "", |ui| {
+                if ui.checkbox(&mut app.settings.close_to_tray, t!("settings.close_to_tray")).changed() {
+                    changed.set(true);
+                }
+            });
             theme::section(ui, icon::FOLDER_OPEN, &t!("settings.folders"));
             let dir = &mut app.settings.media_dir;
             theme::row(ui, &t!("settings.media_dir"), |ui| {

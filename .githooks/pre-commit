@@ -1,0 +1,7 @@
+#!/bin/sh
+root=$(cd "$(dirname "$0")/.." && pwd)
+command -v node >/dev/null 2>&1 || {
+    echo "git-consent: node not found; refusing commit without the consent hook" >&2
+    exit 1
+}
+exec node "$root/scripts/git-consent.mjs" check commit
