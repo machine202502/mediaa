@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { rewriteRunLinks, repairDocLinks, renderGrokLog, grokRunFacts, followTick } from "./subagent-log.mjs";
+import { rewriteRunLinks, repairDocLinks, renderGrokLog, grokRunFacts, followTick, claudeProjectDirs, ownerGone, sameProject } from "./subagent-log.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -355,4 +355,67 @@ test("follow renders a grok stream as lines are appended", () => {
     } finally {
         child.kill();
     }
+});
+
+test("the exact Claude project directory comes first", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-projects-"));
+    const exact = path.join(root, "C--shared-data-reps--old-gifcap2");
+    fs.mkdirSync(exact, { recursive: true });
+    fs.writeFileSync(path.join(exact, "session.jsonl"), `${JSON.stringify({ cwd: "C:\\shared-data\\reps\\.old\\gifcap2" })}\n`);
+
+    assert.deepEqual(claudeProjectDirs(root, "C:\\shared-data\\reps\\.old\\gifcap2"), [exact]);
+});
+
+test("a moved repository still finds its Claude sessions by folder name", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-projects-"));
+    const moved = path.join(root, "C--shared-data-reps-gifcap2");
+    fs.mkdirSync(moved, { recursive: true });
+    fs.writeFileSync(path.join(moved, "session.jsonl"), `${JSON.stringify({ cwd: "C:\\shared-data\\reps\\gifcap2" })}\n`);
+    const other = path.join(root, "C--work-other-gifcap2");
+    fs.mkdirSync(other, { recursive: true });
+    fs.writeFileSync(path.join(other, "session.jsonl"), `${JSON.stringify({ cwd: "C:\\work\\other\\project" })}\n`);
+
+    assert.deepEqual(claudeProjectDirs(root, "C:\\shared-data\\reps\\.old\\gifcap2"), [moved]);
+});
+
+test("the watcher stops when the process that started it is gone", () => {
+    const gone = () => {
+        const error = new Error("gone");
+        error.code = "ESRCH";
+        throw error;
+    };
+    const denied = () => {
+        const error = new Error("denied");
+        error.code = "EPERM";
+        throw error;
+    };
+
+    assert.equal(ownerGone(123, gone), true);
+    assert.equal(ownerGone(123, denied), false);
+    assert.equal(ownerGone(123, () => {}), false);
+    assert.equal(ownerGone(0, gone), false);
+});
+
+test("a session keeps looking for its working directory past the first line", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-projects-"));
+    const moved = path.join(root, "C--shared-data-reps-gifcap2");
+    fs.mkdirSync(moved, { recursive: true });
+    fs.writeFileSync(
+        path.join(moved, "session.jsonl"),
+        [
+            JSON.stringify({ type: "queue-operation", operation: "enqueue" }),
+            JSON.stringify({ type: "queue-operation", operation: "dequeue" }),
+            JSON.stringify({ type: "user", cwd: "C:\\shared-data\\reps\\gifcap2" }),
+            "",
+        ].join("\n"),
+    );
+
+    assert.deepEqual(claudeProjectDirs(root, "C:\\shared-data\\reps\\.old\\gifcap2"), [moved]);
+});
+
+test("a project keeps its identity after the folder is moved", () => {
+    assert.equal(sameProject("C:\\shared-data\\reps\\gifcap2", "C:\\shared-data\\reps\\.old\\gifcap2"), true);
+    assert.equal(sameProject("C:\\shared-data\\reps\\gifcap2\\", "c:/shared-data/reps/.old/gifcap2"), true);
+    assert.equal(sameProject("C:\\work\\other\\project", "C:\\shared-data\\reps\\.old\\gifcap2"), false);
+    assert.equal(sameProject("", "C:\\shared-data\\reps\\.old\\gifcap2"), false);
 });

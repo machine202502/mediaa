@@ -15,8 +15,82 @@ const configFile = path.join(outDir, "config.json");
 const CUT = 2000;
 const IDLE_MS = 10 * 60 * 1000;
 
-const projectKey = repo.replace(/[^A-Za-z0-9]/g, "-");
-const claudeProject = path.join(os.homedir(), ".claude", "projects", projectKey);
+const ownerFile = path.join(outDir, ".watch.owner");
+const claudeRoot = path.join(os.homedir(), ".claude", "projects");
+let claudeProjects = null;
+
+export function folderName(value) {
+    return String(value).replace(/\\/g, "/").replace(/\/+$/, "").split("/").pop() || "";
+}
+
+function sessionCwd(dir) {
+    let files = [];
+    try {
+        files = fs
+            .readdirSync(dir)
+            .filter((f) => f.endsWith(".jsonl"))
+            .map((f) => ({ f, mtime: fs.statSync(path.join(dir, f)).mtimeMs }))
+            .sort((a, b) => b.mtime - a.mtime)
+            .map((e) => e.f);
+    } catch {
+        return "";
+    }
+    for (const f of files.slice(0, 3)) {
+        try {
+            const lines = fs.readFileSync(path.join(dir, f), "utf8").split("\n").filter((l) => l.trim()).slice(0, 200);
+            for (const line of lines) {
+                try {
+                    const cwd = JSON.parse(line).cwd;
+                    if (cwd) return cwd;
+                } catch {}
+            }
+        } catch {}
+    }
+    return "";
+}
+
+export function sameProject(a, b) {
+    if (!String(a || "").trim() || !String(b || "").trim()) return false;
+    const pa = normPath(a);
+    const pb = normPath(b);
+    return pa === pb || folderName(pa) === folderName(pb);
+}
+
+export function claudeProjectDirs(root, repoPath) {
+    const exact = path.join(root, String(repoPath).replace(/[^A-Za-z0-9]/g, "-"));
+    const dirs = [];
+    if (fs.existsSync(exact)) dirs.push(exact);
+    let names = [];
+    try {
+        names = fs
+            .readdirSync(root, { withFileTypes: true })
+            .filter((e) => e.isDirectory())
+            .map((e) => e.name);
+    } catch {}
+    const wanted = folderName(repoPath);
+    for (const name of names) {
+        const dir = path.join(root, name);
+        if (dir === exact) continue;
+        if (!name.endsWith(`-${wanted}`)) continue;
+        if (folderName(sessionCwd(dir)) === wanted) dirs.push(dir);
+    }
+    return dirs;
+}
+
+export function ownerGone(pid, check = (p) => process.kill(p, 0)) {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    try {
+        check(pid);
+        return false;
+    } catch (e) {
+        return e?.code !== "EPERM";
+    }
+}
+
+function optionValue(args, name) {
+    const i = args.indexOf(name);
+    return i >= 0 ? args[i + 1] : "";
+}
 
 function readJsonl(file) {
     const out = [];
@@ -521,7 +595,6 @@ function userChunkText(events) {
 }
 
 export function grokBuiltinSources(sessionsDir, repoPath) {
-    const repoN = normPath(repoPath);
     const byId = new Map();
     let groups = [];
     try {
@@ -574,7 +647,7 @@ export function grokBuiltinSources(sessionsDir, repoPath) {
             const childId = meta?.child_session_id;
             if (!childId || seen.has(childId)) continue;
             const childCwd = meta.child_cwd || parentCwd;
-            if (normPath(childCwd) !== repoN && normPath(parentCwd) !== repoN) continue;
+            if (!sameProject(childCwd, repoPath) && !sameProject(parentCwd, repoPath)) continue;
             const child = byId.get(childId);
             if (!child) continue;
             seen.add(childId);
@@ -599,9 +672,10 @@ export function grokBuiltinSources(sessionsDir, repoPath) {
 
 function sources() {
     const out = [];
-    if (fs.existsSync(claudeProject)) {
-        for (const session of fs.readdirSync(claudeProject)) {
-            const dir = path.join(claudeProject, session, "subagents");
+    claudeProjects ??= claudeProjectDirs(claudeRoot, repo);
+    for (const project of claudeProjects) {
+        for (const session of fs.readdirSync(project)) {
+            const dir = path.join(project, session, "subagents");
             if (!fs.existsSync(dir)) continue;
             for (const f of fs.readdirSync(dir)) {
                 if (!f.endsWith(".jsonl")) continue;
@@ -1059,20 +1133,38 @@ function pass(force) {
     fs.writeFileSync(indexFile, JSON.stringify(index, null, 2));
 }
 
-function startWatch() {
+function startWatch(owner = 0) {
     fs.mkdirSync(outDir, { recursive: true });
+    if (owner > 0) takeOverWatcher();
     fs.writeFileSync(pidFile, String(process.pid));
+    fs.writeFileSync(ownerFile, String(owner));
     const mine = () => Number(readText(pidFile)) === process.pid;
     const drop = () => {
         try {
-            if (mine()) fs.rmSync(pidFile, { force: true });
+            if (mine()) {
+                fs.rmSync(pidFile, { force: true });
+                fs.rmSync(ownerFile, { force: true });
+            }
         } catch {}
     };
     process.on("exit", drop);
     process.on("SIGINT", () => process.exit(0));
     process.on("SIGTERM", () => process.exit(0));
     pass(true);
-    setInterval(() => pass(false), 3000);
+    setInterval(() => {
+        pass(false);
+        if (owner > 0 && ownerGone(owner)) process.exit(0);
+    }, 3000);
+}
+
+function takeOverWatcher() {
+    const pid = runningWatcher();
+    if (!pid) return;
+    const owner = Number(readText(ownerFile));
+    if (Number.isInteger(owner) && owner > 0 && !ownerGone(owner)) return;
+    try {
+        process.kill(pid);
+    } catch {}
 }
 
 function readUsageFile(file) {
@@ -1176,7 +1268,8 @@ if (isMain) {
             child.unref();
         } catch {}
     } else if (cmd === "watch") {
-        if (!runningWatcher()) startWatch();
+        const owner = Number(optionValue(process.argv.slice(3), "--owner"));
+        if (!runningWatcher()) startWatch(Number.isInteger(owner) && owner > 0 ? owner : 0);
     } else if (cmd === "follow" && arg) {
         const timer = setInterval(() => {
             if (followTick(arg).finished) clearInterval(timer);
@@ -1185,7 +1278,7 @@ if (isMain) {
     } else if (cmd === "grok-facts" && arg) {
         writeGrokFacts(path.resolve(arg));
     } else {
-        console.error("usage: node scripts/subagent-log.mjs once | watch [--detach] | follow RUN_DIR | id MODEL TITLE | grok-facts RUN_DIR");
+        console.error("usage: node scripts/subagent-log.mjs once | watch [--detach] [--owner PID] | follow RUN_DIR | id MODEL TITLE | grok-facts RUN_DIR");
         process.exit(2);
     }
 }
