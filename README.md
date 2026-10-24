@@ -32,7 +32,8 @@ The window has three sections:
   Quality / resolution / bitrate settings, sound removal, output name and folder (by default
   the library folder, set in Settings); progress and cancel.
 - **Global hotkeys** (configurable), **dark / light / system theme**, **languages**: English and
-  Russian (system language by default).
+  Russian (system language by default). Closing the window hides the app to the **tray** (on by
+  default, switchable in Settings); quitting is done from the tray menu.
 
 ## Project layout
 

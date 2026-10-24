@@ -246,6 +246,7 @@ pub struct Settings {
     pub audio_record: AudioRecordSettings,
     pub hotkey_audio: AudioRecordSettings,
     pub hotkeys: HotkeySettings,
+    pub close_to_tray: bool,
 }
 
 impl Default for Settings {
@@ -264,6 +265,7 @@ impl Default for Settings {
             audio_record: AudioRecordSettings::default(),
             hotkey_audio: AudioRecordSettings::default(),
             hotkeys: HotkeySettings::default(),
+            close_to_tray: true,
         }
     }
 }
@@ -387,6 +389,17 @@ mod tests {
         let path = dir.path().join("s.toml");
         std::fs::write(&path, "this is = = not toml").unwrap();
         assert_eq!(Settings::load_from(&path), Settings::default());
+    }
+
+    #[test]
+    fn closing_the_window_hides_to_the_tray_by_default() {
+        assert!(Settings::default().close_to_tray);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.toml");
+        std::fs::write(&path, "theme = \"light\"\n").unwrap();
+        assert!(Settings::load_from(&path).close_to_tray, "an old file without the key keeps the default");
+        std::fs::write(&path, "close_to_tray = false\n").unwrap();
+        assert!(!Settings::load_from(&path).close_to_tray);
     }
 
     #[test]

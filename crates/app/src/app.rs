@@ -750,12 +750,10 @@ impl App {
     }
 
     pub fn quit(&mut self, ctx: &egui::Context) {
+        self.quit_after_save = true;
         if matches!(self.recorder, RecState::Recording { .. }) {
-            self.quit_after_save = true;
             self.stop_recording(ctx, true);
-        } else if matches!(self.recorder, RecState::Saving { .. }) {
-            self.quit_after_save = true;
-        } else {
+        } else if !matches!(self.recorder, RecState::Saving { .. }) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
@@ -800,12 +798,10 @@ impl eframe::App for App {
         self.poll_recorder(ctx);
         self.update_tray();
 
-        if ctx.input(|i| i.viewport().close_requested()) && !self.quit_after_save {
-            let busy = !self.recorder.is_idle();
-            if busy && self.tray.is_some() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.hide_window(ctx);
-            }
+        let closing = ctx.input(|i| i.viewport().close_requested()) && !self.quit_after_save;
+        if closing && close_goes_to_tray(self.settings.close_to_tray, self.tray.is_some(), !self.recorder.is_idle()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.hide_window(ctx);
         }
         if let Some(t) = self.settings_dirty {
             if t.elapsed() > Duration::from_millis(600) {
@@ -841,6 +837,10 @@ impl eframe::App for App {
     }
 }
 
+fn close_goes_to_tray(close_to_tray: bool, has_tray: bool, busy: bool) -> bool {
+    busy || (close_to_tray && has_tray)
+}
+
 pub fn page_from_args(args: &[String]) -> Option<Page> {
     args.iter().find_map(|a| match a.strip_prefix("--page=")? {
         "screenshot" => Some(Page::Screenshot),
@@ -856,10 +856,19 @@ pub fn page_from_args(args: &[String]) -> Option<Page> {
 
 #[cfg(test)]
 mod tests {
-    use super::{page_from_args, Page, StartupAction};
+    use super::{close_goes_to_tray, page_from_args, Page, StartupAction};
 
     fn parse(args: &[&str]) -> StartupAction {
         StartupAction::from_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn closing_the_window_hides_to_the_tray_unless_turned_off() {
+        assert!(close_goes_to_tray(true, true, false), "the default hides the window");
+        assert!(!close_goes_to_tray(false, true, false), "turned off: the app quits");
+        assert!(!close_goes_to_tray(true, false, false), "no tray icon: nothing to hide to");
+        assert!(close_goes_to_tray(false, true, true), "a recording keeps the app alive");
+        assert!(close_goes_to_tray(false, false, true), "a recording keeps the app alive without a tray");
     }
 
     #[test]
