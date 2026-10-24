@@ -230,6 +230,7 @@
 | Шаг | Что | Исполнитель | Состояние | Лог |
 |---|---|---|---|---|
 | 1 | Ветка `feature/agent` на `0f13c6d`: история агента остаётся там, main не переписывается | голова | готово | — |
+| 1a | Ветка переставлена на main и несёт агент коммитом `2c2ae35` (дерево как в `0f13c6d`) — из неё открывается PR в main | голова | готово | — |
 | 2 | Удаление агента из main: крейты agent/engine/eval/queue, модули core, страницы UI, локали, evals, скрипты, проекты workflow | голова | готово | — |
 | 3 | Сборка без Vulkan/llama.cpp: `.cargo/config.toml`, `build.rs`, `env.ps1`, `subagent.sh`, `cmake/`, `Directory.Build.targets` | голова | готово | — |
 | 4 | Документы: README, CLAUDE.md, dev-context.md, lead.md, todos.md, done.md | голова | готово | — |

@@ -19,7 +19,8 @@
 ### 2026-10-25 — Агент вынесен в ветку feature/agent, из main удалён полностью
 
 * Агент делался прямо в main, хотя должен был быть отдельной веткой. Ветка `feature/agent`
-  создана на коммите `0f13c6d` — вся история агента осталась там, ничего не переписано.
+  стоит на main и несёт агент одним коммитом `2c2ae35` (дерево ровно как в `0f13c6d`), поэтому
+  из неё открывается PR в main; история main не переписана.
 * Из main удалено всё, что относится к агенту: крейты `crates/agent`, `crates/engine`,
   `crates/eval`, `crates/queue`; модули `core::{agent,chat,outline,retrieval,speakers,transcript,secrets,catalogs,pulse}`;
   `crates/app/src/pages/agent/**`, `tab_strip.rs`; раздел «Агент» в шапке и страницы
