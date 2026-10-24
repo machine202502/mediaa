@@ -1,7 +1,0 @@
-Part of the recording {{ start }} – {{ end }}. Speakers in it: {% for s in speakers %}{{ s }}{% if not loop.last %}, {% endif %}{% endfor %}.
-{% if known %}Names found so far (they may be wrong): {% for k in known %}{{ k.label }} — {{ k.name }}{% if not loop.last %}; {% endif %}{% endfor %}.
-{% endif %}
-Transcript:
-{% for line in lines %}{{ line }}
-{% endfor %}
-List the evidence of who is who in this part. For each item give the speaker label, the name, how the text shows it (self: the speaker names themself; addressed: someone calls the speaker by name and the speaker answers; introduced: someone introduces the speaker or gives them the floor; nickname: a nickname or username of the speaker), the time of the line that shows it, and how sure you are (high or low). Give at most 5 items, the clearest ones, and only about the speakers listed above. If this part shows nothing, give an empty list.

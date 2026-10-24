@@ -178,10 +178,6 @@ fn rust_comments(src: &str) -> Vec<usize> {
     hits
 }
 
-fn j2_comments(src: &str) -> Vec<usize> {
-    src.match_indices("{#").map(|(at, _)| at).collect()
-}
-
 fn js_allowed(prev: u8, word: &str) -> bool {
     matches!(
         word,
@@ -689,63 +685,6 @@ fn ps_comments(src: &str) -> Vec<usize> {
     out
 }
 
-fn cmake_comments(src: &str) -> Vec<usize> {
-    let bytes = src.as_bytes();
-    let n = bytes.len();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < n {
-        let c = bytes[i];
-        if c == b'\\' {
-            i += 2;
-            continue;
-        }
-        if c == b'"' {
-            i += 1;
-            while i < n {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                } else if bytes[i] == b'"' {
-                    i += 1;
-                    break;
-                } else {
-                    i += 1;
-                }
-            }
-            continue;
-        }
-        if c == b'[' {
-            let mut k = i + 1;
-            let mut eq = 0;
-            while k < n && bytes[k] == b'=' {
-                eq += 1;
-                k += 1;
-            }
-            if k < n && bytes[k] == b'[' {
-                let mut close = String::from("]");
-                for _ in 0..eq {
-                    close.push('=');
-                }
-                close.push(']');
-                if let Some(at) = src[k + 1..].find(&close) {
-                    i = k + 1 + at + close.len();
-                    continue;
-                }
-                return out;
-            }
-        }
-        if c == b'#' {
-            out.push(i);
-            while i < n && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
-
 fn docker_comments(src: &str) -> Vec<usize> {
     let mut out = Vec::new();
     let mut at = 0;
@@ -863,9 +802,8 @@ fn no_comments_in_the_repository() {
         .unwrap()
         .to_path_buf();
     let mut files = Vec::new();
-    collect(&root.join("crates"), &["rs", "toml", "j2"], &mut files);
+    collect(&root.join("crates"), &["rs", "toml"], &mut files);
     collect(&root.join("scripts"), &["sh", "mjs", "js", "ps1"], &mut files);
-    collect(&root.join("cmake"), &["cmake"], &mut files);
     files.push(root.join("Cargo.toml"));
     files.push(root.join(".cargo/config.toml"));
     files.sort();
@@ -876,11 +814,9 @@ fn no_comments_in_the_repository() {
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         match extension {
             "rs" => report(&path, &src, &rust_comments(&src), &mut hits),
-            "j2" => report(&path, &src, &j2_comments(&src), &mut hits),
             "sh" => report(&path, &src, &sh_comments(&src), &mut hits),
             "mjs" | "js" => report(&path, &src, &js_comments(&src), &mut hits),
             "ps1" => report(&path, &src, &ps_comments(&src), &mut hits),
-            "cmake" => report(&path, &src, &cmake_comments(&src), &mut hits),
             "toml" => hits.extend(toml_comments(&src, &path)),
             _ => {
                 if path
@@ -970,18 +906,8 @@ fn shell_plain_comment_fails() {
 }
 
 #[test]
-fn jinja_comment_fails() {
-    assert_eq!(j2_comments("{# x #}\n").len(), 1);
-}
-
-#[test]
 fn toml_comment_fails() {
     assert_eq!(toml_comments("# x\n[t]\na = 1\n", Path::new("x.toml")).len(), 1);
-}
-
-#[test]
-fn cmake_comment_fails() {
-    assert_eq!(cmake_comments("# x\nset(A 1)\n").len(), 1);
 }
 
 #[test]

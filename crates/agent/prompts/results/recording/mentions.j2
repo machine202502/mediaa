@@ -1,8 +1,0 @@
-«{{ query }}»: {{ count }} mentions, first at [{{ first }}], last at [{{ last }}].
-{% for m in found %}
-{{ "\n" if not loop.first else "" }}[{{ m.time }}]{% if m.speaker is not none %} {{ m.speaker }}:{% endif %} …{{ m.context }}…
-{%- endfor %}
-{% if more %}
-
-… and {{ more }} more
-{%- endif %}

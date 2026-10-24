@@ -1,5 +1,0 @@
----
-source: crates/agent/src/prompts.rs
-expression: shorter
----
-Your answer was cut off at the limit of 1819 tokens, so it is not valid JSON. Write the whole answer again, shorter, so that it fits: fewer and shorter items, the same sections, nothing new.

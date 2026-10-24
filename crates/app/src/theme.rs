@@ -60,26 +60,6 @@ pub fn palette(ui: &egui::Ui) -> Palette {
     }
 }
 
-pub const TAB_SCROLL_BAR: f32 = 3.0;
-
-pub fn tab_row_scroll(ui: &mut egui::Ui) {
-    let p = palette(ui);
-    let mut scroll = egui::style::ScrollStyle::solid();
-    scroll.bar_width = TAB_SCROLL_BAR;
-    scroll.bar_inner_margin = 0.0;
-    scroll.bar_outer_margin = 0.0;
-    scroll.handle_min_length = 12.0;
-    scroll.foreground_color = false;
-    ui.style_mut().spacing.scroll = scroll;
-    let visuals = ui.visuals_mut();
-    let radius = CornerRadius::same(2);
-    visuals.widgets.inactive.bg_fill = p.text_weak;
-    visuals.widgets.inactive.corner_radius = radius;
-    visuals.widgets.hovered.corner_radius = radius;
-    visuals.widgets.active.corner_radius = radius;
-    visuals.extreme_bg_color = p.border;
-}
-
 fn visuals(p: &Palette, dark: bool) -> Visuals {
     let mut v = if dark { Visuals::dark() } else { Visuals::light() };
     let r = CornerRadius::same(6);
@@ -217,32 +197,6 @@ pub const POPUP_TITLE: f32 = 13.0;
 
 pub fn popup_title(ui: &mut egui::Ui, title: &str) {
     ui.label(egui::RichText::new(title).size(POPUP_TITLE));
-}
-
-pub fn with_compact_title<R>(ctx: &egui::Context, f: impl FnOnce() -> R) -> R {
-    let mut previous = FontId::new(18.0, FontFamily::Proportional);
-    ctx.all_styles_mut(|style| {
-        if let Some(font) = style.text_styles.get(&TextStyle::Heading) {
-            previous = font.clone();
-        }
-        style.text_styles.insert(TextStyle::Heading, FontId::new(POPUP_TITLE, FontFamily::Proportional));
-    });
-    let _restore = RestoreHeading { ctx, previous };
-    f()
-}
-
-struct RestoreHeading<'a> {
-    ctx: &'a egui::Context,
-    previous: FontId,
-}
-
-impl Drop for RestoreHeading<'_> {
-    fn drop(&mut self) {
-        let previous = self.previous.clone();
-        self.ctx.all_styles_mut(|style| {
-            style.text_styles.insert(TextStyle::Heading, previous.clone());
-        });
-    }
 }
 
 pub fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, danger: bool) -> egui::Response {
@@ -398,21 +352,6 @@ pub fn equal_cards(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn tab_row_scroll_is_thin_solid_and_muted() {
-        let mut harness = egui_kittest::Harness::new_ui(|ui| {
-            super::tab_row_scroll(ui);
-            let scroll = ui.spacing().scroll;
-            assert!(!scroll.floating);
-            assert_eq!(scroll.bar_width, super::TAB_SCROLL_BAR);
-            assert_eq!(scroll.allocated_width(), super::TAB_SCROLL_BAR);
-            let p = super::palette(ui);
-            assert_eq!(ui.visuals().widgets.inactive.bg_fill, p.text_weak);
-            assert_eq!(ui.visuals().extreme_bg_color, p.border);
-        });
-        harness.run();
-    }
-
     #[cfg(windows)]
     #[test]
     fn a_symbol_font_is_found() {

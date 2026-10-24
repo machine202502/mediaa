@@ -26,7 +26,6 @@ pub struct Player {
     audio: Option<Arc<AudioOut>>,
     cancel: Arc<AtomicBool>,
     dragging: bool,
-    links: bool,
 }
 
 impl Player {
@@ -52,7 +51,6 @@ impl Player {
             audio,
             cancel: Arc::new(AtomicBool::new(false)),
             dragging: false,
-            links: true,
         };
         p.restart(0.0);
         p
@@ -108,14 +106,8 @@ impl Player {
         }
     }
 
-    pub fn set_links(&mut self, on: bool) {
-        self.links = on;
-    }
-
     pub fn seek(&mut self, t: f64) {
-        if self.links {
-            self.jump(t);
-        }
+        self.jump(t);
     }
 
     pub fn jump(&mut self, t: f64) {

@@ -28,8 +28,6 @@ function Find-LibClang {
 
 $env:VCPKG_ROOT = Find-Vcpkg
 $env:LIBCLANG_PATH = Find-LibClang
-if (-not $env:VULKAN_SDK) { $env:VULKAN_SDK = [Environment]::GetEnvironmentVariable('VULKAN_SDK', 'Machine') }
-if (-not $env:VULKAN_SDK) { throw 'Vulkan SDK not found: winget install --id KhronosGroup.VulkanSDK -e' }
 $env:FFMPEG_DIR = "$Root\vcpkg_installed\$Triplet"
 
 if (-not (Test-Path "$env:FFMPEG_DIR\lib\avcodec.lib")) {

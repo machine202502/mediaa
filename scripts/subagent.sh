@@ -76,7 +76,6 @@ to_win() {
 }
 
 prepare_env() {
-    export VULKAN_SDK="${VULKAN_SDK:-C:/VulkanSDK/1.4.363.0}"
     export LIBCLANG_PATH="${LIBCLANG_PATH:-C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/Llvm/x64/bin}"
 
     local var
@@ -104,7 +103,7 @@ start_claude() {
             "Bash(cargo:*)" "Bash(ls:*)" "Bash(cat:*)" "Bash(head:*)" "Bash(tail:*)" "Bash(wc:*)"
             "Bash(grep:*)" "Bash(find:*)" "Bash(mkdir:*)" "Bash(git diff:*)" "Bash(git status:*)"
             "WebFetch" "mcp__integrated-browser-mcp" "mcp__debugmcp" "mcp__desktop-mcp"
-            "Bash(scripts/ui-snap.sh:*)" "Bash(bash scripts/ui-snap.sh:*)" "Bash(node:*)" "Bash(scripts/live-test.sh:*)" "Bash(bash scripts/live-test.sh:*)"
+            "Bash(scripts/ui-snap.sh:*)" "Bash(bash scripts/ui-snap.sh:*)" "Bash(node:*)"
         --disallowedTools "Bash(git commit:*)" "Bash(git add:*)" "Bash(git reset:*)" "Bash(git push:*)"
             "Bash(git stash:*)" "Bash(git checkout:*)" "Bash(git restore:*)" "Bash(git rm:*)"
             "Bash(cargo run:*)" "mcp__claude-in-chrome")
@@ -210,7 +209,7 @@ Put everything that shows you checked your work into \`$1/\` (create it):
 * evidence: screenshots, the relevant part of test/clippy/command output, measurements.
 Ways to take screenshots:
 * the app's own window — the ONLY way to run the app: \`scripts/ui-snap.sh $1/<name>.png
-  [--page NAME] [--open NAME_PART]\` (builds, starts a copy on a test library, shoots only that
+  [--page NAME]\` (builds, starts a copy on a test library, shoots only that
   copy's window, closes it). Never start the app yourself;
 * a web page: the VS Code browser — open your own tab (\`browser_tab_open\`) and pass its tabId;
   \`browser_screenshot\` returns the image but does not save it;

@@ -31,11 +31,6 @@ pub enum Page {
     Library,
     Convert,
     Settings,
-    Catalogs,
-    Providers,
-    Models,
-    Queue,
-    Budget,
     About,
 }
 
@@ -72,7 +67,6 @@ pub struct App {
     settings_dirty: Option<Instant>,
     pub page: Page,
     pub last_capture_page: Page,
-    pub last_agent_page: Page,
     pub last_main_page: Page,
     pub toasts: egui_notify::Toasts,
     tray: Option<Tray>,
@@ -92,7 +86,6 @@ pub struct App {
     pub lib: pages::library::LibraryUi,
     pub thumbs: Thumbnails,
     pub conv: pages::convert::ConvertUi,
-    pub agent: pages::agent::AgentUi,
     pub capabilities: Vec<(&'static str, bool)>,
     quit_after_save: bool,
     native_window: Option<NativeWindow>,
@@ -147,16 +140,12 @@ impl App {
             .as_mut()
             .map(|h| h.apply(&settings.hotkeys))
             .unwrap_or_default();
-        let agent_budget = settings.agent.budget.clone();
-        let engine: std::sync::Arc<dyn mediaa_engine::Engine> =
-            std::sync::Arc::new(mediaa_engine::LocalEngine::new(mediaa_core::paths::models_dir(), agent_budget.clone().into()));
 
         let mut app = Self {
             settings,
             settings_dirty: None,
             page: Page::Screenshot,
             last_capture_page: Page::Screenshot,
-            last_agent_page: Page::Catalogs,
             last_main_page: Page::Screenshot,
             toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
             tray,
@@ -176,7 +165,6 @@ impl App {
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
             conv: Default::default(),
-            agent: pages::agent::AgentUi::new(engine, &agent_budget),
             capabilities: mediaa_media::capabilities(),
             quit_after_save: false,
             native_window: cc.window_handle().ok().and_then(|h| NativeWindow::from_raw(h.as_raw())),
@@ -192,10 +180,8 @@ impl App {
         app.startup = startup;
         if let Some(p) = page {
             app.page = p;
-            match p.section() {
-                Some(pages::Section::Capture) => app.last_capture_page = p,
-                Some(pages::Section::Agent) => app.last_agent_page = p,
-                _ => {}
+            if let Some(pages::Section::Capture) = p.section() {
+                app.last_capture_page = p;
             }
         }
         app
@@ -813,9 +799,6 @@ impl eframe::App for App {
         }
         self.poll_recorder(ctx);
         self.update_tray();
-        let ai = mediaa_core::catalogs::ai_dir(&crate::pages::library::library_dir(&self.settings));
-        let language = crate::i18n::current();
-        self.agent.tick(&ai, &self.settings.agent, &language, ctx);
 
         if ctx.input(|i| i.viewport().close_requested()) && !self.quit_after_save {
             let busy = !self.recorder.is_idle();
@@ -867,11 +850,6 @@ pub fn page_from_args(args: &[String]) -> Option<Page> {
         "convert" => Some(Page::Convert),
         "settings" => Some(Page::Settings),
         "about" => Some(Page::About),
-        "catalogs" => Some(Page::Catalogs),
-        "providers" => Some(Page::Providers),
-        "models" => Some(Page::Models),
-        "queue" => Some(Page::Queue),
-        "budget" => Some(Page::Budget),
         _ => None,
     })
 }

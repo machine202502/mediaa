@@ -28,15 +28,13 @@ How to be the lead (model, limits, commits, notifications): [workflow/lead.md](w
   Исполнитель | Состояние | Лог»; no prose blocks. It is a growing log: nothing is ever removed,
   finished batches stay (their rows say «готово», the commit is a row), new ones are appended at the
   end; only the limits table at the top is updated in place. Every line of work is a row:
-  subagent runs, the lead's own steps (design, prompt texts, reviews, live checks) and questions
+  subagent runs, the lead's own steps (design, reviews, live checks) and questions
   waiting for the user. The lead updates it whenever work starts or finishes. Format and the
   limits table: [workflow/lead.md](workflow/lead.md).
 - **Closing a task is part of the task, never an offer.** When a task is finished, before
   reporting it or committing: record it in done.md under «Сделано» (rejected ideas go under
   «Отклонено»), remove it from todos.md, mark its rows done in process.md. After the commit, add
   the hash to its done.md entry and a «Коммит» row with the hash to its batch in process.md.
-- [workflow/agent.md](workflow/agent.md): the agent's architecture and phases.
-- [workflow/engine.md](workflow/engine.md), [workflow/topics.md](workflow/topics.md), [workflow/pipeline.md](workflow/pipeline.md): designs (contracts) of larger tasks.
 
 ## Rules
 
@@ -49,7 +47,7 @@ How to be the lead (model, limits, commits, notifications): [workflow/lead.md](w
 - Prefer mature third-party crates over hand-written code.
 - Keep everything covered by tests; run `cargo test --workspace` and
   `cargo clippy --workspace --all-targets` before finishing.
-- **No comments in code of any kind** (Rust, `.j2` templates, scripts, TOML and other configs):
+- **No comments in code of any kind** (Rust, scripts, TOML and other configs):
   names and tests carry the meaning. Explanations of decisions go to `workflow/*.md`, and only
   when they will be needed later. `cargo test --workspace` enforces it
   (`crates/core/tests/no_comments.rs`). A comment stays only where it is a part of the
@@ -65,16 +63,3 @@ How to be the lead (model, limits, commits, notifications): [workflow/lead.md](w
     `// eslint-…`, `// @ts-…`, `// biome-ignore …`, `# noqa`, `# type: ignore`.
   A lint suppression in Rust is not a comment: move the reason into the attribute —
   `#[allow(lint, reason = "…")]` / `#[expect(lint, reason = "…")]`.
-- **The lead always writes the prompts.** The wording of every text sent to a model (every
-  `crates/agent/prompts/**/*.j2`: system prompts, task prompts, tool descriptions, corrective
-  messages, merge/summary questions) is written or rewritten by the lead, never by a subagent —
-  the quality of the small models depends on it directly. A subagent may only wire a template
-  (the data it receives, the grammar, the tests) with placeholder text; its brief says so, and
-  the lead writes the final wording and updates the exact tests and snapshots before the task is
-  done.
-- **Prompts live in template files, never in Rust code.** Every text sent to a model (system
-  prompts, task prompts, tool descriptions, corrective messages) is a MiniJinja template in
-  `crates/agent/prompts/*.j2`, registered in `crates/agent/src/prompts.rs` and rendered with
-  `prompts::render`. Conditions and pieces belong in the template (`{% if %}`, `{% include %}`),
-  the code only passes data. Any prompt change is made in the `.j2` file and its insta
-  snapshot is reviewed.

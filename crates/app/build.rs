@@ -7,8 +7,6 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    println!("cargo:rustc-link-arg-bins=/DELAYLOAD:vulkan-1.dll");
-    println!("cargo:rustc-link-arg-bins=delayimp.lib");
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let ico_path = out.join("mediaa.ico");
     let mut dir = ico::IconDir::new(ico::ResourceType::Icon);

@@ -1,5 +1,4 @@
 pub mod about;
-pub mod agent;
 pub mod audio;
 pub mod capture;
 pub mod convert;
@@ -15,14 +14,11 @@ use mediaa_core::library::human_duration;
 use mediaa_core::settings::ThemePreference;
 use rust_i18n::t;
 
-const SIDEBAR_MIN: f32 = 180.0;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Library,
     Capture,
     Convert,
-    Agent,
 }
 
 impl Page {
@@ -31,7 +27,6 @@ impl Page {
             Page::Library => Some(Section::Library),
             Page::Screenshot | Page::Record | Page::RecordAudio => Some(Section::Capture),
             Page::Convert => Some(Section::Convert),
-            Page::Catalogs | Page::Queue | Page::Budget | Page::Providers | Page::Models => Some(Section::Agent),
             Page::Settings | Page::About => None,
         }
     }
@@ -43,13 +38,6 @@ fn sub_pages(section: Section) -> Vec<(Page, &'static str, String)> {
             (Page::Screenshot, icon::CAMERA, t!("nav.screenshot").into()),
             (Page::Record, icon::VIDEO_CAMERA, t!("nav.record").into()),
             (Page::RecordAudio, icon::MICROPHONE, t!("nav.record_audio").into()),
-        ],
-        Section::Agent => vec![
-            (Page::Catalogs, icon::TREE_STRUCTURE, t!("nav.catalogs").into()),
-            (Page::Queue, icon::QUEUE, t!("nav.queue").into()),
-            (Page::Budget, icon::GAUGE, t!("nav.budget").into()),
-            (Page::Providers, icon::PLUGS_CONNECTED, t!("nav.providers").into()),
-            (Page::Models, icon::CUBE, t!("nav.models").into()),
         ],
         Section::Library | Section::Convert => Vec::new(),
     }
@@ -73,7 +61,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
         app.last_main_page = app.page;
         match section {
             Section::Capture => app.last_capture_page = app.page,
-            Section::Agent => app.last_agent_page = app.page,
             Section::Library | Section::Convert => {}
         }
         let pages = sub_pages(section);
@@ -98,35 +85,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
             .show(ui, |ui| if app.page == Page::Record { record::start_bar(app, ui) } else { audio::start_bar(app, ui) });
     }
 
-    if app.page == Page::Catalogs {
-        let width_id = egui::Id::new("catalog-sidebar-width");
-        let max = (ui.available_width() * 0.6).max(SIDEBAR_MIN);
-        let width = ctx.data_mut(|d| *d.get_persisted_mut_or(width_id, 280.0f32)).clamp(SIDEBAR_MIN, max);
-        let panel = egui::Panel::left("catalog-tree")
-            .resizable(false)
-            .exact_size(width)
-            .frame(egui::Frame::new().fill(p.chrome).inner_margin(Margin::symmetric(8, 8)))
-            .show(ui, |ui| agent::catalogs::sidebar(app, ui));
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(p.bg))
-            .show(ui, |ui| agent::catalogs::tabs(app, ui));
-        let edge = panel.response.rect.right();
-        let y = panel.response.rect.y_range();
-        let handle = ui.interact(egui::Rect::from_x_y_ranges(edge - 4.0..=edge + 4.0, y), egui::Id::new("catalog-splitter"), egui::Sense::drag());
-        let active = handle.hovered() || handle.dragged();
-        if active {
-            ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        }
-        if handle.dragged() {
-            let w = (width + handle.drag_delta().x).clamp(SIDEBAR_MIN, max);
-            ctx.data_mut(|d| d.insert_persisted(width_id, w));
-        }
-        let (line, stroke) = if active { (2.0, p.accent) } else { (1.0, p.border) };
-        ui.painter().vline(edge, y, Stroke::new(line, stroke));
-        agent::catalogs::dialogs(app, &ctx);
-        return;
-    }
-
     egui::CentralPanel::default()
         .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(18, 14)))
         .show(ui, |ui| {
@@ -139,12 +97,7 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                     Page::Library => library::ui(app, ui),
                     Page::Convert => convert::ui(app, ui),
                     Page::Settings => settings::ui(app, ui),
-                    Page::Providers => agent::providers::ui(app, ui),
-                    Page::Models => agent::models::ui(app, ui),
-                    Page::Queue => agent::queue::ui(app, ui),
-                    Page::Budget => agent::budget::ui(app, ui),
                     Page::About => about::ui(app, ui),
-                    Page::Catalogs => {}
                 });
         });
 }
@@ -166,7 +119,6 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 (Some(Section::Library), format!("{}  {}", icon::IMAGES, t!("section.library"))),
                 (Some(Section::Capture), format!("{}  {}", icon::SCREENCAST, t!("section.capture"))),
                 (Some(Section::Convert), format!("{}  {}", icon::SHUFFLE, t!("section.convert"))),
-                (Some(Section::Agent), format!("{}  {}", icon::SPARKLE, t!("section.agent"))),
             ],
         );
         if section != before {
@@ -174,7 +126,6 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 Some(Section::Library) => Page::Library,
                 Some(Section::Capture) | None => app.last_capture_page,
                 Some(Section::Convert) => Page::Convert,
-                Some(Section::Agent) => app.last_agent_page,
             };
         }
 

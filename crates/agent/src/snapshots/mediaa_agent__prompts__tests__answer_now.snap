@@ -1,5 +1,0 @@
----
-source: crates/agent/src/prompts.rs
-expression: "render(\"nudges/answer_now.j2\", ())"
----
-Answer now with what you have found; say what is missing or uncertain.

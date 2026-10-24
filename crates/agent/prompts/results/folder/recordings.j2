@@ -1,3 +1,0 @@
-{% for it in items %}
-{{ "\n" if not loop.first else "" }}#{{ it.number }} «{{ it.title }}», {{ it.length }}{{ "" if it.transcribed else " — not transcribed yet" }}{% if it.chapters %}. Chapters: {{ it.chapters | join("; ") }}{% endif %}
-{%- endfor %}

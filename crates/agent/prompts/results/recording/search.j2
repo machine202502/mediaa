@@ -1,3 +1,0 @@
-{% for h in hits %}
-{{ "\n\n" if not loop.first else "" }}[{{ h.start }}–{{ h.end }}] ({{ h.who | join(", ") }}) {{ h.text }}
-{%- endfor %}

@@ -1,7 +1,0 @@
----
-source: crates/agent/src/prompts.rs
-expression: card
----
-Recording: «Звонок», 5:00 long (short).
-Speakers: @s1 (the user calls them Дана), @s2, @s3 (the user calls them Пётр).
-No outline yet: use search and read.

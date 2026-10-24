@@ -246,7 +246,6 @@ pub struct Settings {
     pub audio_record: AudioRecordSettings,
     pub hotkey_audio: AudioRecordSettings,
     pub hotkeys: HotkeySettings,
-    pub agent: crate::agent::AgentSettings,
 }
 
 impl Default for Settings {
@@ -265,7 +264,6 @@ impl Default for Settings {
             audio_record: AudioRecordSettings::default(),
             hotkey_audio: AudioRecordSettings::default(),
             hotkeys: HotkeySettings::default(),
-            agent: crate::agent::AgentSettings::default(),
         }
     }
 }
@@ -296,13 +294,10 @@ impl Settings {
     }
 
     pub fn load() -> Settings {
-        let mut s = Self::load_from(&paths::settings_file());
-        crate::secrets::load(&mut s.agent);
-        s
+        Self::load_from(&paths::settings_file())
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
-        crate::secrets::save(&self.agent)?;
         self.save_to(&paths::settings_file())
     }
 

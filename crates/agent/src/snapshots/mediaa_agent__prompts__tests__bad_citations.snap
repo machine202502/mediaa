@@ -1,5 +1,0 @@
----
-source: crates/agent/src/prompts.rs
-expression: "render(\"nudges/bad_citations.j2\", context!\n{ bad => [\"[42:00]\", \"[1:02:03]\"], citation_form => \"[m:ss]\" })"
----
-These citations point at nothing said: [42:00], [1:02:03]. Fix the answer: cite only times from the tool results, as [m:ss].

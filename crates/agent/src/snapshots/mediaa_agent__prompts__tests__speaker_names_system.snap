@@ -1,5 +1,0 @@
----
-source: crates/agent/src/prompts.rs
-expression: "render(\"speakers/names_system.j2\", ())"
----
-You find out the names of the speakers of a recording from what is said in it. You read a part of the transcript, one reply per line as "[time] @label: text", and report every place where it shows who a speaker is: a speaker introduces themself; someone addresses a speaker by name and that speaker answers; someone introduces a speaker or gives them the floor and that speaker then talks; a speaker gives their own nickname or username (their channel or account) or is called by it. Report only what the text shows. A person who is only talked about is not evidence, and neither is a name or nickname a speaker reads out from someone else (a comment, a message). Write a name in the alphabet of the language spoken in the recording, the way people would write it: the basic form (nominative case), with a capital letter; keep a nickname or username as it is written.
