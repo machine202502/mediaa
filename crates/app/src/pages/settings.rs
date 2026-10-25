@@ -16,6 +16,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let changed = std::cell::Cell::new(false);
 
     let mut open_dir = None;
+    let mut autostart_error = None;
     theme::split_card(
         ui,
         |ui| {
@@ -62,6 +63,59 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                             changed.set(true);
                         }
                     });
+            });
+            theme::section(ui, icon::ROCKET_LAUNCH, &t!("settings.startup"));
+            theme::row(ui, "", |ui| {
+                let mut enabled = app.settings.launch_at_login;
+                if ui
+                    .checkbox(&mut enabled, t!("settings.launch_at_login"))
+                    .changed()
+                {
+                    match mediaa_platform::startup::set_enabled(enabled, app.settings.start_in_tray)
+                    {
+                        Ok(()) => {
+                            app.settings.launch_at_login = enabled;
+                            changed.set(true);
+                        }
+                        Err(error) => autostart_error = Some(format!("{error:#}")),
+                    }
+                }
+            });
+            theme::row(ui, "", |ui| {
+                let mut enabled = app.settings.start_in_tray;
+                if ui
+                    .checkbox(&mut enabled, t!("settings.start_in_tray"))
+                    .changed()
+                {
+                    let update = if app.settings.launch_at_login {
+                        mediaa_platform::startup::set_enabled(true, enabled)
+                    } else {
+                        Ok(())
+                    };
+                    match update {
+                        Ok(()) => {
+                            app.settings.start_in_tray = enabled;
+                            changed.set(true);
+                        }
+                        Err(error) => autostart_error = Some(format!("{error:#}")),
+                    }
+                }
+            });
+            theme::section(ui, icon::RECORD, &t!("settings.after_completion"));
+            theme::row(ui, &t!("settings.after_completion_action"), |ui| {
+                let opts = [
+                    (
+                        AfterCompletionAction::OpenLibrary,
+                        t!("settings.after_completion_library").to_string(),
+                    ),
+                    (
+                        AfterCompletionAction::CopyFile,
+                        t!("settings.after_completion_copy").to_string(),
+                    ),
+                ];
+                if theme::segmented(ui, &mut app.settings.after_completion, &opts) {
+                    changed.set(true);
+                }
             });
         },
         |ui| {
@@ -130,22 +184,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     }
                 });
             });
-            theme::section(ui, icon::RECORD, &t!("settings.after_completion"));
-            theme::row(ui, &t!("settings.after_completion_action"), |ui| {
-                let opts = [
-                    (
-                        AfterCompletionAction::OpenLibrary,
-                        t!("settings.after_completion_library").to_string(),
-                    ),
-                    (
-                        AfterCompletionAction::CopyFile,
-                        t!("settings.after_completion_copy").to_string(),
-                    ),
-                ];
-                if theme::segmented(ui, &mut app.settings.after_completion, &opts) {
-                    changed.set(true);
-                }
-            });
             theme::section(ui, icon::FOLDER_OPEN, &t!("settings.folders"));
             let dir = &mut app.settings.media_dir;
             theme::row(ui, &t!("settings.media_dir"), |ui| {
@@ -196,6 +234,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             });
         },
     );
+    if let Some(error) = autostart_error {
+        app.error(t!("err.autostart", error = error));
+    }
     if let Some(dir) = open_dir {
         let _ = std::fs::create_dir_all(&dir);
         app.open_path(&dir);

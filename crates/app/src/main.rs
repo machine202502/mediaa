@@ -32,11 +32,14 @@ fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let startup = app::StartupAction::from_args(args.clone());
     let page = app::page_from_args(&args);
+    let start_in_tray =
+        startup == app::StartupAction::Tray || mediaa_core::Settings::load().start_in_tray;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("MediaA")
             .with_app_id("mediaa")
             .with_transparent(true)
+            .with_visible(!start_in_tray)
             .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([480.0, 480.0])
             .with_icon(std::sync::Arc::new(egui::IconData {

@@ -496,6 +496,7 @@ pub enum StartupAction {
     None,
     Area,
     Fullscreen,
+    Tray,
 }
 
 impl StartupAction {
@@ -504,6 +505,7 @@ impl StartupAction {
             .find_map(|a| match a.as_str() {
                 "--area" | "-a" => Some(StartupAction::Area),
                 "--fullscreen" | "-f" => Some(StartupAction::Fullscreen),
+                "--tray" => Some(StartupAction::Tray),
                 _ => None,
             })
             .unwrap_or_default()
@@ -604,7 +606,15 @@ impl App {
         for p in app.hotkey_problems.clone() {
             app.warning(p);
         }
-        app.startup = startup;
+        let wants_tray = startup == StartupAction::Tray || app.settings.start_in_tray;
+        app.startup = if startup == StartupAction::None && wants_tray {
+            StartupAction::Tray
+        } else {
+            startup
+        };
+        if wants_tray && app.tray.is_none() {
+            app.show_window(ctx);
+        }
         if let Some(p) = page {
             app.page = p;
             if let Some(pages::Section::Capture) = p.section() {
@@ -1042,6 +1052,11 @@ impl App {
             StartupAction::None => {}
             StartupAction::Area => self.start_region_screenshot(ctx, overlay::Purpose::Area),
             StartupAction::Fullscreen => self.start_fullscreen_screenshot(ctx, None),
+            StartupAction::Tray => {
+                if self.tray.is_some() {
+                    self.hide_window(ctx);
+                }
+            }
         }
     }
 
@@ -1965,6 +1980,7 @@ mod tests {
             parse(&["--unknown", "--fullscreen"]),
             StartupAction::Fullscreen
         );
+        assert_eq!(parse(&["--tray"]), StartupAction::Tray);
     }
 
     #[test]

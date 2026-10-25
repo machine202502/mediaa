@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 mediaa-core.workspace = true
 anyhow.workspace = true
+auto-launch = "0.6"
 log.workspace = true
 image.workspace = true
 crossbeam-channel.workspace = true

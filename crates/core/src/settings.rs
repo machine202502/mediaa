@@ -285,6 +285,8 @@ pub struct Settings {
     pub hotkey_audio: AudioRecordSettings,
     pub region_audio: AudioRecordSettings,
     pub hotkeys: HotkeySettings,
+    pub launch_at_login: bool,
+    pub start_in_tray: bool,
     pub close_to_tray: bool,
     pub tray_left_click: TrayClickAction,
     pub stop_recording_on_left_click: bool,
@@ -320,6 +322,8 @@ impl Default for Settings {
             hotkey_audio: AudioRecordSettings::default(),
             region_audio: AudioRecordSettings::default(),
             hotkeys: HotkeySettings::default(),
+            launch_at_login: false,
+            start_in_tray: false,
             close_to_tray: true,
             tray_left_click: TrayClickAction::default(),
             stop_recording_on_left_click: true,
@@ -444,6 +448,8 @@ mod tests {
         s.recording_region_outline_width = 17;
         s.record.segmented_webp = false;
         s.record.parallel_webp = false;
+        s.launch_at_login = true;
+        s.start_in_tray = true;
         s.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), s);
     }
@@ -489,6 +495,23 @@ mod tests {
         );
         std::fs::write(&path, "close_to_tray = false\n").unwrap();
         assert!(!Settings::load_from(&path).close_to_tray);
+    }
+
+    #[test]
+    fn autostart_and_tray_start_are_disabled_by_default() {
+        let settings = Settings::default();
+        assert!(!settings.launch_at_login);
+        assert!(!settings.start_in_tray);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.toml");
+        std::fs::write(&path, "close_to_tray = true\n").unwrap();
+        let loaded = Settings::load_from(&path);
+        assert!(!loaded.launch_at_login);
+        assert!(!loaded.start_in_tray);
+        std::fs::write(&path, "launch_at_login = true\nstart_in_tray = true\n").unwrap();
+        let loaded = Settings::load_from(&path);
+        assert!(loaded.launch_at_login);
+        assert!(loaded.start_in_tray);
     }
 
     #[test]
