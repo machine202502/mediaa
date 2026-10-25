@@ -247,8 +247,18 @@ fn assert_duration(path: &Path, expected: f64, tolerance: f64) {
 
 #[test]
 fn static_build_has_required_codecs() {
-    for (name, ok) in mediaa_media::capabilities() {
-        assert!(ok, "{name} missing from the FFmpeg build");
+    use ez_ffmpeg::capabilities as caps;
+    for name in ["libx264", "libx264rgb", "aac", "gif", "libwebp_anim"] {
+        assert!(
+            caps::is_encoder_available(name),
+            "{name} encoder missing from the FFmpeg build"
+        );
+    }
+    for name in ["palettegen", "paletteuse", "amix"] {
+        assert!(
+            caps::is_filter_available(name),
+            "{name} filter missing from the FFmpeg build"
+        );
     }
 }
 

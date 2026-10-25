@@ -270,9 +270,15 @@ hk_parse_error = "«%{key}» — неверная комбинация (%{error}
 hk_taken = "%{key} уже занята другой программой — измените её в настройках"
 about = "О программе"
 picker_keys = "Клавиши при выделении области"
-version = "MediaA %{version} — FFmpeg слинкован статически"
-logs = "Папка логов"
-rescan_devices = "Обновить устройства"
+version = "Версия %{version}"
+devices = "Устройства"
+devices_hint = "Обновите список после подключения монитора или микрофона."
+refresh_devices = "Обновить экраны и микрофоны"
+diagnostics = "Диагностика"
+diagnostics_hint = "Технические файлы и исходный код приложения."
+logs = "Открыть папку с логами"
+logs_hint = "Открыть папку с техническими логами MediaA."
+repository = "Репозиторий GitHub"
 
 [notice]
 error = "Ошибка"

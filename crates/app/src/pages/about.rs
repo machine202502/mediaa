@@ -6,6 +6,8 @@ use egui_phosphor::regular as icon;
 use mediaa_core::paths;
 use rust_i18n::t;
 
+const REPOSITORY_URL: &str = "https://github.com/machine202502/mediaa";
+
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     header(ui, &t!("settings.about"), "");
     theme::card(ui).show(ui, |ui| {
@@ -22,35 +24,61 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             });
         });
         ui.add_space(6.0);
-        ui.horizontal_wrapped(|ui| {
-            for (name, ok) in &app.capabilities {
-                let p = theme::palette(ui);
-                let (ic, c) = if *ok {
-                    (icon::CHECK, p.success)
-                } else {
-                    (icon::X, p.danger)
-                };
-                ui.label(RichText::new(format!("{ic} {name}")).color(c).size(11.5));
-            }
-        });
-        ui.add_space(6.0);
+        section_help(
+            ui,
+            icon::PLUGS_CONNECTED,
+            &t!("settings.devices"),
+            &t!("settings.devices_hint"),
+        );
         ui.horizontal(|ui| {
-            if ui
-                .add(theme::secondary(icon::FOLDER_OPEN, &t!("settings.logs")))
-                .clicked()
-            {
-                app.open_path(&paths::logs_dir());
-            }
             if ui
                 .add(theme::secondary(
                     icon::ARROWS_CLOCKWISE,
-                    &t!("settings.rescan_devices"),
+                    &t!("settings.refresh_devices"),
                 ))
+                .on_hover_text(t!("settings.devices_hint"))
                 .clicked()
             {
                 app.mic_devices = mediaa_platform::audio::input_devices();
                 app.refresh_monitors();
             }
         });
+        ui.add_space(8.0);
+        section_help(
+            ui,
+            icon::WRENCH,
+            &t!("settings.diagnostics"),
+            &t!("settings.diagnostics_hint"),
+        );
+        ui.horizontal(|ui| {
+            if ui
+                .add(theme::secondary(icon::FOLDER_OPEN, &t!("settings.logs")))
+                .on_hover_text(t!("settings.logs_hint"))
+                .clicked()
+            {
+                app.open_path(&paths::logs_dir());
+            }
+            if ui
+                .add(theme::secondary(
+                    icon::GITHUB_LOGO,
+                    &t!("settings.repository"),
+                ))
+                .on_hover_text(REPOSITORY_URL)
+                .clicked()
+            {
+                ui.ctx().open_url(egui::OpenUrl::new_tab(REPOSITORY_URL));
+            }
+        });
     });
+}
+
+fn section_help(ui: &mut egui::Ui, icon: &str, title: &str, help: &str) {
+    let p = theme::palette(ui);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(icon).size(15.0).color(p.accent));
+        ui.label(RichText::new(title).size(14.0).strong());
+        ui.label(RichText::new(icon::INFO).size(13.0).color(p.text_weak))
+            .on_hover_text(help);
+    });
+    ui.add_space(2.0);
 }

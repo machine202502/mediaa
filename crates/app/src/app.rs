@@ -483,7 +483,6 @@ pub struct App {
     pub lib: pages::library::LibraryUi,
     pub thumbs: Thumbnails,
     pub conv: pages::convert::ConvertUi,
-    pub capabilities: Vec<(&'static str, bool)>,
     quit_after_save: bool,
     native_window: Option<NativeWindow>,
     startup: StartupAction,
@@ -572,7 +571,6 @@ impl App {
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
             conv: Default::default(),
-            capabilities: mediaa_media::capabilities(),
             quit_after_save: false,
             native_window: cc
                 .window_handle()
