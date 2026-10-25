@@ -35,5 +35,4 @@ if (-not (Test-Path "$env:FFMPEG_DIR\lib\avcodec.lib")) {
     & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet $Triplet "--x-manifest-root=$Root" "--x-install-root=$Root\vcpkg_installed"
     if ($LASTEXITCODE -ne 0) { throw 'vcpkg install failed' }
 }
-git -C $Root config core.hooksPath .githooks
 Set-Location $Root

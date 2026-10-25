@@ -3,14 +3,5 @@ vcpkg_installed/
 vcpkg_installed_*/
 dist/
 
-# Personal Claude Code settings
-.claude/settings.local.json
-
-# Readable dialogs of subagents (scripts/subagent-log.mjs)
-subagents/
-
-# Node tools of the workflow (scripts)
-tools/*/node_modules/
-
 # Local eval data that must not be published (third-party recordings)
 evals/local/

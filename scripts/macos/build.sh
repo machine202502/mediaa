@@ -19,7 +19,6 @@ fi
 "$VCPKG_ROOT/vcpkg" install --triplet "$TRIPLET" --x-manifest-root="$ROOT" --x-install-root="$ROOT/vcpkg_installed"
 export FFMPEG_DIR="$ROOT/vcpkg_installed/$TRIPLET"
 cd "$ROOT"
-git config core.hooksPath .githooks || true
 
 case "${1:-build}" in
   --test) cargo test --workspace ;;

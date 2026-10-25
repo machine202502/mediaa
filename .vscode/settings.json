@@ -1,0 +1,6 @@
+{
+  "chat.useAgentSkills": true,
+  "chat.agentSkillsLocations": {
+    ".claude/skills": false
+  }
+}

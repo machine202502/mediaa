@@ -63,6 +63,27 @@ pipeline as a library), [xcap](https://crates.io/crates/xcap), [windows-capture]
 [eframe/egui](https://crates.io/crates/eframe), [tray-icon](https://crates.io/crates/tray-icon),
 [global-hotkey](https://crates.io/crates/global-hotkey), [rust-i18n](https://crates.io/crates/rust-i18n).
 
+## Workflow
+
+Assistants follow [CLAUDE.md](CLAUDE.md). Complex designs go to `workflow/plans/`, and
+implementation is tracked one task at a time in
+[workflow/tasks.md](workflow/tasks.md).
+
+Long-term project memory is split into [rules](workflow/rules.md),
+[practices](workflow/practices.md) and [stones](workflow/stones.md). The current user's explicit
+instruction takes priority; stale or conflicting memory must be corrected.
+
+Project audit skills:
+
+| Skill | Purpose | Invocation |
+|---|---|---|
+| `mediaa-audit` | Material risks in code, architecture, LLM workflow and build | Codex: `$mediaa-audit`; Claude Code: `/mediaa-audit` |
+| `mediaa-complexity` | Unjustified safeguards, abstractions and lifecycle complexity | Codex: `$mediaa-complexity`; Claude Code: `/mediaa-complexity` |
+
+The canonical definitions are in `.agents/skills/`. VS Code discovers them through its Agent
+Skills support, enabled in `.vscode/settings.json`. Claude Code uses the thin wrappers in
+`.claude/skills/`.
+
 ## Prerequisites
 
 | | Windows | Linux | macOS |
@@ -87,16 +108,6 @@ commit is pinned in `scripts/vcpkg-commit.txt`.
 
 `env.ps1` (used by all Windows scripts) finds or clones vcpkg, finds `libclang.dll` via
 `vswhere`, builds FFmpeg on the first run and sets `VCPKG_ROOT`, `LIBCLANG_PATH`, `FFMPEG_DIR`.
-
-## Git hooks
-
-`node scripts/install-git-hooks.mjs` (the Windows, Linux and macOS build scripts do it too) sets
-`core.hooksPath` to `.githooks`. Every `git commit`, `push`, `rebase` and `merge` then prints one
-question — «did the human give explicit consent to this push (branch …, commit …)? yes or no» — and
-stops until it is answered. One «yes» allows one call; it is bound to that branch and commit, and
-every answer is logged in `.git/consent.log`. Without a terminal (an agent, CI) the hook refuses and
-explains how to confirm explicitly. `--no-verify` and switching `core.hooksPath` away are forbidden
-by [CLAUDE.md](CLAUDE.md).
 
 **Linux:**
 
@@ -192,9 +203,9 @@ optimized for recording tests.
 Debug test scripts use the `rust-lld` linker. Release testing is never part of the normal loop and
 is run only on request. The release artifact remains a single `dist/windows/mediaa.exe`.
 
-`test.ps1` also runs formatting, Clippy with warnings denied, the script tests and — when installed —
-`cargo audit --file Cargo.lock --deny unsound --deny yanked`. Install the optional RustSec scanner with
-`cargo install cargo-audit --locked`.
+`test.ps1` also runs formatting, Clippy with warnings denied and — when installed —
+`cargo audit --file Cargo.lock --deny unsound --deny yanked`. Install the optional RustSec scanner
+with `cargo install cargo-audit --locked`.
 
 ```bash
 scripts/linux/build.sh --test       # Linux
