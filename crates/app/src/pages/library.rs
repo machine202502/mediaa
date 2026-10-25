@@ -37,6 +37,9 @@ const SCRUB_ZONE: f32 = 26.0;
 const CHUNK: usize = 300;
 const RESCAN_EVERY: Duration = Duration::from_secs(60);
 
+#[cfg(test)]
+type TestTrash = Arc<dyn Fn(&Path) -> anyhow::Result<()> + Send + Sync>;
+
 pub struct LibraryUi {
     index: Option<LibraryIndex>,
     load: Option<Receiver<(PathBuf, LibraryIndex)>>,
@@ -61,6 +64,8 @@ pub struct LibraryUi {
     previews: Previews,
     viewer: Option<Viewer>,
     dev_viewed: bool,
+    #[cfg(test)]
+    trash: Option<TestTrash>,
 }
 
 struct HitList {
@@ -97,6 +102,8 @@ impl Default for LibraryUi {
             previews: Previews::default(),
             viewer: None,
             dev_viewed: false,
+            #[cfg(test)]
+            trash: None,
         }
     }
 }
@@ -106,6 +113,22 @@ pub fn library_dir(settings: &Settings) -> PathBuf {
 }
 
 impl LibraryUi {
+    #[cfg(test)]
+    pub(crate) fn set_test_entries(&mut self, dir: &Path) {
+        let mut index = LibraryIndex::load(dir);
+        index.apply_scan(library_index::scan_dir(dir));
+        self.index = Some(index);
+        self.last_scan = Instant::now();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_trash(&mut self) {
+        self.trash = Some(Arc::new(|path| {
+            std::fs::remove_file(path)?;
+            Ok(())
+        }));
+    }
+
     pub fn viewer_open(&self) -> bool {
         self.viewer.is_some()
     }
@@ -365,6 +388,8 @@ impl LibraryUi {
         self.prepare_for_removal(&plan.items);
         let plan = plan.clone();
         let worker_plan = plan.clone();
+        #[cfg(test)]
+        let trash = self.trash.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let task = tasks.spawn(
             TaskKind::LibraryCleanup,
@@ -375,7 +400,13 @@ impl LibraryUi {
                     &worker_plan.items,
                     worker_plan.older,
                     SystemTime::now(),
-                    files::move_to_trash,
+                    move |path| {
+                        #[cfg(test)]
+                        if let Some(trash) = &trash {
+                            return trash(path);
+                        }
+                        files::move_to_trash(path)
+                    },
                 );
                 let _ = tx.send((worker_plan, report));
             },
@@ -393,6 +424,8 @@ impl LibraryUi {
         let item = CleanupItem { path, size: 0 };
         self.prepare_for_removal(std::slice::from_ref(&item));
         let worker_item = item.clone();
+        #[cfg(test)]
+        let trash = self.trash.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let task = tasks.spawn(
             TaskKind::LibraryCleanup,
@@ -400,7 +433,13 @@ impl LibraryUi {
             None,
             move || {
                 let items = [worker_item];
-                let report = cleanup_selected(&items, files::move_to_trash);
+                let report = cleanup_selected(&items, move |path| {
+                    #[cfg(test)]
+                    if let Some(trash) = &trash {
+                        return trash(path);
+                    }
+                    files::move_to_trash(path)
+                });
                 let plan = CleanupPlan {
                     older: CleanupOlder::Week,
                     items: items.to_vec(),

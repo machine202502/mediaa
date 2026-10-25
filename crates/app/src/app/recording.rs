@@ -507,6 +507,7 @@ impl App {
                     };
                     if !sound_deferred
                         && completion_sound_after_action(sound_on_completion, action_succeeded)
+                        && self.completion_sound_enabled()
                     {
                         mediaa_platform::audio::confirmation_tone();
                     }
@@ -566,6 +567,17 @@ impl App {
         }
         if !matches!(self.recorder, RecState::Idle) {
             ctx.request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    fn completion_sound_enabled(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.completion_sound_enabled
+        }
+        #[cfg(not(test))]
+        {
+            true
         }
     }
 

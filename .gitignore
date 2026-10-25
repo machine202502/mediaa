@@ -5,3 +5,7 @@ dist/
 
 # Local eval data that must not be published (third-party recordings)
 evals/local/
+
+**/tests/snapshots/**/*.diff.png
+**/tests/snapshots/**/*.new.png
+**/tests/snapshots/**/*.old.png

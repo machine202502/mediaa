@@ -18,6 +18,39 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+static LOGS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+
+struct CaptureLogger;
+
+impl log::Log for CaptureLogger {
+    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if let Some(logs) = LOGS.get() {
+            logs.lock().unwrap().push(record.args().to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static CAPTURE_LOGGER: CaptureLogger = CaptureLogger;
+
+fn log_position() -> usize {
+    let logs = LOGS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let _ = log::set_logger(&CAPTURE_LOGGER);
+    log::set_max_level(log::LevelFilter::Info);
+    logs.lock().unwrap().len()
+}
+
+fn logs_since(position: usize) -> Vec<String> {
+    LOGS.get()
+        .map(|logs| logs.lock().unwrap()[position..].to_vec())
+        .unwrap_or_default()
+}
+
 struct Pattern {
     w: u32,
     h: u32,

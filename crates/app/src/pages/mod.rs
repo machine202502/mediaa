@@ -402,6 +402,9 @@ pub fn tile(
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, title)
+    });
     resp
 }
 

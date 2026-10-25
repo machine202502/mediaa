@@ -55,6 +55,12 @@ const HIDE_DELAY: Duration = Duration::from_millis(300);
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
 const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(600);
 const SETTINGS_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+
+#[cfg(test)]
+type TestMonitorCapture = Arc<dyn Fn(screen::MonitorId) -> Result<Frame, String> + Send + Sync>;
+#[cfg(test)]
+type TestWindowCapture = Arc<dyn Fn(screen::WindowId) -> Result<Frame, String> + Send + Sync>;
+
 pub struct App {
     pub settings: Settings,
     settings_dirty: Option<Instant>,
@@ -98,6 +104,14 @@ pub struct App {
     native_window: Option<NativeWindow>,
     startup: StartupAction,
     logo: Option<egui::TextureHandle>,
+    #[cfg(test)]
+    fixed_catalogs: bool,
+    #[cfg(test)]
+    monitor_capture: Option<TestMonitorCapture>,
+    #[cfg(test)]
+    window_capture: Option<TestWindowCapture>,
+    #[cfg(test)]
+    completion_sound_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -207,6 +221,14 @@ impl App {
                 .and_then(|h| NativeWindow::from_raw(h.as_raw())),
             startup: StartupAction::None,
             logo: None,
+            #[cfg(test)]
+            fixed_catalogs: false,
+            #[cfg(test)]
+            monitor_capture: None,
+            #[cfg(test)]
+            window_capture: None,
+            #[cfg(test)]
+            completion_sound_enabled: true,
         };
         if let Some(mode) = mediaa_core::dev::notices_mode() {
             app.notices.push(
@@ -296,6 +318,10 @@ impl App {
     }
 
     pub(crate) fn refresh_catalogs(&mut self, ctx: &egui::Context) {
+        #[cfg(test)]
+        if self.fixed_catalogs {
+            return;
+        }
         if self.catalog_job.is_some() {
             return;
         }
@@ -573,3 +599,9 @@ pub fn page_from_args(args: &[String]) -> Option<Page> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
+mod ui_tests;

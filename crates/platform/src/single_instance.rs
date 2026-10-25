@@ -284,4 +284,48 @@ mod tests {
             .unwrap()
             .is_some());
     }
+
+    #[test]
+    fn development_scopes_are_isolated_and_have_separate_activation() {
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let first_scope = Some(format!("unit-test-first-{suffix}"));
+        let second_scope = Some(format!("unit-test-second-{suffix}"));
+        let first = super::SingleInstance::acquire_scoped(first_scope.clone()).unwrap();
+        let second = super::SingleInstance::acquire_scoped(second_scope.clone()).unwrap();
+        let (Some(first), Some(second)) = (first, second) else {
+            return;
+        };
+        assert!(super::SingleInstance::acquire_scoped(first_scope.clone())
+            .unwrap()
+            .is_none());
+        #[cfg(windows)]
+        {
+            assert!(first.take_activation());
+            assert!(!first.take_activation());
+            assert!(!second.take_activation());
+        }
+        assert!(super::SingleInstance::acquire_scoped(second_scope.clone())
+            .unwrap()
+            .is_none());
+        #[cfg(windows)]
+        {
+            assert!(second.take_activation());
+            assert!(!second.take_activation());
+            assert!(!first.take_activation());
+        }
+        drop(first);
+        assert!(super::SingleInstance::acquire_scoped(first_scope)
+            .unwrap()
+            .is_some());
+        assert!(super::SingleInstance::acquire_scoped(second_scope)
+            .unwrap()
+            .is_none());
+    }
 }

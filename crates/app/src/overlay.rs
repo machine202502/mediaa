@@ -660,8 +660,78 @@ fn text_font(ctx: &egui::Context, style: &Style, size: f32) -> FontId {
 
 #[cfg(test)]
 mod tests {
-    use super::consume_copy_shortcut;
+    use super::{consume_copy_shortcut, AfterCapture, ImageFormat, Outcome, Overlay, Purpose};
     use eframe::egui;
+    use egui_kittest::kittest::Queryable;
+    use mediaa_core::Frame;
+    use mediaa_platform::screen::{MonitorId, MonitorInfo};
+
+    fn monitor(id: u32, x: i32, width: u32, primary: bool) -> MonitorInfo {
+        MonitorInfo {
+            id: MonitorId::new(id),
+            device: format!(r"\\.\DISPLAY{id}"),
+            index: id as usize - 1,
+            name: format!("Display {id}"),
+            x,
+            y: 0,
+            width,
+            height: 720,
+            scale: 1.0,
+            primary,
+        }
+    }
+
+    fn overlay_harness(
+        monitors: Vec<MonitorInfo>,
+        purpose: Purpose,
+    ) -> egui_kittest::Harness<'static, Option<Overlay>> {
+        let frame = Frame::filled(800, 600, [28, 48, 76, 255]);
+        egui_kittest::Harness::builder()
+            .with_size(egui::vec2(800.0, 600.0))
+            .with_os(egui::os::OperatingSystem::Windows)
+            .with_theme(egui::Theme::Dark)
+            .build_ui_state(
+                move |ui, overlay: &mut Option<Overlay>| {
+                    let overlay = overlay.get_or_insert_with(|| {
+                        Overlay::new(
+                            ui.ctx(),
+                            purpose,
+                            monitors.clone(),
+                            0,
+                            frame.clone(),
+                            AfterCapture::Save,
+                            false,
+                        )
+                    });
+                    overlay.state.lock().ui(ui);
+                },
+                None,
+            )
+    }
+
+    fn drag(
+        harness: &mut egui_kittest::Harness<'_, Option<Overlay>>,
+        from: egui::Pos2,
+        to: egui::Pos2,
+    ) {
+        harness.hover_at(from);
+        harness.event(egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        harness.run_steps(1);
+        harness.hover_at(to);
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        harness.run_steps(2);
+    }
 
     #[test]
     fn semantic_copy_event_is_consumed_once() {
@@ -669,5 +739,76 @@ mod tests {
         input.events.push(egui::Event::Copy);
         assert!(consume_copy_shortcut(&mut input));
         assert!(!consume_copy_shortcut(&mut input));
+    }
+
+    #[test]
+    fn region_editor_selects_annotates_and_saves() {
+        let mut harness = overlay_harness(
+            vec![monitor(1, 0, 800, true), monitor(2, 800, 800, false)],
+            Purpose::Screenshot,
+        );
+        crate::theme::install(&harness.ctx);
+        harness.run_steps(2);
+        drag(
+            &mut harness,
+            egui::pos2(80.0, 70.0),
+            egui::pos2(420.0, 310.0),
+        );
+
+        harness
+            .get_by_label(egui_phosphor::regular::ARROW_UP_RIGHT)
+            .click();
+        harness.run_steps(1);
+        drag(
+            &mut harness,
+            egui::pos2(140.0, 140.0),
+            egui::pos2(300.0, 230.0),
+        );
+
+        #[cfg(windows)]
+        harness.snapshot("region-editor-selected");
+
+        let save = rust_i18n::t!("overlay.save", format = ImageFormat::Png.label()).to_string();
+        harness.get_by_label_contains(&save).click();
+        harness.run_steps(2);
+        let state = harness.state().as_ref().unwrap().state.lock();
+        let Outcome::Image {
+            selection, shapes, ..
+        } = state.outcome.as_ref().unwrap()
+        else {
+            panic!("region was not saved: {:?}", state.outcome)
+        };
+        assert!((340..=350).contains(&selection.w), "{selection:?}");
+        assert!((240..=250).contains(&selection.h), "{selection:?}");
+        assert!(!shapes.is_empty());
+    }
+
+    #[test]
+    fn region_editor_cancel_and_monitor_switch_follow_keyboard_shortcuts() {
+        let mut cancel = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
+        cancel.run_steps(2);
+        drag(
+            &mut cancel,
+            egui::pos2(80.0, 70.0),
+            egui::pos2(300.0, 240.0),
+        );
+        cancel.key_press(egui::Key::Escape);
+        cancel.run_steps(2);
+        assert!(matches!(
+            cancel.state().as_ref().unwrap().state.lock().outcome,
+            Some(Outcome::Cancel)
+        ));
+
+        let mut switch = overlay_harness(
+            vec![monitor(1, 0, 800, true), monitor(2, 800, 800, false)],
+            Purpose::Screenshot,
+        );
+        switch.run_steps(2);
+        switch.key_press(egui::Key::Tab);
+        switch.run_steps(2);
+        assert!(matches!(
+            switch.state().as_ref().unwrap().state.lock().outcome,
+            Some(Outcome::CaptureMonitor { index: 1, .. })
+        ));
     }
 }

@@ -217,6 +217,17 @@ i18n key coverage…) and end-to-end tests that really encode with the staticall
 recording from synthetic sources with synthetic audio (MP4 + mixed audio tracks, MKV per window,
 GIF, WebP), pause accounting, cancel, every conversion and thumbnails.
 
+UI/UX tests use `egui_kittest` with mocked displays, windows and microphones. They verify the real
+app screens through AccessKit and keep Windows layout snapshots in `crates/app/tests/snapshots`:
+
+```powershell
+cargo test -p mediaa --lib app::ui_tests
+UPDATE_SNAPSHOTS=true cargo test -p mediaa --lib ui_regression_snapshot
+```
+
+Use `UPDATE_SNAPSHOTS=true` only after reviewing the changed image. Snapshot diffs and temporary
+images are ignored by Git.
+
 Tests against the real desktop (screen/window capture, recording the actual screen to MP4) need a
 display session and are skipped by default:
 

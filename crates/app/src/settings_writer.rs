@@ -83,6 +83,11 @@ impl SettingsWriter {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn discard() -> Self {
+        Self::with_saver(PathBuf::new(), |_, _| Ok(()))
+    }
+
     pub(crate) fn request(&mut self, settings: Settings) -> anyhow::Result<u64> {
         anyhow::ensure!(self.join.is_some(), "settings writer is unavailable");
         self.generation += 1;

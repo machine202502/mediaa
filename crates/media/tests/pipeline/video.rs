@@ -211,6 +211,7 @@ fn segmented_webp_accepts_still_sections() {
 
 #[test]
 fn failed_live_start_falls_back_to_offline_webp() {
+    let log_start = super::log_position();
     let dir = tempfile::tempdir().unwrap();
     let work = dir.path().join("work");
     std::fs::create_dir_all(&work).unwrap();
@@ -233,6 +234,11 @@ fn failed_live_start_falls_back_to_offline_webp() {
         .find(|warning| warning.starts_with("WebpFallback"))
         .unwrap_or_else(|| panic!("{warnings:?}"));
     assert!(notice.contains("webp-"), "{notice}");
+    let logs = super::logs_since(log_start).join("\n");
+    assert!(logs.contains("stage=live unavailable"), "{logs}");
+    assert!(logs.contains("stage=offline-mkv"), "{logs}");
+    assert!(logs.contains("stage=complete fallback=true"), "{logs}");
+    assert!(logs.contains("webp-"), "{logs}");
     let info = probe(&paths[0]).unwrap();
     assert!(
         info.duration_secs().is_some_and(|duration| duration > 0.8),

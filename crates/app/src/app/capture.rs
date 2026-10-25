@@ -182,7 +182,13 @@ impl App {
         kind: CaptureKind,
         monitor: screen::MonitorId,
     ) {
+        #[cfg(test)]
+        let capture = self.monitor_capture.clone();
         self.queue_capture(ctx, kind, move || {
+            #[cfg(test)]
+            if let Some(capture) = &capture {
+                return capture(monitor);
+            }
             screen::capture_monitor(monitor).map_err(|error| format!("{error:#}"))
         });
     }
@@ -193,7 +199,13 @@ impl App {
         kind: CaptureKind,
         window: screen::WindowId,
     ) {
+        #[cfg(test)]
+        let capture = self.window_capture.clone();
         self.queue_capture(ctx, kind, move || {
+            #[cfg(test)]
+            if let Some(capture) = &capture {
+                return capture(window);
+            }
             screen::capture_window(window).map_err(|error| format!("{error:#}"))
         });
     }
