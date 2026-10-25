@@ -5,7 +5,11 @@ use std::sync::atomic::AtomicBool;
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let (input, output) = (args.next().expect("input"), args.next().expect("output"));
-    let ext = std::path::Path::new(&output).extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    let ext = std::path::Path::new(&output)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let target = VideoFormat::ALL
         .map(Target::Video)
         .into_iter()
@@ -22,7 +26,14 @@ fn main() -> anyhow::Result<()> {
             settings.png_colors = Some(n.parse()?);
         }
     }
-    convert::convert(input.as_ref(), output.as_ref(), target, &settings, &mut |_| {}, &AtomicBool::new(false))?;
+    convert::convert(
+        input.as_ref(),
+        output.as_ref(),
+        target,
+        &settings,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )?;
     println!("{output}");
     Ok(())
 }

@@ -29,9 +29,18 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn new(path: &Path, duration: f64, has_audio: bool, looping: bool, picture: bool) -> Player {
+    pub fn new(
+        path: &Path,
+        duration: f64,
+        has_audio: bool,
+        looping: bool,
+        picture: bool,
+    ) -> Player {
         let audio = if has_audio {
-            AudioOut::open().map_err(|e| log::warn!("audio output: {e:#}")).ok().map(Arc::new)
+            AudioOut::open()
+                .map_err(|e| log::warn!("audio output: {e:#}"))
+                .ok()
+                .map(Arc::new)
         } else {
             None
         };
@@ -61,48 +70,68 @@ impl Player {
             Some(a) if !self.paused => self.pos + a.elapsed().as_secs_f64() * self.speed,
             _ => self.pos,
         };
-        if self.duration > 0.0 { t.min(self.duration) } else { t }
+        if self.duration > 0.0 {
+            t.min(self.duration)
+        } else {
+            t
+        }
     }
 
     fn restart(&mut self, at: f64) {
         self.cancel.store(true, Ordering::Relaxed);
         self.cancel = Arc::new(AtomicBool::new(false));
-        let at = if self.duration > 0.0 { at.clamp(0.0, self.duration) } else { at.max(0.0) };
+        let at = if self.duration > 0.0 {
+            at.clamp(0.0, self.duration)
+        } else {
+            at.max(0.0)
+        };
         (self.pos, self.anchor, self.pending, self.got_frame) = (at, None, None, false);
 
         self.frames = None;
         if self.picture {
             let (tx, rx) = crossbeam_channel::bounded::<PreviewFrame>(8);
             let (path, cancel) = (self.path.clone(), self.cancel.clone());
-            let _ = std::thread::Builder::new().name("viewer-video".into()).spawn(move || {
-            let res = preview_frames(&path, VIDEO_WIDTH, 1.0 / 120.0, at, &cancel, &mut |f| !cancel.load(Ordering::Relaxed) && tx.send(f).is_ok());
-            if let Err(e) = res {
-                log::debug!("viewer video {}: {e:#}", path.display());
-            }
-            });
+            let _ = std::thread::Builder::new()
+                .name("viewer-video".into())
+                .spawn(move || {
+                    let res =
+                        preview_frames(&path, VIDEO_WIDTH, 1.0 / 120.0, at, &cancel, &mut |f| {
+                            !cancel.load(Ordering::Relaxed) && tx.send(f).is_ok()
+                        });
+                    if let Err(e) = res {
+                        log::debug!("viewer video {}: {e:#}", path.display());
+                    }
+                });
             self.frames = Some(rx);
         }
 
         if let Some(out) = self.audio.clone() {
             out.clear();
             out.set_paused(true);
-            let (path, cancel, speed, rate) = (self.path.clone(), self.cancel.clone(), self.speed, out.sample_rate());
+            let (path, cancel, speed, rate) = (
+                self.path.clone(),
+                self.cancel.clone(),
+                self.speed,
+                out.sample_rate(),
+            );
             let c = cancel.clone();
-            let _ = std::thread::Builder::new().name("viewer-audio".into()).spawn(move || {
-                let res = decode_audio(&path, at, speed, rate, cancel, move |samples| {
-                    while out.queued_secs() > AUDIO_AHEAD {
-                        if c.load(Ordering::Relaxed) {
-                            return false;
+            let _ = std::thread::Builder::new()
+                .name("viewer-audio".into())
+                .spawn(move || {
+                    let res = decode_audio(&path, at, speed, rate, cancel, move |samples| {
+                        while out.queued_secs() > AUDIO_AHEAD {
+                            if c.load(Ordering::Relaxed) {
+                                return false;
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
                         }
-                        std::thread::sleep(Duration::from_millis(10));
+                        out.push(samples);
+                        !c.load(Ordering::Relaxed)
+                    });
+                    if let Err(e) = res {
+                        log::debug!("viewer audio {}: {e:#}", path.display());
                     }
-                    out.push(samples);
-                    !c.load(Ordering::Relaxed)
                 });
-                if let Err(e) = res {
-                    log::debug!("viewer audio {}: {e:#}", path.display());
-                }
-            });
         }
     }
 

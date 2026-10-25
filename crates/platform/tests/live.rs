@@ -15,7 +15,14 @@ fn captures_primary_monitor() {
     assert!(m.primary || monitors.len() == 1);
     let f = screen::capture_monitor(m.id).unwrap();
     assert_eq!((f.width, f.height), (m.width, m.height));
-    assert!(f.data.as_chunks::<4>().0.iter().any(|p| *p != [0, 0, 0, 255]), "not a black frame");
+    assert!(
+        f.data
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|p| *p != [0, 0, 0, 255]),
+        "not a black frame"
+    );
 }
 
 #[test]
@@ -43,8 +50,10 @@ fn records_real_screen_area_to_mp4() {
     let dir = tempfile::tempdir().unwrap();
     let m = screen::monitors().unwrap().remove(0);
     let id = m.id;
-    let factory: SourceFactory =
-        Box::new(move || MonitorSource::new(id, Some(Rect::new(0, 0, 640, 360)), true).map(|s| Box::new(s) as Box<dyn FrameSource>));
+    let factory: SourceFactory = Box::new(move || {
+        MonitorSource::new(id, Some(Rect::new(0, 0, 640, 360)), true)
+            .map(|s| Box::new(s) as Box<dyn FrameSource>)
+    });
     let session = RecordingSession::start(RecordingRequest {
         sources: vec![factory],
         audio: vec![],
@@ -55,6 +64,8 @@ fn records_real_screen_area_to_mp4() {
         audio_in_every_file: true,
         audio_kbps: 192,
         anim: Default::default(),
+        segmented_webp: true,
+        parallel_webp: true,
         out_dir: dir.path().join("out"),
         work_dir: dir.path().join("work"),
         title: "live".into(),
@@ -62,11 +73,14 @@ fn records_real_screen_area_to_mp4() {
     .unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     let events = session.events();
-    session.stop(true, Arc::new(AtomicBool::new(false))).join().unwrap();
+    session
+        .stop(true, Arc::new(AtomicBool::new(false)))
+        .join()
+        .unwrap();
     let paths = loop {
         match events.recv_timeout(Duration::from_secs(30)).unwrap() {
             SessionEvent::Finished(p) => break p,
-            SessionEvent::Finalizing(_) | SessionEvent::Warning(_) => {}
+            SessionEvent::Finalizing(_) | SessionEvent::Warning(_) | SessionEvent::Notice(_) => {}
             other => panic!("{other:?}"),
         }
     };

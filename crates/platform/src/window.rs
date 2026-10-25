@@ -40,9 +40,10 @@ impl NativeWindow {
         {
             use std::sync::atomic::{AtomicIsize, Ordering};
             use windows_sys::Win32::UI::WindowsAndMessaging::{
-                GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowLongPtrW, ShowWindow,
-                GWL_EXSTYLE, LWA_ALPHA, SW_HIDE, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WS_EX_LAYERED,
-                WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+                GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
+                SetWindowLongPtrW, ShowWindow, GWL_EXSTYLE, LWA_ALPHA, SW_HIDE, SW_SHOWNOACTIVATE,
+                WDA_EXCLUDEFROMCAPTURE, WDA_NONE, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+                WS_EX_TRANSPARENT,
             };
             static SAVED_STYLE: AtomicIsize = AtomicIsize::new(-1);
             let hwnd = self.0 as windows_sys::Win32::Foundation::HWND;
@@ -78,7 +79,9 @@ impl NativeWindow {
 pub fn exclude_from_capture(title: &str) -> bool {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            FindWindowW, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+        };
         let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
         // SAFETY: valid NUL-terminated UTF-16 title.
         unsafe {
@@ -97,9 +100,9 @@ pub fn make_black_transparent(title: &str) -> bool {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            FindWindowW, GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-            GWL_EXSTYLE, LWA_COLORKEY, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-            WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+            FindWindowW, GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW,
+            SetWindowPos, GWL_EXSTYLE, LWA_COLORKEY, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_NOZORDER, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
         };
         let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
         // SAFETY: valid NUL-terminated title and Win32 window-style calls on our own viewport.
@@ -148,13 +151,16 @@ impl RegionOutline {
         appearance: crate::outline::OutlineAppearance,
     ) -> bool {
         use windows_sys::Win32::Foundation::{GetLastError, ERROR_CLASS_ALREADY_EXISTS};
-        use windows_sys::Win32::Graphics::Gdi::{CreateSolidBrush, DeleteObject, FillRect, GetDC, ReleaseDC};
+        use windows_sys::Win32::Graphics::Gdi::{
+            CreateSolidBrush, DeleteObject, FillRect, GetDC, ReleaseDC,
+        };
         use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, RegisterClassW, SetLayeredWindowAttributes, SetWindowDisplayAffinity,
-            SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW, LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOZORDER,
-            SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WDA_EXCLUDEFROMCAPTURE, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-            WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+            CreateWindowExW, DefWindowProcW, RegisterClassW, SetLayeredWindowAttributes,
+            SetWindowDisplayAffinity, SetWindowPos, ShowWindow, CS_HREDRAW, CS_VREDRAW,
+            LWA_COLORKEY, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+            WDA_EXCLUDEFROMCAPTURE, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WS_EX_TRANSPARENT, WS_POPUP,
         };
 
         unsafe extern "system" fn window_proc(
@@ -167,8 +173,14 @@ impl RegionOutline {
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
 
-        let class_name: Vec<u16> = "MediaA recording region outline".encode_utf16().chain(std::iter::once(0)).collect();
-        let title: Vec<u16> = "MediaA recording area".encode_utf16().chain(std::iter::once(0)).collect();
+        let class_name: Vec<u16> = "MediaA recording region outline"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let title: Vec<u16> = "MediaA recording area"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         // SAFETY: all pointers passed to Win32 below refer to live, NUL-terminated data or owned handles.
         unsafe {
             let instance = GetModuleHandleW(std::ptr::null());
@@ -208,7 +220,15 @@ impl RegionOutline {
             let Some(hwnd) = self.hwnd else {
                 return false;
             };
-            SetWindowPos(hwnd, std::ptr::null_mut(), x, y, width, height, SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW,
+            );
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             let dc = GetDC(hwnd);
             if dc.is_null() {
@@ -231,10 +251,30 @@ impl RegionOutline {
             let border = CreateSolidBrush(color);
             let stroke = stroke_width.max(1).min(width.min(height));
             for edge in [
-                windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: width, bottom: stroke },
-                windows_sys::Win32::Foundation::RECT { left: 0, top: height - stroke, right: width, bottom: height },
-                windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: stroke, bottom: height },
-                windows_sys::Win32::Foundation::RECT { left: width - stroke, top: 0, right: width, bottom: height },
+                windows_sys::Win32::Foundation::RECT {
+                    left: 0,
+                    top: 0,
+                    right: width,
+                    bottom: stroke,
+                },
+                windows_sys::Win32::Foundation::RECT {
+                    left: 0,
+                    top: height - stroke,
+                    right: width,
+                    bottom: height,
+                },
+                windows_sys::Win32::Foundation::RECT {
+                    left: 0,
+                    top: 0,
+                    right: stroke,
+                    bottom: height,
+                },
+                windows_sys::Win32::Foundation::RECT {
+                    left: width - stroke,
+                    top: 0,
+                    right: width,
+                    bottom: height,
+                },
             ] {
                 FillRect(dc, &edge, border);
             }
@@ -287,7 +327,9 @@ impl Drop for RegionOutline {
 pub fn disable_open_animation(title: &str) -> bool {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED};
+        use windows_sys::Win32::Graphics::Dwm::{
+            DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
+        };
         use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
         let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
         // SAFETY: valid NUL-terminated UTF-16 title; the attribute value is a 4-byte BOOL.

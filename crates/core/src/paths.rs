@@ -86,7 +86,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("fresh.tmp"), b"x").unwrap();
         std::fs::create_dir(dir.path().join("session")).unwrap();
-        assert_eq!(remove_stale_entries(dir.path(), Duration::from_secs(3600)), 0);
+        assert_eq!(
+            remove_stale_entries(dir.path(), Duration::from_secs(3600)),
+            0
+        );
         std::thread::sleep(Duration::from_millis(20));
         assert_eq!(remove_stale_entries(dir.path(), Duration::ZERO), 2);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
@@ -94,6 +97,9 @@ mod tests {
 
     #[test]
     fn stale_cleanup_of_missing_dir_is_noop() {
-        assert_eq!(remove_stale_entries(Path::new("/definitely/missing/dir"), Duration::ZERO), 0);
+        assert_eq!(
+            remove_stale_entries(Path::new("/definitely/missing/dir"), Duration::ZERO),
+            0
+        );
     }
 }

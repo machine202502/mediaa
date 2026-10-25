@@ -20,7 +20,10 @@ impl RectF {
         self.x < o.right() && o.x < self.right() && self.y < o.bottom() && o.y < self.bottom()
     }
     pub fn inside(&self, o: &RectF) -> bool {
-        self.x >= o.x - 0.01 && self.y >= o.y - 0.01 && self.right() <= o.right() + 0.01 && self.bottom() <= o.bottom() + 0.01
+        self.x >= o.x - 0.01
+            && self.y >= o.y - 0.01
+            && self.right() <= o.right() + 0.01
+            && self.bottom() <= o.bottom() + 0.01
     }
 }
 
@@ -35,10 +38,20 @@ pub const GAP: f32 = 10.0;
 fn clamp_into(r: RectF, screen: &RectF) -> RectF {
     let max_x = (screen.right() - GAP - r.w).max(screen.x + GAP);
     let max_y = (screen.bottom() - GAP - r.h).max(screen.y + GAP);
-    RectF::new(r.x.clamp(screen.x + GAP, max_x), r.y.clamp(screen.y + GAP, max_y), r.w, r.h)
+    RectF::new(
+        r.x.clamp(screen.x + GAP, max_x),
+        r.y.clamp(screen.y + GAP, max_y),
+        r.w,
+        r.h,
+    )
 }
 
-pub fn place_panels(screen: RectF, sel: RectF, tools: Option<(f32, f32)>, actions: (f32, f32)) -> PanelLayout {
+pub fn place_panels(
+    screen: RectF,
+    sel: RectF,
+    tools: Option<(f32, f32)>,
+    actions: (f32, f32),
+) -> PanelLayout {
     let (aw, ah) = actions;
     let fits_right = |w: f32| sel.right() + GAP + w <= screen.right() - GAP;
     let fits_left = |w: f32| sel.x - GAP - w >= screen.x + GAP;
@@ -57,7 +70,9 @@ pub fn place_panels(screen: RectF, sel: RectF, tools: Option<(f32, f32)>, action
             }
             v.push(RectF::new(sel.right() - GAP - tw, sel.y + GAP, tw, th));
             v.push(RectF::new(sel.x + GAP, sel.y + GAP, tw, th));
-            v.into_iter().map(|r| Some(clamp_into(r, &screen))).collect()
+            v.into_iter()
+                .map(|r| Some(clamp_into(r, &screen)))
+                .collect()
         }
     };
 
@@ -73,7 +88,11 @@ pub fn place_panels(screen: RectF, sel: RectF, tools: Option<(f32, f32)>, action
 
     for tools_rect in &tool_candidates {
         let tools_on_right = tools_rect.is_some_and(|t| t.x >= sel.x + sel.w / 2.0);
-        let mut xs = if tools_on_right { vec![sel.right() - aw, sel.x] } else { vec![sel.x, sel.right() - aw] };
+        let mut xs = if tools_on_right {
+            vec![sel.right() - aw, sel.x]
+        } else {
+            vec![sel.x, sel.right() - aw]
+        };
         let mut ys = rows.clone();
         if let Some(t) = tools_rect {
             xs.extend([t.right() + GAP, t.x - GAP - aw]);
@@ -83,7 +102,10 @@ pub fn place_panels(screen: RectF, sel: RectF, tools: Option<(f32, f32)>, action
             for &x in &xs {
                 let bar = clamp_into(RectF::new(x, y, aw, ah), &screen);
                 if tools_rect.is_none_or(|t| !t.overlaps(&bar)) {
-                    return PanelLayout { tools: *tools_rect, actions: bar };
+                    return PanelLayout {
+                        tools: *tools_rect,
+                        actions: bar,
+                    };
                 }
             }
         }
@@ -121,7 +143,11 @@ mod tests {
         let t = l.tools.unwrap();
         assert_eq!(t.x, sel.right() + GAP);
         assert_eq!(l.actions.y, sel.bottom() + GAP);
-        assert_eq!(l.actions.right(), sel.right(), "bar ends at the selection edge, left of the tools");
+        assert_eq!(
+            l.actions.right(),
+            sel.right(),
+            "bar ends at the selection edge, left of the tools"
+        );
     }
 
     #[test]

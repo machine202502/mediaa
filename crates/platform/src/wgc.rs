@@ -8,8 +8,8 @@ use windows_capture::frame::Frame as WgcFrame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 use windows_capture::monitor::Monitor;
 use windows_capture::settings::{
-    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings, GraphicsCaptureItemType,
-    MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+    GraphicsCaptureItemType, MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 use windows_capture::window::Window;
 
@@ -33,12 +33,25 @@ impl GraphicsCaptureApiHandler for Handler {
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         let (latest, region) = ctx.flags;
-        Ok(Self { latest, region, scratch: Vec::new() })
+        Ok(Self {
+            latest,
+            region,
+            scratch: Vec::new(),
+        })
     }
 
-    fn on_frame_arrived(&mut self, frame: &mut WgcFrame, _control: InternalCaptureControl) -> Result<(), Self::Error> {
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut WgcFrame,
+        _control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
         let buffer = match self.region {
-            Some(r) => frame.buffer_crop(r.x as u32, r.y as u32, (r.x + r.w) as u32, (r.y + r.h) as u32)?,
+            Some(r) => frame.buffer_crop(
+                r.x as u32,
+                r.y as u32,
+                (r.x + r.w) as u32,
+                (r.y + r.h) as u32,
+            )?,
             None => frame.buffer()?,
         };
         let (w, h) = (buffer.width(), buffer.height());
@@ -60,8 +73,15 @@ pub struct WgcSource {
 }
 
 impl WgcSource {
-    pub fn monitor(monitor_id: u32, name: String, size: (u32, u32), region: Option<Rect>, cursor: bool) -> anyhow::Result<Self> {
-        let monitor = Monitor::from_raw_hmonitor(monitor_id as i32 as isize as *mut std::ffi::c_void);
+    pub fn monitor(
+        monitor_id: u32,
+        name: String,
+        size: (u32, u32),
+        region: Option<Rect>,
+        cursor: bool,
+    ) -> anyhow::Result<Self> {
+        let monitor =
+            Monitor::from_raw_hmonitor(monitor_id as i32 as isize as *mut std::ffi::c_void);
         Self::start(monitor, name, size, region, cursor)
     }
 
@@ -70,7 +90,10 @@ impl WgcSource {
         let mut s = Self::start(window, name, (0, 0), None, cursor)?;
         let first = s.wait_first()?;
         s.size = (first.width & !1, first.height & !1);
-        anyhow::ensure!(s.size.0 >= 16 && s.size.1 >= 16, "window is too small to record");
+        anyhow::ensure!(
+            s.size.0 >= 16 && s.size.1 >= 16,
+            "window is too small to record"
+        );
         Ok(s)
     }
 
@@ -79,12 +102,22 @@ impl WgcSource {
         Self::start(window, String::new(), (0, 0), None, false)?.wait_first()
     }
 
-    fn start<T>(item: T, name: String, size: (u32, u32), region: Option<Rect>, cursor: bool) -> anyhow::Result<Self>
+    fn start<T>(
+        item: T,
+        name: String,
+        size: (u32, u32),
+        region: Option<Rect>,
+        cursor: bool,
+    ) -> anyhow::Result<Self>
     where
         T: TryInto<GraphicsCaptureItemType> + Clone + Send + 'static,
     {
         let latest = Arc::new(Latest::default());
-        let cursor = if cursor { CursorCaptureSettings::WithCursor } else { CursorCaptureSettings::WithoutCursor };
+        let cursor = if cursor {
+            CursorCaptureSettings::WithCursor
+        } else {
+            CursorCaptureSettings::WithoutCursor
+        };
         let settings = |border| {
             Settings::new(
                 item.clone(),
@@ -100,7 +133,15 @@ impl WgcSource {
         let control = Handler::start_free_threaded(settings(DrawBorderSettings::WithoutBorder))
             .or_else(|_| Handler::start_free_threaded(settings(DrawBorderSettings::Default)))
             .map_err(|e| anyhow!("Windows Graphics Capture: {e}"))?;
-        let mut s = Self { name, size, latest, last: None, fresh: 0, grabs: 0, control: Some(control) };
+        let mut s = Self {
+            name,
+            size,
+            latest,
+            last: None,
+            fresh: 0,
+            grabs: 0,
+            control: Some(control),
+        };
         if size != (0, 0) {
             s.wait_first()?;
         }
@@ -114,7 +155,9 @@ impl WgcSource {
             .arrived
             .wait_timeout_while(guard, Duration::from_secs(3), |f| f.is_none())
             .expect("frame lock");
-        let frame = guard.clone().context("no frame from Windows Graphics Capture")?;
+        let frame = guard
+            .clone()
+            .context("no frame from Windows Graphics Capture")?;
         drop(guard);
         self.last = Some(frame.clone());
         Ok(frame)
@@ -141,13 +184,22 @@ impl FrameSource for WgcSource {
         }
         let frame = self.last.clone().context("no frame yet")?;
         let (w, h) = self.size;
-        Ok(if (frame.width, frame.height) == (w, h) { frame } else { frame.fit_to(w, h, [0, 0, 0, 255]) })
+        Ok(if (frame.width, frame.height) == (w, h) {
+            frame
+        } else {
+            frame.fit_to(w, h, [0, 0, 0, 255])
+        })
     }
 }
 
 impl Drop for WgcSource {
     fn drop(&mut self) {
-        log::info!("capture \"{}\": {} of {} frames had new content", self.name, self.fresh, self.grabs);
+        log::info!(
+            "capture \"{}\": {} of {} frames had new content",
+            self.name,
+            self.fresh,
+            self.grabs
+        );
         if let Some(c) = self.control.take() {
             let _ = c.stop();
         }

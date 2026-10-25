@@ -1,4 +1,4 @@
-use crate::animation::{self, AnimationEffort, AnimationEncodeRequest, AnimationOrigin};
+use crate::animation_backends::{self, AnimationEffort, AnimationEncodeRequest, AnimationOrigin};
 use crate::filters;
 use crate::info::{probe, MediaInfo};
 use crate::job;
@@ -19,7 +19,13 @@ pub enum VideoFormat {
 }
 
 impl VideoFormat {
-    pub const ALL: [VideoFormat; 5] = [VideoFormat::Mp4, VideoFormat::Mov, VideoFormat::Mkv, VideoFormat::Webm, VideoFormat::Avi];
+    pub const ALL: [VideoFormat; 5] = [
+        VideoFormat::Mp4,
+        VideoFormat::Mov,
+        VideoFormat::Mkv,
+        VideoFormat::Webm,
+        VideoFormat::Avi,
+    ];
 
     pub fn extension(self) -> &'static str {
         match self {
@@ -59,7 +65,13 @@ pub enum StillFormat {
 }
 
 impl StillFormat {
-    pub const ALL: [StillFormat; 5] = [StillFormat::Jpeg, StillFormat::Png, StillFormat::Webp, StillFormat::Bmp, StillFormat::Tiff];
+    pub const ALL: [StillFormat; 5] = [
+        StillFormat::Jpeg,
+        StillFormat::Png,
+        StillFormat::Webp,
+        StillFormat::Bmp,
+        StillFormat::Tiff,
+    ];
 
     pub fn extension(self) -> &'static str {
         match self {
@@ -114,7 +126,10 @@ impl Target {
     }
 
     pub fn for_kind(kind: MediaKind) -> Vec<Target> {
-        let moving = VideoFormat::ALL.map(Target::Video).into_iter().chain(AnimFormat::ALL.map(Target::Anim));
+        let moving = VideoFormat::ALL
+            .map(Target::Video)
+            .into_iter()
+            .chain(AnimFormat::ALL.map(Target::Anim));
         let still = StillFormat::ALL.map(Target::Still);
         let sound = AudioFormat::ALL.map(Target::Audio);
         match kind {
@@ -243,7 +258,12 @@ fn run_tracked(
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
     match total_us.filter(|total| *total > 0) {
-        Some(total) => job::run(ctx, Some(total), &mut |progress| on_progress(Some(progress)), cancel),
+        Some(total) => job::run(
+            ctx,
+            Some(total),
+            &mut |progress| on_progress(Some(progress)),
+            cancel,
+        ),
         None => job::run(ctx, None, &mut |_| {}, cancel),
     }
 }
@@ -271,11 +291,15 @@ fn video_output(out: Output, format: VideoFormat, s: &ConvertSettings, audio: bo
             .set_video_codec_opt("cpu-used", s.effort.vp9_cpu_used())
             .set_video_codec_opt("row-mt", "1"),
         VideoFormat::Avi => {
-            let out = out.set_video_codec("mpeg4").set_video_qscale(filters::qscale(s.quality));
+            let out = out
+                .set_video_codec("mpeg4")
+                .set_video_qscale(filters::qscale(s.quality));
             match s.effort {
                 Effort::Fast => out,
                 Effort::Balanced => out.set_video_codec_opt("mbd", "rd"),
-                Effort::Max => out.set_video_codec_opt("mbd", "rd").set_video_codec_opt("trellis", "1"),
+                Effort::Max => out
+                    .set_video_codec_opt("mbd", "rd")
+                    .set_video_codec_opt("trellis", "1"),
             }
         }
     };
@@ -286,8 +310,14 @@ fn video_output(out: Output, format: VideoFormat, s: &ConvertSettings, audio: bo
     if !audio {
         return out;
     }
-    let out = out.add_stream_map("0:a").set_audio_bitrate(bitrate(s.audio_kbps));
-    let out = if s.mono { out.set_audio_channels(1) } else { out };
+    let out = out
+        .add_stream_map("0:a")
+        .set_audio_bitrate(bitrate(s.audio_kbps));
+    let out = if s.mono {
+        out.set_audio_channels(1)
+    } else {
+        out
+    };
     match format {
         VideoFormat::Mp4 | VideoFormat::Mov | VideoFormat::Mkv => out.set_audio_codec("aac"),
         VideoFormat::Webm => out.set_audio_codec("libopus"),
@@ -298,26 +328,53 @@ fn video_output(out: Output, format: VideoFormat, s: &ConvertSettings, audio: bo
 pub(crate) fn audio_output(out: Output, map: &str, format: AudioFormat, kbps: u32) -> Output {
     let out = out.add_stream_map(map.to_string());
     match format {
-        AudioFormat::Mp3 => out.set_format("mp3").set_audio_codec("libmp3lame").set_audio_bitrate(bitrate(kbps)),
-        AudioFormat::M4a => out.set_format("ipod").set_audio_codec("aac").set_audio_bitrate(bitrate(kbps)).set_format_opt("movflags", "+faststart"),
+        AudioFormat::Mp3 => out
+            .set_format("mp3")
+            .set_audio_codec("libmp3lame")
+            .set_audio_bitrate(bitrate(kbps)),
+        AudioFormat::M4a => out
+            .set_format("ipod")
+            .set_audio_codec("aac")
+            .set_audio_bitrate(bitrate(kbps))
+            .set_format_opt("movflags", "+faststart"),
         AudioFormat::Wav => out.set_format("wav").set_audio_codec("pcm_s16le"),
         AudioFormat::Flac => out.set_format("flac").set_audio_codec("flac"),
-        AudioFormat::Ogg => out.set_format("ogg").set_audio_codec("libopus").set_audio_bitrate(bitrate(kbps)),
+        AudioFormat::Ogg => out
+            .set_format("ogg")
+            .set_audio_codec("libopus")
+            .set_audio_bitrate(bitrate(kbps)),
     }
 }
 
 fn still_output(out: Output, format: StillFormat, s: &ConvertSettings) -> Output {
-    let out = out.set_format("image2").set_format_opt("update", "1").add_stream_map("[v]").set_max_video_frames(1);
+    let out = out
+        .set_format("image2")
+        .set_format_opt("update", "1")
+        .add_stream_map("[v]")
+        .set_max_video_frames(1);
     match format {
-        StillFormat::Jpeg => out.set_video_codec("mjpeg").set_video_qscale(filters::qscale(s.quality)),
-        StillFormat::Png => out.set_video_codec("png").set_video_codec_opt("compression_level", "1"),
+        StillFormat::Jpeg => out
+            .set_video_codec("mjpeg")
+            .set_video_qscale(filters::qscale(s.quality)),
+        StillFormat::Png => out
+            .set_video_codec("png")
+            .set_video_codec_opt("compression_level", "1"),
         StillFormat::Webp => out
             .set_video_codec("libwebp")
             .set_video_codec_opt("lossless", if s.webp_lossless { "1" } else { "0" })
-            .set_video_codec_opt("quality", if s.webp_lossless { "100".to_string() } else { s.quality.min(100).to_string() })
+            .set_video_codec_opt(
+                "quality",
+                if s.webp_lossless {
+                    "100".to_string()
+                } else {
+                    s.quality.min(100).to_string()
+                },
+            )
             .set_video_codec_opt("compression_level", s.effort.webp_level()),
         StillFormat::Bmp => out.set_video_codec("bmp"),
-        StillFormat::Tiff => out.set_video_codec("tiff").set_video_codec_opt("compression_algo", "deflate"),
+        StillFormat::Tiff => out
+            .set_video_codec("tiff")
+            .set_video_codec_opt("compression_algo", "deflate"),
     }
 }
 
@@ -331,7 +388,13 @@ fn still_pix_fmt(format: StillFormat, s: &ConvertSettings) -> &'static str {
     }
 }
 
-fn build_context(input: Input, output: &Path, target: Target, s: &ConvertSettings, info: &MediaInfo) -> anyhow::Result<FfmpegContext> {
+fn build_context(
+    input: Input,
+    output: &Path,
+    target: Target,
+    s: &ConvertSettings,
+    info: &MediaInfo,
+) -> anyhow::Result<FfmpegContext> {
     let builder = FfmpegContext::builder().input(input);
     let out = Output::from(url(output));
     let ctx = match target {
@@ -344,7 +407,10 @@ fn build_context(input: Input, output: &Path, target: Target, s: &ConvertSetting
                 .build()?
         }
         Target::Still(StillFormat::Png) if s.png_colors.is_some() => builder
-            .filter_desc(filters::palette_graph(s.max_height, s.png_colors.unwrap_or(256)))
+            .filter_desc(filters::palette_graph(
+                s.max_height,
+                s.png_colors.unwrap_or(256),
+            ))
             .output(still_output(out, StillFormat::Png, s))
             .build()?,
         Target::Still(format) => builder
@@ -353,8 +419,18 @@ fn build_context(input: Input, output: &Path, target: Target, s: &ConvertSetting
             .build()?,
         Target::Audio(format) => {
             let out = audio_output(out, "0:a", format, s.audio_kbps);
-            let out = if format == AudioFormat::Flac { out.set_audio_codec_opt("compression_level", s.effort.flac_level()) } else { out };
-            builder.output(if s.mono { out.set_audio_channels(1) } else { out }).build()?
+            let out = if format == AudioFormat::Flac {
+                out.set_audio_codec_opt("compression_level", s.effort.flac_level())
+            } else {
+                out
+            };
+            builder
+                .output(if s.mono {
+                    out.set_audio_channels(1)
+                } else {
+                    out
+                })
+                .build()?
         }
     };
     Ok(ctx)
@@ -363,8 +439,12 @@ fn build_context(input: Input, output: &Path, target: Target, s: &ConvertSetting
 fn optimize_png(path: &Path, effort: Effort) -> anyhow::Result<()> {
     let mut opts = oxipng::Options::from_preset(effort.png_preset());
     opts.strip = oxipng::StripChunks::Safe;
-    oxipng::optimize(&oxipng::InFile::Path(path.to_path_buf()), &oxipng::OutFile::from_path(path.to_path_buf()), &opts)
-        .map_err(|e| anyhow::anyhow!("png optimisation: {e}"))?;
+    oxipng::optimize(
+        &oxipng::InFile::Path(path.to_path_buf()),
+        &oxipng::OutFile::from_path(path.to_path_buf()),
+        &opts,
+    )
+    .map_err(|e| anyhow::anyhow!("png optimisation: {e}"))?;
     Ok(())
 }
 
@@ -392,7 +472,7 @@ fn convert_part(
         std::fs::create_dir_all(parent)?;
     }
     if let Target::Anim(format) = target {
-        return animation::encode(
+        let result = animation_backends::encode(
             &AnimationEncodeRequest {
                 input,
                 output,
@@ -401,27 +481,45 @@ fn convert_part(
                 settings: &settings.anim,
                 effort: settings.effort.animation_effort(),
                 origin: AnimationOrigin::Conversion,
+                segmented_webp: false,
+                scheduling: Default::default(),
+                threads: None,
+                trace_id: None,
             },
             on_progress,
             cancel,
         );
+        if result.is_ok() {
+            if let Err(error) = crate::preview_cache::ensure_proxy_for(input, output, cancel) {
+                log::warn!("preview proxy {}: {error:#}", input.display());
+            }
+        }
+        return result;
     }
     on_progress(None);
     let animated_webp = formats::is_webp_path(input) && formats::webp_is_animated(input)?;
     let encoded = if animated_webp {
-        animation::webp_frames_input(input).and_then(|(source, info, producer)| {
-            let r = build_context(source.into(), output, target, settings, &info).and_then(|ctx| match target {
-                Target::Video(_) | Target::Audio(_) => run_tracked(ctx, info.duration_us, on_progress, cancel),
-                Target::Anim(_) => unreachable!("animation targets use AnimationEncoder"),
-                Target::Still(_) => job::run(ctx, None, &mut |_| {}, cancel),
+        animation_backends::webp_frames_input(input).and_then(|(source, info, producer)| {
+            let r = build_context(source.into(), output, target, settings, &info).and_then(|ctx| {
+                match target {
+                    Target::Video(_) | Target::Audio(_) => {
+                        run_tracked(ctx, info.duration_us, on_progress, cancel)
+                    }
+                    Target::Anim(_) => unreachable!("animation targets use AnimationEncoder"),
+                    Target::Still(_) => job::run(ctx, None, &mut |_| {}, cancel),
+                }
             });
-            let produced = producer.join().map_err(|_| anyhow::anyhow!("webp decoder panicked"))?;
+            let produced = producer
+                .join()
+                .map_err(|_| anyhow::anyhow!("webp decoder panicked"))?;
             r.and(produced)
         })
     } else {
         probe(input).and_then(|info| {
             match target {
-                Target::Audio(_) => anyhow::ensure!(info.has_audio(), "{} has no sound", input.display()),
+                Target::Audio(_) => {
+                    anyhow::ensure!(info.has_audio(), "{} has no sound", input.display())
+                }
                 _ => anyhow::ensure!(info.has_video(), "{} has no picture", input.display()),
             }
             let (start, total) = match window {
@@ -455,13 +553,32 @@ fn convert_part(
 
 const SAMPLE_US: i64 = 5_000_000;
 
-pub fn estimate_size(input: &Path, target: Target, settings: &ConvertSettings, cancel: &AtomicBool) -> anyhow::Result<u64> {
+pub fn estimate_size(
+    input: &Path,
+    target: Target,
+    settings: &ConvertSettings,
+    cancel: &AtomicBool,
+) -> anyhow::Result<u64> {
     let dir = tempfile::tempdir()?;
     let output = dir.path().join(format!("estimate.{}", target.extension()));
     let animated_webp = formats::is_webp_path(input) && formats::webp_is_animated(input)?;
-    let duration = if animated_webp || matches!(target, Target::Still(_)) { None } else { probe(input)?.duration_us };
-    let window = duration.filter(|d| *d > 3 * SAMPLE_US).map(|d| ((d - SAMPLE_US) / 3, SAMPLE_US));
-    convert_part(input, &output, target, settings, window, &mut |_| {}, cancel)?;
+    let duration = if animated_webp || matches!(target, Target::Still(_)) {
+        None
+    } else {
+        probe(input)?.duration_us
+    };
+    let window = duration
+        .filter(|d| *d > 3 * SAMPLE_US)
+        .map(|d| ((d - SAMPLE_US) / 3, SAMPLE_US));
+    convert_part(
+        input,
+        &output,
+        target,
+        settings,
+        window,
+        &mut |_| {},
+        cancel,
+    )?;
     let size = std::fs::metadata(&output)?.len();
     Ok(match (window, duration) {
         (Some((_, len)), Some(total)) => (size as f64 * total as f64 / len as f64) as u64,
@@ -543,11 +660,27 @@ mod tests {
         assert_eq!((defaults.quality, defaults.audio_kbps), (100, 256));
         let video = Target::for_kind(MediaKind::Video);
         assert_eq!(video.len(), 17);
-        assert!(video.contains(&Target::Video(VideoFormat::Webm)) && video.contains(&Target::Anim(AnimFormat::Gif)));
-        assert!(video.contains(&Target::Audio(AudioFormat::Mp3)), "sound out of a video");
-        assert_eq!(Target::for_kind(MediaKind::Animation), video[..12], "animations: no sound");
-        assert!(video.contains(&Target::Still(StillFormat::Png)), "first frame as an image");
-        assert_eq!(Target::for_kind(MediaKind::Audio), AudioFormat::ALL.map(Target::Audio).to_vec());
+        assert!(
+            video.contains(&Target::Video(VideoFormat::Webm))
+                && video.contains(&Target::Anim(AnimFormat::Gif))
+        );
+        assert!(
+            video.contains(&Target::Audio(AudioFormat::Mp3)),
+            "sound out of a video"
+        );
+        assert_eq!(
+            Target::for_kind(MediaKind::Animation),
+            video[..12],
+            "animations: no sound"
+        );
+        assert!(
+            video.contains(&Target::Still(StillFormat::Png)),
+            "first frame as an image"
+        );
+        assert_eq!(
+            Target::for_kind(MediaKind::Audio),
+            AudioFormat::ALL.map(Target::Audio).to_vec()
+        );
         let images = Target::for_kind(MediaKind::Image);
         assert_eq!(images, StillFormat::ALL.map(Target::Still).to_vec());
         assert!(StillFormat::Jpeg.has_quality() && !StillFormat::Png.has_quality());
@@ -560,13 +693,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let title = |input: &str, target, name: Option<&str>| {
             let p = output_path(Path::new(input), target, name, dir.path());
-            (naming::parse_path(&p).unwrap().title, p.extension().unwrap().to_string_lossy().into_owned())
+            (
+                naming::parse_path(&p).unwrap().title,
+                p.extension().unwrap().to_string_lossy().into_owned(),
+            )
         };
         let clip = "/x/My clip_2026-10-13_09-05-07.mp4";
-        assert_eq!(title(clip, Target::Anim(AnimFormat::Gif), None), ("My clip".into(), "gif".into()));
-        assert_eq!(title(clip, Target::Video(VideoFormat::Webm), Some("  Short ")), ("Short".into(), "webm".into()));
-        assert_eq!(title(clip, Target::Video(VideoFormat::Mp4), Some("")), ("My clip".into(), "mp4".into()), "empty name: default");
-        assert_eq!(title("/x/holiday.MOV", Target::Video(VideoFormat::Mp4), None).0, "holiday", "files from elsewhere: their stem");
+        assert_eq!(
+            title(clip, Target::Anim(AnimFormat::Gif), None),
+            ("My clip".into(), "gif".into())
+        );
+        assert_eq!(
+            title(clip, Target::Video(VideoFormat::Webm), Some("  Short ")),
+            ("Short".into(), "webm".into())
+        );
+        assert_eq!(
+            title(clip, Target::Video(VideoFormat::Mp4), Some("")),
+            ("My clip".into(), "mp4".into()),
+            "empty name: default"
+        );
+        assert_eq!(
+            title("/x/holiday.MOV", Target::Video(VideoFormat::Mp4), None).0,
+            "holiday",
+            "files from elsewhere: their stem"
+        );
     }
-
 }

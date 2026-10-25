@@ -25,7 +25,9 @@ pub struct RegionOutline {
 
 impl RegionOutline {
     pub fn with_backend(backend: impl RegionOutlineBackend + 'static) -> Self {
-        Self { backend: Box::new(backend) }
+        Self {
+            backend: Box::new(backend),
+        }
     }
 
     pub fn show(&mut self, geometry: OutlineGeometry, appearance: OutlineAppearance) -> bool {
@@ -39,7 +41,9 @@ impl RegionOutline {
 
 impl Default for RegionOutline {
     fn default() -> Self {
-        Self { backend: platform_backend() }
+        Self {
+            backend: platform_backend(),
+        }
     }
 }
 

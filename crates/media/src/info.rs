@@ -26,14 +26,20 @@ impl MediaInfo {
     }
 }
 
-pub fn probe_webp(decoder: &image_webp::WebPDecoder<impl std::io::BufRead + std::io::Seek>) -> MediaInfo {
+pub fn probe_webp(
+    decoder: &image_webp::WebPDecoder<impl std::io::BufRead + std::io::Seek>,
+) -> MediaInfo {
     let (width, height) = decoder.dimensions();
     let duration_ms = decoder.loop_duration();
     MediaInfo {
         duration_us: Some(duration_ms as i64 * 1000).filter(|d| *d > 0),
         width,
         height,
-        fps: if duration_ms > 0 { f64::from(decoder.num_frames()) * 1000.0 / duration_ms as f64 } else { 0.0 },
+        fps: if duration_ms > 0 {
+            f64::from(decoder.num_frames()) * 1000.0 / duration_ms as f64
+        } else {
+            0.0
+        },
         video_codec: Some("webp".into()),
         audio_codec: None,
         audio_streams: 0,
@@ -46,7 +52,8 @@ pub fn has_sound(path: &Path) -> anyhow::Result<bool> {
 
 pub fn probe(path: &Path) -> anyhow::Result<MediaInfo> {
     if mediaa_core::formats::is_webp_path(path) {
-        let decoder = image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(path)?))?;
+        let decoder =
+            image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(path)?))?;
         if decoder.is_animated() {
             return Ok(probe_webp(&decoder));
         }

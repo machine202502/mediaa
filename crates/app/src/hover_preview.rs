@@ -37,13 +37,28 @@ impl HoverPreview {
     fn start(ctx: &egui::Context, path: &Path, duration: Option<f64>, resume: f64) -> Self {
         let interval = preview_interval(duration, MAX_FPS, MAX_FRAMES);
         let resume = resume.max(0.0);
-        let mut passes = vec![Pass { from: resume, until: f64::INFINITY, to: f64::NEG_INFINITY, done: false }];
+        let mut passes = vec![Pass {
+            from: resume,
+            until: f64::INFINITY,
+            to: f64::NEG_INFINITY,
+            done: false,
+        }];
         if resume > 0.0 {
-            passes.push(Pass { from: 0.0, until: resume, to: f64::NEG_INFINITY, done: false });
+            passes.push(Pass {
+                from: 0.0,
+                until: resume,
+                to: f64::NEG_INFINITY,
+                done: false,
+            });
         }
         let (tx, rx) = crossbeam_channel::unbounded::<Msg>();
         let cancel = Arc::new(AtomicBool::new(false));
-        let (p, c, ctx2, runs) = (path.to_path_buf(), cancel.clone(), ctx.clone(), passes.clone());
+        let (p, c, ctx2, runs) = (
+            path.to_path_buf(),
+            cancel.clone(),
+            ctx.clone(),
+            passes.clone(),
+        );
         let decode = move || {
             for (i, pass) in runs.iter().enumerate() {
                 let res = preview_frames(&p, WIDTH, interval, pass.from, &c, &mut |frame| {
@@ -63,7 +78,10 @@ impl HoverPreview {
                 }
             }
         };
-        if let Err(e) = std::thread::Builder::new().name("hover-preview".into()).spawn(decode) {
+        if let Err(e) = std::thread::Builder::new()
+            .name("hover-preview".into())
+            .spawn(decode)
+        {
             log::warn!("preview thread: {e}");
         }
         Self {
@@ -85,7 +103,10 @@ impl HoverPreview {
             match frame {
                 Some(f) => {
                     p.to = p.to.max(f.at);
-                    let img = egui::ColorImage::from_rgba_unmultiplied([f.frame.width as usize, f.frame.height as usize], &f.frame.data);
+                    let img = egui::ColorImage::from_rgba_unmultiplied(
+                        [f.frame.width as usize, f.frame.height as usize],
+                        &f.frame.data,
+                    );
                     let tex = ctx.load_texture("hover-preview", img, egui::TextureOptions::LINEAR);
                     let i = self.frames.partition_point(|(t, _)| *t < f.at);
                     self.frames.insert(i, (f.at, tex));
@@ -97,7 +118,10 @@ impl HoverPreview {
 
     pub fn length(&self) -> f64 {
         let decoded = self.frames.last().map_or(0.0, |(t, _)| t + self.interval);
-        self.duration.unwrap_or(decoded.max(self.resume + self.interval)).max(decoded).max(0.1)
+        self.duration
+            .unwrap_or(decoded.max(self.resume + self.interval))
+            .max(decoded)
+            .max(0.1)
     }
 
     pub fn position(&self) -> f64 {
@@ -150,7 +174,12 @@ pub struct Previews {
 }
 
 impl Previews {
-    pub fn play(&mut self, ctx: &egui::Context, path: &Path, duration: Option<f64>) -> &mut HoverPreview {
+    pub fn play(
+        &mut self,
+        ctx: &egui::Context,
+        path: &Path,
+        duration: Option<f64>,
+    ) -> &mut HoverPreview {
         if self.current.as_ref().is_none_or(|p| p.path != path) {
             self.stop();
             let resume = self.resume.get(path).copied().unwrap_or(0.0);
@@ -186,7 +215,13 @@ mod tests {
         assert!((4.0..4.5).contains(&pos), "{pos}");
         let pos = previews.play(&ctx, b, Some(10.0)).position();
         assert!((7.0..7.5).contains(&pos), "{pos}");
-        assert!(previews.play(&ctx, Path::new("new.mp4"), Some(10.0)).position() < 0.5, "new clips start at 0");
+        assert!(
+            previews
+                .play(&ctx, Path::new("new.mp4"), Some(10.0))
+                .position()
+                < 0.5,
+            "new clips start at 0"
+        );
     }
 
     #[test]
@@ -196,15 +231,28 @@ mod tests {
         let mut pv = HoverPreview::start(&ctx, Path::new("missing.mp4"), Some(10.0), 4.0);
         pv.interval = 0.1;
         pv.passes = vec![
-            Pass { from: 4.0, until: f64::INFINITY, to: 5.0, done: false },
-            Pass { from: 0.0, until: 4.0, to: f64::NEG_INFINITY, done: false },
+            Pass {
+                from: 4.0,
+                until: f64::INFINITY,
+                to: 5.0,
+                done: false,
+            },
+            Pass {
+                from: 0.0,
+                until: 4.0,
+                to: f64::NEG_INFINITY,
+                done: false,
+            },
         ];
         assert!(pv.covered(4.0) && pv.covered(5.1));
         assert!(!pv.covered(6.0), "ahead of the decoder");
         assert!(!pv.covered(1.0), "beginning not decoded yet");
         pv.passes[1].done = true;
         assert!(pv.covered(1.0) && pv.covered(3.99));
-        assert!(!pv.covered(7.0), "a finished second pass does not cover the end");
+        assert!(
+            !pv.covered(7.0),
+            "a finished second pass does not cover the end"
+        );
         pv.passes[0].done = true;
         assert!(pv.covered(9.9));
     }

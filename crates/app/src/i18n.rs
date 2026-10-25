@@ -76,7 +76,11 @@ mod tests {
         assert_eq!(resolve(None, Some("ru-RU")), "ru");
         assert_eq!(resolve(None, Some("ru_RU.UTF-8")), "ru");
         assert_eq!(resolve(None, Some("de-DE")), "en");
-        assert_eq!(resolve(Some("xx"), Some("ru")), "ru", "unknown setting falls back to system");
+        assert_eq!(
+            resolve(Some("xx"), Some("ru")),
+            "ru",
+            "unknown setting falls back to system"
+        );
         assert_eq!(resolve(None, None), "en");
         assert_eq!(resolve(Some("EN-gb"), None), "en");
     }
@@ -89,7 +93,11 @@ mod tests {
         match value {
             toml::Value::Table(t) => {
                 for (k, v) in t {
-                    let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                    let key = if prefix.is_empty() {
+                        k.clone()
+                    } else {
+                        format!("{prefix}.{k}")
+                    };
                     flatten(&key, v, out);
                 }
             }
@@ -101,7 +109,8 @@ mod tests {
 
     fn keys_of(lang: &str) -> BTreeSet<String> {
         let path = crate_dir().join("locales").join(format!("{lang}.toml"));
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let value: toml::Value = toml::from_str(&text).unwrap();
         let mut keys = BTreeSet::new();
         flatten("", &value, &mut keys);
@@ -121,7 +130,8 @@ mod tests {
     fn no_locale_value_mentions_the_engine() {
         for (lang, _) in LANGUAGES {
             let path = crate_dir().join("locales").join(format!("{lang}.toml"));
-            let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             let value: toml::Value = toml::from_str(&text).unwrap();
             let mut values = Vec::new();
             strings_of(&value, &mut values);
@@ -140,7 +150,10 @@ mod tests {
             let other = keys_of(lang);
             let missing: Vec<_> = en.difference(&other).collect();
             let extra: Vec<_> = other.difference(&en).collect();
-            assert!(missing.is_empty() && extra.is_empty(), "{lang}: missing {missing:?}, extra {extra:?}");
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "{lang}: missing {missing:?}, extra {extra:?}"
+            );
         }
     }
 
@@ -170,7 +183,10 @@ mod tests {
                 }
                 let key = src[pos + 4..].split('"').next().unwrap();
                 if !en.contains(key) {
-                    missing.insert(format!("{key} ({})", f.file_name().unwrap().to_string_lossy()));
+                    missing.insert(format!(
+                        "{key} ({})",
+                        f.file_name().unwrap().to_string_lossy()
+                    ));
                 }
             }
         }

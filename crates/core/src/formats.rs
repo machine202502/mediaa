@@ -98,7 +98,13 @@ pub enum AudioFormat {
 }
 
 impl AudioFormat {
-    pub const ALL: [AudioFormat; 5] = [AudioFormat::Mp3, AudioFormat::M4a, AudioFormat::Wav, AudioFormat::Flac, AudioFormat::Ogg];
+    pub const ALL: [AudioFormat; 5] = [
+        AudioFormat::Mp3,
+        AudioFormat::M4a,
+        AudioFormat::Wav,
+        AudioFormat::Flac,
+        AudioFormat::Ogg,
+    ];
 
     pub fn extension(self) -> &'static str {
         match self {
@@ -179,11 +185,19 @@ pub enum MediaKind {
 
 pub const IMAGE_EXTENSIONS: [&str; 7] = ["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"];
 pub const ANIMATION_EXTENSIONS: [&str; 1] = ["gif"];
-pub const VIDEO_EXTENSIONS: [&str; 12] = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "wmv", "flv", "mpg", "mpeg", "ts", "3gp"];
+pub const VIDEO_EXTENSIONS: [&str; 12] = [
+    "mp4", "mkv", "mov", "webm", "avi", "m4v", "wmv", "flv", "mpg", "mpeg", "ts", "3gp",
+];
 pub const AUDIO_EXTENSIONS: [&str; 8] = ["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "wma"];
 
 pub fn all_media_extensions() -> Vec<&'static str> {
-    [&VIDEO_EXTENSIONS[..], &ANIMATION_EXTENSIONS, &IMAGE_EXTENSIONS, &AUDIO_EXTENSIONS].concat()
+    [
+        &VIDEO_EXTENSIONS[..],
+        &ANIMATION_EXTENSIONS,
+        &IMAGE_EXTENSIONS,
+        &AUDIO_EXTENSIONS,
+    ]
+    .concat()
 }
 
 impl MediaKind {

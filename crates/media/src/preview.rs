@@ -1,17 +1,21 @@
 use crate::info::{probe, MediaInfo};
 use ez_ffmpeg::frame_export::{FrameExtractor, PixelLayout, Sampling};
 use ez_ffmpeg::{FfmpegContext, Input, Output};
-use std::sync::Arc;
 use mediaa_core::formats::{is_webp_path, MediaKind};
 use mediaa_core::Frame;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub fn details(path: &Path, kind: MediaKind) -> anyhow::Result<MediaInfo> {
     if kind == MediaKind::Image {
         let (width, height) = image::image_dimensions(path)?;
-        return Ok(MediaInfo { width, height, ..MediaInfo::default() });
+        return Ok(MediaInfo {
+            width,
+            height,
+            ..MediaInfo::default()
+        });
     }
     probe(path)
 }
@@ -38,10 +42,12 @@ pub fn preview_frames(
     cancel: &AtomicBool,
     on_frame: &mut dyn FnMut(PreviewFrame) -> bool,
 ) -> anyhow::Result<()> {
-    if is_webp_path(path) {
-        return webp_frames(path, width, interval, start, cancel, on_frame);
+    let proxy = crate::preview_cache::ready_proxy(path);
+    let source = proxy.as_deref().unwrap_or(path);
+    if is_webp_path(source) {
+        return webp_frames(source, width, interval, start, cancel, on_frame);
     }
-    let mut extractor = FrameExtractor::new(path.to_string_lossy().into_owned())
+    let mut extractor = FrameExtractor::new(source.to_string_lossy().into_owned())
         .pixel(PixelLayout::Rgba32)
         .width(width & !1)
         .sampling(Sampling::EverySec(interval));
@@ -58,7 +64,10 @@ pub fn preview_frames(
         let pts = f.pts_us().unwrap_or(0);
         let at = start + (pts - *first.get_or_insert(pts)) as f64 / 1e6;
         let (w, h) = (f.width(), f.height());
-        if !on_frame(PreviewFrame { at, frame: Frame::new(w, h, f.into_vec()) }) {
+        if !on_frame(PreviewFrame {
+            at,
+            frame: Frame::new(w, h, f.into_vec()),
+        }) {
             break;
         }
     }
@@ -73,10 +82,16 @@ fn webp_frames(
     cancel: &AtomicBool,
     on_frame: &mut dyn FnMut(PreviewFrame) -> bool,
 ) -> anyhow::Result<()> {
-    let mut decoder = image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(path)?))?;
+    let mut decoder =
+        image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(path)?))?;
     let (w, h) = decoder.dimensions();
     let alpha = decoder.has_alpha();
-    let mut buf = vec![0u8; decoder.output_buffer_size().ok_or_else(|| anyhow::anyhow!("webp too large"))?];
+    let mut buf = vec![
+        0u8;
+        decoder
+            .output_buffer_size()
+            .ok_or_else(|| anyhow::anyhow!("webp too large"))?
+    ];
     let target_w = width.min(w).max(1);
     let target_h = ((u64::from(h) * u64::from(target_w)) / u64::from(w.max(1))).max(1) as u32;
     let (mut t, mut next) = (0.0, start);
@@ -84,12 +99,15 @@ fn webp_frames(
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let delay = if decoder.is_animated() { f64::from(decoder.read_frame(&mut buf)?.max(1)) / 1000.0 } else {
+        let delay = if decoder.is_animated() {
+            f64::from(decoder.read_frame(&mut buf)?.max(1)) / 1000.0
+        } else {
             decoder.read_image(&mut buf)?;
             0.0
         };
         if t >= next {
-            let frame = scale_webp_frame(&buf, w, h, alpha, target_w, target_h).ok_or_else(|| anyhow::anyhow!("bad webp frame"))?;
+            let frame = scale_webp_frame(&buf, w, h, alpha, target_w, target_h)
+                .ok_or_else(|| anyhow::anyhow!("bad webp frame"))?;
             if !on_frame(PreviewFrame { at: t, frame }) {
                 break;
             }
@@ -104,10 +122,18 @@ fn scale_webp_frame(buf: &[u8], w: u32, h: u32, alpha: bool, tw: u32, th: u32) -
     use image::{ImageBuffer, Rgb, Rgba};
     let rgba = if alpha {
         let src = ImageBuffer::<Rgba<u8>, &[u8]>::from_raw(w, h, buf)?;
-        if (tw, th) == (w, h) { image::RgbaImage::from_raw(w, h, buf.to_vec())? } else { image::imageops::thumbnail(&src, tw, th) }
+        if (tw, th) == (w, h) {
+            image::RgbaImage::from_raw(w, h, buf.to_vec())?
+        } else {
+            image::imageops::thumbnail(&src, tw, th)
+        }
     } else {
         let src = ImageBuffer::<Rgb<u8>, &[u8]>::from_raw(w, h, buf)?;
-        let small = if (tw, th) == (w, h) { image::RgbImage::from_raw(w, h, buf.to_vec())? } else { image::imageops::thumbnail(&src, tw, th) };
+        let small = if (tw, th) == (w, h) {
+            image::RgbImage::from_raw(w, h, buf.to_vec())?
+        } else {
+            image::imageops::thumbnail(&src, tw, th)
+        };
         image::DynamicImage::ImageRgb8(small).into_rgba8()
     };
     Some(Frame::from_image(rgba))
@@ -132,15 +158,36 @@ pub fn decode_audio(
     cancel: Arc<AtomicBool>,
     sink: impl FnMut(&[f32]) -> bool + Send + 'static,
 ) -> anyhow::Result<()> {
-    let graph = format!("[0:a]{},aresample={rate},aformat=sample_fmts=flt:channel_layouts=stereo[a]", atempo_chain(speed));
+    let graph = format!(
+        "[0:a]{},aresample={rate},aformat=sample_fmts=flt:channel_layouts=stereo[a]",
+        atempo_chain(speed)
+    );
     decode_pcm(path, start, &graph, cancel, sink)
 }
 
-pub fn decode_mono(path: &Path, start: f64, rate: u32, cancel: Arc<AtomicBool>, sink: impl FnMut(&[f32]) -> bool + Send + 'static) -> anyhow::Result<()> {
-    decode_pcm(path, start, &format!("[0:a]aresample={rate},aformat=sample_fmts=flt:channel_layouts=mono[a]"), cancel, sink)
+pub fn decode_mono(
+    path: &Path,
+    start: f64,
+    rate: u32,
+    cancel: Arc<AtomicBool>,
+    sink: impl FnMut(&[f32]) -> bool + Send + 'static,
+) -> anyhow::Result<()> {
+    decode_pcm(
+        path,
+        start,
+        &format!("[0:a]aresample={rate},aformat=sample_fmts=flt:channel_layouts=mono[a]"),
+        cancel,
+        sink,
+    )
 }
 
-fn decode_pcm(path: &Path, start: f64, graph: &str, cancel: Arc<AtomicBool>, mut sink: impl FnMut(&[f32]) -> bool + Send + 'static) -> anyhow::Result<()> {
+fn decode_pcm(
+    path: &Path,
+    start: f64,
+    graph: &str,
+    cancel: Arc<AtomicBool>,
+    mut sink: impl FnMut(&[f32]) -> bool + Send + 'static,
+) -> anyhow::Result<()> {
     let mut input = Input::from(path.to_string_lossy().into_owned());
     if start > 0.0 {
         input = input.set_start_time_us((start * 1e6) as i64);
@@ -153,7 +200,12 @@ fn decode_pcm(path: &Path, start: f64, graph: &str, cancel: Arc<AtomicBool>, mut
         }
         rest.extend_from_slice(bytes);
         let whole = rest.len() / 4 * 4;
-        let samples: Vec<f32> = rest[..whole].as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes(*b)).collect();
+        let samples: Vec<f32> = rest[..whole]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
         rest.drain(..whole);
         if !sink(&samples) {
             c.store(true, Ordering::Relaxed);
@@ -163,7 +215,14 @@ fn decode_pcm(path: &Path, start: f64, graph: &str, cancel: Arc<AtomicBool>, mut
     .set_format("f32le")
     .set_audio_codec("pcm_f32le")
     .add_stream_map("[a]");
-    let mut job = Some(FfmpegContext::builder().input(input).filter_desc(graph).output(output).build()?.start()?);
+    let mut job = Some(
+        FfmpegContext::builder()
+            .input(input)
+            .filter_desc(graph)
+            .output(output)
+            .build()?
+            .start()?,
+    );
     loop {
         if cancel.load(Ordering::Relaxed) {
             if let Some(job) = job.take() {

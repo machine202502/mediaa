@@ -7,15 +7,17 @@ use mediaa_core::source::AudioSource;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 pub fn system_audio_supported() -> bool {
     cfg!(any(target_os = "windows", target_os = "macos"))
 }
 
 pub fn default_input_device() -> Option<String> {
-    cpal::default_host().default_input_device().map(|d| d.to_string())
+    cpal::default_host()
+        .default_input_device()
+        .map(|d| d.to_string())
 }
 
 pub fn input_devices() -> Vec<String> {
@@ -174,35 +176,47 @@ struct OutShared {
 
 impl AudioOut {
     pub fn open() -> anyhow::Result<AudioOut> {
-        let device = cpal::default_host().default_output_device().ok_or_else(|| anyhow!("no audio output device"))?;
+        let device = cpal::default_host()
+            .default_output_device()
+            .ok_or_else(|| anyhow!("no audio output device"))?;
         let supported = device.default_output_config()?;
         let format = supported.sample_format();
         let config: cpal::StreamConfig = supported.config();
-        let shared = Arc::new(OutShared { volume: AtomicU32::new(1.0f32.to_bits()), ..Default::default() });
+        let shared = Arc::new(OutShared {
+            volume: AtomicU32::new(1.0f32.to_bits()),
+            ..Default::default()
+        });
         let (ready_tx, ready_rx) = bounded::<anyhow::Result<()>>(1);
         let (stop_tx, stop_rx) = bounded::<()>(1);
         let s = shared.clone();
-        let thread = std::thread::Builder::new().name("audio-out".into()).spawn(move || {
-            let stream = match format {
-                cpal::SampleFormat::F32 => build_out::<f32>(&device, &config, s),
-                cpal::SampleFormat::I16 => build_out::<i16>(&device, &config, s),
-                cpal::SampleFormat::I32 => build_out::<i32>(&device, &config, s),
-                cpal::SampleFormat::U16 => build_out::<u16>(&device, &config, s),
-                other => Err(anyhow!("unsupported sample format {other}")),
-            };
-            match stream.and_then(|st| st.play().map(|_| st).map_err(Into::into)) {
-                Ok(st) => {
-                    let _ = ready_tx.send(Ok(()));
-                    let _ = stop_rx.recv();
-                    drop(st);
+        let thread = std::thread::Builder::new()
+            .name("audio-out".into())
+            .spawn(move || {
+                let stream = match format {
+                    cpal::SampleFormat::F32 => build_out::<f32>(&device, &config, s),
+                    cpal::SampleFormat::I16 => build_out::<i16>(&device, &config, s),
+                    cpal::SampleFormat::I32 => build_out::<i32>(&device, &config, s),
+                    cpal::SampleFormat::U16 => build_out::<u16>(&device, &config, s),
+                    other => Err(anyhow!("unsupported sample format {other}")),
+                };
+                match stream.and_then(|st| st.play().map(|_| st).map_err(Into::into)) {
+                    Ok(st) => {
+                        let _ = ready_tx.send(Ok(()));
+                        let _ = stop_rx.recv();
+                        drop(st);
+                    }
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(e));
+                    }
                 }
-                Err(e) => {
-                    let _ = ready_tx.send(Err(e));
-                }
-            }
-        })?;
+            })?;
         ready_rx.recv().context("audio output thread exited")??;
-        Ok(AudioOut { shared, rate: config.sample_rate, stop_tx: Some(stop_tx), thread: Some(thread) })
+        Ok(AudioOut {
+            shared,
+            rate: config.sample_rate,
+            stop_tx: Some(stop_tx),
+            thread: Some(thread),
+        })
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -210,7 +224,11 @@ impl AudioOut {
     }
 
     pub fn push(&self, samples: &[f32]) {
-        self.shared.queue.lock().expect("audio queue").extend(samples);
+        self.shared
+            .queue
+            .lock()
+            .expect("audio queue")
+            .extend(samples);
     }
 
     pub fn queued_secs(&self) -> f64 {
@@ -226,7 +244,9 @@ impl AudioOut {
     }
 
     pub fn set_volume(&self, volume: f32) {
-        self.shared.volume.store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        self.shared
+            .volume
+            .store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -241,7 +261,11 @@ impl Drop for AudioOut {
     }
 }
 
-fn build_out<T>(device: &cpal::Device, config: &cpal::StreamConfig, shared: Arc<OutShared>) -> anyhow::Result<cpal::Stream>
+fn build_out<T>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    shared: Arc<OutShared>,
+) -> anyhow::Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32>,
 {
@@ -253,7 +277,14 @@ where
             let paused = shared.paused.load(Ordering::Relaxed);
             let mut queue = shared.queue.lock().expect("audio queue");
             for frame in out.chunks_mut(channels) {
-                let (l, r) = if paused { (0.0, 0.0) } else { (queue.pop_front().unwrap_or(0.0), queue.pop_front().unwrap_or(0.0)) };
+                let (l, r) = if paused {
+                    (0.0, 0.0)
+                } else {
+                    (
+                        queue.pop_front().unwrap_or(0.0),
+                        queue.pop_front().unwrap_or(0.0),
+                    )
+                };
                 for (i, s) in frame.iter_mut().enumerate() {
                     let v = match (channels, i) {
                         (1, _) => (l + r) / 2.0,
@@ -277,12 +308,18 @@ fn confirmation_samples(target_rate: u32) -> anyhow::Result<Vec<f32>> {
     let mut reader = hound::WavReader::new(Cursor::new(CONFIRMATION_WAV))?;
     let spec = reader.spec();
     anyhow::ensure!(
-        spec.channels == 1 && spec.sample_format == hound::SampleFormat::Int && spec.bits_per_sample == 16,
+        spec.channels == 1
+            && spec.sample_format == hound::SampleFormat::Int
+            && spec.bits_per_sample == 16,
         "confirmation sound must be mono 16-bit PCM"
     );
-    let source: Vec<f32> = reader.samples::<i16>().map(|sample| sample.map(|v| f32::from(v) / 32_768.0)).collect::<Result<_, _>>()?;
+    let source: Vec<f32> = reader
+        .samples::<i16>()
+        .map(|sample| sample.map(|v| f32::from(v) / 32_768.0))
+        .collect::<Result<_, _>>()?;
     anyhow::ensure!(!source.is_empty(), "confirmation sound is empty");
-    let count = (source.len() as u64 * u64::from(target_rate) / u64::from(spec.sample_rate)).max(1) as usize;
+    let count = (source.len() as u64 * u64::from(target_rate) / u64::from(spec.sample_rate)).max(1)
+        as usize;
     let mut output = Vec::with_capacity(count * 2);
     for i in 0..count {
         let position = i as f64 * f64::from(spec.sample_rate) / f64::from(target_rate);
@@ -326,6 +363,8 @@ mod tests {
         let samples = confirmation_samples(48_000).unwrap();
         assert_eq!(samples.len() % 2, 0);
         assert!(samples.len() > 35_000);
-        assert!(samples.iter().all(|sample| sample.is_finite() && sample.abs() <= 0.2));
+        assert!(samples
+            .iter()
+            .all(|sample| sample.is_finite() && sample.abs() <= 0.2));
     }
 }

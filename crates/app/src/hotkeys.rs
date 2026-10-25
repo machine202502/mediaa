@@ -1,8 +1,8 @@
 use crossbeam_channel::Receiver;
 use eframe::egui;
-use mediaa_core::settings::HotkeySettings;
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use mediaa_core::settings::HotkeySettings;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,7 +30,12 @@ fn standalone(token: &str) -> bool {
 
 fn modifier_prefix(m: egui::Modifiers) -> String {
     let mut s = String::new();
-    for (on, name) in [(m.ctrl, "Ctrl"), (m.alt, "Alt"), (m.shift, "Shift"), (m.mac_cmd, "Super")] {
+    for (on, name) in [
+        (m.ctrl, "Ctrl"),
+        (m.alt, "Alt"),
+        (m.shift, "Shift"),
+        (m.mac_cmd, "Super"),
+    ] {
         if on {
             s.push_str(name);
             s.push('+');
@@ -63,7 +68,9 @@ fn pretty(token: &str) -> String {
         "SCROLLLOCK" => "ScrollLock".into(),
         t if t.len() > 1 && !t.starts_with('F') => {
             let mut c = t.chars();
-            c.next().map(|f| f.to_string() + &c.as_str().to_lowercase()).unwrap_or_default()
+            c.next()
+                .map(|f| f.to_string() + &c.as_str().to_lowercase())
+                .unwrap_or_default()
         }
         t => t.to_string(),
     }
@@ -106,7 +113,10 @@ impl Hotkeys {
         let mut problems = Vec::new();
         for (text, action) in [
             (&settings.region_screenshot, HotkeyAction::RegionScreenshot),
-            (&settings.fullscreen_screenshot, HotkeyAction::FullscreenScreenshot),
+            (
+                &settings.fullscreen_screenshot,
+                HotkeyAction::FullscreenScreenshot,
+            ),
             (&settings.start_video, HotkeyAction::StartVideo),
             (&settings.start_audio, HotkeyAction::StartAudio),
             (&settings.stop_recording, HotkeyAction::StopRecording),
@@ -115,7 +125,8 @@ impl Hotkeys {
                 continue;
             }
             match parse(text) {
-                Err(e) => problems.push(rust_i18n::t!("settings.hk_parse_error", key = text, error = e).into()),
+                Err(e) => problems
+                    .push(rust_i18n::t!("settings.hk_parse_error", key = text, error = e).into()),
                 Ok(hk) => match self.manager.register(hk) {
                     Ok(()) => self.registered.push((hk, action)),
                     Err(e) => {
@@ -138,22 +149,52 @@ mod tests {
         for s in ["PrintScreen", "Shift+PrintScreen", "Alt+Shift+R"] {
             assert!(parse(s).is_ok(), "{s}");
         }
-        assert_ne!(parse("PrintScreen").unwrap().id(), parse("Shift+PrintScreen").unwrap().id());
+        assert_ne!(
+            parse("PrintScreen").unwrap().id(),
+            parse("Shift+PrintScreen").unwrap().id()
+        );
     }
 
     fn mods(ctrl: bool, alt: bool, shift: bool) -> egui::Modifiers {
-        egui::Modifiers { ctrl, alt, shift, ..Default::default() }
+        egui::Modifiers {
+            ctrl,
+            alt,
+            shift,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn captured_combinations() {
-        assert_eq!(combo_from_key(mods(true, false, true), egui::Key::S).as_deref(), Some("Ctrl+Shift+S"));
-        assert_eq!(combo_from_key(mods(false, true, false), egui::Key::ArrowUp).as_deref(), Some("Alt+Up"));
-        assert_eq!(combo_from_key(mods(false, false, false), egui::Key::S), None, "letters need a modifier");
-        assert_eq!(combo_from_key(mods(false, false, false), egui::Key::F9).as_deref(), Some("F9"));
-        assert_eq!(combo_from_key(mods(true, false, false), egui::Key::Escape), None);
-        assert_eq!(combo_from_token(mods(false, false, false), "PRINTSCREEN").as_deref(), Some("PrintScreen"));
-        assert_eq!(combo_from_token(mods(false, false, true), "PRINTSCREEN").as_deref(), Some("Shift+PrintScreen"));
+        assert_eq!(
+            combo_from_key(mods(true, false, true), egui::Key::S).as_deref(),
+            Some("Ctrl+Shift+S")
+        );
+        assert_eq!(
+            combo_from_key(mods(false, true, false), egui::Key::ArrowUp).as_deref(),
+            Some("Alt+Up")
+        );
+        assert_eq!(
+            combo_from_key(mods(false, false, false), egui::Key::S),
+            None,
+            "letters need a modifier"
+        );
+        assert_eq!(
+            combo_from_key(mods(false, false, false), egui::Key::F9).as_deref(),
+            Some("F9")
+        );
+        assert_eq!(
+            combo_from_key(mods(true, false, false), egui::Key::Escape),
+            None
+        );
+        assert_eq!(
+            combo_from_token(mods(false, false, false), "PRINTSCREEN").as_deref(),
+            Some("PrintScreen")
+        );
+        assert_eq!(
+            combo_from_token(mods(false, false, true), "PRINTSCREEN").as_deref(),
+            Some("Shift+PrintScreen")
+        );
     }
 
     #[test]

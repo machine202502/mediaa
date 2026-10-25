@@ -1,7 +1,7 @@
+use crate::icon::{badge, Badge};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use rust_i18n::t;
-use crate::icon::{badge, Badge};
 use tray_icon::menu::{IconMenuItem, Menu, MenuEvent, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
@@ -55,7 +55,13 @@ impl Tray {
             .iter()
             .map(|(id, cmd)| (*cmd, IconMenuItem::with_id(*id, *id, true, None, None)))
             .collect();
-        let get = |c: TrayCommand| &items.iter().find(|(x, _)| *x == c).expect("all items exist").1;
+        let get = |c: TrayCommand| {
+            &items
+                .iter()
+                .find(|(x, _)| *x == c)
+                .expect("all items exist")
+                .1
+        };
         let menu = Menu::new();
         menu.append_items(&[
             get(TrayCommand::ShowWindow),
@@ -81,13 +87,22 @@ impl Tray {
 
         let (tx, rx) = crossbeam_channel::unbounded();
         install_handlers(tx, ctx.clone());
-        let mut tray = Tray { icon: tray, items, applied: None };
+        let mut tray = Tray {
+            icon: tray,
+            items,
+            applied: None,
+        };
         tray.set_state(TrayState::Idle);
         Ok((tray, rx))
     }
 
     fn item(&self, c: TrayCommand) -> &IconMenuItem {
-        &self.items.iter().find(|(x, _)| *x == c).expect("all items exist").1
+        &self
+            .items
+            .iter()
+            .find(|(x, _)| *x == c)
+            .expect("all items exist")
+            .1
     }
 
     pub fn set_state(&mut self, state: TrayState) {
@@ -95,18 +110,33 @@ impl Tray {
         if self.applied.as_ref() == Some(&(state, locale.clone())) {
             return;
         }
-        let was_active = self.applied.as_ref().is_some_and(|(s, _)| matches!(s, TrayState::Recording | TrayState::Paused));
         self.applied = Some((state, locale));
         let active = matches!(state, TrayState::Recording | TrayState::Paused);
         for (cmd, text, enabled) in [
             (TrayCommand::ShowWindow, t!("tray.show"), true),
             (TrayCommand::RegionScreenshot, t!("tray.region"), true),
-            (TrayCommand::FullscreenScreenshot, t!("tray.fullscreen"), true),
-            (TrayCommand::StartRecording, t!("tray.start"), state == TrayState::Idle),
-            (TrayCommand::StartAudio, t!("tray.audio"), state == TrayState::Idle),
+            (
+                TrayCommand::FullscreenScreenshot,
+                t!("tray.fullscreen"),
+                true,
+            ),
+            (
+                TrayCommand::StartRecording,
+                t!("tray.start"),
+                state == TrayState::Idle,
+            ),
+            (
+                TrayCommand::StartAudio,
+                t!("tray.audio"),
+                state == TrayState::Idle,
+            ),
             (
                 TrayCommand::PauseResume,
-                if state == TrayState::Paused { t!("tray.resume") } else { t!("tray.pause") },
+                if state == TrayState::Paused {
+                    t!("tray.resume")
+                } else {
+                    t!("tray.pause")
+                },
                 active,
             ),
             (TrayCommand::StopAndSave, t!("tray.stop"), active),
@@ -119,9 +149,18 @@ impl Tray {
         }
         let mark = |b: Badge| tray_icon::menu::Icon::from_rgba(badge(b, 32), 32, 32).ok();
         let idle = state == TrayState::Idle;
-        self.item(TrayCommand::RegionScreenshot).set_icon(if idle { mark(Badge::Area) } else { None });
-        self.item(TrayCommand::StartRecording).set_icon(if idle { mark(Badge::Record) } else { None });
-        self.item(TrayCommand::StopAndSave).set_icon(if active { mark(Badge::Stop) } else { None });
+        self.item(TrayCommand::RegionScreenshot).set_icon(if idle {
+            mark(Badge::Area)
+        } else {
+            None
+        });
+        self.item(TrayCommand::StartRecording).set_icon(if idle {
+            mark(Badge::Record)
+        } else {
+            None
+        });
+        self.item(TrayCommand::StopAndSave)
+            .set_icon(if active { mark(Badge::Stop) } else { None });
         let tip = match state {
             TrayState::Idle => "MediaA".to_string(),
             TrayState::Recording => format!("MediaA — {}", t!("record.recording")),
@@ -129,11 +168,14 @@ impl Tray {
             TrayState::Saving => format!("MediaA — {}", t!("record.saving")),
         };
         let _ = self.icon.set_tooltip(Some(tip));
-        if active != was_active {
-            let rgba = if active { crate::icon::rgba_recording(32) } else { crate::icon::rgba(32) };
-            if let Ok(icon) = Icon::from_rgba(rgba, 32, 32) {
-                let _ = self.icon.set_icon(Some(icon));
-            }
+        let rgba = match state {
+            TrayState::Idle => crate::icon::rgba(32),
+            TrayState::Recording => crate::icon::rgba_status(32, crate::icon::StatusDot::Recording),
+            TrayState::Paused => crate::icon::rgba_status(32, crate::icon::StatusDot::Paused),
+            TrayState::Saving => crate::icon::rgba_status(32, crate::icon::StatusDot::Saving),
+        };
+        if let Ok(icon) = Icon::from_rgba(rgba, 32, 32) {
+            let _ = self.icon.set_icon(Some(icon));
         }
     }
 }
@@ -153,7 +195,10 @@ fn install_handlers(tx: Sender<TrayCommand>, ctx: egui::Context) {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
-            } | TrayIconEvent::DoubleClick { button: MouseButton::Left, .. }
+            } | TrayIconEvent::DoubleClick {
+                button: MouseButton::Left,
+                ..
+            }
         );
         if left_click {
             let _ = tx.send(TrayCommand::PrimaryClick);

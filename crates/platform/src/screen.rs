@@ -77,7 +77,9 @@ pub fn monitors() -> anyhow::Result<Vec<MonitorInfo>> {
 }
 
 pub fn monitor_at(x: i32, y: i32) -> Option<u32> {
-    xcap::Monitor::from_point(x, y).ok().and_then(|m| m.id().ok())
+    xcap::Monitor::from_point(x, y)
+        .ok()
+        .and_then(|m| m.id().ok())
 }
 
 fn find_monitor(id: u32) -> anyhow::Result<xcap::Monitor> {
@@ -167,7 +169,10 @@ impl MonitorSource {
             info.name.clone()
         };
         let (rx, ry) = region.map_or((0, 0), |r| (r.x, r.y));
-        let origin = (info.x + logical_to_desktop(rx, info.scale), info.y + logical_to_desktop(ry, info.scale));
+        let origin = (
+            info.x + logical_to_desktop(rx, info.scale),
+            info.y + logical_to_desktop(ry, info.scale),
+        );
         let cursor = with_cursor.then_some((origin, info.scale));
         Ok(Self {
             monitor,
@@ -221,7 +226,10 @@ impl WindowSource {
         let window = find_window(window_id)?;
         let first = window.capture_image().context("window capture failed")?;
         let size = (first.width() & !1, first.height() & !1);
-        anyhow::ensure!(size.0 >= 16 && size.1 >= 16, "window is too small to record");
+        anyhow::ensure!(
+            size.0 >= 16 && size.1 >= 16,
+            "window is too small to record"
+        );
         Ok(Self {
             name: window.title().unwrap_or_else(|_| "Window".into()),
             window,
@@ -261,18 +269,29 @@ fn logical_to_desktop(v: i32, scale: f32) -> i32 {
 }
 
 fn draw_cursor(frame: &mut Frame, origin: (i32, i32), scale: f32) {
-    let Some(c) = crate::cursor::current() else { return };
-    let k = if cfg!(target_os = "macos") { scale } else { 1.0 };
+    let Some(c) = crate::cursor::current() else {
+        return;
+    };
+    let k = if cfg!(target_os = "macos") {
+        scale
+    } else {
+        1.0
+    };
     let x = ((c.x - origin.0) as f32 * k).round() as i32;
     let y = ((c.y - origin.1) as f32 * k).round() as i32;
     mediaa_core::cursor::draw(frame, &c.image, x, y);
 }
 
-pub fn monitor_source(monitor_id: u32, region: Option<Rect>, with_cursor: bool) -> anyhow::Result<Box<dyn FrameSource>> {
+pub fn monitor_source(
+    monitor_id: u32,
+    region: Option<Rect>,
+    with_cursor: bool,
+) -> anyhow::Result<Box<dyn FrameSource>> {
     let src = MonitorSource::new(monitor_id, region, with_cursor)?;
     #[cfg(windows)]
-    let fast = crate::wgc::WgcSource::monitor(monitor_id, src.name(), src.size(), src.region, with_cursor)
-        .map(|s| Box::new(s) as Box<dyn FrameSource>);
+    let fast =
+        crate::wgc::WgcSource::monitor(monitor_id, src.name(), src.size(), src.region, with_cursor)
+            .map(|s| Box::new(s) as Box<dyn FrameSource>);
     #[cfg(target_os = "linux")]
     let fast = if crate::x11::X11Source::available() {
         let info = monitor_info(&src.monitor, 0)?;
@@ -281,10 +300,12 @@ pub fn monitor_source(monitor_id: u32, region: Option<Rect>, with_cursor: bool) 
         crate::x11::X11Source::new(crate::x11::Target::Area(area), src.name(), with_cursor)
             .map(|s| Box::new(s) as Box<dyn FrameSource>)
     } else {
-        crate::stream::StreamSource::monitor(&src.monitor, src.name(), src.region).map(|s| Box::new(s) as Box<dyn FrameSource>)
+        crate::stream::StreamSource::monitor(&src.monitor, src.name(), src.region)
+            .map(|s| Box::new(s) as Box<dyn FrameSource>)
     };
     #[cfg(target_os = "macos")]
-    let fast = crate::stream::StreamSource::monitor(&src.monitor, src.name(), src.region).map(|s| Box::new(s) as Box<dyn FrameSource>);
+    let fast = crate::stream::StreamSource::monitor(&src.monitor, src.name(), src.region)
+        .map(|s| Box::new(s) as Box<dyn FrameSource>);
     #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     match fast {
         Ok(s) => return Ok(s),
@@ -296,7 +317,9 @@ pub fn monitor_source(monitor_id: u32, region: Option<Rect>, with_cursor: bool) 
 pub fn window_source(window_id: u32, with_cursor: bool) -> anyhow::Result<Box<dyn FrameSource>> {
     #[cfg(windows)]
     {
-        let name = find_window(window_id)?.title().unwrap_or_else(|_| "Window".into());
+        let name = find_window(window_id)?
+            .title()
+            .unwrap_or_else(|_| "Window".into());
         match crate::wgc::WgcSource::window(window_id, name, with_cursor) {
             Ok(wgc) => return Ok(Box::new(wgc)),
             Err(e) => log::warn!("{e:#}; recording with screenshots instead"),
@@ -304,7 +327,9 @@ pub fn window_source(window_id: u32, with_cursor: bool) -> anyhow::Result<Box<dy
     }
     #[cfg(target_os = "linux")]
     if crate::x11::X11Source::available() {
-        let name = find_window(window_id)?.title().unwrap_or_else(|_| "Window".into());
+        let name = find_window(window_id)?
+            .title()
+            .unwrap_or_else(|_| "Window".into());
         match crate::x11::X11Source::new(crate::x11::Target::Window(window_id), name, with_cursor) {
             Ok(s) => return Ok(Box::new(s)),
             Err(e) => log::warn!("{e:#}; recording with screenshots instead"),

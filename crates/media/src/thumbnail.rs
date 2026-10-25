@@ -9,18 +9,25 @@ pub fn thumbnail(path: &Path, kind: MediaKind, max_size: u32) -> anyhow::Result<
         let img = image::open(path)?.thumbnail(max_size, max_size).to_rgba8();
         return Ok(Frame::from_image(img));
     }
-    if mediaa_core::formats::is_webp_path(path) {
+    let proxy = crate::preview_cache::ready_proxy(path);
+    let source = proxy.as_deref().unwrap_or(path);
+    if mediaa_core::formats::is_webp_path(source) {
         let mut first = None;
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        crate::preview::preview_frames(path, max_size, 1.0, 0.0, &cancel, &mut |f| {
+        crate::preview::preview_frames(source, max_size, 1.0, 0.0, &cancel, &mut |f| {
             first = Some(f.frame);
             false
         })?;
         let f = first.ok_or_else(|| anyhow::anyhow!("no frames in {}", path.display()))?;
-        let img = image::RgbaImage::from_raw(f.width, f.height, f.data).ok_or_else(|| anyhow::anyhow!("bad frame buffer"))?;
-        return Ok(Frame::from_image(image::DynamicImage::ImageRgba8(img).thumbnail(max_size, max_size).to_rgba8()));
+        let img = image::RgbaImage::from_raw(f.width, f.height, f.data)
+            .ok_or_else(|| anyhow::anyhow!("bad frame buffer"))?;
+        return Ok(Frame::from_image(
+            image::DynamicImage::ImageRgba8(img)
+                .thumbnail(max_size, max_size)
+                .to_rgba8(),
+        ));
     }
-    let frame = FrameExtractor::new(path.to_string_lossy().into_owned())
+    let frame = FrameExtractor::new(source.to_string_lossy().into_owned())
         .pixel(PixelLayout::Rgba32)
         .max_frames(1)
         .frames()?

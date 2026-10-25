@@ -61,7 +61,11 @@ pub fn palette(ui: &egui::Ui) -> Palette {
 }
 
 fn visuals(p: &Palette, dark: bool) -> Visuals {
-    let mut v = if dark { Visuals::dark() } else { Visuals::light() };
+    let mut v = if dark {
+        Visuals::dark()
+    } else {
+        Visuals::light()
+    };
     let r = CornerRadius::same(6);
     v.panel_fill = p.bg;
     v.window_fill = p.card;
@@ -101,13 +105,24 @@ pub fn dark_visuals() -> Visuals {
     visuals(&DARK, true)
 }
 
-const SYMBOL_FONTS: [&str; 4] = ["Segoe UI Symbol", "Noto Sans Symbols 2", "Apple Symbols", "DejaVu Sans"];
+const SYMBOL_FONTS: [&str; 4] = [
+    "Segoe UI Symbol",
+    "Noto Sans Symbols 2",
+    "Apple Symbols",
+    "DejaVu Sans",
+];
 
 fn symbol_font() -> Option<Vec<u8>> {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
-    let families: Vec<fontdb::Family> = SYMBOL_FONTS.iter().map(|f| fontdb::Family::Name(f)).collect();
-    let id = db.query(&fontdb::Query { families: &families, ..Default::default() })?;
+    let families: Vec<fontdb::Family> = SYMBOL_FONTS
+        .iter()
+        .map(|f| fontdb::Family::Name(f))
+        .collect();
+    let id = db.query(&fontdb::Query {
+        families: &families,
+        ..Default::default()
+    })?;
     db.with_face_data(id, |data, _| data.to_vec())
 }
 
@@ -115,9 +130,16 @@ pub fn install(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     if let Some(data) = symbol_font() {
-        fonts.font_data.insert("symbols".into(), std::sync::Arc::new(egui::FontData::from_owned(data)));
+        fonts.font_data.insert(
+            "symbols".into(),
+            std::sync::Arc::new(egui::FontData::from_owned(data)),
+        );
         for family in [FontFamily::Proportional, FontFamily::Monospace] {
-            fonts.families.entry(family).or_default().push("symbols".into());
+            fonts
+                .families
+                .entry(family)
+                .or_default()
+                .push("symbols".into());
         }
     }
     ctx.set_fonts(fonts);
@@ -131,11 +153,23 @@ pub fn install(ctx: &egui::Context) {
         style.spacing.slider_width = 170.0;
         style.spacing.combo_width = 190.0;
         style.text_styles = [
-            (TextStyle::Heading, FontId::new(18.0, FontFamily::Proportional)),
+            (
+                TextStyle::Heading,
+                FontId::new(18.0, FontFamily::Proportional),
+            ),
             (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
-            (TextStyle::Button, FontId::new(13.0, FontFamily::Proportional)),
-            (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
-            (TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace)),
+            (
+                TextStyle::Button,
+                FontId::new(13.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Small,
+                FontId::new(11.0, FontFamily::Proportional),
+            ),
+            (
+                TextStyle::Monospace,
+                FontId::new(12.0, FontFamily::Monospace),
+            ),
         ]
         .into();
     });
@@ -169,24 +203,36 @@ pub fn section(ui: &mut egui::Ui, icon: &str, title: &str) {
 
 pub fn hint(ui: &mut egui::Ui, text: impl Into<String>) {
     let p = palette(ui);
-    ui.label(egui::RichText::new(text.into()).size(11.5).color(p.text_weak));
+    ui.label(
+        egui::RichText::new(text.into())
+            .size(11.5)
+            .color(p.text_weak),
+    );
 }
 
 fn sized(btn: egui::Button<'static>) -> egui::Button<'static> {
-    btn.corner_radius(CornerRadius::same(6)).min_size(egui::vec2(0.0, 28.0))
+    btn.corner_radius(CornerRadius::same(6))
+        .min_size(egui::vec2(0.0, 28.0))
 }
 
 pub fn primary(ui: &egui::Ui, icon: &str, text: &str) -> egui::Button<'static> {
     let p = palette(ui);
     sized(
-        egui::Button::new(egui::RichText::new(format!("{icon}  {text}")).color(p.on_accent).strong())
-            .fill(p.accent),
+        egui::Button::new(
+            egui::RichText::new(format!("{icon}  {text}"))
+                .color(p.on_accent)
+                .strong(),
+        )
+        .fill(p.accent),
     )
 }
 
 pub fn danger(ui: &egui::Ui, icon: &str, text: &str) -> egui::Button<'static> {
     let p = palette(ui);
-    sized(egui::Button::new(egui::RichText::new(format!("{icon}  {text}")).color(Color32::WHITE)).fill(p.danger))
+    sized(
+        egui::Button::new(egui::RichText::new(format!("{icon}  {text}")).color(Color32::WHITE))
+            .fill(p.danger),
+    )
 }
 
 pub fn secondary(icon: &str, text: &str) -> egui::Button<'static> {
@@ -201,18 +247,35 @@ pub fn popup_title(ui: &mut egui::Ui, title: &str) {
 
 pub fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, danger: bool) -> egui::Response {
     let p = palette(ui);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
     let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     if ui.is_rect_visible(rect) {
         let color = if danger { p.danger } else { p.text };
         if resp.hovered() || resp.has_focus() {
-            let tint = if danger { p.danger.gamma_multiply(0.15) } else { p.accent_soft };
+            let tint = if danger {
+                p.danger.gamma_multiply(0.15)
+            } else {
+                p.accent_soft
+            };
             ui.painter().rect_filled(rect, CornerRadius::same(6), tint);
         }
         let font = FontId::proportional(13.5);
-        ui.painter().text(rect.left_center() + egui::vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, icon, FontId::proportional(15.0), color);
-        ui.painter().text(rect.left_center() + egui::vec2(36.0, 0.0), egui::Align2::LEFT_CENTER, label, font, color);
+        ui.painter().text(
+            rect.left_center() + egui::vec2(10.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            icon,
+            FontId::proportional(15.0),
+            color,
+        );
+        ui.painter().text(
+            rect.left_center() + egui::vec2(36.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            label,
+            font,
+            color,
+        );
     }
     resp
 }
@@ -223,7 +286,12 @@ pub fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Respon
     icon_button_sized(ui, icon, tooltip, ICON_BUTTON)
 }
 
-pub fn icon_button_sized(ui: &mut egui::Ui, icon: &str, tooltip: &str, side: f32) -> egui::Response {
+pub fn icon_button_sized(
+    ui: &mut egui::Ui,
+    icon: &str,
+    tooltip: &str,
+    side: f32,
+) -> egui::Response {
     icon_face(ui, icon, tooltip, side).on_hover_text(tooltip)
 }
 
@@ -245,17 +313,35 @@ pub fn icon_face(ui: &mut egui::Ui, icon: &str, label: &str, side: f32) -> egui:
         } else {
             p.text
         };
-        ui.painter().rect(rect, CornerRadius::same(6), fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
-        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon, FontId::proportional(14.0), color);
+        ui.painter().rect(
+            rect,
+            CornerRadius::same(6),
+            fill,
+            Stroke::new(1.0, stroke),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            icon,
+            FontId::proportional(14.0),
+            color,
+        );
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label));
+    resp.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
     resp
 }
 
-pub fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options: &[(T, String)]) -> bool {
+pub fn segmented<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    value: &mut T,
+    options: &[(T, String)],
+) -> bool {
     let p = palette(ui);
     let mut changed = false;
     egui::Frame::new()
@@ -268,9 +354,17 @@ pub fn segmented<T: PartialEq + Copy>(ui: &mut egui::Ui, value: &mut T, options:
             ui.horizontal(|ui| {
                 for (opt, label) in options {
                     let selected = *value == *opt;
-                    let text = egui::RichText::new(label.as_str()).color(if selected { p.on_accent } else { p.text });
+                    let text = egui::RichText::new(label.as_str()).color(if selected {
+                        p.on_accent
+                    } else {
+                        p.text
+                    });
                     let btn = egui::Button::new(text)
-                        .fill(if selected { p.accent } else { Color32::TRANSPARENT })
+                        .fill(if selected {
+                            p.accent
+                        } else {
+                            Color32::TRANSPARENT
+                        })
                         .stroke(Stroke::NONE)
                         .corner_radius(CornerRadius::same(5))
                         .min_size(egui::vec2(48.0, 22.0));
@@ -288,7 +382,10 @@ pub fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) ->
     ui.horizontal(|ui| {
         let p = palette(ui);
         let label_w = (ui.available_width() * 0.34).clamp(70.0, 118.0);
-        ui.add_sized([label_w, 24.0], egui::Label::new(egui::RichText::new(label).color(p.text_weak)).truncate());
+        ui.add_sized(
+            [label_w, 24.0],
+            egui::Label::new(egui::RichText::new(label).color(p.text_weak)).truncate(),
+        );
         ui.horizontal_wrapped(|ui| add(ui)).inner
     })
     .inner
@@ -300,7 +397,11 @@ pub fn is_wide(ui: &egui::Ui) -> bool {
     ui.available_width() >= 2.0 * COLUMN_MIN + ui.spacing().item_spacing.x
 }
 
-pub fn split_card(ui: &mut egui::Ui, left: impl FnOnce(&mut egui::Ui), right: impl FnOnce(&mut egui::Ui)) {
+pub fn split_card(
+    ui: &mut egui::Ui,
+    left: impl FnOnce(&mut egui::Ui),
+    right: impl FnOnce(&mut egui::Ui),
+) {
     card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         if is_wide(ui) {
@@ -323,7 +424,10 @@ pub fn equal_cards(
     right: impl FnOnce(&mut egui::Ui),
 ) {
     if !is_wide(ui) {
-        for add in [Box::new(left) as Box<dyn FnOnce(&mut egui::Ui)>, Box::new(right)] {
+        for add in [
+            Box::new(left) as Box<dyn FnOnce(&mut egui::Ui)>,
+            Box::new(right),
+        ] {
             card(ui).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 add(ui);
@@ -341,7 +445,10 @@ pub fn equal_cards(
         pb.content_ui.set_width(pb.content_ui.available_width());
         left(&mut pa.content_ui);
         right(&mut pb.content_ui);
-        let (ha, hb) = (pa.content_ui.min_rect().height(), pb.content_ui.min_rect().height());
+        let (ha, hb) = (
+            pa.content_ui.min_rect().height(),
+            pb.content_ui.min_rect().height(),
+        );
         let h = ha.max(hb);
         pa.content_ui.add_space(h - ha);
         pb.content_ui.add_space(h - hb);

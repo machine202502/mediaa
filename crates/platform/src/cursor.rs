@@ -22,11 +22,12 @@ mod imp {
     use mediaa_core::Frame;
     use std::cell::RefCell;
     use windows_sys::Win32::Graphics::Gdi::{
-        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetObjectW, SelectObject, BITMAP, BITMAPINFO,
-        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
+        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetObjectW, SelectObject,
+        BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, HCURSOR, ICONINFO,
+        DrawIconEx, GetCursorInfo, GetIconInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL, HCURSOR,
+        ICONINFO,
     };
 
     thread_local! {
@@ -34,7 +35,10 @@ mod imp {
     }
 
     fn info() -> Option<CURSORINFO> {
-        let mut ci = CURSORINFO { cbSize: std::mem::size_of::<CURSORINFO>() as u32, ..Default::default() };
+        let mut ci = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
         // SAFETY: `ci` is a properly sized CURSORINFO.
         (unsafe { GetCursorInfo(&mut ci) } != 0).then_some(ci)
     }
@@ -60,7 +64,11 @@ mod imp {
                 }
             }
         })?;
-        Some(CursorState { x: ci.ptScreenPos.x, y: ci.ptScreenPos.y, image })
+        Some(CursorState {
+            x: ci.ptScreenPos.x,
+            y: ci.ptScreenPos.y,
+            image,
+        })
     }
 
     fn picture(cursor: HCURSOR) -> Option<CursorImage> {
@@ -72,7 +80,11 @@ mod imp {
                 return None;
             }
             let mut bm = BITMAP::default();
-            GetObjectW(ii.hbmMask, std::mem::size_of::<BITMAP>() as i32, (&mut bm as *mut BITMAP).cast());
+            GetObjectW(
+                ii.hbmMask,
+                std::mem::size_of::<BITMAP>() as i32,
+                (&mut bm as *mut BITMAP).cast(),
+            );
             let (w, mut h) = (bm.bmWidth, bm.bmHeight);
             if ii.hbmColor.is_null() {
                 h /= 2;
@@ -87,14 +99,25 @@ mod imp {
             let on_black = render(cursor, w, h, 0x00)?;
             let on_white = render(cursor, w, h, 0xFF)?;
             let mut data = Vec::with_capacity((w * h * 4) as usize);
-            for (b, wh) in on_black.as_chunks::<4>().0.iter().zip(on_white.as_chunks::<4>().0) {
+            for (b, wh) in on_black
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(on_white.as_chunks::<4>().0)
+            {
                 let diff = i32::from(wh[1]) - i32::from(b[1]);
                 if diff < 0 {
                     data.extend_from_slice(&[0, 0, 0, 255]);
                     continue;
                 }
                 let a = (255 - diff).clamp(0, 255);
-                let un = |c: u8| if a == 0 { 0 } else { (i32::from(c) * 255 / a).min(255) as u8 };
+                let un = |c: u8| {
+                    if a == 0 {
+                        0
+                    } else {
+                        (i32::from(c) * 255 / a).min(255) as u8
+                    }
+                };
                 data.extend_from_slice(&[un(b[2]), un(b[1]), un(b[0]), a as u8]);
             }
             Some(CursorImage {
@@ -124,7 +147,8 @@ mod imp {
                 return None;
             }
             let mut bits = std::ptr::null_mut();
-            let dib = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+            let dib =
+                CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
             if dib.is_null() || bits.is_null() {
                 DeleteDC(dc);
                 return None;
@@ -157,7 +181,11 @@ mod imp {
     pub fn current() -> Option<CursorState> {
         static ARROW: OnceLock<CursorImage> = OnceLock::new();
         let (x, y) = position()?;
-        Some(CursorState { x, y, image: ARROW.get_or_init(|| arrow(1.0)).clone() })
+        Some(CursorState {
+            x,
+            y,
+            image: ARROW.get_or_init(|| arrow(1.0)).clone(),
+        })
     }
 }
 
@@ -169,7 +197,10 @@ mod tests {
             let img = &c.image.image;
             assert!(img.width > 0 && img.height > 0);
             assert!(c.image.hotspot.0 >= 0 && c.image.hotspot.0 < img.width as i32);
-            assert!(img.data.as_chunks::<4>().0.iter().any(|p| p[3] > 0), "cursor is not fully transparent");
+            assert!(
+                img.data.as_chunks::<4>().0.iter().any(|p| p[3] > 0),
+                "cursor is not fully transparent"
+            );
         }
     }
 }

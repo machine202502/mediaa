@@ -34,5 +34,8 @@ pub fn copy_files(paths: &[&Path]) -> anyhow::Result<()> {
 }
 
 pub fn copy_text(text: &str) -> anyhow::Result<()> {
-    with_ctx(|c| c.set_text(text.to_owned()).map_err(|e| anyhow!("clipboard: {e}")))
+    with_ctx(|c| {
+        c.set_text(text.to_owned())
+            .map_err(|e| anyhow!("clipboard: {e}"))
+    })
 }

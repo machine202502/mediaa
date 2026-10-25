@@ -1141,15 +1141,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui-notify"
-version = "0.23.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d9a4fdd9da87f468f8adce88cf35d40b6097467f7bd3f5798d8550479dd22fa"
-dependencies = [
- "egui",
-]
-
-[[package]]
 name = "egui-phosphor"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1219,11 +1210,16 @@ version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5eb3f3effb2726fee23449293e67acbf6cc6ce35525b1722bd5743bb348114d5"
 dependencies = [
+ "eframe",
  "egui",
+ "egui-wgpu",
+ "image",
  "kittest",
  "log",
+ "pollster 1.0.1",
  "serde",
  "toml 1.1.8+spec-1.1.0",
+ "wgpu",
 ]
 
 [[package]]
@@ -2590,7 +2586,6 @@ dependencies = [
  "chrono",
  "crossbeam-channel",
  "eframe",
- "egui-notify",
  "egui-phosphor",
  "egui_kittest",
  "fontdb",
@@ -2605,6 +2600,7 @@ dependencies = [
  "rfd",
  "rust-i18n",
  "sys-locale",
+ "tempfile",
  "toml 1.1.8+spec-1.1.0",
  "tray-icon",
  "winresource",
@@ -2650,6 +2646,7 @@ dependencies = [
  "image-webp",
  "log",
  "mediaa-core",
+ "mediaa-webp-pipeline",
  "oxipng",
  "tempfile",
 ]
@@ -2677,6 +2674,16 @@ dependencies = [
  "windows-sys 0.61.2",
  "xcap",
  "xcb",
+]
+
+[[package]]
+name = "mediaa-webp-pipeline"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossbeam-channel",
+ "log",
+ "tempfile",
 ]
 
 [[package]]

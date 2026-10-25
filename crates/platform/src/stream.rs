@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(if cfg!(target_os = "macos") { 5 } else { 60 });
+const FIRST_FRAME_TIMEOUT: Duration =
+    Duration::from_secs(if cfg!(target_os = "macos") { 5 } else { 60 });
 
 #[derive(Default)]
 struct Latest {
@@ -25,26 +26,45 @@ pub struct StreamSource {
 }
 
 impl StreamSource {
-    pub fn monitor(monitor: &xcap::Monitor, name: String, region: Option<Rect>) -> anyhow::Result<Self> {
+    pub fn monitor(
+        monitor: &xcap::Monitor,
+        name: String,
+        region: Option<Rect>,
+    ) -> anyhow::Result<Self> {
         let monitor_size = (monitor.width()?, monitor.height()?);
         let (recorder, rx) = monitor.video_recorder().context("screen recorder")?;
         let latest = Arc::new(Latest::default());
         let stop = Arc::new(AtomicBool::new(false));
         let (l, s) = (latest.clone(), stop.clone());
-        std::thread::Builder::new().name("capture-stream".into()).spawn(move || {
-            while !s.load(Ordering::Relaxed) {
-                if let Ok(f) = rx.recv_timeout(Duration::from_millis(200)) {
-                    let mut raw = f.raw;
-                    if cfg!(target_os = "linux") {
-                        raw.as_chunks_mut::<4>().0.iter_mut().for_each(|p| p[3] = 255);
+        std::thread::Builder::new()
+            .name("capture-stream".into())
+            .spawn(move || {
+                while !s.load(Ordering::Relaxed) {
+                    if let Ok(f) = rx.recv_timeout(Duration::from_millis(200)) {
+                        let mut raw = f.raw;
+                        if cfg!(target_os = "linux") {
+                            raw.as_chunks_mut::<4>()
+                                .0
+                                .iter_mut()
+                                .for_each(|p| p[3] = 255);
+                        }
+                        *l.frame.lock().expect("frame lock") =
+                            Some(Frame::new(f.width, f.height, raw));
+                        l.arrived.notify_all();
                     }
-                    *l.frame.lock().expect("frame lock") = Some(Frame::new(f.width, f.height, raw));
-                    l.arrived.notify_all();
                 }
-            }
-        })?;
+            })?;
         recorder.start().context("start screen recorder")?;
-        let mut s = Self { name, size: (0, 0), region, monitor_size, recorder, latest, stop, last: None };
+        let mut s = Self {
+            name,
+            size: (0, 0),
+            region,
+            monitor_size,
+            recorder,
+            latest,
+            stop,
+            last: None,
+        };
         let guard = s.latest.frame.lock().expect("frame lock");
         let (guard, _) = s
             .latest
@@ -55,7 +75,10 @@ impl StreamSource {
         drop(guard);
         let first = s.cut(first);
         s.size = (first.width & !1, first.height & !1);
-        anyhow::ensure!(s.size.0 >= 16 && s.size.1 >= 16, "selected area is too small");
+        anyhow::ensure!(
+            s.size.0 >= 16 && s.size.1 >= 16,
+            "selected area is too small"
+        );
         s.last = Some(s.cut_to_size(first));
         Ok(s)
     }
@@ -64,7 +87,10 @@ impl StreamSource {
         match self.region {
             Some(r) => {
                 let (mw, mh) = self.monitor_size;
-                let (sx, sy) = (frame.width as f32 / mw.max(1) as f32, frame.height as f32 / mh.max(1) as f32);
+                let (sx, sy) = (
+                    frame.width as f32 / mw.max(1) as f32,
+                    frame.height as f32 / mh.max(1) as f32,
+                );
                 let scaled = Rect::new(
                     (r.x as f32 * sx).round() as i32,
                     (r.y as f32 * sy).round() as i32,

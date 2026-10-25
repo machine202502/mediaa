@@ -7,7 +7,9 @@ use egui_phosphor::regular as icon;
 use mediaa_core::library::{human_duration, human_size};
 use mediaa_core::settings::{AUDIO_BITRATES, OUTPUT_HEIGHTS};
 use mediaa_core::MediaKind;
-use mediaa_media::convert::{self, ConvertSettings, Effort, StillFormat, Target, PNG_COLORS, VIDEO_FPS};
+use mediaa_media::convert::{
+    self, ConvertSettings, Effort, StillFormat, Target, PNG_COLORS, VIDEO_FPS,
+};
 use mediaa_media::info::MediaInfo;
 use rust_i18n::t;
 use std::path::PathBuf;
@@ -58,7 +60,9 @@ impl ConvertUi {
     pub fn set_input(&mut self, path: PathBuf) {
         self.probed = Some(match MediaKind::detect(&path) {
             None => Err(t!("convert.unsupported").into()),
-            Some(kind) => mediaa_media::preview::details(&path, kind).map(|i| (kind, i)).map_err(|e| format!("{e:#}")),
+            Some(kind) => mediaa_media::preview::details(&path, kind)
+                .map(|i| (kind, i))
+                .map_err(|e| format!("{e:#}")),
         });
         let targets = self.targets();
         if self.target.is_some_and(|t| !targets.contains(&t)) {
@@ -71,7 +75,10 @@ impl ConvertUi {
     }
 
     fn effective(&self) -> ConvertSettings {
-        ConvertSettings { max_height: (self.max_height > 0).then_some(self.max_height), ..self.settings.clone() }
+        ConvertSettings {
+            max_height: (self.max_height > 0).then_some(self.max_height),
+            ..self.settings.clone()
+        }
     }
 
     fn targets(&self) -> Vec<Target> {
@@ -86,14 +93,25 @@ impl ConvertUi {
 }
 
 fn start(app: &mut App, ctx: &egui::Context, target: Target) {
-    let Some(input) = app.conv.input.clone() else { return };
-    let folder = app.conv.folder.clone().unwrap_or_else(|| app.settings.convert_dir());
+    let Some(input) = app.conv.input.clone() else {
+        return;
+    };
+    let folder = app
+        .conv
+        .folder
+        .clone()
+        .unwrap_or_else(|| app.settings.convert_dir());
     let output = convert::output_path(&input, target, Some(&app.conv.name), &folder);
     let settings = app.conv.effective();
     let progress = Arc::new(AtomicI32::new(-1));
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, rx) = crossbeam_channel::bounded(1);
-    let (p, c, out, ctx2) = (progress.clone(), cancel.clone(), output.clone(), ctx.clone());
+    let (p, c, out, ctx2) = (
+        progress.clone(),
+        cancel.clone(),
+        output.clone(),
+        ctx.clone(),
+    );
     std::thread::Builder::new()
         .name("convert".into())
         .spawn(move || {
@@ -101,30 +119,53 @@ fn start(app: &mut App, ctx: &egui::Context, target: Target) {
                 p.store(f.map_or(-1, |f| (f * 1000.0) as i32), Ordering::Relaxed);
                 ctx2.request_repaint();
             };
-            let r = convert::convert(&input, &out, target, &settings, &mut report, &c).map_err(|e| {
-                if mediaa_media::job::is_cancelled(&e) {
-                    String::new()
-                } else {
-                    format!("{e:#}")
-                }
-            });
+            let r =
+                convert::convert(&input, &out, target, &settings, &mut report, &c).map_err(|e| {
+                    if mediaa_media::job::is_cancelled(&e) {
+                        String::new()
+                    } else {
+                        format!("{e:#}")
+                    }
+                });
             let _ = tx.send(r);
             ctx2.request_repaint();
         })
         .expect("spawn convert thread");
-    app.conv.job = Some(Job { output, progress, started: Instant::now(), cancel, done: rx });
+    app.conv.job = Some(Job {
+        output,
+        progress,
+        started: Instant::now(),
+        cancel,
+        done: rx,
+    });
 }
 
 fn update_estimate(app: &mut App, ctx: &egui::Context, target: Target) {
-    let Some(input) = app.conv.input.clone() else { return };
+    let Some(input) = app.conv.input.clone() else {
+        return;
+    };
     let key = (input, target, app.conv.effective());
     let conv = &mut app.conv;
     if conv.estimate.as_ref().is_none_or(|e| e.key != key) {
-        let previous = conv.estimate.as_ref().and_then(|e| e.result.as_ref().and_then(|r| r.as_ref().ok().copied()).or(e.previous));
-        conv.estimate = Some(Estimate { key, since: Instant::now(), cancel: Arc::default(), rx: None, result: None, previous });
+        let previous = conv.estimate.as_ref().and_then(|e| {
+            e.result
+                .as_ref()
+                .and_then(|r| r.as_ref().ok().copied())
+                .or(e.previous)
+        });
+        conv.estimate = Some(Estimate {
+            key,
+            since: Instant::now(),
+            cancel: Arc::default(),
+            rx: None,
+            result: None,
+            previous,
+        });
     }
     let busy = conv.job.is_some();
-    let Some(e) = conv.estimate.as_mut() else { return };
+    let Some(e) = conv.estimate.as_mut() else {
+        return;
+    };
     if e.result.is_some() {
         return;
     }
@@ -157,24 +198,37 @@ fn update_estimate(app: &mut App, ctx: &egui::Context, target: Target) {
 
 fn estimate_row(ui: &mut egui::Ui, estimate: Option<&Estimate>, input: Option<&std::path::Path>) {
     let Some(e) = estimate else { return };
-    let source = input.and_then(|p| std::fs::metadata(p).ok()).map(|m| m.len());
+    let source = input
+        .and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len());
     let text = |bytes: u64| {
         let mut s = format!("≈ {}", human_size(bytes));
         if let Some(src) = source.filter(|s| *s > 0) {
             let pct = (bytes as f64 / src as f64 - 1.0) * 100.0;
-            s += &format!("  ({}{:.0} %)", if pct < 0.0 { "−" } else { "+" }, pct.abs());
+            s += &format!(
+                "  ({}{:.0} %)",
+                if pct < 0.0 { "−" } else { "+" },
+                pct.abs()
+            );
         }
         s
     };
     theme::row(ui, &t!("convert.size"), |ui| {
         let resp = match &e.result {
             Some(Ok(bytes)) => ui.label(RichText::new(text(*bytes)).strong()),
-            Some(Err(err)) => ui.label(RichText::new(t!("convert.size_failed")).color(theme::palette(ui).text_weak)).on_hover_text(err),
+            Some(Err(err)) => ui
+                .label(RichText::new(t!("convert.size_failed")).color(theme::palette(ui).text_weak))
+                .on_hover_text(err),
             None => {
                 ui.add(egui::Spinner::new().size(12.0));
                 match e.previous {
-                    Some(bytes) => ui.label(RichText::new(text(bytes)).color(theme::palette(ui).text_weak)),
-                    None => ui.label(RichText::new(t!("convert.size_estimating")).color(theme::palette(ui).text_weak)),
+                    Some(bytes) => {
+                        ui.label(RichText::new(text(bytes)).color(theme::palette(ui).text_weak))
+                    }
+                    None => ui.label(
+                        RichText::new(t!("convert.size_estimating"))
+                            .color(theme::palette(ui).text_weak),
+                    ),
                 }
             }
         };
@@ -195,29 +249,42 @@ fn effort_row(ui: &mut egui::Ui, effort: &mut Effort) {
                 (*e, label.to_string())
             })
             .collect();
-        ui.scope(|ui| theme::segmented(ui, effort, &opts)).response.on_hover_text(t!("convert.effort_hint"));
+        ui.scope(|ui| theme::segmented(ui, effort, &opts))
+            .response
+            .on_hover_text(t!("convert.effort_hint"));
     });
 }
 
 fn kbps_combo(ui: &mut egui::Ui, kbps: &mut u32) {
-    egui::ComboBox::from_id_salt("convert-kbps").selected_text(format!("{kbps} kbit/s")).show_ui(ui, |ui| {
-        for k in AUDIO_BITRATES {
-            ui.selectable_value(kbps, k, format!("{k} kbit/s"));
-        }
-    });
+    egui::ComboBox::from_id_salt("convert-kbps")
+        .selected_text(format!("{kbps} kbit/s"))
+        .show_ui(ui, |ui| {
+            for k in AUDIO_BITRATES {
+                ui.selectable_value(kbps, k, format!("{k} kbit/s"));
+            }
+        });
 }
 
 fn mono_checkbox(ui: &mut egui::Ui, mono: &mut bool) {
-    ui.checkbox(mono, t!("convert.mono")).on_hover_text(t!("convert.mono_hint"));
+    ui.checkbox(mono, t!("convert.mono"))
+        .on_hover_text(t!("convert.mono_hint"));
 }
 
 fn fps_combo(ui: &mut egui::Ui, max_fps: &mut Option<u32>, source_fps: f64) {
-    let label = |f: Option<u32>| f.map_or_else(|| t!("convert.fps_original").to_string(), |f| format!("{f} fps"));
+    let label = |f: Option<u32>| {
+        f.map_or_else(
+            || t!("convert.fps_original").to_string(),
+            |f| format!("{f} fps"),
+        )
+    };
     egui::ComboBox::from_id_salt("convert-fps")
         .selected_text(label(*max_fps))
         .show_ui(ui, |ui| {
             ui.selectable_value(max_fps, None, label(None));
-            for f in VIDEO_FPS.into_iter().filter(|f| source_fps <= 0.0 || f64::from(*f) < source_fps - 0.5) {
+            for f in VIDEO_FPS
+                .into_iter()
+                .filter(|f| source_fps <= 0.0 || f64::from(*f) < source_fps - 0.5)
+            {
                 ui.selectable_value(max_fps, Some(f), label(Some(f)));
             }
         })
@@ -226,7 +293,12 @@ fn fps_combo(ui: &mut egui::Ui, max_fps: &mut Option<u32>, source_fps: f64) {
 }
 
 fn png_colors_combo(ui: &mut egui::Ui, colors: &mut Option<u16>) {
-    let label = |c: Option<u16>| c.map_or_else(|| t!("convert.colors_all").to_string(), |n| t!("convert.colors_n", n = n).to_string());
+    let label = |c: Option<u16>| {
+        c.map_or_else(
+            || t!("convert.colors_all").to_string(),
+            |n| t!("convert.colors_n", n = n).to_string(),
+        )
+    };
     egui::ComboBox::from_id_salt("convert-colors")
         .selected_text(label(*colors))
         .show_ui(ui, |ui| {
@@ -247,7 +319,10 @@ fn quality_row(ui: &mut egui::Ui, quality: &mut u8) {
 
 fn pick_file(app: &mut App) {
     let mut dialog = rfd::FileDialog::new()
-        .add_filter(t!("convert.filter_media"), &mediaa_core::formats::all_media_extensions())
+        .add_filter(
+            t!("convert.filter_media"),
+            &mediaa_core::formats::all_media_extensions(),
+        )
         .add_filter(t!("convert.filter_all"), &["*"]);
     if app.settings.media_dir.is_dir() {
         dialog = dialog.set_directory(&app.settings.media_dir);
@@ -274,7 +349,11 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             match result {
                 Ok(()) => {
                     app.lib.files_changed(std::slice::from_ref(&output));
-                    let name = output.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    let name = output
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
                     app.success(t!("convert.done", name = name));
                     app.conv.last = Some(output);
                 }
@@ -285,7 +364,13 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
     let busy = app.conv.job.is_some();
     if !busy {
-        if let Some(p) = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| !p.as_os_str().is_empty())) {
+        if let Some(p) = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .find(|p| !p.as_os_str().is_empty())
+        }) {
             app.conv.set_input(p);
         }
     }
@@ -294,12 +379,24 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         ui.set_width(ui.available_width());
         theme::section(ui, icon::FILE, &t!("convert.input"));
         ui.horizontal(|ui| {
-            if ui.add_enabled(!busy, theme::secondary(icon::FOLDER_OPEN, &t!("convert.choose"))).on_hover_text(t!("convert.drop_hint")).clicked() {
+            if ui
+                .add_enabled(
+                    !busy,
+                    theme::secondary(icon::FOLDER_OPEN, &t!("convert.choose")),
+                )
+                .on_hover_text(t!("convert.drop_hint"))
+                .clicked()
+            {
                 pick_file(app);
             }
             if let Some(p) = &app.conv.input {
-                ui.add(egui::Label::new(RichText::new(p.file_name().unwrap_or_default().to_string_lossy()).strong()).truncate())
-                    .on_hover_text(p.to_string_lossy());
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(p.file_name().unwrap_or_default().to_string_lossy()).strong(),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(p.to_string_lossy());
             }
         });
         match (&app.conv.input, &app.conv.probed) {
@@ -316,7 +413,11 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     facts.push(format!("{:.0} fps", info.fps));
                 }
                 if *kind == MediaKind::Video {
-                    facts.push(if info.has_audio() { t!("record.with_audio").into() } else { t!("record.no_audio").into() });
+                    facts.push(if info.has_audio() {
+                        t!("record.with_audio").into()
+                    } else {
+                        t!("record.no_audio").into()
+                    });
                 }
                 theme::hint(ui, facts.join(" · "));
             }
@@ -327,7 +428,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         }
     });
 
-    let Some(Ok((_, info))) = app.conv.probed.clone() else { return };
+    let Some(Ok((_, info))) = app.conv.probed.clone() else {
+        return;
+    };
     ui.add_space(4.0);
 
     let targets = app.conv.targets();
@@ -336,23 +439,56 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         theme::section(ui, icon::SHUFFLE, &t!("convert.format"));
         ui.add_enabled_ui(!busy, |ui| {
             for (label, group) in [
-                (t!("convert.group_video"), targets.iter().filter(|t| matches!(t, Target::Video(_))).copied().collect::<Vec<_>>()),
-                (t!("convert.group_anim"), targets.iter().filter(|t| matches!(t, Target::Anim(_))).copied().collect()),
-                (t!("convert.group_image"), targets.iter().filter(|t| matches!(t, Target::Still(_))).copied().collect()),
-                (t!("convert.group_audio"), targets.iter().filter(|t| matches!(t, Target::Audio(_))).copied().collect()),
+                (
+                    t!("convert.group_video"),
+                    targets
+                        .iter()
+                        .filter(|t| matches!(t, Target::Video(_)))
+                        .copied()
+                        .collect::<Vec<_>>(),
+                ),
+                (
+                    t!("convert.group_anim"),
+                    targets
+                        .iter()
+                        .filter(|t| matches!(t, Target::Anim(_)))
+                        .copied()
+                        .collect(),
+                ),
+                (
+                    t!("convert.group_image"),
+                    targets
+                        .iter()
+                        .filter(|t| matches!(t, Target::Still(_)))
+                        .copied()
+                        .collect(),
+                ),
+                (
+                    t!("convert.group_audio"),
+                    targets
+                        .iter()
+                        .filter(|t| matches!(t, Target::Audio(_)))
+                        .copied()
+                        .collect(),
+                ),
             ] {
                 if group.is_empty() {
                     continue;
                 }
                 theme::row(ui, &label, |ui| {
-                    let opts: Vec<(Option<Target>, String)> = group.iter().map(|t| (Some(*t), t.label().to_string())).collect();
+                    let opts: Vec<(Option<Target>, String)> = group
+                        .iter()
+                        .map(|t| (Some(*t), t.label().to_string()))
+                        .collect();
                     theme::segmented(ui, &mut app.conv.target, &opts);
                 });
             }
         });
     });
 
-    let Some(target) = app.conv.target else { return };
+    let Some(target) = app.conv.target else {
+        return;
+    };
     update_estimate(app, &ctx, target);
     ui.add_space(4.0);
 
@@ -367,7 +503,13 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 let max_height = &mut app.conv.max_height;
                 let mut resolution_row = |ui: &mut egui::Ui| {
                     theme::row(ui, &t!("record.resolution"), |ui| {
-                        super::record::resolution_picker(ui, max_height, &OUTPUT_HEIGHTS, source_h, egui::Id::new("convert-resolution"));
+                        super::record::resolution_picker(
+                            ui,
+                            max_height,
+                            &OUTPUT_HEIGHTS,
+                            source_h,
+                            egui::Id::new("convert-resolution"),
+                        );
                     });
                 };
                 match target {
@@ -375,7 +517,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                         quality_row(ui, &mut s.quality);
                         effort_row(ui, &mut s.effort);
                         resolution_row(ui);
-                        theme::row(ui, &t!("convert.fps"), |ui| fps_combo(ui, &mut s.max_fps, info.fps));
+                        theme::row(ui, &t!("convert.fps"), |ui| {
+                            fps_combo(ui, &mut s.max_fps, info.fps)
+                        });
                         if info.has_audio() {
                             theme::row(ui, &t!("convert.audio"), |ui| {
                                 ui.add_enabled_ui(!s.remove_audio, |ui| {
@@ -383,11 +527,14 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                                     mono_checkbox(ui, &mut s.mono);
                                 });
                             });
-                            theme::row(ui, "", |ui| ui.checkbox(&mut s.remove_audio, t!("convert.remove_audio")));
+                            theme::row(ui, "", |ui| {
+                                ui.checkbox(&mut s.remove_audio, t!("convert.remove_audio"))
+                            });
                         }
                     }
                     Target::Anim(fmt) => {
-                        changed |= super::record::anim_options(ui, &mut s.anim, Some(fmt), source_h, true);
+                        changed |=
+                            super::record::anim_options(ui, &mut s.anim, Some(fmt), source_h, true);
                         if fmt == mediaa_core::formats::AnimFormat::Webp {
                             effort_row(ui, &mut s.effort);
                         }
@@ -396,14 +543,19 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                         match fmt {
                             StillFormat::Jpeg => quality_row(ui, &mut s.quality),
                             StillFormat::Webp => {
-                                theme::row(ui, "", |ui| ui.checkbox(&mut s.webp_lossless, t!("convert.lossless")).on_hover_text(t!("convert.lossless_hint")));
+                                theme::row(ui, "", |ui| {
+                                    ui.checkbox(&mut s.webp_lossless, t!("convert.lossless"))
+                                        .on_hover_text(t!("convert.lossless_hint"))
+                                });
                                 if !s.webp_lossless {
                                     quality_row(ui, &mut s.quality);
                                 }
                                 effort_row(ui, &mut s.effort);
                             }
                             StillFormat::Png => {
-                                theme::row(ui, &t!("convert.colors"), |ui| png_colors_combo(ui, &mut s.png_colors));
+                                theme::row(ui, &t!("convert.colors"), |ui| {
+                                    png_colors_combo(ui, &mut s.png_colors)
+                                });
                                 effort_row(ui, &mut s.effort);
                             }
                             StillFormat::Bmp | StillFormat::Tiff => {}
@@ -412,7 +564,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     }
                     Target::Audio(fmt) => {
                         if !fmt.lossless() {
-                            theme::row(ui, &t!("audio.bitrate"), |ui| kbps_combo(ui, &mut s.audio_kbps));
+                            theme::row(ui, &t!("audio.bitrate"), |ui| {
+                                kbps_combo(ui, &mut s.audio_kbps)
+                            });
                         }
                         if fmt == mediaa_core::formats::AudioFormat::Flac {
                             effort_row(ui, &mut s.effort);
@@ -429,19 +583,41 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     .conv
                     .input
                     .as_deref()
-                    .and_then(|p| mediaa_core::naming::parse_path(p).map(|n| n.title).or_else(|| p.file_stem().map(|s| s.to_string_lossy().into_owned())))
+                    .and_then(|p| {
+                        mediaa_core::naming::parse_path(p)
+                            .map(|n| n.title)
+                            .or_else(|| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                    })
                     .unwrap_or_default();
                 theme::row(ui, &t!("convert.name"), |ui| {
-                    ui.add(egui::TextEdit::singleline(&mut app.conv.name).hint_text(default_title).desired_width(f32::INFINITY));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut app.conv.name)
+                            .hint_text(default_title)
+                            .desired_width(f32::INFINITY),
+                    );
                 });
-                let folder = app.conv.folder.clone().unwrap_or_else(|| app.settings.convert_dir());
+                let folder = app
+                    .conv
+                    .folder
+                    .clone()
+                    .unwrap_or_else(|| app.settings.convert_dir());
                 theme::row(ui, &t!("convert.folder"), |ui| {
-                    if theme::icon_button(ui, icon::FOLDER_OPEN, &t!("settings.choose_folder")).clicked() {
-                        if let Some(p) = rfd::FileDialog::new().set_directory(&folder).pick_folder() {
+                    if theme::icon_button(ui, icon::FOLDER_OPEN, &t!("settings.choose_folder"))
+                        .clicked()
+                    {
+                        if let Some(p) = rfd::FileDialog::new().set_directory(&folder).pick_folder()
+                        {
                             app.conv.folder = Some(p);
                         }
                     }
-                    if app.conv.folder.is_some() && theme::icon_button(ui, icon::ARROW_COUNTER_CLOCKWISE, &t!("convert.folder_reset")).clicked() {
+                    if app.conv.folder.is_some()
+                        && theme::icon_button(
+                            ui,
+                            icon::ARROW_COUNTER_CLOCKWISE,
+                            &t!("convert.folder_reset"),
+                        )
+                        .clicked()
+                    {
                         app.conv.folder = None;
                     }
                     ui.add(egui::Label::new(folder.to_string_lossy()).truncate());
@@ -463,24 +639,48 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             if value < 0 {
                 activity(ui, &t!("convert.processing"), job.started.elapsed());
             } else {
-                ui.add(egui::ProgressBar::new(frac).desired_width(420.0).show_percentage().animate(true));
+                ui.add(
+                    egui::ProgressBar::new(frac)
+                        .desired_width(420.0)
+                        .show_percentage()
+                        .animate(true),
+                );
             }
-            if ui.add(theme::secondary(icon::X, &t!("common.cancel"))).clicked() {
+            if ui
+                .add(theme::secondary(icon::X, &t!("common.cancel")))
+                .clicked()
+            {
                 cancel.store(true, Ordering::Relaxed);
             }
             ctx.request_repaint_after(Duration::from_millis(200));
         } else {
-            let btn = theme::primary(ui, icon::SHUFFLE, &t!("convert.start")).min_size(egui::vec2(240.0, 38.0));
+            let btn = theme::primary(ui, icon::SHUFFLE, &t!("convert.start"))
+                .min_size(egui::vec2(240.0, 38.0));
             if ui.add(btn).clicked() {
                 start(app, &ctx, target);
             }
             if let Some(last) = app.conv.last.clone() {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    let name = last.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    let w = ui.fonts_mut(|f| f.layout_no_wrap(name.clone(), egui::FontId::proportional(13.0), egui::Color32::WHITE).size().x) + 60.0;
+                    let name = last
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    let w = ui.fonts_mut(|f| {
+                        f.layout_no_wrap(
+                            name.clone(),
+                            egui::FontId::proportional(13.0),
+                            egui::Color32::WHITE,
+                        )
+                        .size()
+                        .x
+                    }) + 60.0;
                     ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
-                    ui.label(RichText::new(format!("{}  {name}", icon::CHECK_CIRCLE)).color(theme::palette(ui).text_weak));
+                    ui.label(
+                        RichText::new(format!("{}  {name}", icon::CHECK_CIRCLE))
+                            .color(theme::palette(ui).text_weak),
+                    );
                     if theme::icon_button(ui, icon::ARROW_SQUARE_OUT, &t!("lib.open")).clicked() {
                         app.open_path(&last);
                     }

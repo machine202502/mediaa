@@ -52,7 +52,9 @@ impl KindFilter {
     }
 }
 
-pub fn group_by_day<'a>(entries: &[&'a LibraryEntry]) -> Vec<(chrono::NaiveDate, Vec<&'a LibraryEntry>)> {
+pub fn group_by_day<'a>(
+    entries: &[&'a LibraryEntry],
+) -> Vec<(chrono::NaiveDate, Vec<&'a LibraryEntry>)> {
     let mut groups: Vec<(chrono::NaiveDate, Vec<&LibraryEntry>)> = Vec::new();
     for e in entries {
         let day = chrono::DateTime::<chrono::Local>::from(e.modified).date_naive();
@@ -112,18 +114,40 @@ mod tests {
     use super::*;
 
     fn entry(name: &str, modified: SystemTime) -> LibraryEntry {
-        LibraryEntry { path: name.into(), name: name.into(), title: name.into(), kind: MediaKind::Image, size: 1, modified, taken: chrono::NaiveDateTime::default(), details: None }
+        LibraryEntry {
+            path: name.into(),
+            name: name.into(),
+            title: name.into(),
+            kind: MediaKind::Image,
+            size: 1,
+            modified,
+            taken: chrono::NaiveDateTime::default(),
+            details: None,
+        }
     }
 
     #[test]
     fn groups_consecutive_entries_by_local_day() {
         use chrono::{Local, TimeZone};
-        let at = |d: u32, h: u32| SystemTime::from(Local.with_ymd_and_hms(2026, 10, d, h, 0, 0).unwrap());
-        let list = [entry("a", at(14, 20)), entry("b", at(14, 9)), entry("c", at(12, 23)), entry("d", at(12, 1))];
+        let at = |d: u32, h: u32| {
+            SystemTime::from(Local.with_ymd_and_hms(2026, 10, d, h, 0, 0).unwrap())
+        };
+        let list = [
+            entry("a", at(14, 20)),
+            entry("b", at(14, 9)),
+            entry("c", at(12, 23)),
+            entry("d", at(12, 1)),
+        ];
         let refs: Vec<_> = list.iter().collect();
         let groups = group_by_day(&refs);
-        let days: Vec<_> = groups.iter().map(|(d, l)| (d.to_string(), l.len())).collect();
-        assert_eq!(days, [("2026-10-14".to_string(), 2), ("2026-10-12".to_string(), 2)]);
+        let days: Vec<_> = groups
+            .iter()
+            .map(|(d, l)| (d.to_string(), l.len()))
+            .collect();
+        assert_eq!(
+            days,
+            [("2026-10-14".to_string(), 2), ("2026-10-12".to_string(), 2)]
+        );
         assert!(group_by_day(&[]).is_empty());
     }
 

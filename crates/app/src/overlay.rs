@@ -23,9 +23,20 @@ pub enum Purpose {
 #[derive(Debug)]
 pub enum Outcome {
     Cancel,
-    Image { frame: Frame, action: AfterCapture, format: Option<ImageFormat>, after_completion: bool },
-    SelectedRegion { monitor: MonitorInfo, rect: Rect },
-    RecordArea { monitor: MonitorInfo, rect: Rect },
+    Image {
+        frame: Frame,
+        action: AfterCapture,
+        format: Option<ImageFormat>,
+        after_completion: bool,
+    },
+    SelectedRegion {
+        monitor: MonitorInfo,
+        rect: Rect,
+    },
+    RecordArea {
+        monitor: MonitorInfo,
+        rect: Rect,
+    },
 }
 
 const COLORS: [[u8; 4]; 8] = [
@@ -44,7 +55,10 @@ fn c32(c: [u8; 4]) -> Color32 {
 }
 
 fn consume_copy_shortcut(input: &mut egui::InputState) -> bool {
-    let shortcut = input.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::C));
+    let shortcut = input.consume_shortcut(&egui::KeyboardShortcut::new(
+        egui::Modifiers::COMMAND,
+        egui::Key::C,
+    ));
     let mut semantic = false;
     input.events.retain(|event| {
         let copy = matches!(event, egui::Event::Copy);
@@ -99,12 +113,14 @@ impl Overlay {
     ) -> Self {
         register_fonts(ctx);
         let current = start.min(monitors.len().saturating_sub(1));
-        let mut editor = SelectionEditor::new(Rect::new(0, 0, first.width as i32, first.height as i32));
+        let mut editor =
+            SelectionEditor::new(Rect::new(0, 0, first.width as i32, first.height as i32));
         if std::env::var_os("MEDIAA_DEV_PICKER").is_some() {
             editor.select_all();
         }
         let texture = Some((current, upload(ctx, &first)));
-        let mut shots: Vec<(MonitorInfo, Option<Frame>)> = monitors.into_iter().map(|m| (m, None)).collect();
+        let mut shots: Vec<(MonitorInfo, Option<Frame>)> =
+            monitors.into_iter().map(|m| (m, None)).collect();
         shots[current].1 = Some(first);
         Self {
             state: Arc::new(Mutex::new(State {
@@ -145,15 +161,28 @@ impl Overlay {
                 .with_title(WINDOW_TITLE)
                 .with_decorations(false)
                 .with_visible(false)
-                .with_position([monitor.x as f32 / monitor.scale, monitor.y as f32 / monitor.scale])
-                .with_inner_size([monitor.width as f32 / monitor.scale, monitor.height as f32 / monitor.scale])
+                .with_position([
+                    monitor.x as f32 / monitor.scale,
+                    monitor.y as f32 / monitor.scale,
+                ])
+                .with_inner_size([
+                    monitor.width as f32 / monitor.scale,
+                    monitor.height as f32 / monitor.scale,
+                ])
                 .with_always_on_top()
                 .with_taskbar(false)
                 .with_active(true);
-            (id, builder, s.shown && s.opened.elapsed() < Duration::from_millis(600))
+            (
+                id,
+                builder,
+                s.shown && s.opened.elapsed() < Duration::from_millis(600),
+            )
         };
         if focus {
-            ctx.send_viewport_cmd_to(id, egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop));
+            ctx.send_viewport_cmd_to(
+                id,
+                egui::ViewportCommand::WindowLevel(egui::WindowLevel::AlwaysOnTop),
+            );
             ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
             ctx.request_repaint_after(Duration::from_millis(50));
         }
@@ -170,7 +199,10 @@ impl Overlay {
 }
 
 fn upload(ctx: &egui::Context, frame: &Frame) -> egui::TextureHandle {
-    let img = egui::ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.data);
+    let img = egui::ColorImage::from_rgba_unmultiplied(
+        [frame.width as usize, frame.height as usize],
+        &frame.data,
+    );
     ctx.load_texture("overlay-shot", img, egui::TextureOptions::LINEAR)
 }
 
@@ -182,17 +214,26 @@ struct Mapping {
 
 impl Mapping {
     fn to_px(self, p: Pos2) -> (f32, f32) {
-        ((p.x - self.origin.x) * self.scale, (p.y - self.origin.y) * self.scale)
+        (
+            (p.x - self.origin.x) * self.scale,
+            (p.y - self.origin.y) * self.scale,
+        )
     }
     fn to_point(self, p: Pos2) -> Point {
         let (x, y) = self.to_px(p);
         Point::new(x.round() as i32, y.round() as i32)
     }
     fn to_pt(self, p: (f32, f32)) -> Pos2 {
-        Pos2::new(self.origin.x + p.0 / self.scale, self.origin.y + p.1 / self.scale)
+        Pos2::new(
+            self.origin.x + p.0 / self.scale,
+            self.origin.y + p.1 / self.scale,
+        )
     }
     fn rect(self, r: Rect) -> ERect {
-        ERect::from_min_max(self.to_pt((r.x as f32, r.y as f32)), self.to_pt((r.right() as f32, r.bottom() as f32)))
+        ERect::from_min_max(
+            self.to_pt((r.x as f32, r.y as f32)),
+            self.to_pt((r.right() as f32, r.bottom() as f32)),
+        )
     }
     fn len(self, px: f32) -> f32 {
         px / self.scale
@@ -205,7 +246,10 @@ impl State {
     }
 
     fn frame(&self) -> &Frame {
-        self.shots[self.current].1.as_ref().expect("current monitor is always captured")
+        self.shots[self.current]
+            .1
+            .as_ref()
+            .expect("current monitor is always captured")
     }
 
     fn switch_monitor(&mut self) {
@@ -250,7 +294,12 @@ impl State {
 
     fn finish_image(&mut self, action: AfterCapture, format: Option<ImageFormat>) {
         if let Some(frame) = self.result() {
-            self.outcome = Some(Outcome::Image { frame, action, format, after_completion: self.after_completion });
+            self.outcome = Some(Outcome::Image {
+                frame,
+                action,
+                format,
+                after_completion: self.after_completion,
+            });
         }
     }
 
@@ -270,9 +319,17 @@ impl State {
             }
         };
         let screen = ui.max_rect();
-        let map = Mapping { origin: screen.min, scale: fw as f32 / screen.width().max(1.0) };
+        let map = Mapping {
+            origin: screen.min,
+            scale: fw as f32 / screen.width().max(1.0),
+        };
         let painter = ui.painter().clone();
-        painter.image(tex.id(), screen, ERect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+        painter.image(
+            tex.id(),
+            screen,
+            ERect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
 
         self.interact(ui, map, screen);
         self.paint(&painter, map, screen);
@@ -328,14 +385,15 @@ impl State {
                     self.editor.select_all();
                 }
                 if let Some(hover) = resp.hover_pos() {
-                    ui.ctx().set_cursor_icon(match self.editor.hit_test(map.to_point(hover)) {
-                        Some(Handle::Move) => CursorIcon::Move,
-                        Some(Handle::N | Handle::S) => CursorIcon::ResizeVertical,
-                        Some(Handle::E | Handle::W) => CursorIcon::ResizeHorizontal,
-                        Some(Handle::NW | Handle::SE) => CursorIcon::ResizeNwSe,
-                        Some(Handle::NE | Handle::SW) => CursorIcon::ResizeNeSw,
-                        None => CursorIcon::Crosshair,
-                    });
+                    ui.ctx()
+                        .set_cursor_icon(match self.editor.hit_test(map.to_point(hover)) {
+                            Some(Handle::Move) => CursorIcon::Move,
+                            Some(Handle::N | Handle::S) => CursorIcon::ResizeVertical,
+                            Some(Handle::E | Handle::W) => CursorIcon::ResizeHorizontal,
+                            Some(Handle::NW | Handle::SE) => CursorIcon::ResizeNwSe,
+                            Some(Handle::NE | Handle::SW) => CursorIcon::ResizeNeSw,
+                            None => CursorIcon::Crosshair,
+                        });
                 }
             }
             Some(Tool::Text) => {
@@ -346,7 +404,10 @@ impl State {
                 if resp.clicked() {
                     if let Some(p) = resp.interact_pointer_pos().filter(|p| inside(*p)) {
                         self.commit_text();
-                        self.text = Some(TextEdit { shape: Shape::begin(Tool::Text, map.to_px(p), self.style), focus: true });
+                        self.text = Some(TextEdit {
+                            shape: Shape::begin(Tool::Text, map.to_px(p), self.style),
+                            focus: true,
+                        });
                     }
                 }
             }
@@ -361,7 +422,9 @@ impl State {
                     }
                 }
                 if resp.dragged() {
-                    if let (Some(shape), Some(p)) = (self.drawing.as_mut(), resp.interact_pointer_pos()) {
+                    if let (Some(shape), Some(p)) =
+                        (self.drawing.as_mut(), resp.interact_pointer_pos())
+                    {
                         shape.drag_to(map.to_px(p));
                     }
                 }
@@ -372,7 +435,8 @@ impl State {
                 }
                 if resp.clicked() && matches!(tool, Tool::Pen | Tool::Marker) {
                     if let Some(p) = resp.interact_pointer_pos().filter(|p| inside(*p)) {
-                        self.shapes.push(Shape::begin(tool, map.to_px(p), self.style));
+                        self.shapes
+                            .push(Shape::begin(tool, map.to_px(p), self.style));
                     }
                 }
             }
@@ -391,8 +455,14 @@ impl State {
         for r in [
             ERect::from_min_max(screen.min, Pos2::new(screen.max.x, s.min.y)),
             ERect::from_min_max(Pos2::new(screen.min.x, s.max.y), screen.max),
-            ERect::from_min_max(Pos2::new(screen.min.x, s.min.y), Pos2::new(s.min.x, s.max.y)),
-            ERect::from_min_max(Pos2::new(s.max.x, s.min.y), Pos2::new(screen.max.x, s.max.y)),
+            ERect::from_min_max(
+                Pos2::new(screen.min.x, s.min.y),
+                Pos2::new(s.min.x, s.max.y),
+            ),
+            ERect::from_min_max(
+                Pos2::new(s.max.x, s.min.y),
+                Pos2::new(screen.max.x, s.max.y),
+            ),
         ] {
             painter.rect_filled(r, CornerRadius::ZERO, dim);
         }
@@ -402,16 +472,42 @@ impl State {
             paint_shape(&clipped, map, shape);
         }
 
-        painter.rect_stroke(s, CornerRadius::ZERO, Stroke::new(1.5, accent), egui::StrokeKind::Outside);
+        painter.rect_stroke(
+            s,
+            CornerRadius::ZERO,
+            Stroke::new(1.5, accent),
+            egui::StrokeKind::Outside,
+        );
         if self.tool.is_none() {
-            for c in [s.left_top(), s.right_top(), s.left_bottom(), s.right_bottom(), s.center_top(), s.center_bottom(), s.left_center(), s.right_center()] {
+            for c in [
+                s.left_top(),
+                s.right_top(),
+                s.left_bottom(),
+                s.right_bottom(),
+                s.center_top(),
+                s.center_bottom(),
+                s.left_center(),
+                s.right_center(),
+            ] {
                 let h = ERect::from_center_size(c, egui::vec2(8.0, 8.0));
                 painter.rect_filled(h, CornerRadius::same(2), Color32::WHITE);
-                painter.rect_stroke(h, CornerRadius::same(2), Stroke::new(1.0, accent), egui::StrokeKind::Inside);
+                painter.rect_stroke(
+                    h,
+                    CornerRadius::same(2),
+                    Stroke::new(1.0, accent),
+                    egui::StrokeKind::Inside,
+                );
             }
         }
-        let galley = painter.layout_no_wrap(format!("{} × {}", sel.w, sel.h), FontId::proportional(13.0), Color32::WHITE);
-        let pos = Pos2::new(s.min.x, (s.min.y - galley.size().y - 10.0).max(screen.min.y + 4.0));
+        let galley = painter.layout_no_wrap(
+            format!("{} × {}", sel.w, sel.h),
+            FontId::proportional(13.0),
+            Color32::WHITE,
+        );
+        let pos = Pos2::new(
+            s.min.x,
+            (s.min.y - galley.size().y - 10.0).max(screen.min.y + 4.0),
+        );
         let bg = ERect::from_min_size(pos, galley.size() + egui::vec2(12.0, 6.0));
         painter.rect_filled(bg, CornerRadius::same(6), Color32::from_black_alpha(210));
         painter.galley(pos + egui::vec2(6.0, 3.0), galley, Color32::WHITE);
@@ -424,15 +520,26 @@ impl State {
         }
         let galley = painter.layout_no_wrap(text, FontId::proportional(16.0), Color32::WHITE);
         let pos = screen.center() - galley.size() / 2.0;
-        let bg = ERect::from_min_size(pos - egui::vec2(18.0, 12.0), galley.size() + egui::vec2(36.0, 24.0));
+        let bg = ERect::from_min_size(
+            pos - egui::vec2(18.0, 12.0),
+            galley.size() + egui::vec2(36.0, 24.0),
+        );
         painter.rect_filled(bg, CornerRadius::same(12), Color32::from_black_alpha(200));
         painter.galley(pos, galley, Color32::WHITE);
     }
 
     fn text_editor(&mut self, ui: &mut egui::Ui, map: Mapping) {
-        let Some(edit) = self.text.as_mut() else { return };
-        let ShapeKind::Text { pos, text } = &mut edit.shape.kind else { return };
-        let font = text_font(ui.ctx(), &edit.shape.style, map.len(edit.shape.style.font_size));
+        let Some(edit) = self.text.as_mut() else {
+            return;
+        };
+        let ShapeKind::Text { pos, text } = &mut edit.shape.kind else {
+            return;
+        };
+        let font = text_font(
+            ui.ctx(),
+            &edit.shape.style,
+            map.len(edit.shape.style.font_size),
+        );
         let color = c32(edit.shape.style.color);
         let mut commit = false;
         egui::Area::new(egui::Id::new("overlay-text"))
@@ -472,10 +579,19 @@ impl State {
             let esc = i.key_pressed(Key::Escape);
             let enter = i.key_pressed(Key::Enter);
             let copy = consume_copy_shortcut(i);
-            let save = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::S));
-            let undo = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::Z));
+            let save = i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                Key::S,
+            ));
+            let undo = i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                Key::Z,
+            ));
             let tab = i.key_pressed(Key::Tab);
-            let all = i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, Key::A));
+            let all = i.consume_shortcut(&egui::KeyboardShortcut::new(
+                egui::Modifiers::COMMAND,
+                Key::A,
+            ));
             let arrows = (
                 i.key_pressed(Key::ArrowRight) as i32 - i.key_pressed(Key::ArrowLeft) as i32,
                 i.key_pressed(Key::ArrowDown) as i32 - i.key_pressed(Key::ArrowUp) as i32,
@@ -515,12 +631,17 @@ impl State {
                 self.editor.nudge(arrows.0, arrows.1, shift);
             }
         }
-        let Some(sel) = self.editor.usable_selection() else { return };
+        let Some(sel) = self.editor.usable_selection() else {
+            return;
+        };
         if self.purpose == Purpose::RecordRegion {
             if copy {
                 self.finish_image(AfterCapture::Copy, None);
             } else if enter {
-                self.outcome = Some(Outcome::SelectedRegion { monitor: self.monitor(), rect: sel });
+                self.outcome = Some(Outcome::SelectedRegion {
+                    monitor: self.monitor(),
+                    rect: sel,
+                });
             }
             return;
         }
@@ -534,7 +655,9 @@ impl State {
     }
 
     fn toolbars(&mut self, ctx: &egui::Context, map: Mapping, screen: ERect) {
-        let Some(sel) = self.editor.usable_selection() else { return };
+        let Some(sel) = self.editor.usable_selection() else {
+            return;
+        };
         if self.editor.is_dragging() || self.drawing.is_some() {
             return;
         }
@@ -550,12 +673,18 @@ impl State {
             let size = dark_bar(ctx, "overlay-tools", at(t), |ui| self.tool_buttons(ui));
             self.remember_size(ctx, true, size);
         }
-        let size = dark_bar(ctx, "overlay-actions", at(layout.actions), |ui| self.action_buttons(ui));
+        let size = dark_bar(ctx, "overlay-actions", at(layout.actions), |ui| {
+            self.action_buttons(ui)
+        });
         self.remember_size(ctx, false, size);
     }
 
     fn remember_size(&mut self, ctx: &egui::Context, tools: bool, size: egui::Vec2) {
-        let slot = if tools { &mut self.tools_size } else { &mut self.actions_size };
+        let slot = if tools {
+            &mut self.tools_size
+        } else {
+            &mut self.actions_size
+        };
         if slot.is_none_or(|old| (old - size).length() > 0.5) {
             *slot = Some(size);
             ctx.request_repaint();
@@ -564,32 +693,60 @@ impl State {
 
     fn action_buttons(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let btn = |ui: &mut egui::Ui, ic: &str, label: &str| ui.add(egui::Button::new(format!("{ic}  {label}")).min_size(egui::vec2(0.0, 30.0)));
+            let btn = |ui: &mut egui::Ui, ic: &str, label: &str| {
+                ui.add(egui::Button::new(format!("{ic}  {label}")).min_size(egui::vec2(0.0, 30.0)))
+            };
             match self.purpose {
                 Purpose::RecordRegion => {
-                    if ui.add(theme::primary(ui, icon::SELECTION, &t!("overlay.choose"))).on_hover_text(t!("overlay.choose_hint")).clicked() {
+                    if ui
+                        .add(theme::primary(ui, icon::SELECTION, &t!("overlay.choose")))
+                        .on_hover_text(t!("overlay.choose_hint"))
+                        .clicked()
+                    {
                         if let Some(rect) = self.editor.usable_selection() {
-                            self.outcome = Some(Outcome::SelectedRegion { monitor: self.monitor(), rect });
+                            self.outcome = Some(Outcome::SelectedRegion {
+                                monitor: self.monitor(),
+                                rect,
+                            });
                         }
                     }
                 }
                 Purpose::Screenshot | Purpose::Area => {
-                    if btn(ui, icon::COPY, &t!("overlay.copy")).on_hover_text("Ctrl+C").clicked() {
+                    if btn(ui, icon::COPY, &t!("overlay.copy"))
+                        .on_hover_text("Ctrl+C")
+                        .clicked()
+                    {
                         self.finish_image(AfterCapture::Copy, None);
                     }
                     for fmt in ImageFormat::ALL {
-                        if btn(ui, icon::FLOPPY_DISK, &t!("overlay.save", format = fmt.label())).clicked() {
+                        if btn(
+                            ui,
+                            icon::FLOPPY_DISK,
+                            &t!("overlay.save", format = fmt.label()),
+                        )
+                        .clicked()
+                        {
                             self.finish_image(AfterCapture::Save, Some(fmt));
                         }
                     }
-                    if self.purpose == Purpose::Area && btn(ui, icon::RECORD, &t!("overlay.record")).on_hover_text(t!("overlay.record_hint")).clicked() {
+                    if self.purpose == Purpose::Area
+                        && btn(ui, icon::RECORD, &t!("overlay.record"))
+                            .on_hover_text(t!("overlay.record_hint"))
+                            .clicked()
+                    {
                         if let Some(rect) = self.editor.usable_selection() {
-                            self.outcome = Some(Outcome::RecordArea { monitor: self.monitor(), rect });
+                            self.outcome = Some(Outcome::RecordArea {
+                                monitor: self.monitor(),
+                                rect,
+                            });
                         }
                     }
                 }
             }
-            if btn(ui, icon::X, &t!("common.cancel")).on_hover_text("Esc").clicked() {
+            if btn(ui, icon::X, &t!("common.cancel"))
+                .on_hover_text("Esc")
+                .clicked()
+            {
                 self.outcome = Some(Outcome::Cancel);
             }
         });
@@ -598,20 +755,38 @@ impl State {
     fn text_menu(&mut self, ui: &mut egui::Ui) {
         ui.set_min_width(200.0);
         ui.label(egui::RichText::new(t!("overlay.font")).strong());
-        egui::ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
-            for (i, face) in annotate::fonts().iter().enumerate() {
-                let i = i as u16;
-                let font = text_font(ui.ctx(), &Style { font: i, ..self.style }, 16.0);
-                if ui.selectable_label(self.style.font == i, egui::RichText::new(&face.name).font(font)).clicked() {
-                    self.style.font = i;
+        egui::ScrollArea::vertical()
+            .max_height(260.0)
+            .show(ui, |ui| {
+                for (i, face) in annotate::fonts().iter().enumerate() {
+                    let i = i as u16;
+                    let font = text_font(
+                        ui.ctx(),
+                        &Style {
+                            font: i,
+                            ..self.style
+                        },
+                        16.0,
+                    );
+                    if ui
+                        .selectable_label(
+                            self.style.font == i,
+                            egui::RichText::new(&face.name).font(font),
+                        )
+                        .clicked()
+                    {
+                        self.style.font = i;
+                    }
                 }
-            }
-        });
+            });
         ui.separator();
         ui.label(egui::RichText::new(t!("overlay.font_size")).strong());
         ui.horizontal_wrapped(|ui| {
             for size in annotate::TEXT_SIZES {
-                if ui.selectable_label(self.style.font_size == size, format!("{size:.0}")).clicked() {
+                if ui
+                    .selectable_label(self.style.font_size == size, format!("{size:.0}"))
+                    .clicked()
+                {
                     self.style.font_size = size;
                 }
             }
@@ -626,10 +801,21 @@ impl State {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             let tool_btn = |ui: &mut egui::Ui, selected: bool, ic: &str, tip: String| {
-                ui.add(egui::Button::new(egui::RichText::new(ic).size(17.0)).selected(selected).min_size(egui::vec2(32.0, 32.0)))
-                    .on_hover_text(tip)
+                ui.add(
+                    egui::Button::new(egui::RichText::new(ic).size(17.0))
+                        .selected(selected)
+                        .min_size(egui::vec2(32.0, 32.0)),
+                )
+                .on_hover_text(tip)
             };
-            if tool_btn(ui, self.tool.is_none(), icon::CURSOR, t!("overlay.tool_select").into()).clicked() {
+            if tool_btn(
+                ui,
+                self.tool.is_none(),
+                icon::CURSOR,
+                t!("overlay.tool_select").into(),
+            )
+            .clicked()
+            {
                 self.commit_text();
                 self.tool = None;
             }
@@ -652,17 +838,24 @@ impl State {
             }
             ui.separator();
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(32.0, 32.0), Sense::click());
-            ui.painter().circle_filled(rect.center(), 10.0, c32(self.style.color));
-            ui.painter().circle_stroke(rect.center(), 10.0, Stroke::new(2.0, Color32::WHITE));
+            ui.painter()
+                .circle_filled(rect.center(), 10.0, c32(self.style.color));
+            ui.painter()
+                .circle_stroke(rect.center(), 10.0, Stroke::new(2.0, Color32::WHITE));
             if resp.on_hover_text(t!("overlay.color")).clicked() {
                 self.palette_open = !self.palette_open;
             }
             if self.palette_open {
                 for c in COLORS {
-                    let (rect, resp) = ui.allocate_exact_size(egui::vec2(32.0, 22.0), Sense::click());
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(32.0, 22.0), Sense::click());
                     ui.painter().circle_filled(rect.center(), 8.0, c32(c));
                     if c == self.style.color {
-                        ui.painter().circle_stroke(rect.center(), 9.5, Stroke::new(1.5, Color32::WHITE));
+                        ui.painter().circle_stroke(
+                            rect.center(),
+                            9.5,
+                            Stroke::new(1.5, Color32::WHITE),
+                        );
                     }
                     if resp.clicked() {
                         self.style.color = c;
@@ -675,10 +868,16 @@ impl State {
             }
             let (rect, resp) = ui.allocate_exact_size(egui::vec2(32.0, 28.0), Sense::click());
             ui.painter().line_segment(
-                [rect.left_center() + egui::vec2(7.0, 0.0), rect.right_center() - egui::vec2(7.0, 0.0)],
+                [
+                    rect.left_center() + egui::vec2(7.0, 0.0),
+                    rect.right_center() - egui::vec2(7.0, 0.0),
+                ],
                 Stroke::new(self.style.width.min(12.0) / 1.5, Color32::WHITE),
             );
-            if resp.on_hover_text(t!("overlay.thickness", n = self.style.width)).clicked() {
+            if resp
+                .on_hover_text(t!("overlay.thickness", n = self.style.width))
+                .clicked()
+            {
                 self.style.width = match self.style.width as u32 {
                     0..=2 => 4.0,
                     3..=4 => 8.0,
@@ -688,7 +887,14 @@ impl State {
             }
             ui.separator();
             let can_undo = !self.shapes.is_empty();
-            if ui.add_enabled(can_undo, egui::Button::new(egui::RichText::new(icon::ARROW_COUNTER_CLOCKWISE).size(17.0)).min_size(egui::vec2(32.0, 32.0)))
+            if ui
+                .add_enabled(
+                    can_undo,
+                    egui::Button::new(
+                        egui::RichText::new(icon::ARROW_COUNTER_CLOCKWISE).size(17.0),
+                    )
+                    .min_size(egui::vec2(32.0, 32.0)),
+                )
                 .on_hover_text(t!("overlay.undo"))
                 .clicked()
             {
@@ -698,7 +904,12 @@ impl State {
     }
 }
 
-fn dark_bar(ctx: &egui::Context, id: &str, pos: Pos2, add: impl FnOnce(&mut egui::Ui)) -> egui::Vec2 {
+fn dark_bar(
+    ctx: &egui::Context,
+    id: &str,
+    pos: Pos2,
+    add: impl FnOnce(&mut egui::Ui),
+) -> egui::Vec2 {
     egui::Area::new(egui::Id::new(id))
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
@@ -709,7 +920,12 @@ fn dark_bar(ctx: &egui::Context, id: &str, pos: Pos2, add: impl FnOnce(&mut egui
                 .stroke(Stroke::new(1.0, Color32::from_rgb(60, 72, 96)))
                 .corner_radius(CornerRadius::same(10))
                 .inner_margin(egui::Margin::same(6))
-                .shadow(egui::epaint::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(120) })
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 4],
+                    blur: 14,
+                    spread: 0,
+                    color: Color32::from_black_alpha(120),
+                })
                 .show(ui, add);
         })
         .response
@@ -731,7 +947,10 @@ fn paint_shape(painter: &egui::Painter, map: Mapping, shape: &Shape) {
         }
         ShapeKind::Marker(v) => {
             let c = shape.style.color;
-            let marker = Stroke::new(map.len(shape.style.width * annotate::MARKER_WIDTH_FACTOR), Color32::from_rgba_unmultiplied(c[0], c[1], c[2], annotate::MARKER_ALPHA));
+            let marker = Stroke::new(
+                map.len(shape.style.width * annotate::MARKER_WIDTH_FACTOR),
+                Color32::from_rgba_unmultiplied(c[0], c[1], c[2], annotate::MARKER_ALPHA),
+            );
             painter.add(egui::Shape::line(pts(v), marker));
         }
         ShapeKind::Line { from, to } => {
@@ -748,7 +967,13 @@ fn paint_shape(painter: &egui::Painter, map: Mapping, shape: &Shape) {
             painter.rect_stroke(r, CornerRadius::ZERO, stroke, egui::StrokeKind::Middle);
         }
         ShapeKind::Text { pos, text } => {
-            painter.text(map.to_pt(*pos), Align2::LEFT_TOP, text, text_font(painter.ctx(), &shape.style, map.len(shape.style.font_size)), color);
+            painter.text(
+                map.to_pt(*pos),
+                Align2::LEFT_TOP,
+                text,
+                text_font(painter.ctx(), &shape.style, map.len(shape.style.font_size)),
+                color,
+            );
         }
     }
 }
@@ -761,7 +986,10 @@ fn register_fonts(ctx: &egui::Context) {
         ctx.add_font(FontInsert::new(
             &face.name,
             data,
-            vec![InsertFontFamily { family: egui::FontFamily::Name(face.name.as_str().into()), priority: FontPriority::Highest }],
+            vec![InsertFontFamily {
+                family: egui::FontFamily::Name(face.name.as_str().into()),
+                priority: FontPriority::Highest,
+            }],
         ));
     }
 }
@@ -773,7 +1001,11 @@ fn text_font(ctx: &egui::Context, style: &Style, size: f32) -> FontId {
         i => match annotate::fonts().get(usize::from(i)) {
             Some(face) => {
                 let family = egui::FontFamily::Name(face.name.as_str().into());
-                if ctx.fonts(|f| f.families().contains(&family)) { family } else { egui::FontFamily::Proportional }
+                if ctx.fonts(|f| f.families().contains(&family)) {
+                    family
+                } else {
+                    egui::FontFamily::Proportional
+                }
             }
             None => egui::FontFamily::Proportional,
         },

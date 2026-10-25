@@ -45,7 +45,12 @@ impl Frame {
 
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let i = (y as usize * self.width as usize + x as usize) * 4;
-        [self.data[i], self.data[i + 1], self.data[i + 2], self.data[i + 3]]
+        [
+            self.data[i],
+            self.data[i + 1],
+            self.data[i + 2],
+            self.data[i + 3],
+        ]
     }
 
     pub fn crop(&self, rect: Rect) -> Frame {
@@ -65,7 +70,8 @@ impl Frame {
         if self.width == width && self.height == height {
             return self.clone();
         }
-        let scale = (f64::from(width) / f64::from(self.width.max(1))).min(f64::from(height) / f64::from(self.height.max(1)));
+        let scale = (f64::from(width) / f64::from(self.width.max(1)))
+            .min(f64::from(height) / f64::from(self.height.max(1)));
         let slightly_larger = self.width <= width + 1 && self.height <= height + 1;
         let scaled;
         let src = if scale < 1.0 && !slightly_larger {
@@ -77,7 +83,10 @@ impl Frame {
             self
         };
         let mut out = Frame::filled(width, height, fill);
-        let (cw, ch) = (src.width.min(width) as usize, src.height.min(height) as usize);
+        let (cw, ch) = (
+            src.width.min(width) as usize,
+            src.height.min(height) as usize,
+        );
         let (x0, y0) = ((width as usize - cw) / 2, (height as usize - ch) / 2);
         let (src_stride, dst_stride) = (src.width as usize * 4, width as usize * 4);
         for row in 0..ch {
@@ -89,11 +98,19 @@ impl Frame {
     }
 
     pub fn resized(&self, width: u32, height: u32) -> Frame {
-        use fast_image_resize::{images::Image, images::ImageRef, FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
-        let src = ImageRef::new(self.width, self.height, &self.data, PixelType::U8x4).expect("frame buffer matches its size");
+        use fast_image_resize::{
+            images::Image, images::ImageRef, FilterType, PixelType, ResizeAlg, ResizeOptions,
+            Resizer,
+        };
+        let src = ImageRef::new(self.width, self.height, &self.data, PixelType::U8x4)
+            .expect("frame buffer matches its size");
         let mut dst = Image::new(width, height, PixelType::U8x4);
         Resizer::new()
-            .resize(&src, &mut dst, &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear)))
+            .resize(
+                &src,
+                &mut dst,
+                &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear)),
+            )
             .expect("same pixel type");
         Frame::new(width, height, dst.into_vec())
     }
@@ -155,7 +172,11 @@ mod tests {
         let fitted = tall.fit_to(20, 20, [0, 0, 0, 255]);
         assert_eq!((fitted.width, fitted.height), (20, 20));
         assert_eq!(fitted.pixel(10, 0), [200, 10, 10, 255], "top row kept");
-        assert_eq!(fitted.pixel(10, 19), [200, 10, 10, 255], "bottom row kept, nothing cut");
+        assert_eq!(
+            fitted.pixel(10, 19),
+            [200, 10, 10, 255],
+            "bottom row kept, nothing cut"
+        );
         assert_eq!(fitted.pixel(0, 10), [0, 0, 0, 255], "side bars");
         assert_eq!(fitted.pixel(19, 10), [0, 0, 0, 255]);
         assert_eq!(f.resized(2, 2).width, 2);

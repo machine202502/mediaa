@@ -12,7 +12,13 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
 
     let ffmpeg_libs = [
-        "avcodec", "avdevice", "avfilter", "avformat", "avutil", "swresample", "swscale",
+        "avcodec",
+        "avdevice",
+        "avfilter",
+        "avformat",
+        "avutil",
+        "swresample",
+        "swscale",
     ];
     let mut libs = BTreeSet::new();
     let Ok(entries) = std::fs::read_dir(&pc_dir) else {

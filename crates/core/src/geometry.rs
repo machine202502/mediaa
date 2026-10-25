@@ -113,8 +113,14 @@ impl Handle {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Drag {
-    Creating { anchor: Point },
-    Editing { handle: Handle, origin: Point, start: Rect },
+    Creating {
+        anchor: Point,
+    },
+    Editing {
+        handle: Handle,
+        origin: Point,
+        start: Rect,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -308,7 +314,10 @@ mod tests {
     fn scale_keeps_edges_consistent() {
         let r = Rect::new(10, 10, 15, 15).scale(1.5);
         assert_eq!(r, Rect::new(15, 15, 23, 23));
-        assert_eq!(Rect::new(0, 0, 100, 50).scale(2.0), Rect::new(0, 0, 200, 100));
+        assert_eq!(
+            Rect::new(0, 0, 100, 50).scale(2.0),
+            Rect::new(0, 0, 200, 100)
+        );
     }
 
     #[test]

@@ -1,4 +1,6 @@
-use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect as ERect, Stroke, StrokeKind, ViewportId};
+use eframe::egui::{
+    self, Color32, CornerRadius, Pos2, Rect as ERect, Stroke, StrokeKind, ViewportId,
+};
 use mediaa_core::geometry::Rect;
 use mediaa_platform::screen::MonitorInfo;
 
@@ -22,7 +24,10 @@ fn geometry(monitor: &MonitorInfo, rect: Rect, width: u32) -> Geometry {
             (monitor.x + rect.x) as f32 / scale - margin,
             (monitor.y + rect.y) as f32 / scale - margin,
         ],
-        size: [rect.w.max(1) as f32 / scale + margin * 2.0, rect.h.max(1) as f32 / scale + margin * 2.0],
+        size: [
+            rect.w.max(1) as f32 / scale + margin * 2.0,
+            rect.h.max(1) as f32 / scale + margin * 2.0,
+        ],
     }
 }
 
@@ -79,7 +84,12 @@ pub fn show(
         } else {
             RECORDING_DIM
         };
-        ui.painter().rect_stroke(bounds, CornerRadius::ZERO, Stroke::new(width as f32, color), StrokeKind::Inside);
+        ui.painter().rect_stroke(
+            bounds,
+            CornerRadius::ZERO,
+            Stroke::new(width as f32, color),
+            StrokeKind::Inside,
+        );
     });
     let _ = mediaa_platform::window::exclude_from_capture(TITLE);
     let _ = mediaa_platform::window::make_black_transparent(TITLE);

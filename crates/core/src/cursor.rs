@@ -12,7 +12,15 @@ pub fn arrow(scale: f32) -> CursorImage {
     let (w, h) = ((13.0 * scale).ceil() as u32, (20.0 * scale).ceil() as u32);
     let mut pixmap = Pixmap::new(w, h).expect("non-zero size");
     let mut pb = PathBuilder::new();
-    let pts = [(0.0, 0.0), (0.0, 16.0), (4.0, 12.5), (7.0, 18.5), (9.5, 17.5), (6.5, 11.5), (11.5, 11.5)];
+    let pts = [
+        (0.0, 0.0),
+        (0.0, 16.0),
+        (4.0, 12.5),
+        (7.0, 18.5),
+        (9.5, 17.5),
+        (6.5, 11.5),
+        (11.5, 11.5),
+    ];
     let off = 0.75;
     pb.move_to(off + pts[0].0 * scale, off + pts[0].1 * scale);
     for (x, y) in &pts[1..] {
@@ -20,27 +28,53 @@ pub fn arrow(scale: f32) -> CursorImage {
     }
     pb.close();
     let path = pb.finish().expect("valid polygon");
-    let mut paint = Paint { anti_alias: true, ..Paint::default() };
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Paint::default()
+    };
     paint.set_color_rgba8(255, 255, 255, 255);
-    pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
     paint.set_color_rgba8(0, 0, 0, 255);
-    let stroke = Stroke { width: scale.max(1.0), ..Stroke::default() };
+    let stroke = Stroke {
+        width: scale.max(1.0),
+        ..Stroke::default()
+    };
     pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     let data = pixmap.pixels().iter().flat_map(|p| {
         let c = p.demultiply();
         [c.red(), c.green(), c.blue(), c.alpha()]
     });
-    CursorImage { image: Frame::new(w, h, data.collect()), hotspot: (1, 1) }
+    CursorImage {
+        image: Frame::new(w, h, data.collect()),
+        hotspot: (1, 1),
+    }
 }
 
 pub fn draw(frame: &mut Frame, cursor: &CursorImage, x: i32, y: i32) {
     let (w, h) = (frame.width, frame.height);
-    let Some(mut canvas) = image::ImageBuffer::<image::Rgba<u8>, &mut [u8]>::from_raw(w, h, &mut frame.data[..]) else {
+    let Some(mut canvas) =
+        image::ImageBuffer::<image::Rgba<u8>, &mut [u8]>::from_raw(w, h, &mut frame.data[..])
+    else {
         return;
     };
-    let top = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(cursor.image.width, cursor.image.height, &cursor.image.data[..])
-        .expect("cursor buffer matches its size");
-    image::imageops::overlay(&mut canvas, &top, i64::from(x - cursor.hotspot.0), i64::from(y - cursor.hotspot.1));
+    let top = image::ImageBuffer::<image::Rgba<u8>, &[u8]>::from_raw(
+        cursor.image.width,
+        cursor.image.height,
+        &cursor.image.data[..],
+    )
+    .expect("cursor buffer matches its size");
+    image::imageops::overlay(
+        &mut canvas,
+        &top,
+        i64::from(x - cursor.hotspot.0),
+        i64::from(y - cursor.hotspot.1),
+    );
 }
 
 #[cfg(test)]
@@ -54,14 +88,20 @@ mod tests {
         let inner = a.image.pixel(6, 14);
         assert_eq!(inner, [255, 255, 255, 255], "inside is white");
         let edge = a.image.pixel(1, 10);
-        assert!(edge[3] > 200 && edge[0] < 80, "left edge is the black outline: {edge:?}");
+        assert!(
+            edge[3] > 200 && edge[0] < 80,
+            "left edge is the black outline: {edge:?}"
+        );
         assert_eq!(a.image.pixel(25, 0)[3], 0, "outside is transparent");
     }
 
     #[test]
     fn draw_places_hotspot_and_clips() {
         let mut f = Frame::filled(40, 40, [0, 0, 255, 255]);
-        let c = CursorImage { image: Frame::filled(4, 4, [255, 0, 0, 255]), hotspot: (1, 1) };
+        let c = CursorImage {
+            image: Frame::filled(4, 4, [255, 0, 0, 255]),
+            hotspot: (1, 1),
+        };
         draw(&mut f, &c, 10, 10);
         assert_eq!(f.pixel(9, 9), [255, 0, 0, 255], "hotspot offset applied");
         assert_eq!(f.pixel(12, 12), [255, 0, 0, 255]);
@@ -74,7 +114,10 @@ mod tests {
     #[test]
     fn translucent_pixels_blend() {
         let mut f = Frame::filled(4, 4, [0, 0, 0, 255]);
-        let c = CursorImage { image: Frame::filled(1, 1, [255, 255, 255, 128]), hotspot: (0, 0) };
+        let c = CursorImage {
+            image: Frame::filled(1, 1, [255, 255, 255, 128]),
+            hotspot: (0, 0),
+        };
         draw(&mut f, &c, 1, 1);
         let p = f.pixel(1, 1);
         assert!(p[0] > 100 && p[0] < 160 && p[3] >= 254, "{p:?}");

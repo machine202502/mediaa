@@ -2,6 +2,7 @@
 
 mod app;
 mod hotkeys;
+mod hover_preview;
 mod i18n;
 mod icon;
 mod overlay;
@@ -10,9 +11,8 @@ mod player;
 mod region_marker;
 mod theme;
 mod thumbs;
-mod hover_preview;
-mod viewer;
 mod tray;
+mod viewer;
 
 rust_i18n::i18n!("locales", fallback = "en");
 

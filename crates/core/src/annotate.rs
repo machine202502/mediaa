@@ -15,7 +15,10 @@ pub struct FontFace {
 
 impl std::fmt::Debug for FontFace {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FontFace").field("name", &self.name).field("index", &self.index).finish()
+        f.debug_struct("FontFace")
+            .field("name", &self.name)
+            .field("index", &self.index)
+            .finish()
     }
 }
 
@@ -23,25 +26,58 @@ pub const FONT_SANS: u16 = 0;
 pub const FONT_MONO: u16 = 1;
 
 const SYSTEM_FONTS: [&str; 18] = [
-    "Arial", "Segoe UI", "Calibri", "Verdana", "Tahoma", "Times New Roman", "Georgia", "Consolas", "Courier New",
-    "Comic Sans MS", "Impact", "Helvetica", "Times", "Menlo", "DejaVu Sans", "DejaVu Serif", "Liberation Sans",
+    "Arial",
+    "Segoe UI",
+    "Calibri",
+    "Verdana",
+    "Tahoma",
+    "Times New Roman",
+    "Georgia",
+    "Consolas",
+    "Courier New",
+    "Comic Sans MS",
+    "Impact",
+    "Helvetica",
+    "Times",
+    "Menlo",
+    "DejaVu Sans",
+    "DejaVu Serif",
+    "Liberation Sans",
     "Noto Serif",
 ];
 
 pub fn fonts() -> &'static [FontFace] {
     static FONTS: OnceLock<Vec<FontFace>> = OnceLock::new();
     FONTS.get_or_init(|| {
-        let builtin = |name: &str, data: &[u8]| FontFace { name: name.into(), data: Arc::new(data.to_vec()), index: 0 };
-        let mut v = vec![builtin("Ubuntu", FONT), builtin("Hack", epaint_default_fonts::HACK_REGULAR)];
+        let builtin = |name: &str, data: &[u8]| FontFace {
+            name: name.into(),
+            data: Arc::new(data.to_vec()),
+            index: 0,
+        };
+        let mut v = vec![
+            builtin("Ubuntu", FONT),
+            builtin("Hack", epaint_default_fonts::HACK_REGULAR),
+        ];
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
         for name in SYSTEM_FONTS {
-            let query = fontdb::Query { families: &[fontdb::Family::Name(name)], ..Default::default() };
+            let query = fontdb::Query {
+                families: &[fontdb::Family::Name(name)],
+                ..Default::default()
+            };
             let Some(id) = db.query(&query) else { continue };
-            let found = db.face(id).is_some_and(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)));
-            if let Some(Some((data, index))) = found.then(|| db.with_face_data(id, |d, i| (d.to_vec(), i))) {
+            let found = db
+                .face(id)
+                .is_some_and(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)));
+            if let Some(Some((data, index))) =
+                found.then(|| db.with_face_data(id, |d, i| (d.to_vec(), i)))
+            {
                 if FontRef::try_from_slice_and_index(&data, index).is_ok() {
-                    v.push(FontFace { name: name.into(), data: Arc::new(data), index });
+                    v.push(FontFace {
+                        name: name.into(),
+                        data: Arc::new(data),
+                        index,
+                    });
                 }
             }
         }
@@ -65,7 +101,14 @@ pub enum Tool {
 }
 
 impl Tool {
-    pub const ALL: [Tool; 6] = [Tool::Pen, Tool::Line, Tool::Arrow, Tool::Rect, Tool::Marker, Tool::Text];
+    pub const ALL: [Tool; 6] = [
+        Tool::Pen,
+        Tool::Line,
+        Tool::Arrow,
+        Tool::Rect,
+        Tool::Marker,
+        Tool::Text,
+    ];
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -78,7 +121,12 @@ pub struct Style {
 
 impl Style {
     pub const fn new(color: [u8; 4], width: f32) -> Style {
-        Style { color, width, font: FONT_SANS, font_size: 24.0 }
+        Style {
+            color,
+            width,
+            font: FONT_SANS,
+            font_size: 24.0,
+        }
     }
 }
 
@@ -106,7 +154,10 @@ impl Shape {
             Tool::Line => ShapeKind::Line { from: p, to: p },
             Tool::Arrow => ShapeKind::Arrow { from: p, to: p },
             Tool::Rect => ShapeKind::Rect { a: p, b: p },
-            Tool::Text => ShapeKind::Text { pos: p, text: String::new() },
+            Tool::Text => ShapeKind::Text {
+                pos: p,
+                text: String::new(),
+            },
         };
         Shape { kind, style }
     }
@@ -114,7 +165,10 @@ impl Shape {
     pub fn drag_to(&mut self, p: (f32, f32)) {
         match &mut self.kind {
             ShapeKind::Pen(pts) | ShapeKind::Marker(pts) => {
-                if pts.last().is_none_or(|l| (l.0 - p.0).hypot(l.1 - p.1) >= 1.0) {
+                if pts
+                    .last()
+                    .is_none_or(|l| (l.0 - p.0).hypot(l.1 - p.1) >= 1.0)
+                {
                     pts.push(p);
                 }
             }
@@ -142,7 +196,11 @@ pub fn arrow_head(from: (f32, f32), to: (f32, f32), width: f32) -> [(f32, f32); 
     let head = (width * 4.0).max(12.0).min(len);
     let half = head * 0.55;
     let base = (to.0 - ux * head, to.1 - uy * head);
-    [to, (base.0 - uy * half, base.1 + ux * half), (base.0 + uy * half, base.1 - ux * half)]
+    [
+        to,
+        (base.0 - uy * half, base.1 + ux * half),
+        (base.0 + uy * half, base.1 - ux * half),
+    ]
 }
 
 pub fn arrow_shaft_end(from: (f32, f32), to: (f32, f32), width: f32) -> (f32, f32) {
@@ -202,10 +260,13 @@ fn draw_text(pm: &mut PixmapMut, pos: (f32, f32), text: &str, style: &Style) {
             if let Some(p) = prev {
                 x += scaled.kern(p, id);
             }
-            let glyph = id.with_scale_and_position(PxScale::from(size), ab_glyph::point(x, baseline));
+            let glyph =
+                id.with_scale_and_position(PxScale::from(size), ab_glyph::point(x, baseline));
             x += scaled.h_advance(id);
             prev = Some(id);
-            let Some(outline) = font.outline_glyph(glyph) else { continue };
+            let Some(outline) = font.outline_glyph(glyph) else {
+                continue;
+            };
             let bounds = outline.px_bounds();
             let data = pm.data_mut();
             outline.draw(|gx, gy, coverage| {
@@ -220,7 +281,8 @@ fn draw_text(pm: &mut PixmapMut, pos: (f32, f32), text: &str, style: &Style) {
                     let dst = f32::from(data[i + c]);
                     data[i + c] = (dst + (f32::from(color[c]) - dst) * a).round() as u8;
                 }
-                data[i + 3] = (f32::from(data[i + 3]) + (255.0 - f32::from(data[i + 3])) * a).round() as u8;
+                data[i + 3] =
+                    (f32::from(data[i + 3]) + (255.0 - f32::from(data[i + 3])) * a).round() as u8;
             });
         }
     }
@@ -228,7 +290,9 @@ fn draw_text(pm: &mut PixmapMut, pos: (f32, f32), text: &str, style: &Style) {
 
 pub fn render(frame: &mut Frame, shapes: &[Shape]) {
     let (w, h) = (frame.width, frame.height);
-    let Some(mut pm) = PixmapMut::from_bytes(&mut frame.data, w, h) else { return };
+    let Some(mut pm) = PixmapMut::from_bytes(&mut frame.data, w, h) else {
+        return;
+    };
     let t = Transform::identity();
     for s in shapes {
         let c = s.style.color;
@@ -284,7 +348,10 @@ pub fn render(frame: &mut Frame, shapes: &[Shape]) {
 pub fn render_crop(full: &Frame, rect: Rect, shapes: &[Shape]) -> Frame {
     let mut out = full.crop(rect);
     let r = rect.clamp_to(&Rect::new(0, 0, full.width as i32, full.height as i32));
-    let shifted: Vec<Shape> = shapes.iter().map(|s| translate(s, -(r.x as f32), -(r.y as f32))).collect();
+    let shifted: Vec<Shape> = shapes
+        .iter()
+        .map(|s| translate(s, -(r.x as f32), -(r.y as f32)))
+        .collect();
     render(&mut out, &shifted);
     out
 }
@@ -294,12 +361,24 @@ fn translate(s: &Shape, dx: f32, dy: f32) -> Shape {
     let kind = match &s.kind {
         ShapeKind::Pen(pts) => ShapeKind::Pen(pts.iter().map(m).collect()),
         ShapeKind::Marker(pts) => ShapeKind::Marker(pts.iter().map(m).collect()),
-        ShapeKind::Line { from, to } => ShapeKind::Line { from: m(from), to: m(to) },
-        ShapeKind::Arrow { from, to } => ShapeKind::Arrow { from: m(from), to: m(to) },
+        ShapeKind::Line { from, to } => ShapeKind::Line {
+            from: m(from),
+            to: m(to),
+        },
+        ShapeKind::Arrow { from, to } => ShapeKind::Arrow {
+            from: m(from),
+            to: m(to),
+        },
         ShapeKind::Rect { a, b } => ShapeKind::Rect { a: m(a), b: m(b) },
-        ShapeKind::Text { pos, text } => ShapeKind::Text { pos: m(pos), text: text.clone() },
+        ShapeKind::Text { pos, text } => ShapeKind::Text {
+            pos: m(pos),
+            text: text.clone(),
+        },
     };
-    Shape { kind, style: s.style }
+    Shape {
+        kind,
+        style: s.style,
+    }
 }
 
 #[cfg(test)]
@@ -324,7 +403,13 @@ mod tests {
     #[test]
     fn rectangle_strokes_edges_only() {
         let mut f = white(100, 100);
-        let s = Shape { kind: ShapeKind::Rect { a: (20.0, 20.0), b: (80.0, 70.0) }, style: RED };
+        let s = Shape {
+            kind: ShapeKind::Rect {
+                a: (20.0, 20.0),
+                b: (80.0, 70.0),
+            },
+            style: RED,
+        };
         render(&mut f, &[s]);
         assert!(is_red(&f, 20, 45), "left edge");
         assert!(is_red(&f, 50, 70), "bottom edge");
@@ -350,7 +435,13 @@ mod tests {
     #[test]
     fn arrow_has_a_head() {
         let mut f = white(200, 100);
-        let s = Shape { kind: ShapeKind::Arrow { from: (10.0, 50.0), to: (190.0, 50.0) }, style: RED };
+        let s = Shape {
+            kind: ShapeKind::Arrow {
+                from: (10.0, 50.0),
+                to: (190.0, 50.0),
+            },
+            style: RED,
+        };
         render(&mut f, &[s]);
         assert!(is_red(&f, 100, 50), "shaft");
         assert!(is_red(&f, 177, 56), "head");
@@ -372,15 +463,27 @@ mod tests {
         s.drag_to((90.0, 50.0));
         render(&mut f, &[s]);
         let p = f.pixel(50, 50);
-        assert!(p[0] == 255 && p[1] > 100 && p[1] < 255, "blended, not opaque: {p:?}");
+        assert!(
+            p[0] == 255 && p[1] > 100 && p[1] < 255,
+            "blended, not opaque: {p:?}"
+        );
     }
 
     #[test]
     fn text_is_rasterized() {
         let mut f = white(200, 80);
-        let s = Shape { kind: ShapeKind::Text { pos: (10.0, 10.0), text: "Привет".into() }, style: RED };
+        let s = Shape {
+            kind: ShapeKind::Text {
+                pos: (10.0, 10.0),
+                text: "Привет".into(),
+            },
+            style: RED,
+        };
         render(&mut f, &[s]);
-        let red = (0..200).flat_map(|x| (0..80).map(move |y| (x, y))).filter(|&(x, y)| is_red(&f, x, y)).count();
+        let red = (0..200)
+            .flat_map(|x| (0..80).map(move |y| (x, y)))
+            .filter(|&(x, y)| is_red(&f, x, y))
+            .count();
         assert!(red > 50, "glyph pixels: {red}");
         assert!(is_white(&f, 195, 75));
     }
@@ -392,9 +495,25 @@ mod tests {
         assert_eq!(fonts[usize::from(FONT_MONO)].name, "Hack");
         for (i, face) in fonts.iter().enumerate() {
             let mut f = white(240, 80);
-            let style = Style { font: i as u16, font_size: 32.0, ..RED };
-            render(&mut f, &[Shape { kind: ShapeKind::Text { pos: (5.0, 5.0), text: "Ab".into() }, style }]);
-            let red = (0..240).flat_map(|x| (0..80).map(move |y| (x, y))).filter(|&(x, y)| is_red(&f, x, y)).count();
+            let style = Style {
+                font: i as u16,
+                font_size: 32.0,
+                ..RED
+            };
+            render(
+                &mut f,
+                &[Shape {
+                    kind: ShapeKind::Text {
+                        pos: (5.0, 5.0),
+                        text: "Ab".into(),
+                    },
+                    style,
+                }],
+            );
+            let red = (0..240)
+                .flat_map(|x| (0..80).map(move |y| (x, y)))
+                .filter(|&(x, y)| is_red(&f, x, y))
+                .count();
             assert!(red > 30, "{}: {red} glyph pixels", face.name);
         }
     }
@@ -403,9 +522,24 @@ mod tests {
     fn bigger_font_size_draws_more() {
         let count = |size: f32| {
             let mut f = white(400, 120);
-            let style = Style { font_size: size, ..RED };
-            render(&mut f, &[Shape { kind: ShapeKind::Text { pos: (5.0, 5.0), text: "Text".into() }, style }]);
-            (0..400).flat_map(|x| (0..120).map(move |y| (x, y))).filter(|&(x, y)| is_red(&f, x, y)).count()
+            let style = Style {
+                font_size: size,
+                ..RED
+            };
+            render(
+                &mut f,
+                &[Shape {
+                    kind: ShapeKind::Text {
+                        pos: (5.0, 5.0),
+                        text: "Text".into(),
+                    },
+                    style,
+                }],
+            );
+            (0..400)
+                .flat_map(|x| (0..120).map(move |y| (x, y)))
+                .filter(|&(x, y)| is_red(&f, x, y))
+                .count()
         };
         assert!(count(72.0) > count(24.0) * 3);
     }
@@ -414,7 +548,10 @@ mod tests {
     fn meaningless_shapes_are_detected() {
         assert!(!Shape::begin(Tool::Rect, (5.0, 5.0), RED).is_meaningful());
         assert!(!Shape::begin(Tool::Text, (5.0, 5.0), RED).is_meaningful());
-        assert!(Shape::begin(Tool::Pen, (5.0, 5.0), RED).is_meaningful(), "a dot is fine");
+        assert!(
+            Shape::begin(Tool::Pen, (5.0, 5.0), RED).is_meaningful(),
+            "a dot is fine"
+        );
         let mut a = Shape::begin(Tool::Arrow, (0.0, 0.0), RED);
         a.drag_to((30.0, 0.0));
         assert!(a.is_meaningful());
@@ -423,7 +560,13 @@ mod tests {
     #[test]
     fn render_crop_translates_shapes() {
         let full = white(200, 200);
-        let s = Shape { kind: ShapeKind::Line { from: (100.0, 110.0), to: (180.0, 110.0) }, style: RED };
+        let s = Shape {
+            kind: ShapeKind::Line {
+                from: (100.0, 110.0),
+                to: (180.0, 110.0),
+            },
+            style: RED,
+        };
         let out = render_crop(&full, Rect::new(100, 100, 50, 50), &[s]);
         assert_eq!((out.width, out.height), (50, 50));
         assert!(is_red(&out, 25, 10));

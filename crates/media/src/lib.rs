@@ -1,9 +1,11 @@
-pub mod animation;
+pub mod animation_backends;
 pub mod convert;
 pub mod filters;
 pub mod info;
 pub mod job;
+mod live_webp;
 pub mod preview;
+pub mod preview_cache;
 pub mod recorder;
 pub mod thumbnail;
 

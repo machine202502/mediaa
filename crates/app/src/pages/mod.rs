@@ -38,7 +38,11 @@ fn sub_pages(section: Section) -> Vec<(Page, &'static str, String)> {
         Section::Capture => vec![
             (Page::Screenshot, icon::CAMERA, t!("nav.screenshot").into()),
             (Page::Record, icon::VIDEO_CAMERA, t!("nav.record").into()),
-            (Page::RecordAudio, icon::MICROPHONE, t!("nav.record_audio").into()),
+            (
+                Page::RecordAudio,
+                icon::MICROPHONE,
+                t!("nav.record_audio").into(),
+            ),
         ],
         Section::Library | Section::Convert => Vec::new(),
     }
@@ -82,12 +86,26 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
     if matches!(app.page, Page::Record | Page::RecordAudio) && app.recorder.is_idle() {
         egui::Panel::bottom("record-start")
             .resizable(false)
-            .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(18, 10)))
-            .show(ui, |ui| if app.page == Page::Record { record::start_bar(app, ui) } else { audio::start_bar(app, ui) });
+            .frame(
+                egui::Frame::new()
+                    .fill(p.bg)
+                    .inner_margin(Margin::symmetric(18, 10)),
+            )
+            .show(ui, |ui| {
+                if app.page == Page::Record {
+                    record::start_bar(app, ui)
+                } else {
+                    audio::start_bar(app, ui)
+                }
+            });
     }
 
     egui::CentralPanel::default()
-        .frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(18, 14)))
+        .frame(
+            egui::Frame::new()
+                .fill(p.bg)
+                .inner_margin(Margin::symmetric(18, 14)),
+        )
         .show(ui, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -117,9 +135,18 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             ui,
             &mut section,
             &[
-                (Some(Section::Library), format!("{}  {}", icon::IMAGES, t!("section.library"))),
-                (Some(Section::Capture), format!("{}  {}", icon::SCREENCAST, t!("section.capture"))),
-                (Some(Section::Convert), format!("{}  {}", icon::SHUFFLE, t!("section.convert"))),
+                (
+                    Some(Section::Library),
+                    format!("{}  {}", icon::IMAGES, t!("section.library")),
+                ),
+                (
+                    Some(Section::Capture),
+                    format!("{}  {}", icon::SCREENCAST, t!("section.capture")),
+                ),
+                (
+                    Some(Section::Convert),
+                    format!("{}  {}", icon::SHUFFLE, t!("section.convert")),
+                ),
             ],
         );
         if section != before {
@@ -136,10 +163,18 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 (Page::About, icon::INFO, t!("settings.about")),
             ] {
                 let selected = app.page == page;
-                let btn = egui::Button::new(RichText::new(ic).size(15.0).color(if selected { p.accent } else { p.text }))
-                    .fill(if selected { p.accent_soft } else { Color32::TRANSPARENT })
-                    .stroke(Stroke::NONE)
-                    .min_size(egui::vec2(28.0, 28.0));
+                let btn = egui::Button::new(RichText::new(ic).size(15.0).color(if selected {
+                    p.accent
+                } else {
+                    p.text
+                }))
+                .fill(if selected {
+                    p.accent_soft
+                } else {
+                    Color32::TRANSPARENT
+                })
+                .stroke(Stroke::NONE)
+                .min_size(egui::vec2(28.0, 28.0));
                 if ui.add(btn).on_hover_text(tip).clicked() {
                     app.page = if selected { app.last_main_page } else { page };
                 }
@@ -149,7 +184,11 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 ThemePreference::Dark => (icon::MOON, ThemePreference::Light),
                 ThemePreference::Light => (icon::SUN, ThemePreference::System),
             };
-            let tip = format!("{}: {}", t!("settings.theme"), i18n::theme(app.settings.theme));
+            let tip = format!(
+                "{}: {}",
+                t!("settings.theme"),
+                i18n::theme(app.settings.theme)
+            );
             if theme::icon_button(ui, ic, &tip).clicked() {
                 app.settings.theme = next;
                 theme::apply_preference(ctx, next);
@@ -166,9 +205,17 @@ fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)]) {
         ui.spacing_mut().item_spacing.x = 4.0;
         for &(page, ic, ref label) in pages {
             let selected = app.page == page;
-            let (fill, fg) = if selected { (p.accent_soft, p.accent) } else { (Color32::TRANSPARENT, p.text) };
+            let (fill, fg) = if selected {
+                (p.accent_soft, p.accent)
+            } else {
+                (Color32::TRANSPARENT, p.text)
+            };
             let recording = page == app.recording_page() && !app.recorder.is_idle();
-            let text = if recording { format!("{ic}  {label}    ") } else { format!("{ic}  {label}") };
+            let text = if recording {
+                format!("{ic}  {label}    ")
+            } else {
+                format!("{ic}  {label}")
+            };
             let btn = egui::Button::new(RichText::new(text).size(13.0).color(fg))
                 .fill(fill)
                 .stroke(Stroke::NONE)
@@ -192,16 +239,28 @@ fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
         RecState::Recording { session, .. } => (
             format!(
                 "{} {}",
-                if session.is_paused() { t!("record.paused") } else { t!("record.recording") },
+                if session.is_paused() {
+                    t!("record.paused")
+                } else {
+                    t!("record.recording")
+                },
                 human_duration(session.elapsed().as_secs_f64())
             ),
             session.is_paused(),
         ),
-        RecState::Saving { progress: Some(progress), .. } => {
-            (format!("{} {:.0}%", t!("record.saving"), progress * 100.0), false)
-        }
+        RecState::Saving {
+            progress: Some(progress),
+            ..
+        } => (
+            format!("{} {:.0}%", t!("record.saving"), progress * 100.0),
+            false,
+        ),
         RecState::Saving { started, .. } => (
-            format!("{} {}", t!("record.saving"), human_duration(started.elapsed().as_secs_f64())),
+            format!(
+                "{} {}",
+                t!("record.saving"),
+                human_duration(started.elapsed().as_secs_f64())
+            ),
             false,
         ),
         _ => return,
@@ -213,7 +272,11 @@ fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
         if theme::icon_button(ui, icon::STOP, &t!("record.stop_save")).clicked() {
             app.stop_recording(ctx, true);
         }
-        let (ic, tip) = if paused { (icon::PLAY, t!("record.resume")) } else { (icon::PAUSE, t!("record.pause")) };
+        let (ic, tip) = if paused {
+            (icon::PLAY, t!("record.resume"))
+        } else {
+            (icon::PAUSE, t!("record.pause"))
+        };
         if theme::icon_button(ui, ic, &tip).clicked() {
             app.toggle_pause();
         }
@@ -249,20 +312,70 @@ pub fn tile_width(ui: &egui::Ui, n: usize) -> f32 {
     ((avail - gap * (cols - 1.0)) / cols).floor()
 }
 
-pub fn tile(ui: &mut egui::Ui, ic: &str, title: &str, subtitle: &str, width: f32, selected: bool) -> egui::Response {
+pub fn tile(
+    ui: &mut egui::Ui,
+    ic: &str,
+    title: &str,
+    subtitle: &str,
+    width: f32,
+    selected: bool,
+) -> egui::Response {
     let p = theme::palette(ui);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 62.0), egui::Sense::click());
     let hovered = resp.hovered();
-    let fill = if selected { p.accent_soft } else if hovered { p.card_hover } else { p.card };
-    let stroke = Stroke::new(if selected { 1.5 } else { 1.0 }, if hovered || selected { p.accent } else { p.border });
-    ui.painter().rect(rect, CornerRadius::same(8), fill, stroke, egui::StrokeKind::Inside);
-    let badge = egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 13.0), egui::vec2(36.0, 36.0));
-    ui.painter().rect_filled(badge, CornerRadius::same(7), p.accent_soft);
-    ui.painter().text(badge.center(), egui::Align2::CENTER_CENTER, ic, egui::FontId::proportional(18.0), p.accent);
+    let fill = if selected {
+        p.accent_soft
+    } else if hovered {
+        p.card_hover
+    } else {
+        p.card
+    };
+    let stroke = Stroke::new(
+        if selected { 1.5 } else { 1.0 },
+        if hovered || selected {
+            p.accent
+        } else {
+            p.border
+        },
+    );
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(8),
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+    let badge =
+        egui::Rect::from_min_size(rect.min + egui::vec2(12.0, 13.0), egui::vec2(36.0, 36.0));
+    ui.painter()
+        .rect_filled(badge, CornerRadius::same(7), p.accent_soft);
+    ui.painter().text(
+        badge.center(),
+        egui::Align2::CENTER_CENTER,
+        ic,
+        egui::FontId::proportional(18.0),
+        p.accent,
+    );
     let x = badge.max.x + 10.0;
-    let title_y = if subtitle.is_empty() { rect.center().y - 9.0 } else { rect.min.y + 14.0 };
-    ui.painter().text(egui::pos2(x, title_y), egui::Align2::LEFT_TOP, title, egui::FontId::proportional(14.0), p.text);
-    ui.painter().text(egui::pos2(x, rect.min.y + 34.0), egui::Align2::LEFT_TOP, subtitle, egui::FontId::proportional(11.5), p.text_weak);
+    let title_y = if subtitle.is_empty() {
+        rect.center().y - 9.0
+    } else {
+        rect.min.y + 14.0
+    };
+    ui.painter().text(
+        egui::pos2(x, title_y),
+        egui::Align2::LEFT_TOP,
+        title,
+        egui::FontId::proportional(14.0),
+        p.text,
+    );
+    ui.painter().text(
+        egui::pos2(x, rect.min.y + 34.0),
+        egui::Align2::LEFT_TOP,
+        subtitle,
+        egui::FontId::proportional(11.5),
+        p.text_weak,
+    );
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }

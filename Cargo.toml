@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/media", "crates/platform", "crates/app"]
+members = ["crates/core", "crates/media", "crates/platform", "crates/app", "crates/webp-pipeline"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,6 +12,7 @@ rust-version = "1.85"
 mediaa-core = { path = "crates/core" }
 mediaa-platform = { path = "crates/platform" }
 mediaa-media = { path = "crates/media" }
+mediaa-webp-pipeline = { path = "crates/webp-pipeline" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

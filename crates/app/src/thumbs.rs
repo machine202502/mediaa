@@ -21,15 +21,26 @@ pub struct Tile {
 }
 
 enum Msg {
-    Thumb { key: Key, size: u64, kind: MediaKind, need_details: bool },
+    Thumb {
+        key: Key,
+        size: u64,
+        kind: MediaKind,
+        need_details: bool,
+    },
     Forget(PathBuf),
     Retain(PathBuf, HashSet<String>),
     Flush(Sender<()>),
 }
 
+enum ProxyMsg {
+    Ensure(PathBuf),
+    Forget(PathBuf),
+}
+
 pub struct Thumbnails {
     tiles: HashMap<Key, Option<Tile>>,
     req_tx: Sender<Msg>,
+    proxy_tx: Sender<ProxyMsg>,
     done_rx: Receiver<(Key, Option<Frame>, Option<MediaInfo>)>,
 }
 
@@ -51,13 +62,51 @@ fn flush(cache: &mut ThumbCache) {
 }
 
 fn file_name(path: &Path) -> String {
-    path.file_name().unwrap_or_default().to_string_lossy().into_owned()
+    path.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
 }
 
 impl Thumbnails {
     pub fn new(ctx: &egui::Context) -> Self {
         let (req_tx, req_rx) = crossbeam_channel::unbounded::<Msg>();
+        let (proxy_tx, proxy_rx) = crossbeam_channel::unbounded::<ProxyMsg>();
         let (done_tx, done_rx) = crossbeam_channel::unbounded();
+        std::thread::Builder::new()
+            .name("preview-proxies".into())
+            .spawn(move || {
+                let mut seen = HashSet::new();
+                while let Ok(msg) = proxy_rx.recv() {
+                    match msg {
+                        ProxyMsg::Ensure(path) => {
+                            let proxy = mediaa_media::preview_cache::proxy_path(&path);
+                            if !seen.insert(proxy.clone()) {
+                                continue;
+                            }
+                            let cancel = std::sync::atomic::AtomicBool::new(false);
+                            if let Err(error) =
+                                mediaa_media::preview_cache::ensure_proxy(&path, &cancel)
+                            {
+                                seen.remove(&proxy);
+                                log::debug!("preview proxy {}: {error:#}", path.display());
+                            }
+                        }
+                        ProxyMsg::Forget(path) => {
+                            seen.remove(&path);
+                            match std::fs::remove_file(&path) {
+                                Ok(()) => {}
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(error) => {
+                                    log::debug!("remove preview proxy {}: {error}", path.display())
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .expect("spawn preview proxy thread");
+        let proxy_sender = proxy_tx.clone();
         let ctx = ctx.clone();
         std::thread::Builder::new()
             .name("thumbnails".into())
@@ -73,19 +122,35 @@ impl Thumbnails {
                         Err(RecvTimeoutError::Disconnected) => break,
                     };
                     match msg {
-                        Msg::Thumb { key, size, kind, need_details } => {
+                        Msg::Thumb {
+                            key,
+                            size,
+                            kind,
+                            need_details,
+                        } => {
+                            if matches!(kind, MediaKind::Animation)
+                                && mediaa_media::preview_cache::ready_proxy(&key.0).is_none()
+                            {
+                                let _ = proxy_sender.send(ProxyMsg::Ensure(key.0.clone()));
+                            }
                             let name = file_name(&key.0);
                             let c = cache_for(&mut cache, key.0.parent().unwrap_or(Path::new(".")));
                             let frame = c.get(&name, size, key.1).or_else(|| {
-                                let made = mediaa_media::thumbnail::thumbnail(&key.0, kind, THUMB_SIZE)
-                                    .map_err(|e| log::debug!("thumbnail {}: {e:#}", key.0.display()))
-                                    .ok()?;
+                                let made =
+                                    mediaa_media::thumbnail::thumbnail(&key.0, kind, THUMB_SIZE)
+                                        .map_err(|e| {
+                                            log::debug!("thumbnail {}: {e:#}", key.0.display())
+                                        })
+                                        .ok()?;
                                 c.put(&name, size, key.1, &made);
                                 Some(made)
                             });
                             let info = need_details
                                 .then(|| mediaa_media::preview::details(&key.0, kind))
-                                .and_then(|r| r.map_err(|e| log::debug!("details {}: {e:#}", key.0.display())).ok());
+                                .and_then(|r| {
+                                    r.map_err(|e| log::debug!("details {}: {e:#}", key.0.display()))
+                                        .ok()
+                                });
                             if done_tx.send((key, frame, info)).is_err() {
                                 break;
                             }
@@ -106,13 +171,21 @@ impl Thumbnails {
                 cache.as_mut().map(flush);
             })
             .expect("spawn thumbnail thread");
-        Self { tiles: HashMap::new(), req_tx, done_rx }
+        Self {
+            tiles: HashMap::new(),
+            req_tx,
+            proxy_tx,
+            done_rx,
+        }
     }
 
     pub fn poll(&mut self, ctx: &egui::Context) {
         while let Ok((key, frame, info)) = self.done_rx.try_recv() {
             let texture = frame.map(|f| {
-                let img = egui::ColorImage::from_rgba_unmultiplied([f.width as usize, f.height as usize], &f.data);
+                let img = egui::ColorImage::from_rgba_unmultiplied(
+                    [f.width as usize, f.height as usize],
+                    &f.data,
+                );
                 ctx.load_texture(key.0.to_string_lossy(), img, egui::TextureOptions::LINEAR)
             });
             self.tiles.insert(key, Some(Tile { texture, info }));
@@ -126,15 +199,21 @@ impl Thumbnails {
             Some(None) => Tile::default(),
             None => {
                 self.tiles.insert(key.clone(), None);
-                let _ = self.req_tx.send(Msg::Thumb { key, size: e.size, kind: e.kind, need_details });
+                let _ = self.req_tx.send(Msg::Thumb {
+                    key,
+                    size: e.size,
+                    kind: e.kind,
+                    need_details,
+                });
                 Tile::default()
             }
         }
     }
 
-    pub fn forget(&mut self, path: &Path) {
+    pub fn forget(&mut self, path: &Path, proxy: PathBuf) {
         self.tiles.retain(|(p, _), _| p != path);
         let _ = self.req_tx.send(Msg::Forget(path.to_path_buf()));
+        let _ = self.proxy_tx.send(ProxyMsg::Forget(proxy));
     }
 
     pub fn retain(&mut self, dir: &Path, names: HashSet<String>) {
@@ -146,5 +225,30 @@ impl Thumbnails {
         if self.req_tx.send(Msg::Flush(tx)).is_ok() {
             let _ = rx.recv_timeout(Duration::from_secs(2));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Thumbnails;
+    use std::time::Duration;
+
+    #[test]
+    fn forgetting_media_removes_its_preview_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("capture.webp");
+        std::fs::write(&source, b"media").unwrap();
+        let proxy = mediaa_media::preview_cache::proxy_path(&source);
+        std::fs::create_dir_all(proxy.parent().unwrap()).unwrap();
+        std::fs::write(&proxy, b"proxy").unwrap();
+        let mut thumbnails = Thumbnails::new(&eframe::egui::Context::default());
+        thumbnails.forget(&source, proxy.clone());
+        for _ in 0..100 {
+            if !proxy.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!proxy.exists());
     }
 }

@@ -28,7 +28,12 @@ impl MediaName {
 
 pub fn parse_stem(stem: &str) -> Option<MediaName> {
     let (base, counter) = match stem.rsplit_once('-') {
-        Some((b, n)) if !n.is_empty() && n.len() <= 6 && n.bytes().all(|c| c.is_ascii_digit()) && b.len() >= STAMP_LEN + 2 => {
+        Some((b, n))
+            if !n.is_empty()
+                && n.len() <= 6
+                && n.bytes().all(|c| c.is_ascii_digit())
+                && b.len() >= STAMP_LEN + 2 =>
+        {
             match parse_tail(b) {
                 Some(_) => (b, Some(n.parse().ok()?)),
                 None => (stem, None),
@@ -37,7 +42,11 @@ pub fn parse_stem(stem: &str) -> Option<MediaName> {
         _ => (stem, None),
     };
     let (title, taken) = parse_tail(base)?;
-    Some(MediaName { title: title.to_string(), taken, counter })
+    Some(MediaName {
+        title: title.to_string(),
+        taken,
+        counter,
+    })
 }
 
 fn parse_tail(base: &str) -> Option<(&str, NaiveDateTime)> {
@@ -76,9 +85,19 @@ pub fn sanitize(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn free_path(dir: &Path, title: &str, taken: NaiveDateTime, ext: &str, skip: Option<&Path>) -> PathBuf {
+fn free_path(
+    dir: &Path,
+    title: &str,
+    taken: NaiveDateTime,
+    ext: &str,
+    skip: Option<&Path>,
+) -> PathBuf {
     let ext = ext.trim_start_matches('.');
-    let mut name = MediaName { title: sanitize(title, MAX_TITLE), taken, counter: None };
+    let mut name = MediaName {
+        title: sanitize(title, MAX_TITLE),
+        taken,
+        counter: None,
+    };
     loop {
         let p = dir.join(format!("{}.{ext}", name.stem()));
         if !p.exists() || skip.is_some_and(|s| s == p) {
@@ -93,9 +112,13 @@ pub fn media_path(dir: &Path, title: &str, at: DateTime<Local>, ext: &str) -> Pa
 }
 
 pub fn rename(path: &Path, title: &str) -> anyhow::Result<PathBuf> {
-    let name = parse_path(path).ok_or_else(|| anyhow::anyhow!("{} is not a MediaA file name", path.display()))?;
+    let name = parse_path(path)
+        .ok_or_else(|| anyhow::anyhow!("{} is not a MediaA file name", path.display()))?;
     let dir = path.parent().unwrap_or(Path::new("."));
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
     if sanitize(title, MAX_TITLE) == name.title {
         return Ok(path.to_path_buf());
     }
@@ -120,10 +143,24 @@ mod tests {
         assert_eq!(p.file_name().unwrap(), "Screenshot_2026-10-13_09-05-07.png");
         std::fs::write(&p, b"x").unwrap();
         let p2 = media_path(dir.path(), "Screenshot", at(), "png");
-        assert_eq!(p2.file_name().unwrap(), "Screenshot_2026-10-13_09-05-07-2.png", "same second: counter");
+        assert_eq!(
+            p2.file_name().unwrap(),
+            "Screenshot_2026-10-13_09-05-07-2.png",
+            "same second: counter"
+        );
         std::fs::write(&p2, b"x").unwrap();
-        assert_eq!(media_path(dir.path(), "Screenshot", at(), "png").file_name().unwrap(), "Screenshot_2026-10-13_09-05-07-3.png");
-        assert_eq!(media_path(dir.path(), "a/b: c?", at(), "png").file_name().unwrap(), "a b c_2026-10-13_09-05-07.png");
+        assert_eq!(
+            media_path(dir.path(), "Screenshot", at(), "png")
+                .file_name()
+                .unwrap(),
+            "Screenshot_2026-10-13_09-05-07-3.png"
+        );
+        assert_eq!(
+            media_path(dir.path(), "a/b: c?", at(), "png")
+                .file_name()
+                .unwrap(),
+            "a b c_2026-10-13_09-05-07.png"
+        );
     }
 
     #[test]
@@ -146,8 +183,16 @@ mod tests {
         ] {
             assert_eq!(parse_stem(bad), None, "{bad}");
         }
-        assert_eq!(parse_stem("Take-2_2026-10-13_09-05-07").unwrap().title, "Take-2");
-        assert_eq!(parse_path(Path::new("/m/Rec [1 of 2]_2026-10-13_09-05-07.mp4")).unwrap().title, "Rec [1 of 2]");
+        assert_eq!(
+            parse_stem("Take-2_2026-10-13_09-05-07").unwrap().title,
+            "Take-2"
+        );
+        assert_eq!(
+            parse_path(Path::new("/m/Rec [1 of 2]_2026-10-13_09-05-07.mp4"))
+                .unwrap()
+                .title,
+            "Rec [1 of 2]"
+        );
     }
 
     #[test]
@@ -163,19 +208,39 @@ mod tests {
         assert_eq!(a2.file_name().unwrap(), "My_2026-10-13_09-05-07.png");
         assert!(!a.exists() && a2.exists());
         let b2 = rename(&b, "My").unwrap();
-        assert_eq!(b2.file_name().unwrap(), "My_2026-10-14_01-00-00.mp4", "same title, different files");
-        assert_eq!(rename(&a2, "My").unwrap(), a2, "unchanged title: unchanged name");
+        assert_eq!(
+            b2.file_name().unwrap(),
+            "My_2026-10-14_01-00-00.mp4",
+            "same title, different files"
+        );
+        assert_eq!(
+            rename(&a2, "My").unwrap(),
+            a2,
+            "unchanged title: unchanged name"
+        );
 
         let c = media_path(dir.path(), "Other", at(), "png");
         std::fs::write(&c, b"c").unwrap();
-        assert_eq!(rename(&c, "My").unwrap().file_name().unwrap(), "My_2026-10-13_09-05-07-2.png");
-        assert!(rename(&dir.path().join("photo.png"), "x").is_err(), "foreign names are refused");
+        assert_eq!(
+            rename(&c, "My").unwrap().file_name().unwrap(),
+            "My_2026-10-13_09-05-07-2.png"
+        );
+        assert!(
+            rename(&dir.path().join("photo.png"), "x").is_err(),
+            "foreign names are refused"
+        );
     }
 
     #[test]
     fn sanitize_strips_invalid_characters() {
-        assert_eq!(sanitize("a/b\\c:d*e?f\"g<h>i|j", 100), "a b c d e f g h i j");
-        assert_eq!(sanitize("  Visual   Studio Code.  ", 100), "Visual Studio Code");
+        assert_eq!(
+            sanitize("a/b\\c:d*e?f\"g<h>i|j", 100),
+            "a b c d e f g h i j"
+        );
+        assert_eq!(
+            sanitize("  Visual   Studio Code.  ", 100),
+            "Visual Studio Code"
+        );
         assert_eq!(sanitize("\u{7}", 10), "untitled");
         assert_eq!(sanitize("Привет мир", 6), "Привет");
     }

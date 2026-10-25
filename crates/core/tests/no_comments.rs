@@ -30,7 +30,10 @@ fn line_start_at(src: &str, pos: usize) -> usize {
 
 fn line_at(src: &str, pos: usize) -> &str {
     let start = line_start_at(src, pos);
-    let end = src[start..].find('\n').map(|i| start + i).unwrap_or(src.len());
+    let end = src[start..]
+        .find('\n')
+        .map(|i| start + i)
+        .unwrap_or(src.len());
     &src[start..end]
 }
 
@@ -117,18 +120,26 @@ fn rust_comments(src: &str) -> Vec<usize> {
             comments.push((start, at));
         }
     }
-    let lines: Vec<usize> = comments.iter().map(|(start, _)| line_number(src, *start)).collect();
+    let lines: Vec<usize> = comments
+        .iter()
+        .map(|(start, _)| line_number(src, *start))
+        .collect();
     let mut hits = Vec::new();
     for (index, &(start, end)) in comments.iter().enumerate() {
         let text = &src[start..end];
         let trimmed = text.trim_start();
-        let doc = trimmed.starts_with("///") || trimmed.starts_with("//!") || trimmed.starts_with("/**");
-        if !doc && prev_code_char(src, &comments, start) == Some(b'{') && next_code_char(src, &comments, end) == Some(b'}') {
+        let doc =
+            trimmed.starts_with("///") || trimmed.starts_with("//!") || trimmed.starts_with("/**");
+        if !doc
+            && prev_code_char(src, &comments, start) == Some(b'{')
+            && next_code_char(src, &comments, end) == Some(b'}')
+        {
             continue;
         }
-        if !doc && (ignored_result_line(&src[line_start_at(src, start)..start])
-            || previous_nonempty_line(src, start).is_some_and(ignored_result_line)
-            || next_nonempty_line(src, end).is_some_and(ignored_result_line))
+        if !doc
+            && (ignored_result_line(&src[line_start_at(src, start)..start])
+                || previous_nonempty_line(src, start).is_some_and(ignored_result_line)
+                || next_nonempty_line(src, end).is_some_and(ignored_result_line))
         {
             continue;
         }
@@ -146,8 +157,13 @@ fn rust_comments(src: &str) -> Vec<usize> {
         {
             last += 1;
         }
-        let run: Vec<&str> = (first..=last).map(|i| &src[comments[i].0..comments[i].1]).collect();
-        if run.iter().any(|line| line.trim_start().starts_with("// SAFETY")) {
+        let run: Vec<&str> = (first..=last)
+            .map(|i| &src[comments[i].0..comments[i].1])
+            .collect();
+        if run
+            .iter()
+            .any(|line| line.trim_start().starts_with("// SAFETY"))
+        {
             let after = comments[last].1;
             let n = src.len();
             let mut i = after;
@@ -159,16 +175,21 @@ fn rust_comments(src: &str) -> Vec<usize> {
             }
         }
         if doc && run.iter().all(|line| line.starts_with("///")) {
-            let has_safety = run
-                .iter()
-                .any(|line| line.trim_start_matches("///").trim_start().starts_with("# Safety"));
+            let has_safety = run.iter().any(|line| {
+                line.trim_start_matches("///")
+                    .trim_start()
+                    .starts_with("# Safety")
+            });
             if has_safety {
                 let mut line = lines[last] + 1;
                 let all: Vec<&str> = src.lines().collect();
                 while line <= all.len() && all[line - 1].trim_start().starts_with("#[") {
                     line += 1;
                 }
-                if line <= all.len() && (all[line - 1].contains("unsafe fn") || all[line - 1].contains("unsafe trait")) {
+                if line <= all.len()
+                    && (all[line - 1].contains("unsafe fn")
+                        || all[line - 1].contains("unsafe trait"))
+                {
                     continue;
                 }
             }
@@ -268,7 +289,11 @@ fn js_expr(bytes: &[u8], start: usize, out: &mut Vec<(usize, usize)>) -> usize {
         }
         if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' {
             if c.is_ascii_digit() {
-                while i < n && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'.' || bytes[i] == b'_') {
+                while i < n
+                    && ((bytes[i] as char).is_ascii_alphanumeric()
+                        || bytes[i] == b'.'
+                        || bytes[i] == b'_')
+                {
                     i += 1;
                 }
                 prev = bytes[i - 1];
@@ -281,7 +306,12 @@ fn js_expr(bytes: &[u8], start: usize, out: &mut Vec<(usize, usize)>) -> usize {
             }
             continue;
         }
-        if c == b'/' && i + 1 < n && bytes[i + 1] != b'/' && bytes[i + 1] != b'*' && js_allowed(prev, &word) {
+        if c == b'/'
+            && i + 1 < n
+            && bytes[i + 1] != b'/'
+            && bytes[i + 1] != b'*'
+            && js_allowed(prev, &word)
+        {
             i = js_regex(bytes, i);
             prev = b'/';
             word.clear();
@@ -413,7 +443,11 @@ fn js_comments(src: &str) -> Vec<usize> {
             continue;
         }
         if c.is_ascii_digit() {
-            while i < n && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'.' || bytes[i] == b'_') {
+            while i < n
+                && ((bytes[i] as char).is_ascii_alphanumeric()
+                    || bytes[i] == b'.'
+                    || bytes[i] == b'_')
+            {
                 i += 1;
             }
             prev = bytes[i - 1];
@@ -433,10 +467,14 @@ fn js_comments(src: &str) -> Vec<usize> {
                 .or_else(|| src[*start..*end].strip_prefix("/*"))
                 .unwrap_or(&src[*start..*end])
                 .trim_start();
-            if body.starts_with("eslint-") || body.starts_with("@ts-") || body.starts_with("biome-ignore") {
+            if body.starts_with("eslint-")
+                || body.starts_with("@ts-")
+                || body.starts_with("biome-ignore")
+            {
                 return false;
             }
-            !(js_code_prev(bytes, &comments, *start) == Some(b'{') && js_code_next(bytes, &comments, *end) == Some(b'}'))
+            !(js_code_prev(bytes, &comments, *start) == Some(b'{')
+                && js_code_next(bytes, &comments, *end) == Some(b'}'))
         })
         .map(|(start, _)| *start)
         .collect()
@@ -527,7 +565,11 @@ fn sh_comments(src: &str) -> Vec<usize> {
         let line_end = src[i..].find('\n').map(|at| i + at).unwrap_or(n);
         if let Some((delim, strip_tabs)) = pending.first() {
             let line = String::from_utf8_lossy(&bytes[line_start..line_end]);
-            let cmp = if *strip_tabs { line.trim_start_matches('\t') } else { line.as_ref() };
+            let cmp = if *strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                line.as_ref()
+            };
             if cmp == delim.as_str() {
                 pending.remove(0);
             }
@@ -577,19 +619,21 @@ fn sh_comments(src: &str) -> Vec<usize> {
                 j += 2;
                 continue;
             }
-            if !shebang
-                && c == b'#'
-                && (j == line_start || b" \t;&|()<>".contains(&bytes[j - 1]))
-            {
+            if !shebang && c == b'#' && (j == line_start || b" \t;&|()<>".contains(&bytes[j - 1])) {
                 let text = src[j..line_end].trim_start();
-                let directive =
-                    text.starts_with("# shellcheck") || text.starts_with("# noqa") || text.starts_with("# type: ignore");
+                let directive = text.starts_with("# shellcheck")
+                    || text.starts_with("# noqa")
+                    || text.starts_with("# type: ignore");
                 if !directive {
                     out.push(j);
                 }
                 break;
             }
-            if c == b'<' && j + 1 < line_end && bytes[j + 1] == b'<' && (j + 2 >= line_end || bytes[j + 2] != b'<') {
+            if c == b'<'
+                && j + 1 < line_end
+                && bytes[j + 1] == b'<'
+                && (j + 2 >= line_end || bytes[j + 2] != b'<')
+            {
                 if let Some((delim, strip_tabs, next)) = sh_heredoc(bytes, j, line_end) {
                     declared = Some((delim, strip_tabs));
                     j = next;
@@ -803,7 +847,11 @@ fn no_comments_in_the_repository() {
         .to_path_buf();
     let mut files = Vec::new();
     collect(&root.join("crates"), &["rs", "toml"], &mut files);
-    collect(&root.join("scripts"), &["sh", "mjs", "js", "ps1"], &mut files);
+    collect(
+        &root.join("scripts"),
+        &["sh", "mjs", "js", "ps1"],
+        &mut files,
+    );
     files.push(root.join("Cargo.toml"));
     files.push(root.join(".cargo/config.toml"));
     files.sort();
@@ -830,36 +878,46 @@ fn no_comments_in_the_repository() {
             }
         }
     }
-    assert!(
-        hits.is_empty(),
-        "comments in code:\n{}",
-        hits.join("\n")
-    );
+    assert!(hits.is_empty(), "comments in code:\n{}", hits.join("\n"));
 }
 
 #[test]
 fn rust_safety_comment_before_unsafe_is_allowed() {
-    assert!(rust_comments("fn f() {\n    // SAFETY: the buffer is valid.\n    unsafe { }\n}\n").is_empty());
+    assert!(
+        rust_comments("fn f() {\n    // SAFETY: the buffer is valid.\n    unsafe { }\n}\n")
+            .is_empty()
+    );
 }
 
 #[test]
 fn rust_safety_comment_without_unsafe_fails() {
-    assert_eq!(rust_comments("// SAFETY: nothing here.\nlet x = 1;\n").len(), 1);
+    assert_eq!(
+        rust_comments("// SAFETY: nothing here.\nlet x = 1;\n").len(),
+        1
+    );
 }
 
 #[test]
 fn rust_safety_doc_on_unsafe_fn_is_allowed() {
-    assert!(rust_comments("/// # Safety\n/// `p` must be valid.\nunsafe fn f(p: *const u8) {}\n").is_empty());
+    assert!(
+        rust_comments("/// # Safety\n/// `p` must be valid.\nunsafe fn f(p: *const u8) {}\n")
+            .is_empty()
+    );
 }
 
 #[test]
 fn rust_safety_doc_on_safe_fn_fails() {
-    assert_eq!(rust_comments("/// # Safety\n/// `p` must be valid.\nfn f(p: *const u8) {}\n").len(), 2);
+    assert_eq!(
+        rust_comments("/// # Safety\n/// `p` must be valid.\nfn f(p: *const u8) {}\n").len(),
+        2
+    );
 }
 
 #[test]
 fn rust_empty_block_comment_is_allowed() {
-    assert!(rust_comments("match x {\n    _ => {\n        // nothing to do\n    }\n}\n").is_empty());
+    assert!(
+        rust_comments("match x {\n    _ => {\n        // nothing to do\n    }\n}\n").is_empty()
+    );
 }
 
 #[test]
@@ -871,7 +929,10 @@ fn rust_comment_beside_code_in_block_fails() {
 fn rust_ignored_result_comment_is_allowed() {
     assert!(rust_comments("// the file may be gone\nlet _ = fs::remove_file(p);\n").is_empty());
     assert!(rust_comments("let value = fs::read(p).ok(); // optional\n").is_empty());
-    assert!(rust_comments("// a missing entry means the default\nlet v = map.get(k).unwrap_or_default();\n").is_empty());
+    assert!(rust_comments(
+        "// a missing entry means the default\nlet v = map.get(k).unwrap_or_default();\n"
+    )
+    .is_empty());
 }
 
 #[test]
@@ -886,7 +947,10 @@ fn js_empty_catch_comment_is_allowed() {
 
 #[test]
 fn js_comment_beside_code_in_block_fails() {
-    assert_eq!(js_comments("function f() {\n    // why\n    return 1;\n}\n").len(), 1);
+    assert_eq!(
+        js_comments("function f() {\n    // why\n    return 1;\n}\n").len(),
+        1
+    );
 }
 
 #[test]
@@ -897,7 +961,10 @@ fn js_tool_directives_are_allowed() {
 
 #[test]
 fn shell_directives_are_allowed() {
-    assert!(sh_comments("#!/bin/sh\n# shellcheck disable=SC2086\n# noqa\n# type: ignore\necho hi\n").is_empty());
+    assert!(sh_comments(
+        "#!/bin/sh\n# shellcheck disable=SC2086\n# noqa\n# type: ignore\necho hi\n"
+    )
+    .is_empty());
 }
 
 #[test]
@@ -907,7 +974,10 @@ fn shell_plain_comment_fails() {
 
 #[test]
 fn toml_comment_fails() {
-    assert_eq!(toml_comments("# x\n[t]\na = 1\n", Path::new("x.toml")).len(), 1);
+    assert_eq!(
+        toml_comments("# x\n[t]\na = 1\n", Path::new("x.toml")).len(),
+        1
+    );
 }
 
 #[test]

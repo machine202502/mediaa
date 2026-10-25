@@ -26,7 +26,8 @@ impl AudioSink {
         if self.paused.load(Ordering::Relaxed) || samples.is_empty() {
             return;
         }
-        self.samples.fetch_add(samples.len() as u64, Ordering::Relaxed);
+        self.samples
+            .fetch_add(samples.len() as u64, Ordering::Relaxed);
         let _ = self.tx.send(((self.clock)(), samples.to_vec()));
     }
 }
@@ -134,7 +135,11 @@ mod tests {
     }
 
     fn read(path: &Path) -> Vec<f32> {
-        hound::WavReader::open(path).unwrap().samples::<f32>().map(Result::unwrap).collect()
+        hound::WavReader::open(path)
+            .unwrap()
+            .samples::<f32>()
+            .map(Result::unwrap)
+            .collect()
     }
 
     #[test]
@@ -164,7 +169,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("loopback.wav");
         let (clock, now) = manual_clock();
-        let track = AudioTrack::create(&path, 1000, 1, Arc::new(AtomicBool::new(false)), clock).unwrap();
+        let track =
+            AudioTrack::create(&path, 1000, 1, Arc::new(AtomicBool::new(false)), clock).unwrap();
         let sink = track.sink();
         *now.lock().unwrap() = Duration::from_millis(500);
         sink.push(&[1.0; 100]);
@@ -181,9 +187,17 @@ mod tests {
 
     #[test]
     fn small_jitter_is_not_padded() {
-        assert_eq!(gap_frames(1000, 100, 1.13, 1000), 0, "30 ms early/late is jitter");
+        assert_eq!(
+            gap_frames(1000, 100, 1.13, 1000),
+            0,
+            "30 ms early/late is jitter"
+        );
         assert_eq!(gap_frames(1000, 100, 1.30, 1000), 200);
-        assert_eq!(gap_frames(5000, 100, 1.0, 1000), 0, "running ahead never pads");
+        assert_eq!(
+            gap_frames(5000, 100, 1.0, 1000),
+            0,
+            "running ahead never pads"
+        );
     }
 
     #[test]

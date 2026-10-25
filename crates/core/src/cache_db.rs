@@ -56,15 +56,20 @@ mod tests {
     fn creates_schema_once_and_rebuilds_other_versions() {
         let dir = tempfile::tempdir().unwrap();
         let db = open(dir.path()).unwrap();
-        db.execute("INSERT INTO counters VALUES ('x', 1)", []).unwrap();
+        db.execute("INSERT INTO counters VALUES ('x', 1)", [])
+            .unwrap();
         drop(db);
         let db = open(dir.path()).unwrap();
-        let n: i64 = db.query_row("SELECT COUNT(*) FROM counters", [], |r| r.get(0)).unwrap();
+        let n: i64 = db
+            .query_row("SELECT COUNT(*) FROM counters", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1, "same schema: data kept");
         db.pragma_update(None, "user_version", 99).unwrap();
         drop(db);
         let db = open(dir.path()).unwrap();
-        let n: i64 = db.query_row("SELECT COUNT(*) FROM counters", [], |r| r.get(0)).unwrap();
+        let n: i64 = db
+            .query_row("SELECT COUNT(*) FROM counters", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 0, "other schema: rebuilt");
     }
 }

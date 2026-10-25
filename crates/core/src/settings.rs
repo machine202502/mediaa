@@ -22,7 +22,11 @@ pub enum AfterCapture {
 }
 
 impl AfterCapture {
-    pub const ALL: [AfterCapture; 3] = [AfterCapture::Copy, AfterCapture::Save, AfterCapture::CopyAndSave];
+    pub const ALL: [AfterCapture; 3] = [
+        AfterCapture::Copy,
+        AfterCapture::Save,
+        AfterCapture::CopyAndSave,
+    ];
 
     pub fn copies(self) -> bool {
         matches!(self, AfterCapture::Copy | AfterCapture::CopyAndSave)
@@ -90,7 +94,11 @@ pub enum MicChoice {
 
 impl MicChoice {
     pub fn resolve(&self, devices: &[String], default: Option<&str>) -> Option<String> {
-        let fallback = || default.map(str::to_string).or_else(|| devices.first().cloned());
+        let fallback = || {
+            default
+                .map(str::to_string)
+                .or_else(|| devices.first().cloned())
+        };
         match self {
             MicChoice::Off => None,
             MicChoice::Auto => fallback(),
@@ -113,6 +121,8 @@ pub struct RecordSettings {
     pub record_cursor: bool,
     pub output_height: u32,
     pub hide_to_tray: bool,
+    pub segmented_webp: bool,
+    pub parallel_webp: bool,
 }
 
 impl Default for RecordSettings {
@@ -128,6 +138,8 @@ impl Default for RecordSettings {
             record_cursor: true,
             output_height: 2160,
             hide_to_tray: true,
+            segmented_webp: true,
+            parallel_webp: true,
         }
     }
 }
@@ -143,7 +155,12 @@ pub struct AudioRecordSettings {
 
 impl Default for AudioRecordSettings {
     fn default() -> Self {
-        Self { format: AudioFormat::Mp3, kbps: 256, microphone: MicChoice::Auto, system_audio: true }
+        Self {
+            format: AudioFormat::Mp3,
+            kbps: 256,
+            microphone: MicChoice::Auto,
+            system_audio: true,
+        }
     }
 }
 
@@ -159,7 +176,9 @@ impl RecordSettings {
     }
 
     pub fn records_audio(&self) -> bool {
-        self.output.supports_audio() && self.record_audio && (self.microphone != MicChoice::Off || self.system_audio)
+        self.output.supports_audio()
+            && self.record_audio
+            && (self.microphone != MicChoice::Off || self.system_audio)
     }
 }
 
@@ -317,7 +336,10 @@ impl Settings {
             Ok(text) => match toml::from_str::<Settings>(&text) {
                 Ok(s) => s.sanitized(),
                 Err(e) => {
-                    log::warn!("settings: {} is invalid ({e}); using defaults", path.display());
+                    log::warn!(
+                        "settings: {} is invalid ({e}); using defaults",
+                        path.display()
+                    );
                     Settings::default()
                 }
             },
@@ -345,7 +367,11 @@ impl Settings {
     }
 
     pub fn sanitized(mut self) -> Settings {
-        for r in [&mut self.record, &mut self.hotkey_record, &mut self.region_record] {
+        for r in [
+            &mut self.record,
+            &mut self.hotkey_record,
+            &mut self.region_record,
+        ] {
             r.fps = r.fps.clamp(1, 60);
             r.video_quality = r.video_quality.clamp(1, 100);
         }
@@ -365,7 +391,9 @@ impl Settings {
     }
 
     pub fn convert_dir(&self) -> PathBuf {
-        self.convert_dir.clone().unwrap_or_else(|| self.media_dir.clone())
+        self.convert_dir
+            .clone()
+            .unwrap_or_else(|| self.media_dir.clone())
     }
 
     pub fn audio_profile(&self, p: RecordProfile) -> &AudioRecordSettings {
@@ -414,6 +442,8 @@ mod tests {
         s.after_completion = AfterCompletionAction::CopyFile;
         s.highlight_recording_region = false;
         s.recording_region_outline_width = 17;
+        s.record.segmented_webp = false;
+        s.record.parallel_webp = false;
         s.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), s);
     }
@@ -432,7 +462,10 @@ mod tests {
         let s = Settings::load_from(&path);
         assert_eq!(s.theme, ThemePreference::Light);
         assert_eq!(s.record.fps, 24);
-        assert_eq!(s.record.video_quality, RecordSettings::default().video_quality);
+        assert_eq!(
+            s.record.video_quality,
+            RecordSettings::default().video_quality
+        );
         assert_eq!(s.anim, AnimSettings::default());
     }
 
@@ -450,7 +483,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.toml");
         std::fs::write(&path, "theme = \"light\"\n").unwrap();
-        assert!(Settings::load_from(&path).close_to_tray, "an old file without the key keeps the default");
+        assert!(
+            Settings::load_from(&path).close_to_tray,
+            "an old file without the key keeps the default"
+        );
         std::fs::write(&path, "close_to_tray = false\n").unwrap();
         assert!(!Settings::load_from(&path).close_to_tray);
     }
@@ -461,9 +497,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.toml");
         std::fs::write(&path, "close_to_tray = true\n").unwrap();
-        assert_eq!(Settings::load_from(&path).tray_left_click, TrayClickAction::ScreenArea);
+        assert_eq!(
+            Settings::load_from(&path).tray_left_click,
+            TrayClickAction::ScreenArea
+        );
         std::fs::write(&path, "tray_left_click = \"open_window\"\n").unwrap();
-        assert_eq!(Settings::load_from(&path).tray_left_click, TrayClickAction::OpenWindow);
+        assert_eq!(
+            Settings::load_from(&path).tray_left_click,
+            TrayClickAction::OpenWindow
+        );
     }
 
     #[test]
@@ -479,13 +521,22 @@ mod tests {
 
     #[test]
     fn completion_opens_the_library_by_default() {
-        assert_eq!(AfterCompletionAction::default(), AfterCompletionAction::OpenLibrary);
+        assert_eq!(
+            AfterCompletionAction::default(),
+            AfterCompletionAction::OpenLibrary
+        );
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.toml");
         std::fs::write(&path, "close_to_tray = true\n").unwrap();
-        assert_eq!(Settings::load_from(&path).after_completion, AfterCompletionAction::OpenLibrary);
+        assert_eq!(
+            Settings::load_from(&path).after_completion,
+            AfterCompletionAction::OpenLibrary
+        );
         std::fs::write(&path, "after_completion = \"copy_file\"\n").unwrap();
-        assert_eq!(Settings::load_from(&path).after_completion, AfterCompletionAction::CopyFile);
+        assert_eq!(
+            Settings::load_from(&path).after_completion,
+            AfterCompletionAction::CopyFile
+        );
     }
 
     #[test]
@@ -514,7 +565,11 @@ mod tests {
 
     #[test]
     fn audio_only_with_video_output_and_source() {
-        let mut r = RecordSettings { system_audio: false, microphone: MicChoice::Off, ..RecordSettings::default() };
+        let mut r = RecordSettings {
+            system_audio: false,
+            microphone: MicChoice::Off,
+            ..RecordSettings::default()
+        };
         assert!(!r.records_audio());
         r.system_audio = true;
         assert!(r.records_audio());
@@ -529,32 +584,89 @@ mod tests {
     #[test]
     fn microphone_resolution() {
         let devs = vec!["Headset".to_string(), "Webcam mic".to_string()];
-        assert_eq!(MicChoice::Auto.resolve(&devs, Some("Webcam mic")), Some("Webcam mic".into()));
-        assert_eq!(MicChoice::Auto.resolve(&devs, None), Some("Headset".into()), "no default: first device");
-        assert_eq!(MicChoice::Auto.resolve(&[], None), None, "nothing connected");
-        assert_eq!(MicChoice::Off.resolve(&devs, Some("Headset")), None, "explicit None stays off");
+        assert_eq!(
+            MicChoice::Auto.resolve(&devs, Some("Webcam mic")),
+            Some("Webcam mic".into())
+        );
+        assert_eq!(
+            MicChoice::Auto.resolve(&devs, None),
+            Some("Headset".into()),
+            "no default: first device"
+        );
+        assert_eq!(
+            MicChoice::Auto.resolve(&[], None),
+            None,
+            "nothing connected"
+        );
+        assert_eq!(
+            MicChoice::Off.resolve(&devs, Some("Headset")),
+            None,
+            "explicit None stays off"
+        );
         let headset = MicChoice::Device("Headset".into());
-        assert_eq!(headset.resolve(&devs, Some("Webcam mic")), Some("Headset".into()));
+        assert_eq!(
+            headset.resolve(&devs, Some("Webcam mic")),
+            Some("Headset".into())
+        );
         let gone = MicChoice::Device("USB Mic".into());
-        assert_eq!(gone.resolve(&devs, Some("Webcam mic")), Some("Webcam mic".into()), "unplugged: default instead");
+        assert_eq!(
+            gone.resolve(&devs, Some("Webcam mic")),
+            Some("Webcam mic".into()),
+            "unplugged: default instead"
+        );
     }
 
     #[test]
     fn recording_defaults() {
         let r = RecordSettings::default();
         assert_eq!(r.output, OutputKind::Video(VideoContainer::Mp4));
-        assert!(r.record_audio && r.system_audio && r.microphone == MicChoice::Auto && r.audio_in_every_file && r.record_cursor);
+        assert!(
+            r.record_audio
+                && r.system_audio
+                && r.microphone == MicChoice::Auto
+                && r.audio_in_every_file
+                && r.record_cursor
+        );
+        assert!(r.segmented_webp && r.parallel_webp);
         assert_eq!((r.fps, r.video_quality, r.output_height), (60, 100, 2160));
         let s = Settings::default();
-        assert_eq!(s.hotkey_record.output, OutputKind::Video(VideoContainer::Mkv));
-        assert_eq!((s.hotkey_record.fps, s.hotkey_record.video_quality), (60, 100));
-        assert!(s.hotkey_record.record_audio && s.hotkey_record.system_audio && s.hotkey_record.microphone == MicChoice::Auto);
+        assert_eq!(
+            s.hotkey_record.output,
+            OutputKind::Video(VideoContainer::Mkv)
+        );
+        assert_eq!(
+            (s.hotkey_record.fps, s.hotkey_record.video_quality),
+            (60, 100)
+        );
+        assert!(
+            s.hotkey_record.record_audio
+                && s.hotkey_record.system_audio
+                && s.hotkey_record.microphone == MicChoice::Auto
+        );
         assert_eq!(s.region_record.output, OutputKind::Anim(AnimFormat::Webp));
-        assert_eq!((s.region_record.fps, s.region_record.output_height), (15, 480));
-        assert_eq!((s.region_anim.fps, s.region_anim.max_height, s.region_anim.webp_quality), (15, 480, 80));
+        assert_eq!(
+            (s.region_record.fps, s.region_record.output_height),
+            (15, 480)
+        );
+        assert_eq!(
+            (
+                s.region_anim.fps,
+                s.region_anim.max_height,
+                s.region_anim.webp_quality
+            ),
+            (15, 480, 80)
+        );
         assert_eq!(s.hotkey_screen, ScreenChoice::Primary);
         let h = &s.hotkeys;
-        assert!([&h.region_screenshot, &h.fullscreen_screenshot, &h.start_video, &h.start_audio, &h.stop_recording].iter().all(|k| k.is_empty()));
+        assert!([
+            &h.region_screenshot,
+            &h.fullscreen_screenshot,
+            &h.start_video,
+            &h.start_audio,
+            &h.stop_recording
+        ]
+        .iter()
+        .all(|k| k.is_empty()));
     }
 
     #[test]
@@ -562,32 +674,62 @@ mod tests {
         let mut s = Settings::default();
         assert_eq!(s.convert_dir(), s.media_dir);
         s.media_dir = "/m".into();
-        assert_eq!(s.convert_dir(), PathBuf::from("/m"), "follows the library folder");
+        assert_eq!(
+            s.convert_dir(),
+            PathBuf::from("/m"),
+            "follows the library folder"
+        );
         s.convert_dir = Some("/c".into());
         assert_eq!(s.convert_dir(), PathBuf::from("/c"));
         let mut s = Settings::default();
-        assert_eq!(s.hotkey_audio, s.audio_record, "hotkey audio starts like the page");
+        assert_eq!(
+            s.hotkey_audio, s.audio_record,
+            "hotkey audio starts like the page"
+        );
         s.hotkey_audio.format = AudioFormat::Flac;
-        assert_eq!(s.audio_profile(RecordProfile::Hotkey).format, AudioFormat::Flac);
+        assert_eq!(
+            s.audio_profile(RecordProfile::Hotkey).format,
+            AudioFormat::Flac
+        );
         assert_eq!(s.audio_profile(RecordProfile::App).format, AudioFormat::Mp3);
-        assert_eq!(s.audio_profile(RecordProfile::Region).format, AudioFormat::Mp3);
+        assert_eq!(
+            s.audio_profile(RecordProfile::Region).format,
+            AudioFormat::Mp3
+        );
         let a = AudioRecordSettings::default();
-        assert_eq!((a.format, a.kbps, a.system_audio), (AudioFormat::Mp3, 256, true));
+        assert_eq!(
+            (a.format, a.kbps, a.system_audio),
+            (AudioFormat::Mp3, 256, true)
+        );
     }
 
     #[test]
     fn quick_video_profile_rejects_animation_formats() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.toml");
-        std::fs::write(&path, "[hotkey_record]\noutput = { kind = \"anim\", format = \"gif\" }\n").unwrap();
+        std::fs::write(
+            &path,
+            "[hotkey_record]\noutput = { kind = \"anim\", format = \"gif\" }\n",
+        )
+        .unwrap();
         let s = Settings::load_from(&path);
-        assert_eq!(s.hotkey_record.output, OutputKind::Video(VideoContainer::Mkv));
+        assert_eq!(
+            s.hotkey_record.output,
+            OutputKind::Video(VideoContainer::Mkv)
+        );
     }
 
     #[test]
     fn screen_choice_roundtrip() {
-        for c in [ScreenChoice::Primary, ScreenChoice::UnderCursor, ScreenChoice::Display(r"\.DISPLAY2".into())] {
-            let s = Settings { hotkey_screen: c.clone(), ..Settings::default() };
+        for c in [
+            ScreenChoice::Primary,
+            ScreenChoice::UnderCursor,
+            ScreenChoice::Display(r"\.DISPLAY2".into()),
+        ] {
+            let s = Settings {
+                hotkey_screen: c.clone(),
+                ..Settings::default()
+            };
             let back: Settings = toml::from_str(&toml::to_string(&s).unwrap()).unwrap();
             assert_eq!(back.hotkey_screen, c);
         }
