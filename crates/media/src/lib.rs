@@ -1,3 +1,4 @@
+pub mod animation;
 pub mod convert;
 pub mod filters;
 pub mod info;

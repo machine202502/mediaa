@@ -13,6 +13,7 @@ use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
 use mediaa_core::settings::ThemePreference;
 use rust_i18n::t;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -196,7 +197,13 @@ fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             ),
             session.is_paused(),
         ),
-        RecState::Saving { progress, .. } => (format!("{} {:.0}%", t!("record.saving"), progress * 100.0), false),
+        RecState::Saving { progress: Some(progress), .. } => {
+            (format!("{} {:.0}%", t!("record.saving"), progress * 100.0), false)
+        }
+        RecState::Saving { started, .. } => (
+            format!("{} {}", t!("record.saving"), human_duration(started.elapsed().as_secs_f64())),
+            false,
+        ),
         _ => return,
     };
     if matches!(app.recorder, RecState::Recording { .. }) {
@@ -227,6 +234,14 @@ pub fn header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
     ui.add_space(8.0);
 }
 
+pub fn activity(ui: &mut egui::Ui, label: &str, elapsed: Duration) {
+    ui.horizontal(|ui| {
+        ui.add(egui::Spinner::new().size(18.0));
+        ui.label(label);
+        ui.monospace(human_duration(elapsed.as_secs_f64()));
+    });
+}
+
 pub fn tile_width(ui: &egui::Ui, n: usize) -> f32 {
     let gap = ui.spacing().item_spacing.x;
     let avail = ui.available_width();
@@ -252,4 +267,23 @@ pub fn tile(ui: &mut egui::Ui, ic: &str, title: &str, subtitle: &str, width: f32
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activity_row_does_not_take_the_remaining_page_height() {
+        let ctx = egui::Context::default();
+        let mut height = 0.0;
+        let output = ctx.run_ui(Default::default(), |ui| {
+            ui.set_min_height(600.0);
+            let top = ui.cursor().min.y;
+            activity(ui, "", Duration::from_secs(8));
+            height = ui.cursor().min.y - top;
+        });
+        output.drop_without_applying_deltas();
+        assert!(height < 40.0, "{height}");
+    }
 }

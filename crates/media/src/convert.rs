@@ -1,13 +1,13 @@
+use crate::animation::{self, AnimationEffort, AnimationEncodeRequest, AnimationOrigin};
 use crate::filters;
 use crate::info::{probe, MediaInfo};
 use crate::job;
-use ez_ffmpeg::{FfmpegContext, FramePushSource, Input, Output};
+use ez_ffmpeg::{FfmpegContext, Input, Output};
 use mediaa_core::formats::{self, AnimFormat, AudioFormat, MediaKind, VideoContainer};
 use mediaa_core::naming;
 use mediaa_core::settings::AnimSettings;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::thread::JoinHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VideoFormat {
@@ -161,6 +161,14 @@ impl Effort {
         }
     }
 
+    fn animation_effort(self) -> AnimationEffort {
+        match self {
+            Self::Fast => AnimationEffort::Fast,
+            Self::Balanced => AnimationEffort::Balanced,
+            Self::Max => AnimationEffort::Max,
+        }
+    }
+
     fn flac_level(self) -> &'static str {
         match self {
             Effort::Fast => "2",
@@ -199,13 +207,13 @@ pub struct ConvertSettings {
 impl Default for ConvertSettings {
     fn default() -> Self {
         Self {
-            quality: 80,
+            quality: 100,
             effort: Effort::Balanced,
             max_height: None,
             max_fps: None,
             remove_audio: false,
             anim: AnimSettings::default(),
-            audio_kbps: 192,
+            audio_kbps: 256,
             mono: false,
             png_colors: None,
             webp_lossless: false,
@@ -228,14 +236,16 @@ fn url(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }
 
-fn webp_output(output: Output, quality: u8, effort: Effort) -> Output {
-    output
-        .set_format("webp")
-        .set_video_codec("libwebp_anim")
-        .set_video_codec_opt("lossless", "0")
-        .set_video_codec_opt("quality", quality.min(100).to_string())
-        .set_video_codec_opt("compression_level", effort.webp_level())
-        .set_format_opt("loop", "0")
+fn run_tracked(
+    ctx: FfmpegContext,
+    total_us: Option<i64>,
+    on_progress: &mut dyn FnMut(Option<f32>),
+    cancel: &AtomicBool,
+) -> anyhow::Result<()> {
+    match total_us.filter(|total| *total > 0) {
+        Some(total) => job::run(ctx, Some(total), &mut |progress| on_progress(Some(progress)), cancel),
+        None => job::run(ctx, None, &mut |_| {}, cancel),
+    }
 }
 
 fn bitrate(kbps: u32) -> String {
@@ -325,14 +335,7 @@ fn build_context(input: Input, output: &Path, target: Target, s: &ConvertSetting
     let builder = FfmpegContext::builder().input(input);
     let out = Output::from(url(output));
     let ctx = match target {
-        Target::Anim(AnimFormat::Gif) => builder
-            .filter_desc(filters::gif_graph(&s.anim))
-            .output(out.set_format("gif").add_stream_map("[v]").set_format_opt("loop", "0"))
-            .build()?,
-        Target::Anim(AnimFormat::Webp) => builder
-            .filter_desc(filters::webp_graph(&s.anim))
-            .output(webp_output(out.add_stream_map("[v]"), s.anim.webp_quality, s.effort))
-            .build()?,
+        Target::Anim(_) => unreachable!("animation targets use AnimationEncoder"),
         Target::Video(format) => {
             let audio = info.has_audio() && !s.remove_audio;
             builder
@@ -370,7 +373,7 @@ pub fn convert(
     output: &Path,
     target: Target,
     settings: &ConvertSettings,
-    on_progress: &mut dyn FnMut(f32),
+    on_progress: &mut dyn FnMut(Option<f32>),
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
     convert_part(input, output, target, settings, None, on_progress, cancel)
@@ -382,17 +385,36 @@ fn convert_part(
     target: Target,
     settings: &ConvertSettings,
     window: Option<(i64, i64)>,
-    on_progress: &mut dyn FnMut(f32),
+    on_progress: &mut dyn FnMut(Option<f32>),
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
+    if let Target::Anim(format) = target {
+        return animation::encode(
+            &AnimationEncodeRequest {
+                input,
+                output,
+                window,
+                format,
+                settings: &settings.anim,
+                effort: settings.effort.animation_effort(),
+                origin: AnimationOrigin::Conversion,
+            },
+            on_progress,
+            cancel,
+        );
+    }
+    on_progress(None);
     let animated_webp = formats::is_webp_path(input) && formats::webp_is_animated(input)?;
     let encoded = if animated_webp {
-        webp_frames_input(input).and_then(|(source, info, producer)| {
-            let r = build_context(source.into(), output, target, settings, &info)
-                .and_then(|ctx| job::run(ctx, info.duration_us, on_progress, cancel));
+        animation::webp_frames_input(input).and_then(|(source, info, producer)| {
+            let r = build_context(source.into(), output, target, settings, &info).and_then(|ctx| match target {
+                Target::Video(_) | Target::Audio(_) => run_tracked(ctx, info.duration_us, on_progress, cancel),
+                Target::Anim(_) => unreachable!("animation targets use AnimationEncoder"),
+                Target::Still(_) => job::run(ctx, None, &mut |_| {}, cancel),
+            });
             let produced = producer.join().map_err(|_| anyhow::anyhow!("webp decoder panicked"))?;
             r.and(produced)
         })
@@ -402,12 +424,23 @@ fn convert_part(
                 Target::Audio(_) => anyhow::ensure!(info.has_audio(), "{} has no sound", input.display()),
                 _ => anyhow::ensure!(info.has_video(), "{} has no picture", input.display()),
             }
-            let (source, total) = match window {
-                Some((start, len)) => (Input::from(url(input)).set_start_time_us(start).set_recording_time_us(len), Some(len)),
-                None => (Input::from(url(input)), info.duration_us),
+            let (start, total) = match window {
+                Some((start, len)) => (start, Some(len)),
+                None => (0, info.duration_us),
             };
+            let mut source = Input::from(url(input));
+            if start > 0 {
+                source = source.set_start_time_us(start);
+            }
+            if let Some((_, len)) = window {
+                source = source.set_recording_time_us(len);
+            }
             let ctx = build_context(source, output, target, settings, &info)?;
-            job::run(ctx, total, on_progress, cancel)
+            match target {
+                Target::Video(_) | Target::Audio(_) => run_tracked(ctx, total, on_progress, cancel),
+                Target::Anim(_) => unreachable!("animation targets use AnimationEncoder"),
+                Target::Still(_) => job::run(ctx, None, &mut |_| {}, cancel),
+            }
         })
     };
     let result = encoded.and_then(|()| match target {
@@ -434,39 +467,6 @@ pub fn estimate_size(input: &Path, target: Target, settings: &ConvertSettings, c
         (Some((_, len)), Some(total)) => (size as f64 * total as f64 / len as f64) as u64,
         _ => size,
     })
-}
-
-fn webp_frames_input(
-    path: &Path,
-) -> anyhow::Result<(FramePushSource, MediaInfo, JoinHandle<anyhow::Result<()>>)> {
-    let file = std::io::BufReader::new(std::fs::File::open(path)?);
-    let mut decoder = image_webp::WebPDecoder::new(file)?;
-    let (w, h) = decoder.dimensions();
-    let pix = if decoder.has_alpha() { "rgba" } else { "rgb24" };
-    let info = crate::info::probe_webp(&decoder);
-    let (source, mut handle) = FramePushSource::builder(w, h)
-        .pixel_format(pix)
-        .time_base(1, 1000)
-        .build()?;
-    let producer = std::thread::Builder::new()
-        .name("webp-decode".into())
-        .spawn(move || -> anyhow::Result<()> {
-            let size = decoder
-                .output_buffer_size()
-                .ok_or_else(|| anyhow::anyhow!("webp too large"))?;
-            let mut buf = vec![0u8; size];
-            let mut pts = 0i64;
-            for _ in 0..decoder.num_frames() {
-                let delay = i64::from(decoder.read_frame(&mut buf)?.max(1));
-                if handle.push(&buf, pts, Some(delay)).is_err() {
-                    break;
-                }
-                pts += delay;
-            }
-            handle.finish();
-            Ok(())
-        })?;
-    Ok((source, info, producer))
 }
 
 pub fn encode_audio_recording(
@@ -539,6 +539,8 @@ mod tests {
 
     #[test]
     fn targets_by_kind() {
+        let defaults = ConvertSettings::default();
+        assert_eq!((defaults.quality, defaults.audio_kbps), (100, 256));
         let video = Target::for_kind(MediaKind::Video);
         assert_eq!(video.len(), 17);
         assert!(video.contains(&Target::Video(VideoFormat::Webm)) && video.contains(&Target::Anim(AnimFormat::Gif)));
@@ -566,4 +568,5 @@ mod tests {
         assert_eq!(title(clip, Target::Video(VideoFormat::Mp4), Some("")), ("My clip".into(), "mp4".into()), "empty name: default");
         assert_eq!(title("/x/holiday.MOV", Target::Video(VideoFormat::Mp4), None).0, "holiday", "files from elsewhere: their stem");
     }
+
 }

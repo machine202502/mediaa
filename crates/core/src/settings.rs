@@ -126,7 +126,7 @@ impl Default for RecordSettings {
             system_audio: true,
             audio_in_every_file: true,
             record_cursor: true,
-            output_height: 1080,
+            output_height: 2160,
             hide_to_tray: true,
         }
     }
@@ -143,7 +143,7 @@ pub struct AudioRecordSettings {
 
 impl Default for AudioRecordSettings {
     fn default() -> Self {
-        Self { format: AudioFormat::Mp3, kbps: 192, microphone: MicChoice::Auto, system_audio: true }
+        Self { format: AudioFormat::Mp3, kbps: 256, microphone: MicChoice::Auto, system_audio: true }
     }
 }
 
@@ -291,12 +291,11 @@ impl Default for Settings {
             hotkey_anim: AnimSettings::default(),
             region_record: RecordSettings {
                 output: OutputKind::Anim(AnimFormat::Webp),
+                fps: AnimSettings::default().fps,
+                output_height: AnimSettings::default().max_height,
                 ..RecordSettings::default()
             },
-            region_anim: AnimSettings {
-                webp_quality: 100,
-                ..AnimSettings::default()
-            },
+            region_anim: AnimSettings::default(),
             hotkey_screen: ScreenChoice::Primary,
             audio_record: AudioRecordSettings::default(),
             hotkey_audio: AudioRecordSettings::default(),
@@ -545,13 +544,14 @@ mod tests {
         let r = RecordSettings::default();
         assert_eq!(r.output, OutputKind::Video(VideoContainer::Mp4));
         assert!(r.record_audio && r.system_audio && r.microphone == MicChoice::Auto && r.audio_in_every_file && r.record_cursor);
-        assert_eq!((r.fps, r.video_quality, r.output_height), (60, 100, 1080));
+        assert_eq!((r.fps, r.video_quality, r.output_height), (60, 100, 2160));
         let s = Settings::default();
         assert_eq!(s.hotkey_record.output, OutputKind::Video(VideoContainer::Mkv));
         assert_eq!((s.hotkey_record.fps, s.hotkey_record.video_quality), (60, 100));
         assert!(s.hotkey_record.record_audio && s.hotkey_record.system_audio && s.hotkey_record.microphone == MicChoice::Auto);
         assert_eq!(s.region_record.output, OutputKind::Anim(AnimFormat::Webp));
-        assert_eq!(s.region_anim.webp_quality, 100);
+        assert_eq!((s.region_record.fps, s.region_record.output_height), (15, 480));
+        assert_eq!((s.region_anim.fps, s.region_anim.max_height, s.region_anim.webp_quality), (15, 480, 80));
         assert_eq!(s.hotkey_screen, ScreenChoice::Primary);
         let h = &s.hotkeys;
         assert!([&h.region_screenshot, &h.fullscreen_screenshot, &h.start_video, &h.start_audio, &h.stop_recording].iter().all(|k| k.is_empty()));
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(s.audio_profile(RecordProfile::App).format, AudioFormat::Mp3);
         assert_eq!(s.audio_profile(RecordProfile::Region).format, AudioFormat::Mp3);
         let a = AudioRecordSettings::default();
-        assert_eq!((a.format, a.kbps, a.system_audio), (AudioFormat::Mp3, 192, true));
+        assert_eq!((a.format, a.kbps, a.system_audio), (AudioFormat::Mp3, 256, true));
     }
 
     #[test]

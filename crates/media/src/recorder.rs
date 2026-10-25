@@ -1,4 +1,5 @@
-use crate::convert::{self, ConvertSettings, Target};
+use crate::animation::{self, AnimationEffort, AnimationEncodeRequest, AnimationOrigin};
+use crate::convert;
 use crate::filters;
 use crossbeam_channel::{Receiver, Sender};
 use ez_ffmpeg::{FfmpegContext, FramePushSource, Output};
@@ -30,13 +31,19 @@ pub struct RecordingRequest {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SessionFailure {
+    pub error: String,
+    pub recovery_files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum SessionEvent {
     Warning(String),
     CaptureFailed(String),
-    Finalizing(f32),
+    Finalizing(Option<f32>),
     Finished(Vec<PathBuf>),
     Cancelled,
-    Failed(String),
+    Failed(SessionFailure),
 }
 
 #[derive(Debug, Default)]
@@ -104,13 +111,23 @@ struct Capture {
     join: JoinHandle<anyhow::Result<()>>,
 }
 
+struct FinalizeFailure {
+    error: anyhow::Error,
+    recovery_files: Vec<PathBuf>,
+}
+
+impl From<anyhow::Error> for FinalizeFailure {
+    fn from(error: anyhow::Error) -> Self {
+        Self { error, recovery_files: Vec::new() }
+    }
+}
+
 pub struct RecordingSession {
     control: Arc<Control>,
     captures: Vec<Capture>,
     audio: Vec<Box<dyn AudioSource>>,
     tracks: Vec<AudioTrack>,
     output: OutputKind,
-    video_quality: u8,
     audio_in_every_file: bool,
     audio_kbps: u32,
     anim: AnimSettings,
@@ -307,7 +324,6 @@ impl RecordingSession {
             audio,
             tracks,
             output: req.output,
-            video_quality: req.video_quality,
             audio_in_every_file: req.audio_in_every_file,
             audio_kbps: req.audio_kbps,
             anim: req.anim,
@@ -382,14 +398,20 @@ impl RecordingSession {
                 let event = if save {
                     match self.finalize(&cancel) {
                         Ok(paths) => SessionEvent::Finished(paths),
-                        Err(e) if crate::job::is_cancelled(&e) => SessionEvent::Cancelled,
-                        Err(e) => SessionEvent::Failed(format!("{e:#}")),
+                        Err(failure) if crate::job::is_cancelled(&failure.error) => SessionEvent::Cancelled,
+                        Err(failure) => SessionEvent::Failed(SessionFailure {
+                            error: format!("{:#}", failure.error),
+                            recovery_files: failure.recovery_files,
+                        }),
                     }
                 } else {
                     self.discard();
                     SessionEvent::Cancelled
                 };
-                let _ = std::fs::remove_dir_all(&work_dir);
+                let keep_work_dir = matches!(&event, SessionEvent::Failed(failure) if failure.recovery_files.iter().any(|path| path.starts_with(&work_dir)));
+                if !keep_work_dir {
+                    let _ = std::fs::remove_dir_all(&work_dir);
+                }
                 let _ = events.send(event);
             })
             .expect("spawn finalize thread")
@@ -427,20 +449,24 @@ impl RecordingSession {
         let _ = std::fs::remove_dir_all(&self.work_dir);
     }
 
-    fn finalize(mut self, cancel: &AtomicBool) -> anyhow::Result<Vec<PathBuf>> {
+    fn finalize(mut self, cancel: &AtomicBool) -> Result<Vec<PathBuf>, FinalizeFailure> {
         let videos = self.shutdown();
         let wavs = self.finish_tracks();
         if let OutputKind::Audio(format) = self.output {
-            anyhow::ensure!(!wavs.is_empty(), "no sound was recorded");
+            if wavs.is_empty() {
+                return Err(anyhow::anyhow!("no sound was recorded").into());
+            }
             let out = naming::media_path(&self.out_dir, &self.title, self.started, format.extension());
             let events = self.events_tx.clone();
             let mut progress = |p: f32| {
-                let _ = events.send(SessionEvent::Finalizing(p));
+                let _ = events.send(SessionEvent::Finalizing(Some(p)));
             };
             convert::encode_audio_recording(&wavs, &out, format, self.audio_kbps, &mut progress, cancel)?;
             return Ok(vec![out]);
         }
-        anyhow::ensure!(!videos.is_empty(), "no frames were recorded");
+        if videos.is_empty() {
+            return Err(anyhow::anyhow!("no frames were recorded").into());
+        }
         let total = videos.len() as f32;
         let mut outputs = Vec::new();
         for (i, (name, scratch)) in videos.iter().enumerate() {
@@ -450,27 +476,82 @@ impl RecordingSession {
             let out = naming::media_path(&self.out_dir, &title, self.started, self.output.extension());
             let events = self.events_tx.clone();
             let mut progress = |p: f32| {
-                let _ = events.send(SessionEvent::Finalizing((i as f32 + p) / total));
+                let _ = events.send(SessionEvent::Finalizing(Some((i as f32 + p) / total)));
             };
-            match self.output {
+            let encoded: anyhow::Result<()> = match self.output {
                 OutputKind::Video(container) => {
                     let tracks: &[PathBuf] = if with_audio { &wavs } else { &[] };
-                    convert::mux_recording(scratch, tracks, &out, container, &mut progress, cancel)?
+                    convert::mux_recording(scratch, tracks, &out, container, &mut progress, cancel)
                 }
                 OutputKind::Audio(_) => unreachable!("handled above"),
-                OutputKind::Anim(format) => convert::convert(
-                    scratch,
-                    &out,
-                    Target::Anim(format),
-                    &ConvertSettings { anim: self.anim.clone(), quality: self.video_quality, ..ConvertSettings::default() },
-                    &mut progress,
-                    cancel,
-                )?,
+                OutputKind::Anim(format) => {
+                    let events = self.events_tx.clone();
+                    let mut animation_progress = |p: Option<f32>| {
+                        let _ = events.send(SessionEvent::Finalizing(p));
+                    };
+                    animation::encode(
+                        &AnimationEncodeRequest {
+                            input: scratch,
+                            output: &out,
+                            window: None,
+                            format,
+                            settings: &self.anim,
+                            effort: AnimationEffort::Balanced,
+                            origin: AnimationOrigin::Recording,
+                        },
+                        &mut animation_progress,
+                        cancel,
+                    )
+                }
+            };
+            if let Err(error) = encoded {
+                let recovery_files = if crate::job::is_cancelled(&error) {
+                    Vec::new()
+                } else {
+                    preserve_recordings(&videos, &self.out_dir, &self.title, self.started)
+                };
+                return Err(FinalizeFailure {
+                    error,
+                    recovery_files,
+                });
             }
             outputs.push(out);
         }
         Ok(outputs)
     }
+}
+
+fn preserve_recordings(
+    videos: &[(String, PathBuf)],
+    out_dir: &Path,
+    title: &str,
+    started: chrono::DateTime<chrono::Local>,
+) -> Vec<PathBuf> {
+    videos
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (name, scratch))| {
+            if !scratch.is_file() {
+                return None;
+            }
+            let title = linked_title(title, index, videos.len(), name, false);
+            let target = naming::media_path(out_dir, &format!("{title} (source)"), started, "mkv");
+            if std::fs::rename(scratch, &target).is_ok() {
+                return Some(target);
+            }
+            match std::fs::copy(scratch, &target) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(scratch);
+                    Some(target)
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&target);
+                    log::warn!("keep source recording {}: {error:#}", scratch.display());
+                    Some(scratch.clone())
+                }
+            }
+        })
+        .collect()
 }
 
 pub fn linked_title(title: &str, i: usize, n: usize, source: &str, with_audio: bool) -> String {
@@ -483,12 +564,34 @@ pub fn linked_title(title: &str, i: usize, n: usize, source: &str, with_audio: b
 
 #[cfg(test)]
 mod tests {
-    use super::linked_title;
+    use super::{linked_title, preserve_recordings};
+    use chrono::{Local, TimeZone};
+    use std::path::PathBuf;
 
     #[test]
     fn linked_names() {
         assert_eq!(linked_title("Rec", 0, 1, "Display 1", true), "Rec");
         assert_eq!(linked_title("Rec", 0, 2, "Display 1", true), "Rec [1 of 2] - Display 1 (audio)");
         assert_eq!(linked_title("Rec", 1, 2, "Code: main.rs", false), "Rec [2 of 2] - Code main.rs");
+    }
+
+    #[test]
+    fn failed_finalize_keeps_source_recordings_in_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::create_dir_all(&out).unwrap();
+        let source = work.join("video-0.mkv");
+        std::fs::write(&source, b"recorded frames").unwrap();
+        let started = Local.with_ymd_and_hms(2026, 10, 25, 6, 0, 0).unwrap();
+        let kept = preserve_recordings(&[("Display 1".into(), source.clone())], &out, "Recording", started);
+        assert_eq!(kept.len(), 1);
+        assert!(!source.exists());
+        assert_eq!(kept[0].extension().and_then(|ext| ext.to_str()), Some("mkv"));
+        assert_eq!(std::fs::read(&kept[0]).unwrap(), b"recorded frames");
+        assert!(kept[0].starts_with(&out));
+        let expected: PathBuf = out.join("Recording (source)_2026-10-25_06-00-00.mkv");
+        assert_eq!(kept[0], expected);
     }
 }

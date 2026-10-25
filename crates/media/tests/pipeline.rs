@@ -306,9 +306,11 @@ fn conversions_between_popular_formats() {
     let cancel = AtomicBool::new(false);
     let run = |input: &Path, target: Target, s: &ConvertSettings| {
         let output = convert::output_path(input, target, None, &out);
-        let mut last = 0.0f32;
-        convert::convert(input, &output, target, s, &mut |p| last = p, &cancel).unwrap_or_else(|e| panic!("{target:?}: {e:#}"));
-        assert_eq!(last, 1.0);
+        let mut progress = Vec::new();
+        convert::convert(input, &output, target, s, &mut |p| progress.push(p), &cancel).unwrap_or_else(|e| panic!("{target:?}: {e:#}"));
+        let measured: Vec<_> = progress.into_iter().flatten().collect();
+        assert!(measured.windows(2).all(|pair| pair[0] <= pair[1]), "{target:?}: {measured:?}");
+        assert!(measured.last().is_none_or(|value| *value == 1.0), "{target:?}: {measured:?}");
         assert_eq!(output.extension().unwrap(), target.extension());
         output
     };
@@ -372,6 +374,25 @@ fn conversions_between_popular_formats() {
     let hi = run(&png, Target::Still(StillFormat::Jpeg), &ConvertSettings { quality: 100, ..opts() });
     let lo = run(&png, Target::Still(StillFormat::Jpeg), &ConvertSettings { quality: 5, ..opts() });
     assert!(std::fs::metadata(&lo).unwrap().len() < std::fs::metadata(&hi).unwrap().len(), "lower quality, smaller file");
+}
+
+#[test]
+fn webp_conversion_uses_activity_instead_of_fake_percentage() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(dir.path(), vec![pattern(96, 64)], vec![], OutputKind::Video(VideoContainer::Mkv));
+    let mkv = record(dir.path(), req, 1.2).remove(0);
+    let output = dir.path().join("segmented.webp");
+    let mut progress = Vec::new();
+    convert::convert(&mkv, &output, Target::Anim(AnimFormat::Webp), &opts(), &mut |p| progress.push(p), &AtomicBool::new(false))
+        .unwrap();
+    assert!(!progress.is_empty());
+    assert!(progress.iter().all(Option::is_none), "{progress:?}");
+    let decoder = image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(&output).unwrap())).unwrap();
+    let info = probe(&output).unwrap();
+    let duration = info.duration_secs().unwrap();
+    assert!((0.9..1.8).contains(&duration), "{info:?}");
+    let expected_frames = duration * 10.0;
+    assert!((decoder.num_frames() as f64 - expected_frames).abs() <= 2.0, "{} vs {expected_frames}", decoder.num_frames());
 }
 
 #[test]

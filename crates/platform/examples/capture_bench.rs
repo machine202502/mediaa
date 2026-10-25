@@ -92,7 +92,8 @@ fn main() -> anyhow::Result<()> {
                 }
                 break;
             }
-            SessionEvent::Failed(e) | SessionEvent::CaptureFailed(e) => anyhow::bail!(e),
+            SessionEvent::Failed(failure) => anyhow::bail!(failure.error),
+            SessionEvent::CaptureFailed(error) => anyhow::bail!(error),
             _ => {}
         }
     }

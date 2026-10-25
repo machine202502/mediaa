@@ -1,4 +1,4 @@
-use super::{header, tile};
+use super::{activity, header, tile};
 use crate::app::{App, RecState};
 use crate::overlay::Purpose;
 use crate::{i18n, theme};
@@ -76,12 +76,16 @@ pub fn live_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) -> boo
             ctx.request_repaint_after(Duration::from_millis(250));
             true
         }
-        RecState::Saving { progress, cancel, .. } => {
-            let (progress, cancel) = (*progress, cancel.clone());
+        RecState::Saving { progress, started, cancel, .. } => {
+            let (progress, started, cancel) = (*progress, *started, cancel.clone());
             theme::card(ui).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(t!("record.saving_long")).strong());
-                ui.add(egui::ProgressBar::new(progress).show_percentage().animate(true));
+                if let Some(progress) = progress {
+                    ui.add(egui::ProgressBar::new(progress).show_percentage().animate(true));
+                } else {
+                    activity(ui, "", started.elapsed());
+                }
                 if ui.add(theme::secondary(icon::X, &t!("record.abort_saving"))).clicked() {
                     cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }

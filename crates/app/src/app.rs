@@ -6,11 +6,12 @@ use crate::tray::{Tray, TrayCommand, TrayState};
 use crate::{pages, theme};
 use crossbeam_channel::Receiver;
 use eframe::egui;
+use egui_phosphor::regular as icon;
 use mediaa_core::geometry::Rect;
 use mediaa_core::settings::{AfterCapture, AfterCompletionAction, AnimSettings, RecordProfile, ScreenChoice, TrayClickAction};
 use mediaa_core::source::{AudioSource, SourceFactory};
-use mediaa_core::{naming, paths, screenshot, Frame, ImageFormat, OutputKind, Settings};
-use mediaa_media::recorder::{RecordingRequest, RecordingSession, SessionEvent};
+use mediaa_core::{library, naming, paths, screenshot, Frame, ImageFormat, OutputKind, Settings};
+use mediaa_media::recorder::{RecordingRequest, RecordingSession, SessionEvent, SessionFailure};
 use mediaa_platform::audio::{CpalSource, CpalTarget};
 use mediaa_platform::screen::{self, MonitorInfo, WindowInfo};
 use mediaa_platform::window::NativeWindow;
@@ -53,13 +54,25 @@ enum Pending {
 pub enum RecState {
     Idle,
     Recording { session: Box<RecordingSession>, events: Receiver<SessionEvent> },
-    Saving { events: Receiver<SessionEvent>, progress: f32, cancel: Arc<AtomicBool>, sound_on_completion: bool },
+    Saving {
+        events: Receiver<SessionEvent>,
+        progress: Option<f32>,
+        started: Instant,
+        cancel: Arc<AtomicBool>,
+        sound_on_completion: bool,
+    },
 }
 
 impl RecState {
     pub fn is_idle(&self) -> bool {
         matches!(self, RecState::Idle)
     }
+}
+
+#[derive(Clone)]
+struct RecoveryNotice {
+    error: String,
+    files: Vec<PathBuf>,
 }
 
 pub struct App {
@@ -69,6 +82,7 @@ pub struct App {
     pub last_capture_page: Page,
     pub last_main_page: Page,
     pub toasts: egui_notify::Toasts,
+    recovery_notice: Option<RecoveryNotice>,
     tray: Option<Tray>,
     tray_rx: Option<Receiver<TrayCommand>>,
     hotkeys: Option<Hotkeys>,
@@ -150,6 +164,7 @@ impl App {
             last_capture_page: Page::Screenshot,
             last_main_page: Page::Screenshot,
             toasts: egui_notify::Toasts::default().with_anchor(egui_notify::Anchor::BottomRight),
+            recovery_notice: None,
             tray,
             tray_rx,
             hotkeys,
@@ -231,6 +246,68 @@ impl App {
         let msg = msg.into();
         log::error!("{msg}");
         self.toasts.error(msg).duration(Some(Duration::from_secs(6)));
+    }
+
+    fn show_recovery_notice(&mut self, ctx: &egui::Context) {
+        let Some(notice) = self.recovery_notice.clone() else { return };
+        let Some(first) = notice.files.first().cloned() else {
+            self.recovery_notice = None;
+            return;
+        };
+        let mut close = false;
+        let mut copy = false;
+        egui::Area::new(egui::Id::new("recording-recovery"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                let p = theme::palette(ui);
+                let frame = egui::Frame::new()
+                    .fill(p.card)
+                    .stroke(egui::Stroke::new(1.0, p.danger))
+                    .corner_radius(egui::CornerRadius::same(10))
+                    .inner_margin(egui::Margin::same(12));
+                let response = frame.show(ui, |ui| {
+                    ui.set_min_width(360.0);
+                    ui.set_max_width(440.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(icon::WARNING_OCTAGON).size(18.0).color(p.danger));
+                        ui.vertical(|ui| {
+                            ui.label(egui::RichText::new(t!("toast.saving_failed", error = notice.error)).strong());
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(library::file_url(&first)).color(p.accent).underline(),
+                                )
+                                .wrap(),
+                            );
+                            if notice.files.len() > 1 {
+                                ui.label(t!("toast.recovery_more", count = notice.files.len() - 1));
+                            }
+                            ui.label(egui::RichText::new(t!("toast.recovery_hint")).color(p.text_weak).size(11.5));
+                        });
+                        if ui.small_button(icon::X).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+                if !close
+                    && response
+                        .response
+                        .interact(egui::Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                {
+                    copy = true;
+                }
+            });
+        if close {
+            self.recovery_notice = None;
+        } else if copy {
+            let links = recovery_links(&notice.files);
+            match clipboard::copy_text(&links) {
+                Ok(()) => self.success(t!("toast.recovery_copied")),
+                Err(error) => self.error(t!("err.copy_failed", error = format!("{error:#}"))),
+            }
+        }
     }
 
     pub fn info(&mut self, msg: impl Into<String>) {
@@ -646,7 +723,7 @@ impl App {
                 let audio_only = matches!(session.output(), OutputKind::Audio(_));
                 let sound_on_completion = recording_completion_sound(session.output(), with_sound);
                 session.stop(save, cancel.clone());
-                self.recorder = RecState::Saving { events, progress: 0.0, cancel, sound_on_completion };
+                self.recorder = RecState::Saving { events, progress: None, started: Instant::now(), cancel, sound_on_completion };
                 if save {
                     self.page = if audio_only { Page::RecordAudio } else { Page::Record };
                 }
@@ -721,12 +798,17 @@ impl App {
                     self.info(t!("toast.discarded"));
 
                 }
-                SessionEvent::Failed(e) => {
+                SessionEvent::Failed(SessionFailure { error, recovery_files }) => {
                     self.recorder = RecState::Idle;
                     self.recording_region = None;
                     self.show_window(ctx);
-                    self.error(t!("toast.saving_failed", error = e));
-
+                    if recovery_files.is_empty() {
+                        self.error(t!("toast.saving_failed", error = error));
+                    } else {
+                        self.lib.files_changed(&recovery_files);
+                        self.recovery_notice = Some(RecoveryNotice { error, files: recovery_files });
+                        self.quit_after_save = false;
+                    }
                 }
             }
         }
@@ -958,6 +1040,7 @@ impl eframe::App for App {
         if !self.lib.viewer_open() {
             self.toasts.show(&ctx);
         }
+        self.show_recovery_notice(&ctx);
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
@@ -978,6 +1061,10 @@ impl eframe::App for App {
 
 fn close_goes_to_tray(close_to_tray: bool, has_tray: bool, busy: bool) -> bool {
     busy || (close_to_tray && has_tray)
+}
+
+fn recovery_links(files: &[PathBuf]) -> String {
+    files.iter().map(|path| library::file_url(path)).collect::<Vec<_>>().join("\n")
 }
 
 fn tray_click_stops_recording(enabled: bool, recording: bool) -> bool {
@@ -1012,7 +1099,10 @@ pub fn page_from_args(args: &[String]) -> Option<Page> {
 
 #[cfg(test)]
 mod tests {
-    use super::{close_goes_to_tray, page_from_args, recording_animation_settings, recording_completion_sound, tray_click_stops_recording, Page, StartupAction};
+    use super::{
+        close_goes_to_tray, page_from_args, recording_animation_settings, recording_completion_sound, recovery_links,
+        tray_click_stops_recording, Page, StartupAction,
+    };
     use mediaa_core::{AnimFormat, OutputKind, Settings, VideoContainer};
 
     fn parse(args: &[&str]) -> StartupAction {
@@ -1053,6 +1143,18 @@ mod tests {
         assert!(!recording_completion_sound(OutputKind::Video(VideoContainer::Mkv), false));
         assert!(!recording_completion_sound(OutputKind::Anim(AnimFormat::Webp), true));
         assert!(!recording_completion_sound(OutputKind::Anim(AnimFormat::Gif), true));
+    }
+
+    #[test]
+    fn recovery_notification_copies_file_links() {
+        let links = recovery_links(&[
+            std::path::PathBuf::from("first source.mkv"),
+            std::path::PathBuf::from("second.mkv"),
+        ]);
+        let links: Vec<_> = links.lines().collect();
+        assert_eq!(links.len(), 2);
+        assert!(links.iter().all(|link| link.starts_with("file://")));
+        assert!(links[0].contains("first%20source.mkv"));
     }
 
     #[test]

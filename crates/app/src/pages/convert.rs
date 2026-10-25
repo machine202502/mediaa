@@ -1,4 +1,4 @@
-use super::header;
+use super::{activity, header};
 use crate::app::App;
 use crate::{i18n, theme};
 use crossbeam_channel::Receiver;
@@ -11,13 +11,14 @@ use mediaa_media::convert::{self, ConvertSettings, Effort, StillFormat, Target, 
 use mediaa_media::info::MediaInfo;
 use rust_i18n::t;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 struct Job {
     output: PathBuf,
-    progress: Arc<AtomicU32>,
+    progress: Arc<AtomicI32>,
+    started: Instant,
     cancel: Arc<AtomicBool>,
     done: Receiver<Result<(), String>>,
 }
@@ -89,15 +90,15 @@ fn start(app: &mut App, ctx: &egui::Context, target: Target) {
     let folder = app.conv.folder.clone().unwrap_or_else(|| app.settings.convert_dir());
     let output = convert::output_path(&input, target, Some(&app.conv.name), &folder);
     let settings = app.conv.effective();
-    let progress = Arc::new(AtomicU32::new(0));
+    let progress = Arc::new(AtomicI32::new(-1));
     let cancel = Arc::new(AtomicBool::new(false));
     let (tx, rx) = crossbeam_channel::bounded(1);
     let (p, c, out, ctx2) = (progress.clone(), cancel.clone(), output.clone(), ctx.clone());
     std::thread::Builder::new()
         .name("convert".into())
         .spawn(move || {
-            let mut report = |f: f32| {
-                p.store((f * 1000.0) as u32, Ordering::Relaxed);
+            let mut report = |f: Option<f32>| {
+                p.store(f.map_or(-1, |f| (f * 1000.0) as i32), Ordering::Relaxed);
                 ctx2.request_repaint();
             };
             let r = convert::convert(&input, &out, target, &settings, &mut report, &c).map_err(|e| {
@@ -111,7 +112,7 @@ fn start(app: &mut App, ctx: &egui::Context, target: Target) {
             ctx2.request_repaint();
         })
         .expect("spawn convert thread");
-    app.conv.job = Some(Job { output, progress, cancel, done: rx });
+    app.conv.job = Some(Job { output, progress, started: Instant::now(), cancel, done: rx });
 }
 
 fn update_estimate(app: &mut App, ctx: &egui::Context, target: Target) {
@@ -456,9 +457,14 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
 
     ui.vertical_centered(|ui| {
         if let Some(job) = &app.conv.job {
-            let frac = job.progress.load(Ordering::Relaxed) as f32 / 1000.0;
+            let value = job.progress.load(Ordering::Relaxed);
+            let frac = value.max(0) as f32 / 1000.0;
             let cancel = job.cancel.clone();
-            ui.add(egui::ProgressBar::new(frac).desired_width(420.0).show_percentage().animate(true));
+            if value < 0 {
+                activity(ui, &t!("convert.processing"), job.started.elapsed());
+            } else {
+                ui.add(egui::ProgressBar::new(frac).desired_width(420.0).show_percentage().animate(true));
+            }
             if ui.add(theme::secondary(icon::X, &t!("common.cancel"))).clicked() {
                 cancel.store(true, Ordering::Relaxed);
             }
