@@ -104,18 +104,24 @@ enum WriteBatch {
 struct IndexWriter {
     sender: Option<Sender<WriteBatch>>,
     join: Option<JoinHandle<()>>,
+    stopped: Receiver<()>,
 }
 
 impl IndexWriter {
     fn new(db: rusqlite::Connection) -> Self {
         let (sender, receiver) = crossbeam_channel::bounded(32);
+        let (stopped_tx, stopped) = crossbeam_channel::bounded(1);
         let join = std::thread::Builder::new()
             .name("library-index-writer".into())
-            .spawn(move || run_writer(db, receiver))
+            .spawn(move || {
+                run_writer(db, receiver);
+                let _ = stopped_tx.send(());
+            })
             .ok();
         Self {
             sender: Some(sender),
             join,
+            stopped,
         }
     }
 
@@ -130,6 +136,15 @@ impl IndexWriter {
 impl Drop for IndexWriter {
     fn drop(&mut self) {
         self.sender.take();
+        let stopped = self.stopped.recv_timeout(Duration::from_secs(2)).is_ok();
+        if stopped {
+            if let Some(join) = self.join.take() {
+                let _ = join.join();
+            }
+        } else {
+            log::warn!("library index writer did not stop within 2 s");
+            self.join.take();
+        }
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
@@ -432,6 +447,13 @@ impl LibraryIndex {
     }
 
     pub fn refresh_paths(&mut self, paths: &[PathBuf]) {
+        let mut positions: HashMap<String, usize> = self
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.name.clone(), index))
+            .collect();
+        let mut removed = std::collections::HashSet::new();
         let mut upserts: Vec<LibraryEntry> = Vec::new();
         let mut deletes: Vec<String> = Vec::new();
         for path in paths {
@@ -442,19 +464,21 @@ impl LibraryIndex {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            let pos = self.entries.iter().position(|e| e.name == name);
+            let pos = positions.get(&name).copied();
             match (read_entry(path), pos) {
-                (Some(e), Some(i)) if unchanged(&self.entries[i], &e) => {}
+                (Some(entry), Some(index)) if unchanged(&self.entries[index], &entry) => {}
                 (Some(e), Some(i)) => {
                     self.entries[i] = e.clone();
                     upserts.push(e);
                 }
                 (Some(e), None) => {
+                    positions.insert(name.clone(), self.entries.len());
                     self.entries.push(e.clone());
                     upserts.push(e);
                 }
                 (None, Some(i)) => {
-                    self.entries.remove(i);
+                    removed.insert(i);
+                    positions.remove(&name);
                     deletes.push(name);
                 }
                 (None, None) => {}
@@ -462,6 +486,13 @@ impl LibraryIndex {
         }
         if upserts.is_empty() && deletes.is_empty() {
             return;
+        }
+        if !removed.is_empty() {
+            self.entries = std::mem::take(&mut self.entries)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, entry)| (!removed.contains(&index)).then_some(entry))
+                .collect();
         }
         self.store(upserts, deletes);
         self.changed();
@@ -473,6 +504,7 @@ impl LibraryIndex {
         };
         if self.entries[i].details != Some(details) {
             self.entries[i].details = Some(details);
+            self.version += 1;
             let name = self.entries[i].name.clone();
             if !self.pending_details.contains(&name) {
                 self.pending_details.push(name);

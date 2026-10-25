@@ -1,14 +1,19 @@
+use crate::error::{invalid_input, timed_out};
 use crate::filters;
 use crate::filters::Effort;
 use crate::info::{probe, MediaInfo};
 use crate::job;
+use crate::webp_decode::WebpReader;
+use crossbeam_channel::RecvTimeoutError;
 use ez_ffmpeg::{FfmpegContext, FramePushSource, Input, Output};
 use mediaa_core::formats::{self, AnimFormat};
 use mediaa_core::settings::AnimSettings;
 use mediaa_webp_pipeline::{self, PipelineConfig, PipelineTuning, Segment, SegmentBackend};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
-use std::thread::JoinHandle;
+use std::time::Duration;
+
+const WEBP_DECODE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimationOrigin {
@@ -134,11 +139,12 @@ impl AnimationEncoder for SegmentedWebpEncoder {
         cancel: &AtomicBool,
     ) -> anyhow::Result<()> {
         let info = probe(request.input)?;
-        anyhow::ensure!(
-            info.has_video(),
-            "{} has no picture",
-            request.input.display()
-        );
+        if !info.has_video() {
+            return Err(invalid_input(format!(
+                "{} has no picture",
+                request.input.display()
+            )));
+        }
         let (base_start_us, total_us) = match request.window {
             Some((start, len)) => (start, len),
             None => (0, info.duration_us.unwrap_or(0)),
@@ -185,25 +191,25 @@ impl AnimationEncoder for FfmpegAnimationEncoder {
             formats::is_webp_path(request.input) && formats::webp_is_animated(request.input)?;
         if animated_webp {
             let (source, info, producer) = webp_frames_input(request.input)?;
-            anyhow::ensure!(
-                info.has_video(),
-                "{} has no picture",
-                request.input.display()
-            );
+            if !info.has_video() {
+                return Err(invalid_input(format!(
+                    "{} has no picture",
+                    request.input.display()
+                )));
+            }
             let result = animation_context(source.into(), request.output, request)
                 .and_then(|ctx| job::run(ctx, None, &mut |_| {}, cancel));
-            let produced = producer
-                .join()
-                .map_err(|_| anyhow::anyhow!("webp decoder panicked"))?;
-            return result.and(produced);
+            result?;
+            return producer.wait();
         }
 
         let info = probe(request.input)?;
-        anyhow::ensure!(
-            info.has_video(),
-            "{} has no picture",
-            request.input.display()
-        );
+        if !info.has_video() {
+            return Err(invalid_input(format!(
+                "{} has no picture",
+                request.input.display()
+            )));
+        }
         let mut source = Input::from(url(request.input));
         if let Some(threads) = request.threads {
             source = source.set_video_codec_opt("threads", threads.to_string());
@@ -266,36 +272,64 @@ fn url(path: &Path) -> String {
 
 pub(crate) fn webp_frames_input(
     path: &Path,
-) -> anyhow::Result<(FramePushSource, MediaInfo, JoinHandle<anyhow::Result<()>>)> {
-    let file = std::io::BufReader::new(std::fs::File::open(path)?);
-    let mut decoder = image_webp::WebPDecoder::new(file)?;
-    let (w, h) = decoder.dimensions();
-    mediaa_core::formats::ensure_safe_dimensions(w, h)?;
-    let pix = if decoder.has_alpha() { "rgba" } else { "rgb24" };
-    let info = crate::info::probe_webp(&decoder);
+) -> anyhow::Result<(FramePushSource, MediaInfo, WebpProducer)> {
+    let mut reader = WebpReader::open(path)?;
+    let (w, h) = reader.dimensions();
+    let pix = if reader.has_alpha() { "rgba" } else { "rgb24" };
+    let info = reader.info();
+    let frames = reader.frame_count();
     let (source, mut handle) = FramePushSource::builder(w, h)
         .pixel_format(pix)
         .time_base(1, 1000)
         .build()?;
-    let producer = std::thread::Builder::new()
+    let (done_tx, done) = crossbeam_channel::bounded(1);
+    std::thread::Builder::new()
         .name("webp-decode".into())
         .spawn(move || -> anyhow::Result<()> {
-            let size = decoder
-                .output_buffer_size()
-                .ok_or_else(|| anyhow::anyhow!("webp too large"))?;
-            let mut buf = vec![0u8; size];
-            let mut pts = 0i64;
-            for _ in 0..decoder.num_frames() {
-                let delay = i64::from(decoder.read_frame(&mut buf)?.max(1));
-                if handle.push(&buf, pts, Some(delay)).is_err() {
-                    break;
+            let result = (|| {
+                let mut pts = 0i64;
+                for _ in 0..frames {
+                    let frame = reader.read_frame()?;
+                    let delay = i64::from(frame.delay_ms);
+                    if handle.push(frame.data, pts, Some(delay)).is_err() {
+                        break;
+                    }
+                    pts += delay;
                 }
-                pts += delay;
-            }
-            handle.finish();
+                handle.finish();
+                Ok(())
+            })();
+            let _ = done_tx.send(result);
             Ok(())
         })?;
-    Ok((source, info, producer))
+    Ok((
+        source,
+        info,
+        WebpProducer {
+            result: done,
+            timeout: WEBP_DECODE_STOP_TIMEOUT,
+        },
+    ))
+}
+
+pub(crate) struct WebpProducer {
+    result: crossbeam_channel::Receiver<anyhow::Result<()>>,
+    timeout: Duration,
+}
+
+impl WebpProducer {
+    pub(crate) fn wait(self) -> anyhow::Result<()> {
+        match self.result.recv_timeout(self.timeout) {
+            Ok(result) => result,
+            Err(RecvTimeoutError::Timeout) => Err(timed_out(format!(
+                "WebP decoder did not stop within {} s",
+                self.timeout.as_secs()
+            ))),
+            Err(RecvTimeoutError::Disconnected) => {
+                Err(anyhow::anyhow!("WebP decoder stopped without a result"))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -424,5 +458,19 @@ mod tests {
         .unwrap_err();
         assert!(format!("{error:#}").contains("encoder failed"));
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn webp_producer_wait_is_bounded_and_typed() {
+        let (_sender, result) = crossbeam_channel::bounded(1);
+        let producer = WebpProducer {
+            result,
+            timeout: Duration::from_millis(10),
+        };
+        let error = producer.wait().unwrap_err();
+        assert_eq!(
+            crate::error::classify_media_error(&error),
+            crate::error::MediaErrorKind::Timeout
+        );
     }
 }

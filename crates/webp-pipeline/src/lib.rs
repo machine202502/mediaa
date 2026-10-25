@@ -2,6 +2,7 @@ mod webp_parts;
 
 use anyhow::Context;
 use crossbeam_channel::{bounded, RecvTimeoutError};
+use mediaa_core::limits::{FPS, VIDEO_QUALITY};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -121,10 +122,10 @@ impl PipelineConfig {
     }
 
     fn normalized(&self) -> Self {
-        let fps = self.fps.clamp(1, 60);
+        let fps = FPS.clamp(self.fps);
         let width = self.width.max(1);
         let height = self.height.max(1);
-        let quality = self.quality.clamp(1, 100);
+        let quality = VIDEO_QUALITY.clamp(u32::from(self.quality)) as u8;
         let frame_bytes = frame_memory(width, height, quality);
         let fixed_encoder_bytes = self.fixed_encoder_bytes;
         let memory_bytes = self

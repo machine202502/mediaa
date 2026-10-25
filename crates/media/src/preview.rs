@@ -1,4 +1,5 @@
 use crate::info::{probe, MediaInfo};
+use crate::webp_decode::WebpReader;
 use ez_ffmpeg::frame_export::{FrameExtractor, PixelLayout, Sampling};
 use ez_ffmpeg::{FfmpegContext, Input, Output};
 use mediaa_core::formats::{is_webp_path, MediaKind};
@@ -9,16 +10,34 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub fn details(path: &Path, kind: MediaKind) -> anyhow::Result<MediaInfo> {
+    details_cancellable(path, kind, &AtomicBool::new(false))
+}
+
+pub fn details_cancellable(
+    path: &Path,
+    kind: MediaKind,
+    cancel: &AtomicBool,
+) -> anyhow::Result<MediaInfo> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err(crate::job::Cancelled.into());
+    }
     if kind == MediaKind::Image {
         let (width, height) = image::image_dimensions(path)?;
         mediaa_core::formats::ensure_safe_dimensions(width, height)?;
+        if cancel.load(Ordering::Relaxed) {
+            return Err(crate::job::Cancelled.into());
+        }
         return Ok(MediaInfo {
             width,
             height,
             ..MediaInfo::default()
         });
     }
-    probe(path)
+    let info = probe(path)?;
+    if cancel.load(Ordering::Relaxed) {
+        return Err(crate::job::Cancelled.into());
+    }
+    Ok(info)
 }
 
 #[derive(Debug)]
@@ -83,32 +102,26 @@ fn webp_frames(
     cancel: &AtomicBool,
     on_frame: &mut dyn FnMut(PreviewFrame) -> bool,
 ) -> anyhow::Result<()> {
-    let mut decoder =
-        image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(path)?))?;
-    let (w, h) = decoder.dimensions();
-    mediaa_core::formats::ensure_safe_dimensions(w, h)?;
-    let alpha = decoder.has_alpha();
-    let mut buf = vec![
-        0u8;
-        decoder
-            .output_buffer_size()
-            .ok_or_else(|| anyhow::anyhow!("webp too large"))?
-    ];
+    let mut reader = WebpReader::open(path)?;
+    let (w, h) = reader.dimensions();
+    let alpha = reader.has_alpha();
+    let animated = reader.is_animated();
+    let frames = reader.frame_count();
     let target_w = width.min(w).max(1);
     let target_h = ((u64::from(h) * u64::from(target_w)) / u64::from(w.max(1))).max(1) as u32;
     let (mut t, mut next) = (0.0, start);
-    for _ in 0..decoder.num_frames().max(1) {
+    for _ in 0..frames.max(1) {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let delay = if decoder.is_animated() {
-            f64::from(decoder.read_frame(&mut buf)?.max(1)) / 1000.0
+        let frame = reader.read_frame()?;
+        let delay = if animated {
+            f64::from(frame.delay_ms) / 1000.0
         } else {
-            decoder.read_image(&mut buf)?;
             0.0
         };
         if t >= next {
-            let frame = scale_webp_frame(&buf, w, h, alpha, target_w, target_h)
+            let frame = scale_webp_frame(frame.data, w, h, alpha, target_w, target_h)
                 .ok_or_else(|| anyhow::anyhow!("bad webp frame"))?;
             if !on_frame(PreviewFrame { at: t, frame }) {
                 break;

@@ -351,13 +351,10 @@ impl Settings {
     }
 
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let text = toml::to_string_pretty(self)?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, path)?;
+        let pending = crate::atomic_file::AtomicFile::new(path)?;
+        std::fs::write(pending.path(), text)?;
+        pending.commit_replace()?;
         Ok(())
     }
 

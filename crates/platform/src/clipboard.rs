@@ -18,8 +18,8 @@ fn with_ctx<R>(f: impl FnOnce(&ClipboardContext) -> anyhow::Result<R>) -> anyhow
     })
 }
 
-pub fn copy_image(frame: &Frame) -> anyhow::Result<()> {
-    let img = image::RgbaImage::from_raw(frame.width, frame.height, frame.data.clone())
+pub fn copy_image(frame: Frame) -> anyhow::Result<()> {
+    let img = image::RgbaImage::from_raw(frame.width, frame.height, frame.data)
         .ok_or_else(|| anyhow!("invalid frame"))?;
     let data = RustImageData::from_dynamic_image(image::DynamicImage::ImageRgba8(img));
     with_ctx(|c| c.set_image(data).map_err(|e| anyhow!("clipboard: {e}")))

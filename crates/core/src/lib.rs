@@ -1,5 +1,6 @@
 pub mod atomic_file;
 pub mod audio;
+pub mod dev;
 pub mod formats;
 pub mod frame;
 pub mod geometry;

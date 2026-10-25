@@ -71,7 +71,7 @@ impl App {
             Ok(recovery) => {
                 self.recovery_rx = None;
                 if let Some(task) = self.recovery_task.take() {
-                    self.tasks.join(task);
+                    self.tasks.finish(task);
                 }
                 self.show_recovery(recovery);
             }
@@ -81,7 +81,7 @@ impl App {
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
                 self.recovery_rx = None;
                 if let Some(task) = self.recovery_task.take() {
-                    self.tasks.join(task);
+                    self.tasks.finish(task);
                 }
                 self.error(t!("toast.recovery_failed"));
             }

@@ -10,7 +10,30 @@ use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const AUDIO_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+const AUDIO_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+fn wait_ready<T>(
+    receiver: crossbeam_channel::Receiver<anyhow::Result<T>>,
+    timeout: Duration,
+    subject: &str,
+) -> anyhow::Result<T> {
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("{subject} start timed out"),
+        )
+        .into()),
+        Err(crossbeam_channel::RecvTimeoutError::Disconnected) => Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            format!("{subject} thread exited"),
+        )
+        .into()),
+    }
+}
 
 pub fn system_audio_supported() -> bool {
     cfg!(any(target_os = "windows", target_os = "macos"))
@@ -43,6 +66,7 @@ pub struct CpalSource {
     target: CpalTarget,
     stop_tx: Option<Sender<()>>,
     thread: Option<JoinHandle<()>>,
+    stopped: Option<crossbeam_channel::Receiver<()>>,
 }
 
 impl CpalSource {
@@ -51,6 +75,7 @@ impl CpalSource {
             target,
             stop_tx: None,
             thread: None,
+            stopped: None,
         }
     }
 }
@@ -62,14 +87,19 @@ fn open_device(target: &CpalTarget) -> anyhow::Result<(cpal::Device, cpal::Suppo
             let device = host
                 .input_devices()?
                 .find(|d| &d.to_string() == name)
-                .ok_or_else(|| anyhow!("audio device \"{name}\" not found"))?;
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("audio device \"{name}\" not found"),
+                    )
+                })?;
             let config = device.default_input_config()?;
             Ok((device, config))
         }
         CpalTarget::System => {
-            let device = host
-                .default_output_device()
-                .ok_or_else(|| anyhow!("no audio output device"))?;
+            let device = host.default_output_device().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no audio output device")
+            })?;
             let config = device.default_output_config()?;
             Ok((device, config))
         }
@@ -115,6 +145,7 @@ impl AudioSource for CpalSource {
         let sink = open_sink(config.sample_rate, config.channels)?;
         let (ready_tx, ready_rx) = bounded::<anyhow::Result<()>>(1);
         let (stop_tx, stop_rx) = bounded::<()>(1);
+        let (stopped_tx, stopped_rx) = bounded::<()>(1);
         let name = self.name();
         let thread = std::thread::Builder::new()
             .name("audio-capture".into())
@@ -137,19 +168,13 @@ impl AudioSource for CpalSource {
                 let _ = stop_rx.recv();
                 drop(stream);
                 log::info!("audio capture \"{name}\" stopped");
+                let _ = stopped_tx.send(());
             })?;
-        let ready = match ready_rx.recv_timeout(Duration::from_secs(15)) {
-            Ok(result) => result,
-            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
-                anyhow::bail!("audio start timed out")
-            }
-            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                anyhow::bail!("audio thread exited")
-            }
-        };
-        ready.with_context(|| format!("cannot record from \"{}\"", self.name()))?;
+        wait_ready(ready_rx, Duration::from_secs(15), "audio")
+            .with_context(|| format!("cannot record from \"{}\"", self.name()))?;
         self.stop_tx = Some(stop_tx);
         self.thread = Some(thread);
+        self.stopped = Some(stopped_rx);
         Ok(())
     }
 
@@ -157,9 +182,7 @@ impl AudioSource for CpalSource {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        stop_thread(self.thread.take(), self.stopped.take(), "audio capture");
     }
 }
 
@@ -187,7 +210,9 @@ impl AudioOut {
     pub fn open() -> anyhow::Result<AudioOut> {
         let device = cpal::default_host()
             .default_output_device()
-            .ok_or_else(|| anyhow!("no audio output device"))?;
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "no audio output device")
+            })?;
         let supported = device.default_output_config()?;
         let format = supported.sample_format();
         let config: cpal::StreamConfig = supported.config();
@@ -219,7 +244,7 @@ impl AudioOut {
                     }
                 }
             })?;
-        ready_rx.recv().context("audio output thread exited")??;
+        wait_ready(ready_rx, AUDIO_OPEN_TIMEOUT, "audio output")?;
         Ok(AudioOut {
             shared,
             rate: config.sample_rate,
@@ -260,9 +285,28 @@ impl Drop for AudioOut {
         if let Some(tx) = self.stop_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
-        }
+        join_finished(self.thread.take());
+    }
+}
+
+fn join_finished(thread: Option<JoinHandle<()>>) {
+    if let Some(thread) = thread.filter(|thread| thread.is_finished()) {
+        let _ = thread.join();
+    }
+}
+
+fn stop_thread(
+    thread: Option<JoinHandle<()>>,
+    stopped: Option<crossbeam_channel::Receiver<()>>,
+    subject: &str,
+) {
+    let stopped = stopped.is_some_and(|receiver| receiver.recv_timeout(AUDIO_STOP_TIMEOUT).is_ok());
+    if !stopped {
+        log::warn!("{subject} did not stop within {:?}", AUDIO_STOP_TIMEOUT);
+        return;
+    }
+    if let Some(thread) = thread.filter(|thread| thread.is_finished()) {
+        let _ = thread.join();
     }
 }
 
@@ -339,6 +383,15 @@ fn confirmation_samples(target_rate: u32) -> anyhow::Result<Vec<f32>> {
 }
 
 pub fn confirmation_tone() {
+    if let Err(error) = std::thread::Builder::new()
+        .name("confirmation-tone".into())
+        .spawn(play_confirmation_tone)
+    {
+        log::warn!("confirmation sound worker: {error}");
+    }
+}
+
+fn play_confirmation_tone() {
     let out = match AudioOut::open() {
         Ok(out) => out,
         Err(e) => {
@@ -355,12 +408,16 @@ pub fn confirmation_tone() {
     };
     let duration = samples.len() as f32 / 2.0 / out.sample_rate() as f32;
     out.push(&samples);
-    std::thread::sleep(Duration::from_secs_f32(duration + 0.04));
+    let deadline = Instant::now() + Duration::from_secs_f32(duration + 0.04);
+    while Instant::now() < deadline && out.queued_secs() > 0.0 {
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{confirmation_samples, CONFIRMATION_WAV};
+    use super::{confirmation_samples, join_finished, wait_ready, CONFIRMATION_WAV};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn confirmation_tone_comes_from_the_embedded_wav_file() {
@@ -371,5 +428,27 @@ mod tests {
         assert!(samples
             .iter()
             .all(|sample| sample.is_finite() && sample.abs() <= 0.2));
+    }
+
+    #[test]
+    fn audio_ready_wait_is_bounded() {
+        let (_sender, receiver) = crossbeam_channel::bounded(1);
+        let started = Instant::now();
+        let error =
+            wait_ready::<()>(receiver, Duration::from_millis(10), "audio output").unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn dropping_an_unfinished_audio_thread_does_not_wait() {
+        let (release, wait) = crossbeam_channel::bounded(1);
+        let thread = std::thread::spawn(move || {
+            let _ = wait.recv();
+        });
+        let started = Instant::now();
+        join_finished(Some(thread));
+        assert!(started.elapsed() < Duration::from_millis(100));
+        release.send(()).unwrap();
     }
 }

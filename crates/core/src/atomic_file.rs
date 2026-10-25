@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+pub const TEMP_PREFIX: &str = ".mediaa-";
+
 pub struct AtomicFile {
     target: PathBuf,
     temp: tempfile::TempPath,
@@ -15,7 +17,7 @@ impl AtomicFile {
             .map(|value| format!(".{value}"))
             .unwrap_or_default();
         let temp = tempfile::Builder::new()
-            .prefix(".mediaa-")
+            .prefix(TEMP_PREFIX)
             .suffix(&extension)
             .tempfile_in(parent)?
             .into_temp_path();
@@ -31,6 +33,22 @@ impl AtomicFile {
     }
 
     pub fn commit(self) -> anyhow::Result<PathBuf> {
+        self.prepare()?;
+        self.temp
+            .persist_noclobber(&self.target)
+            .map_err(|error| error.error)?;
+        Ok(self.target)
+    }
+
+    pub fn commit_replace(self) -> anyhow::Result<PathBuf> {
+        self.prepare()?;
+        self.temp
+            .persist(&self.target)
+            .map_err(|error| error.error)?;
+        Ok(self.target)
+    }
+
+    fn prepare(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.temp.is_file(),
             "encoder did not create {}",
@@ -41,10 +59,7 @@ impl AtomicFile {
             .write(true)
             .open(&self.temp)?
             .sync_all()?;
-        self.temp
-            .persist_noclobber(&self.target)
-            .map_err(|error| error.error)?;
-        Ok(self.target)
+        Ok(())
     }
 }
 
@@ -66,5 +81,16 @@ mod tests {
         std::fs::write(output.path(), b"replacement").unwrap();
         assert!(output.commit().is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn commit_replace_publishes_new_contents_over_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("settings.toml");
+        std::fs::write(&target, b"old").unwrap();
+        let output = AtomicFile::new(&target).unwrap();
+        std::fs::write(output.path(), b"new").unwrap();
+        output.commit_replace().unwrap();
+        assert_eq!(std::fs::read(target).unwrap(), b"new");
     }
 }

@@ -122,10 +122,20 @@ fn canceling_an_estimate_signals_its_worker() {
             rx: None,
             result: None,
             previous: None,
+            task: None,
         }),
         ..ConvertUi::default()
     };
     ui.cancel_estimate();
     assert!(ui.estimate.is_none());
     assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[test]
+fn selecting_a_supported_file_clears_the_previous_unsupported_state() {
+    let mut ui = ConvertUi::default();
+    ui.set_input(std::path::PathBuf::from("notes.txt"));
+    assert!(ui.probed.is_some());
+    ui.set_input(std::path::PathBuf::from("capture.png"));
+    assert!(ui.probed.is_none());
 }

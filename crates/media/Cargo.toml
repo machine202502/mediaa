@@ -19,6 +19,7 @@ image-webp = "0.2"
 ez-ffmpeg = { version = "0.19", features = ["static"] }
 oxipng = { version = "10.2", default-features = false, features = ["parallel"] }
 tempfile.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 hound.workspace = true

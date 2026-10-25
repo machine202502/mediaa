@@ -85,6 +85,7 @@ pub(super) fn update_estimate(app: &mut App, ctx: &egui::Context, target: Target
             rx: None,
             result: None,
             previous,
+            task: None,
         });
     }
     let busy = conv.job.is_some();
@@ -95,19 +96,26 @@ pub(super) fn update_estimate(app: &mut App, ctx: &egui::Context, target: Target
         return;
     }
     match &e.rx {
-        Some(rx) => {
-            if let Ok(r) = rx.try_recv() {
-                e.result = Some(r);
+        Some(rx) => match rx.try_recv() {
+            Ok(result) => {
+                e.result = Some(result);
             }
-        }
+            Err(crossbeam_channel::TryRecvError::Empty) => {}
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                e.result = Some(Err(t!("convert.worker_stopped").into()));
+            }
+        },
         None if busy => {}
         None if e.since.elapsed() < ESTIMATE_DELAY => ctx.request_repaint_after(ESTIMATE_DELAY),
         None => {
             let (tx, rx) = crossbeam_channel::bounded(1);
             let (key, cancel, ctx) = (e.key.clone(), e.cancel.clone(), ctx.clone());
-            let spawned = std::thread::Builder::new()
-                .name("convert-estimate".into())
-                .spawn(move || {
+            let spawned = app.tasks.spawn_with_deadline(
+                TaskKind::ConversionEstimate,
+                "convert-estimate",
+                Some(cancel.clone()),
+                Some(super::ESTIMATE_TIMEOUT),
+                move || {
                     let (input, target, settings) = key;
                     let input = mediaa_core::paths::SourcePath::new(input);
                     let r = convert::estimate_size(&input, target, &settings, &cancel);
@@ -115,11 +123,28 @@ pub(super) fn update_estimate(app: &mut App, ctx: &egui::Context, target: Target
                         let _ = tx.send(r.map_err(|e| format!("{e:#}")));
                         ctx.request_repaint();
                     }
-                });
+                },
+            );
             match spawned {
-                Ok(_) => e.rx = Some(rx),
+                Ok(task) => {
+                    e.rx = Some(rx);
+                    e.task = Some(task);
+                }
                 Err(error) => e.result = Some(Err(format!("estimate: {error}"))),
             }
+        }
+    }
+    if e.result.is_none() && e.task.is_some_and(|task| app.tasks.overdue(task)) {
+        e.cancel.store(true, Ordering::Relaxed);
+        e.result = Some(Err(t!("convert.estimate_timeout").into()));
+        e.rx = None;
+        if let Some(task) = e.task.take() {
+            app.tasks.detach(task);
+        }
+    }
+    if e.result.is_some() {
+        if let Some(task) = e.task.take() {
+            app.tasks.finish(task);
         }
     }
 }

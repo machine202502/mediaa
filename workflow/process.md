@@ -647,3 +647,66 @@
 | 5 | Проверка: fmt, clippy, Rust/Node tests и audit | голова | готово: 266 Rust, 4 desktop-live пропущены, 41 Node, clippy `-D warnings`, audit 0 blocking | — |
 | — | Release build/tests | голова | не запускалось: нет отдельного запроса | — |
 | — | Коммит, задача закрыта | пользователь | готово, `c51dda6` | — |
+
+## Партия 23-6 — долгосрочная устойчивость, lifecycle и инварианты (запрос пользователя 2026-10-25)
+
+| Шаг | Что | Исполнитель | Состояние | Лог |
+|---|---|---|---|---|
+| 1 | Ускорить локальный цикл и убрать неиспользуемые тяжёлые возможности | голова | готово: `eframe/persistence` убран, локальный check без examples | — |
+| 2 | Убрать блокировки UI, неограниченные ожидания и добавить recovery при timeout | голова | готово: audio/live WebP/WebP producer/writer bounded | — |
+| 3 | Расширить типизированную модель ошибок и действий восстановления | голова | готово: actionable kinds и downcast без текста | — |
+| 4 | Замкнуть one-shot операции на единый lifecycle и убрать блокирующие join из UI | голова | готово: probe/estimate/viewer/housekeeping в supervisor, статический guard | — |
+| 5 | Централизовать связанные пределы, временные пути и dev-настройки | голова | готово: limits, bitrate, temp prefix, previews, debug-only env | — |
+| 6 | Укрепить WebP-декодирование, разбор и проверку контейнера | голова | готово: общий reader, bounded producer, malformed corpus | — |
+| 7 | Добавить регрессионные тесты lifecycle, timeout и повреждённых данных | голова | готово: targeted tests зелёные | — |
+| 8 | Проверка: fmt, clippy, Rust/Node tests, audit и замеры сборки | голова | готово: 277 Rust, 4 desktop-live пропущены, 41 Node, fmt, clippy `-D warnings`, audit 0 blocking; warm check 0,48 s | — |
+| 9 | Записать результат в done.md и закрыть пункт | голова | готово | `workflow/done.md` |
+| — | Коммит | пользователь | ждёт разрешения | — |
+
+## Партия 23-7 — критичные операции вне UI и владение workers (запрос пользователя 2026-10-25)
+
+| Шаг | Что | Исполнитель | Состояние | Лог |
+|---|---|---|---|---|
+| 1 | Уточнить `TaskSupervisor`: ограниченная история, готовый результат раньше timeout, отмена заменяемой задачи | голова | готово: unfinished остаются tracked, история 32, probe отменяется и проверяет result первым | — |
+| 2 | Вынести рендер, копирование и сохранение скриншота из UI | голова | готово: один background job, копирование из библиотеки тоже | — |
+| 3 | Открывать аудиовыход плеера асинхронно | голова | готово; контролы резервируются до готовности | — |
+| 4 | Заменить spawn-per-seek в плеере и spawn-per-hover на постоянные workers | голова | готово: `LatestWorker` с generation/cancel | — |
+| 5 | Ограничить память hover-preview | голова | готово: 96 кадров × 320 px вместо 180 × 480 | — |
+| 6 | Использовать типизированные ошибки для разных действий восстановления | голова | готово: `RecoveryAction` и локализованные подсказки | — |
+| 7 | Вынести удаление одного файла в существующий cleanup task | голова | готово: отдельный cleanup message и terminal report | — |
+| 8 | Проверка: targeted, workspace, clippy, fmt, Node и audit | голова | готово: 281 Rust, 4 desktop-live пропущены, 41 Node, clippy/fmt, audit 0 blocking | — |
+| 9 | Закрыть задачу в done.md | голова | готово | `workflow/done.md` |
+| — | Коммит | пользователь | ждёт разрешения | — |
+
+## Партия 23-8 — второй аудит, UI/I-O границы и watchdog (запрос пользователя 2026-10-25)
+
+| Шаг | Что | Исполнитель | Состояние | Лог |
+|---|---|---|---|---|
+| 1 | Завершить плеер и аудиоветку без блокировки видео | голова | готово: atomic completion, bounded audio start, fallback after decode failure | — |
+| 2 | Убрать блокирующий clipboard и image I/O из UI | голова | готово: FIFO worker, deadlines, background capture/save/copy, typed terminal results | — |
+| 3 | Уточнить ownership задач и выход приложения | голова | готово: `detach`/`detach_kind`, bounded history, disposable catalog/housekeeping/viewer tasks | — |
+| 4 | Ограничить финализацию и live/WebP pipelines | голова | готово: finalize/convert limits, live manager timeout, stall watchdog FFmpeg | — |
+| 5 | Вынести настройки, устройства и desktop actions из UI-потока | голова | готово: `SettingsWriter`, catalog refresh deadline, background open/reveal/rename | — |
+| 6 | Убрать тяжёлую работу из кадра библиотеки и плеера | голова | готово: cached `HitList`, details invalidation, allocation-free hover frame lookup | — |
+| 7 | Убрать лишнее ожидание и копирование аудио/изображения | голова | готово: non-waiting `AudioOut` drop, owned image frame for clipboard | — |
+| 8 | Покрыть новые границы и инварианты тестами | голова | готово: settings writer, task detach, rename, watchdog, audio drop, library snapshot | — |
+| 9 | Проверка: fmt, clippy, debug tests, desktop-live, Node и audit | голова | готово: 296 Rust, 4 desktop-live passed outside sandbox, 41 Node, clippy/fmt, audit 0 blocking | — |
+| 10 | Повторный аудит и закрытие задачи | голова | готово | `workflow/done.md` |
+| — | Release build/tests | голова | не запускалось: нет отдельного запроса | — |
+| — | Коммит | пользователь | ждёт разрешения | — |
+
+## Партия 23-9 — убрать wall-clock deadline у пользовательских процессов (запрос пользователя 2026-10-25)
+
+| Шаг | Что | Исполнитель | Состояние | Лог |
+|---|---|---|---|---|
+| 1 | Признать ошибочность общих дедлайнов предыдущей волны | голова | готово: тесты проверяли таймер, но не продуктовую допустимость времени | — |
+| 2 | Убрать общий deadline конвертации, финализации записи и image pipeline | голова | готово: остаются progress и явная отмена | — |
+| 3 | Не обрывать финальное кодирование live WebP по времени | голова | готово: timeout остался только у cancel acknowledgement | — |
+| 4 | Убрать общий FFmpeg stall watchdog и окончательные timeout viewer/probe | голова | готово: закрытие viewer отсоединяет lookup | — |
+| 5 | Исправить позднее появление аудио в плеере | голова | готово: видео не ждёт звук, при позднем появлении аудио пересинхронизируется | — |
+| 6 | Восстанавливать clipboard после timeout одной операции | голова | готово: следующий вызов создаёт worker заново | — |
+| 7 | Оставить timeout только у native/I-O handshake и автоматических estimate/catalog | голова | готово | — |
+| 8 | Проверка: fmt, clippy, Rust/Node tests, desktop-live и audit | голова | готово: 298 Rust, 41 Node, 4 live passed, audit 0 blocking | — |
+| 9 | Обновить контекст и закрыть задачу | голова | готово | `workflow/done.md` |
+| — | Release build/tests | голова | не запускалось: нет отдельного запроса | — |
+| — | Коммит | пользователь | ждёт разрешения | — |

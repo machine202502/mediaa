@@ -665,10 +665,14 @@ impl RecordingSession {
         for failure in &failures {
             let _ = self.events_tx.send(SessionEvent::Warning(failure.clone()));
         }
-        let wavs = self.finish_tracks();
         if cancel.load(Ordering::Relaxed) {
-            return Err(anyhow::Error::from(crate::job::Cancelled).into());
+            return Err(FinalizeFailure {
+                error: anyhow::Error::from(crate::job::Cancelled),
+                recovery_files: Vec::new(),
+                keep_work_dir: true,
+            });
         }
+        let wavs = self.finish_tracks();
         if let OutputKind::Audio(format) = self.output {
             if wavs.is_empty() {
                 return Err(anyhow::anyhow!("no sound was recorded").into());
@@ -713,6 +717,15 @@ impl RecordingSession {
         let trace = self.webp_trace.as_deref();
         if let Some(trace) = trace {
             log::info!("[{trace}] stage=finalize path={requested_path:?}");
+        }
+        if live.as_ref().is_some_and(|result| result.timed_out) {
+            let recovery_files =
+                preserve_recordings(&videos, &self.out_dir, &self.title, self.started);
+            return Err(FinalizeFailure {
+                error: crate::error::timed_out("live WebP did not stop in time"),
+                recovery_files,
+                keep_work_dir: true,
+            });
         }
         let live_requested = requested_path == AnimationPath::Live;
         let mut webp_fallback = false;
@@ -848,6 +861,7 @@ impl RecordingSession {
                         tracks,
                         pending.path(),
                         container,
+                        self.audio_kbps,
                         &mut progress,
                         cancel,
                     )

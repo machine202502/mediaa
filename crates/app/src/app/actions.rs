@@ -24,6 +24,17 @@ impl App {
         let Some(outcome) = self.overlay.as_ref().and_then(|o| o.show(ctx)) else {
             return;
         };
+        let outcome = match outcome {
+            Outcome::CaptureMonitor { index, monitor } => {
+                self.queue_monitor_capture(
+                    ctx,
+                    state::CaptureKind::OverlayMonitor { index },
+                    monitor.id,
+                );
+                return;
+            }
+            outcome => outcome,
+        };
         self.overlay = None;
         if std::mem::take(&mut self.ghosted) {
             if let Some(w) = self.native_window {
@@ -34,10 +45,22 @@ impl App {
             Outcome::Cancel => {}
             Outcome::Image {
                 frame,
+                selection,
+                shapes,
                 action,
                 format,
                 after_completion,
-            } => self.deliver_image(ctx, frame, action, format, after_completion),
+            } => self.deliver_image(
+                ctx,
+                super::capture::CapturedImage {
+                    frame,
+                    selection,
+                    shapes,
+                    action,
+                    format,
+                    after_completion,
+                },
+            ),
             Outcome::SelectedRegion { monitor, rect } => {
                 self.rec.target = pages::record::TargetKind::Region;
                 self.rec.region = Some((monitor, rect));
@@ -53,6 +76,7 @@ impl App {
                     }),
                 );
             }
+            Outcome::CaptureMonitor { .. } => {}
         }
     }
 
@@ -85,6 +109,13 @@ impl App {
             .add(WorkKind::Conversion, self.conv.is_busy())
             .add(WorkKind::Recovery, self.recovery_rx.is_some())
             .add(WorkKind::LibraryCleanup, self.lib.cleanup_active())
+            .add(
+                WorkKind::ImageIo,
+                self.screenshot_job.is_some()
+                    || self.capture_job.is_some()
+                    || self.copy_image_job.is_some(),
+            )
+            .add(WorkKind::Clipboard, self.clipboard.is_busy())
     }
 
     pub(super) fn has_active_work(&self) -> bool {
@@ -157,7 +188,9 @@ impl App {
     }
 
     fn hotkey_screen(&mut self) -> Option<MonitorInfo> {
-        self.refresh_monitors();
+        if self.monitors.is_empty() {
+            self.refresh_monitors();
+        }
         let primary = self.monitors.first().cloned();
         match self.settings.hotkey_screen.clone() {
             ScreenChoice::Primary => primary,
@@ -299,6 +332,26 @@ impl App {
         self.quit_when_idle = true;
         self.conv.cancel_estimate();
         self.tasks.cancel_kind(TaskKind::RecordingStart);
+        if let Some(job) = self.screenshot_job.take() {
+            self.tasks.detach(job.task);
+        }
+        if let Some(job) = self.copy_image_job.take() {
+            self.tasks.detach(job.task);
+        }
+        for kind in [
+            TaskKind::Catalog,
+            TaskKind::Housekeeping,
+            TaskKind::LibraryLoad,
+            TaskKind::LibraryScan,
+            TaskKind::ViewerImage,
+            TaskKind::ViewerAudio,
+            TaskKind::ConversionProbe,
+            TaskKind::ConversionEstimate,
+            TaskKind::ExternalOpen,
+            TaskKind::RenameMedia,
+        ] {
+            self.tasks.detach_kind(kind);
+        }
         if let RecState::Starting { cancel, .. } = &self.recorder {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         } else if matches!(self.recorder, RecState::Recording { .. }) {
@@ -348,12 +401,6 @@ impl App {
             &mut self.region_outline,
         );
         ctx.request_repaint_after(Duration::from_millis(100));
-    }
-
-    pub fn open_path(&mut self, path: &std::path::Path) {
-        if let Err(e) = files::open(path) {
-            self.error(format!("{e:#}"));
-        }
     }
 
     pub fn open_in_convert(&mut self, path: PathBuf) {

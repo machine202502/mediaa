@@ -252,7 +252,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
     if let Some(dir) = open_dir {
         let _ = std::fs::create_dir_all(&dir);
-        app.open_path(&dir);
+        app.open_path(ui.ctx(), &dir);
     }
     ui.add_space(8.0);
 
@@ -442,7 +442,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     }
     refresh_mics |= opened;
     if refresh_mics {
-        app.refresh_mics();
+        app.refresh_catalogs(ui.ctx());
     }
 
     if changed.get() {

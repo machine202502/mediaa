@@ -1,15 +1,14 @@
+use crate::latest_worker::LatestWorker;
 use crossbeam_channel::Receiver;
 use eframe::egui;
 use mediaa_media::preview::{preview_frames, preview_interval, PreviewFrame};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const WIDTH: u32 = 480;
+const WIDTH: u32 = 320;
 const MAX_FPS: f64 = 15.0;
-const MAX_FRAMES: u32 = 180;
+const MAX_FRAMES: u32 = 96;
 
 #[derive(Debug, Clone, Copy)]
 struct Pass {
@@ -19,12 +18,35 @@ struct Pass {
     done: bool,
 }
 
-type Msg = (usize, Option<PreviewFrame>);
+struct Request {
+    generation: u64,
+    path: PathBuf,
+    interval: f64,
+    passes: Vec<Pass>,
+}
+
+type Msg = (u64, usize, Option<PreviewFrame>);
+
+fn passes(resume: f64) -> Vec<Pass> {
+    let mut passes = vec![Pass {
+        from: resume,
+        until: f64::INFINITY,
+        to: f64::NEG_INFINITY,
+        done: false,
+    }];
+    if resume > 0.0 {
+        passes.push(Pass {
+            from: 0.0,
+            until: resume,
+            to: f64::NEG_INFINITY,
+            done: false,
+        });
+    }
+    passes
+}
 
 pub struct HoverPreview {
     path: PathBuf,
-    rx: Receiver<Msg>,
-    cancel: Arc<AtomicBool>,
     frames: Vec<(f64, egui::TextureHandle)>,
     passes: Vec<Pass>,
     interval: f64,
@@ -34,64 +56,13 @@ pub struct HoverPreview {
 }
 
 impl HoverPreview {
-    fn start(ctx: &egui::Context, path: &Path, duration: Option<f64>, resume: f64) -> Self {
+    fn start(path: &Path, duration: Option<f64>, resume: f64) -> Self {
         let interval = preview_interval(duration, MAX_FPS, MAX_FRAMES);
         let resume = resume.max(0.0);
-        let mut passes = vec![Pass {
-            from: resume,
-            until: f64::INFINITY,
-            to: f64::NEG_INFINITY,
-            done: false,
-        }];
-        if resume > 0.0 {
-            passes.push(Pass {
-                from: 0.0,
-                until: resume,
-                to: f64::NEG_INFINITY,
-                done: false,
-            });
-        }
-        let (tx, rx) = crossbeam_channel::bounded::<Msg>(MAX_FRAMES as usize);
-        let cancel = Arc::new(AtomicBool::new(false));
-        let (p, c, ctx2, runs) = (
-            path.to_path_buf(),
-            cancel.clone(),
-            ctx.clone(),
-            passes.clone(),
-        );
-        let decode = move || {
-            let mut emitted = 0u32;
-            for (i, pass) in runs.iter().enumerate() {
-                let res = preview_frames(&p, WIDTH, interval, pass.from, &c, &mut |frame| {
-                    if emitted >= MAX_FRAMES || frame.at >= pass.until {
-                        return false;
-                    }
-                    emitted += 1;
-                    ctx2.request_repaint();
-                    tx.send((i, Some(frame))).is_ok()
-                });
-                if let Err(e) = res {
-                    log::debug!("preview {}: {e:#}", p.display());
-                }
-                let _ = tx.send((i, None));
-                ctx2.request_repaint();
-                if c.load(Ordering::Relaxed) {
-                    break;
-                }
-            }
-        };
-        if let Err(e) = std::thread::Builder::new()
-            .name("hover-preview".into())
-            .spawn(decode)
-        {
-            log::warn!("preview thread: {e}");
-        }
         Self {
             path: path.to_path_buf(),
-            rx,
-            cancel,
             frames: Vec::new(),
-            passes,
+            passes: passes(resume),
             interval,
             duration,
             resume,
@@ -99,8 +70,12 @@ impl HoverPreview {
         }
     }
 
-    fn poll(&mut self, ctx: &egui::Context) {
-        for (pass, frame) in self.rx.try_iter().take(6) {
+    fn poll(&mut self, ctx: &egui::Context, rx: &Receiver<Msg>, generation: u64) {
+        for (_, pass, frame) in rx
+            .try_iter()
+            .filter(|(message_generation, _, _)| *message_generation == generation)
+            .take(6)
+        {
             let p = &mut self.passes[pass];
             match frame {
                 Some(f) => {
@@ -144,11 +119,14 @@ impl HoverPreview {
 
     pub fn frame(&self) -> Option<&egui::TextureHandle> {
         let pos = self.position();
-        if !self.covered(pos) {
+        if !self.covered(pos) || self.frames.is_empty() {
             return None;
         }
-        let times: Vec<f64> = self.frames.iter().map(|(t, _)| *t).collect();
-        frame_at(&times, pos).map(|i| &self.frames[i].1)
+        let index = self
+            .frames
+            .partition_point(|(time, _)| *time <= pos)
+            .saturating_sub(1);
+        Some(&self.frames[index].1)
     }
 
     pub fn is_loading(&self) -> bool {
@@ -156,12 +134,7 @@ impl HoverPreview {
     }
 }
 
-impl Drop for HoverPreview {
-    fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-    }
-}
-
+#[cfg(test)]
 fn frame_at(times: &[f64], pos: f64) -> Option<usize> {
     if times.is_empty() {
         return None;
@@ -173,6 +146,9 @@ fn frame_at(times: &[f64], pos: f64) -> Option<usize> {
 pub struct Previews {
     current: Option<HoverPreview>,
     resume: HashMap<PathBuf, f64>,
+    worker: Option<LatestWorker<Request>>,
+    rx: Option<Receiver<Msg>>,
+    generation: u64,
 }
 
 impl Previews {
@@ -189,10 +165,28 @@ impl Previews {
         if replace {
             self.stop();
             let resume = self.resume.get(path).copied().unwrap_or(0.0);
-            self.current = Some(HoverPreview::start(ctx, path, duration, resume));
+            let interval = preview_interval(duration, MAX_FPS, MAX_FRAMES);
+            let preview = HoverPreview::start(path, duration, resume);
+            self.generation += 1;
+            let generation = self.generation;
+            if let Some(rx) = &self.rx {
+                while rx.try_recv().is_ok() {}
+            }
+            if let Some(worker) = self.ensure_worker() {
+                worker.request(Request {
+                    generation,
+                    path: path.to_path_buf(),
+                    interval,
+                    passes: passes(resume),
+                });
+            }
+            self.current = Some(preview);
         }
+        let generation = self.generation;
         let p = self.current.as_mut().expect("just set");
-        p.poll(ctx);
+        if let Some(rx) = &self.rx {
+            p.poll(ctx, rx, generation);
+        }
         ctx.request_repaint_after(Duration::from_millis(16));
         p
     }
@@ -200,7 +194,53 @@ impl Previews {
     pub fn stop(&mut self) {
         if let Some(p) = self.current.take() {
             self.resume.insert(p.path.clone(), p.position());
+            if let Some(worker) = &self.worker {
+                worker.cancel();
+            }
         }
+    }
+
+    fn ensure_worker(&mut self) -> Option<&LatestWorker<Request>> {
+        if self.worker.is_none() {
+            match LatestWorker::start(
+                "hover-preview",
+                MAX_FRAMES as usize + 4,
+                |request: Request, cancel, frames| {
+                    let mut emitted = 0u32;
+                    for (index, pass) in request.passes.iter().enumerate() {
+                        let result = preview_frames(
+                            &request.path,
+                            WIDTH,
+                            request.interval,
+                            pass.from,
+                            &cancel,
+                            &mut |frame| {
+                                if emitted >= MAX_FRAMES || frame.at >= pass.until {
+                                    return false;
+                                }
+                                emitted += 1;
+                                let _ = frames.try_send((request.generation, index, Some(frame)));
+                                !cancel.load(std::sync::atomic::Ordering::Relaxed)
+                            },
+                        );
+                        if let Err(error) = result {
+                            log::debug!("preview {}: {error:#}", request.path.display());
+                        }
+                        let _ = frames.try_send((request.generation, index, None));
+                        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                },
+            ) {
+                Ok((worker, rx)) => {
+                    self.worker = Some(worker);
+                    self.rx = Some(rx);
+                }
+                Err(error) => log::warn!("preview worker: {error}"),
+            }
+        }
+        self.worker.as_ref()
     }
 
     pub fn retain(&mut self, dir: &Path, entries: &HashMap<String, std::time::SystemTime>) {
@@ -248,15 +288,14 @@ mod tests {
         let pos = previews.play(&ctx, path, Some(600.0)).position();
         assert!(pos < 0.5, "{pos}");
         assert!(previews.current.as_ref().is_some_and(|preview| {
-            preview.duration == Some(600.0) && preview.interval >= 600.0 / 180.0
+            preview.duration == Some(600.0) && preview.interval >= 600.0 / 96.0
         }));
     }
 
     #[test]
     fn only_decoded_stretches_count_as_ready() {
         use super::{HoverPreview, Pass};
-        let ctx = eframe::egui::Context::default();
-        let mut pv = HoverPreview::start(&ctx, Path::new("missing.mp4"), Some(10.0), 4.0);
+        let mut pv = HoverPreview::start(Path::new("missing.mp4"), Some(10.0), 4.0);
         pv.interval = 0.1;
         pv.passes = vec![
             Pass {

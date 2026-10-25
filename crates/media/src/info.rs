@@ -52,10 +52,9 @@ pub fn has_sound(path: &Path) -> anyhow::Result<bool> {
 
 pub fn probe(path: &Path) -> anyhow::Result<MediaInfo> {
     if mediaa_core::formats::is_webp_path(path) {
-        let decoder =
-            image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(path)?))?;
-        if decoder.is_animated() {
-            return Ok(probe_webp(&decoder));
+        let reader = crate::webp_decode::WebpReader::open(path)?;
+        if reader.is_animated() {
+            return Ok(reader.info());
         }
     }
     let url = path.to_string_lossy().into_owned();

@@ -1,15 +1,8 @@
 use super::*;
 use mediaa_core::limits::VIDEO_QUALITY;
 
-pub(super) fn estimate_row(
-    ui: &mut egui::Ui,
-    estimate: Option<&Estimate>,
-    input: Option<&std::path::Path>,
-) {
+pub(super) fn estimate_row(ui: &mut egui::Ui, estimate: Option<&Estimate>, source: Option<u64>) {
     let Some(e) = estimate else { return };
-    let source = input
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len());
     let text = |bytes: u64| {
         let mut s = format!("≈ {}", human_size(bytes));
         if let Some(src) = source.filter(|s| *s > 0) {

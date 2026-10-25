@@ -1,9 +1,9 @@
 use super::{recovery_links, App};
+use crate::clipboard_service::Purpose;
 use crate::theme;
 use eframe::egui;
 use egui_phosphor::regular as icon;
-use mediaa_media::error::MediaErrorKind;
-use mediaa_platform::{clipboard, files};
+use mediaa_media::error::{MediaErrorKind, RecoveryAction};
 use rust_i18n::t;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -391,15 +391,27 @@ impl App {
     }
 
     pub fn error_with_kind(&mut self, kind: MediaErrorKind, msg: impl Into<String>) {
-        let detail = msg.into().trim().to_string();
+        let mut detail = msg.into().trim().to_string();
         let summary = notice_summary(&detail, &t!("notice.error"));
+        if let Some(action) = kind.recovery_action() {
+            let hint = match action {
+                RecoveryAction::Retry => t!("err.hint_retry"),
+                RecoveryAction::ChooseSource => t!("err.hint_choose_source"),
+                RecoveryAction::FixPermissions => t!("err.hint_permissions"),
+                RecoveryAction::FreeSpace => t!("err.hint_free_space"),
+                RecoveryAction::Wait => t!("err.hint_wait"),
+                RecoveryAction::UpdateApp => t!("err.hint_update"),
+            };
+            detail.push_str("\n\n");
+            detail.push_str(&hint);
+        }
         self.notices.push(
             NoticeLevel::Error,
             summary,
             detail,
             None,
             Vec::new(),
-            kind == MediaErrorKind::Io,
+            kind.requires_attention(),
         );
     }
 
@@ -418,28 +430,32 @@ impl App {
 
     pub(super) fn show_notices(&mut self, ctx: &egui::Context) {
         match self.notices.show(ctx) {
-            Some(NoticeAction::CopyLog(log_ref)) => match clipboard::copy_text(&log_ref) {
-                Ok(()) => self.success(t!("notice.log_id_copied", id = log_ref)),
-                Err(error) => self.error(t!("err.copy_failed", error = format!("{error:#}"))),
-            },
+            Some(NoticeAction::CopyLog(log_ref)) => {
+                if let Err(error) = self.clipboard.handle().copy_text(
+                    log_ref.clone(),
+                    Purpose::Toast(t!("notice.log_id_copied", id = log_ref).into_owned()),
+                ) {
+                    self.error(t!("err.copy_failed", error = error));
+                }
+            }
             Some(NoticeAction::CopyFiles(files)) => {
                 let links = recovery_links(&files);
-                match clipboard::copy_text(&links) {
-                    Ok(()) => self.success(t!("toast.recovery_copied")),
-                    Err(error) => self.error(t!("err.copy_failed", error = format!("{error:#}"))),
+                if let Err(error) = self.clipboard.handle().copy_text(
+                    links,
+                    Purpose::Toast(t!("toast.recovery_copied").into_owned()),
+                ) {
+                    self.error(t!("err.copy_failed", error = error));
                 }
             }
             Some(NoticeAction::CopyFile(file)) => {
-                match clipboard::copy_text(&mediaa_core::library::file_url(&file)) {
-                    Ok(()) => self.success(t!("toast.recovery_copied")),
-                    Err(error) => self.error(t!("err.copy_failed", error = format!("{error:#}"))),
+                if let Err(error) = self.clipboard.handle().copy_text(
+                    mediaa_core::library::file_url(&file),
+                    Purpose::Toast(t!("toast.recovery_copied").into_owned()),
+                ) {
+                    self.error(t!("err.copy_failed", error = error));
                 }
             }
-            Some(NoticeAction::RevealFile(file)) => {
-                if let Err(error) = files::reveal(&file) {
-                    self.error(format!("{error:#}"));
-                }
-            }
+            Some(NoticeAction::RevealFile(file)) => self.reveal_path(ctx, file),
             None => {}
         }
     }

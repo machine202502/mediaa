@@ -20,7 +20,7 @@ use grid::cover_uv;
 use grid::{grid_columns, kind_filter, tile, toolbar_tools, TOOLBAR_ONE_LINE};
 use mediaa_core::library::{self, human_duration, human_size, Details, KindFilter, LibraryEntry};
 use mediaa_core::{naming, MediaKind, Settings};
-use mediaa_platform::{clipboard, files};
+use mediaa_platform::files;
 use mediaa_storage::library_index::{self, LibraryIndex, LibraryWatcher, Query, Sort};
 use rust_i18n::t;
 use std::collections::HashMap;
@@ -39,6 +39,8 @@ const RESCAN_EVERY: Duration = Duration::from_secs(60);
 
 pub struct LibraryUi {
     index: Option<LibraryIndex>,
+    load: Option<Receiver<(PathBuf, LibraryIndex)>>,
+    load_task: Option<TaskId>,
     watcher: Option<LibraryWatcher>,
     watcher_retry: Instant,
     scan: Option<crossbeam_channel::Receiver<Vec<mediaa_core::library::LibraryEntry>>>,
@@ -46,12 +48,13 @@ pub struct LibraryUi {
     changed_while_scanning: Vec<PathBuf>,
     last_scan: Instant,
     query: Query,
-    hits: Option<(u64, Query, Arc<[usize]>)>,
+    hits: Option<Arc<HitList>>,
     limit: usize,
     confirm_delete: Option<PathBuf>,
     confirm_cleanup: Option<CleanupPlan>,
     cleanup_job: Option<Receiver<(CleanupPlan, CleanupReport)>>,
     cleanup_task: Option<TaskId>,
+    cleanup_success: Option<String>,
     renaming: Option<(PathBuf, String)>,
     hovered: Option<PathBuf>,
     hover_next: Option<PathBuf>,
@@ -60,10 +63,20 @@ pub struct LibraryUi {
     dev_viewed: bool,
 }
 
+struct HitList {
+    version: u64,
+    query: Query,
+    limit: usize,
+    indices: Arc<[usize]>,
+    entries: Arc<[LibraryEntry]>,
+}
+
 impl Default for LibraryUi {
     fn default() -> Self {
         Self {
             index: None,
+            load: None,
+            load_task: None,
             watcher: None,
             watcher_retry: Instant::now(),
             scan: None,
@@ -77,6 +90,7 @@ impl Default for LibraryUi {
             confirm_cleanup: None,
             cleanup_job: None,
             cleanup_task: None,
+            cleanup_success: None,
             renaming: None,
             hovered: None,
             hover_next: None,
@@ -88,7 +102,7 @@ impl Default for LibraryUi {
 }
 
 pub fn library_dir(settings: &Settings) -> PathBuf {
-    std::env::var_os("MEDIAA_DEV_LIBRARY").map_or_else(|| settings.media_dir.clone(), PathBuf::from)
+    mediaa_core::dev::library_dir().unwrap_or_else(|| settings.media_dir.clone())
 }
 
 impl LibraryUi {
@@ -98,10 +112,32 @@ impl LibraryUi {
 
     pub(crate) fn refresh(&mut self, settings: &Settings, tasks: &mut TaskSupervisor) {
         let dir = library_dir(settings);
+        if self.scan.is_some() {
+            if self.index.as_ref().is_some_and(|index| index.dir() == dir) {
+                return;
+            }
+            if let Some(task) = self.scan_task.take() {
+                tasks.detach(task);
+            }
+            self.scan = None;
+        }
         if self.index.as_ref().is_none_or(|i| i.dir() != dir) {
-            self.index = Some(LibraryIndex::load(&dir));
+            if self.load.is_none() {
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                match tasks.spawn(TaskKind::LibraryLoad, "library-load", None, move || {
+                    let index = LibraryIndex::load(&dir);
+                    let _ = tx.send((dir, index));
+                }) {
+                    Ok(task) => {
+                        self.load = Some(rx);
+                        self.load_task = Some(task);
+                    }
+                    Err(error) => log::warn!("library load thread: {error}"),
+                }
+            }
             self.watcher = None;
             self.watcher_retry = Instant::now();
+            return;
         }
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = tasks.spawn(TaskKind::LibraryScan, "library-scan", None, move || {
@@ -141,6 +177,30 @@ impl LibraryUi {
             .as_ref()
             .is_none_or(|i| i.dir() != library_dir(settings))
         {
+            if let Some(load) = &self.load {
+                match load.try_recv() {
+                    Ok((dir, index)) => {
+                        log::debug!("library index loaded from {}", dir.display());
+                        self.index = Some(index);
+                        self.load = None;
+                        if let Some(task) = self.load_task.take() {
+                            tasks.finish(task);
+                        }
+                        self.refresh(settings, tasks);
+                    }
+                    Err(crossbeam_channel::TryRecvError::Empty) => {
+                        ctx.request_repaint_after(Duration::from_millis(50));
+                    }
+                    Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                        self.load = None;
+                        if let Some(task) = self.load_task.take() {
+                            tasks.finish(task);
+                        }
+                        log::warn!("library index loader stopped");
+                    }
+                }
+                return None;
+            }
             self.refresh(settings, tasks);
         }
         let index = self.index.as_mut()?;
@@ -179,7 +239,7 @@ impl LibraryUi {
                     index.refresh_paths(&std::mem::take(&mut self.changed_while_scanning));
                     self.scan = None;
                     if let Some(task) = self.scan_task.take() {
-                        tasks.join(task);
+                        tasks.finish(task);
                     }
                     scanned = Some((
                         index.dir().to_path_buf(),
@@ -196,7 +256,7 @@ impl LibraryUi {
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     self.scan = None;
                     if let Some(task) = self.scan_task.take() {
-                        tasks.join(task);
+                        tasks.finish(task);
                     }
                 }
             }
@@ -204,28 +264,48 @@ impl LibraryUi {
         scanned
     }
 
-    fn hits(&mut self) -> Arc<[usize]> {
-        let Some(index) = self.index.as_ref() else {
-            return Arc::from([]);
-        };
-        let fresh = self
+    fn hits(&mut self) -> Option<Arc<HitList>> {
+        let index = self.index.as_ref()?;
+        let query_changed = self
             .hits
             .as_ref()
-            .is_some_and(|(v, q, _)| *v == index.version() && *q == self.query);
-        if !fresh {
-            if self.hits.as_ref().is_none_or(|(_, q, _)| *q != self.query) {
-                self.limit = CHUNK;
-            }
-            self.hits = Some((
-                index.version(),
-                self.query.clone(),
-                index.query(&self.query).into(),
-            ));
+            .is_none_or(|hits| hits.query != self.query);
+        if query_changed {
+            self.limit = CHUNK;
         }
-        self.hits
-            .as_ref()
-            .map(|(_, _, hits)| hits.clone())
-            .unwrap_or_else(|| Arc::from([]))
+        let rebuild = self.hits.as_ref().is_none_or(|hits| {
+            hits.version != index.version() || hits.query != self.query || hits.limit != self.limit
+        });
+        if !rebuild {
+            return self.hits.clone();
+        }
+        let indices: Arc<[usize]> = if query_changed
+            || self
+                .hits
+                .as_ref()
+                .is_none_or(|hits| hits.version != index.version())
+        {
+            index.query(&self.query).into()
+        } else {
+            self.hits
+                .as_ref()
+                .map(|hits| hits.indices.clone())
+                .unwrap_or_default()
+        };
+        let entries: Arc<[LibraryEntry]> = indices
+            .iter()
+            .take(self.limit)
+            .filter_map(|&entry| index.entries().get(entry).cloned())
+            .collect::<Vec<_>>()
+            .into();
+        self.hits = Some(Arc::new(HitList {
+            version: index.version(),
+            query: self.query.clone(),
+            limit: self.limit,
+            indices,
+            entries,
+        }));
+        self.hits.clone()
     }
 
     fn set_details(&mut self, path: &Path, details: Details) {
@@ -302,6 +382,41 @@ impl LibraryUi {
         )?;
         self.cleanup_job = Some(rx);
         self.cleanup_task = Some(task);
+        self.cleanup_success = None;
+        Ok(())
+    }
+
+    fn start_delete(&mut self, path: PathBuf, tasks: &mut TaskSupervisor) -> anyhow::Result<()> {
+        if self.cleanup_active() {
+            anyhow::bail!("cleanup is already running");
+        }
+        let item = CleanupItem { path, size: 0 };
+        self.prepare_for_removal(std::slice::from_ref(&item));
+        let worker_item = item.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let task = tasks.spawn(
+            TaskKind::LibraryCleanup,
+            "library-delete",
+            None,
+            move || {
+                let items = [worker_item];
+                let report = cleanup_selected(&items, files::move_to_trash);
+                let plan = CleanupPlan {
+                    older: CleanupOlder::Week,
+                    items: items.to_vec(),
+                };
+                let _ = tx.send((plan, report));
+            },
+        )?;
+        self.cleanup_job = Some(rx);
+        self.cleanup_task = Some(task);
+        self.cleanup_success = Some(
+            t!(
+                "lib.deleted",
+                name = item.path.file_name().unwrap_or_default().to_string_lossy()
+            )
+            .into_owned(),
+        );
         Ok(())
     }
 
@@ -309,15 +424,16 @@ impl LibraryUi {
         &mut self,
         tasks: &mut TaskSupervisor,
         ctx: &egui::Context,
-    ) -> Option<(CleanupPlan, CleanupReport)> {
+    ) -> Option<(CleanupPlan, CleanupReport, Option<String>)> {
         let rx = self.cleanup_job.as_ref()?;
         match rx.try_recv() {
             Ok(result) => {
                 self.cleanup_job = None;
                 if let Some(task) = self.cleanup_task.take() {
-                    tasks.join(task);
+                    tasks.finish(task);
                 }
-                Some(result)
+                let success = self.cleanup_success.take();
+                Some((result.0, result.1, success))
             }
             Err(crossbeam_channel::TryRecvError::Empty) => {
                 ctx.request_repaint_after(Duration::from_millis(100));
@@ -326,8 +442,9 @@ impl LibraryUi {
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
                 self.cleanup_job = None;
                 if let Some(task) = self.cleanup_task.take() {
-                    tasks.join(task);
+                    tasks.finish(task);
                 }
+                let success = self.cleanup_success.take();
                 Some((
                     CleanupPlan {
                         older: CleanupOlder::Week,
@@ -340,6 +457,7 @@ impl LibraryUi {
                         }],
                         ..CleanupReport::default()
                     },
+                    success,
                 ))
             }
         }
@@ -539,7 +657,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     rename_dialog(app, ui.ctx());
 
     let hits = app.lib.hits();
-    if hits.is_empty() {
+    if hits.as_ref().is_none_or(|hits| hits.entries.is_empty()) {
         app.lib.previews.stop();
         theme::card(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -560,23 +678,12 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         });
         return;
     }
-    let shown: Vec<LibraryEntry> = {
-        let entries = app
-            .lib
-            .index
-            .as_ref()
-            .map(LibraryIndex::entries)
-            .unwrap_or_default();
-        hits.iter()
-            .take(app.lib.limit)
-            .map(|&i| entries[i].clone())
-            .collect()
-    };
+    let hits = hits.expect("non-empty hits were checked");
+    let shown = &hits.entries;
 
     if !app.lib.dev_viewed {
         app.lib.dev_viewed = true;
-        if let Some(e) = std::env::var("MEDIAA_DEV_VIEW")
-            .ok()
+        if let Some(e) = mediaa_core::dev::view_filter()
             .and_then(|n| shown.iter().find(|e| !n.is_empty() && e.name.contains(&n)))
         {
             let d = mediaa_media::preview::details(&e.path, e.kind)
@@ -587,6 +694,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 e.kind,
                 d.and_then(|d| d.duration_secs),
                 d.is_some_and(|d| d.audio),
+                &mut app.tasks,
             ));
         }
     }
@@ -621,7 +729,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(GAP - ui.spacing().item_spacing.y);
         }
     }
-    if hits.len() > app.lib.limit {
+    if hits.indices.len() > app.lib.limit {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(avail, 40.0), Sense::hover());
         egui::Spinner::new().paint_at(
             ui,
@@ -636,35 +744,43 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         app.lib.previews.stop();
     }
     if let Some(a) = action {
-        run(app, a);
+        run(app, ui.ctx(), a);
     }
     app.lib.hovered = app.lib.hover_next.take();
-    if let Some(v) = app.lib.viewer.as_mut() {
-        match v.show(ui.ctx()) {
-            Some(ViewerAction::Close) => app.lib.viewer = None,
-            Some(ViewerAction::OpenFile(p)) => {
-                app.lib.viewer = None;
-                run(app, Action::Open(p));
+    let viewer_action = app
+        .lib
+        .viewer
+        .as_mut()
+        .and_then(|viewer| viewer.show(ui.ctx(), &mut app.tasks));
+    match viewer_action {
+        Some(ViewerAction::Close) => {
+            if let Some(mut viewer) = app.lib.viewer.take() {
+                viewer.cancel_pending(&mut app.tasks);
             }
-            None => {}
         }
+        Some(ViewerAction::OpenFile(p)) => {
+            if let Some(mut viewer) = app.lib.viewer.take() {
+                viewer.cancel_pending(&mut app.tasks);
+            }
+            run(app, ui.ctx(), Action::Open(p));
+        }
+        None => {}
     }
     app.lib.flush_details();
 }
 
 pub fn poll_cleanup(app: &mut App, ctx: &egui::Context) {
-    if let Some((plan, report)) = app.lib.poll_cleanup(&mut app.tasks, ctx) {
+    if let Some((plan, report, success)) = app.lib.poll_cleanup(&mut app.tasks, ctx) {
         apply_cleanup_report(app, &report);
-        finish_cleanup(
-            app,
-            report,
+        let success = success.unwrap_or_else(|| {
             t!(
                 "lib.cleanup_done",
                 count = plan.items.len(),
                 size = human_size(plan.bytes())
             )
-            .into(),
-        );
+            .into()
+        });
+        finish_cleanup(app, report, success);
     }
 }
 

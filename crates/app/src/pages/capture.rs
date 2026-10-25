@@ -109,7 +109,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         app.settings_changed();
     }
     if refresh_monitors {
-        app.refresh_monitors();
+        app.refresh_catalogs(ui.ctx());
     }
     if let Some(m) = shot_monitor {
         app.start_fullscreen_screenshot(&ctx, Some(m));
@@ -122,7 +122,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             theme::section(ui, icon::APP_WINDOW, &t!("shot.windows"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh")).clicked() {
-                    app.refresh_windows();
+                    app.refresh_catalogs(ui.ctx());
                 }
             });
         });

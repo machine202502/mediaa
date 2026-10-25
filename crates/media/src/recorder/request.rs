@@ -1,4 +1,4 @@
-use crate::error::MediaErrorKind;
+use crate::error::{invalid_input, MediaErrorKind};
 use mediaa_core::formats::{AnimFormat, OutputKind};
 use mediaa_core::limits::{AUDIO_KBPS, DEFAULT_VIDEO_AUDIO_KBPS, FPS, VIDEO_QUALITY};
 use mediaa_core::paths::{MediaDir, WorkDir};
@@ -130,38 +130,41 @@ impl RecordingRequestBuilder {
     }
 
     pub fn build(mut self) -> anyhow::Result<RecordingRequest> {
-        anyhow::ensure!(
-            FPS.contains(self.request.fps),
-            "recording fps must be between 1 and 60"
-        );
-        anyhow::ensure!(
-            VIDEO_QUALITY.contains(u32::from(self.request.video_quality)),
-            "recording quality must be between 1 and 100"
-        );
-        anyhow::ensure!(
-            self.request.audio.is_empty() || AUDIO_KBPS.contains(self.request.audio_kbps),
-            "audio bitrate must be between 32 and 320 kbps"
-        );
-        match self.request.output {
-            OutputKind::Audio(_) => anyhow::ensure!(
-                self.request.sources.is_empty() && !self.request.audio.is_empty(),
-                "audio recording needs sound sources only"
-            ),
-            _ => anyhow::ensure!(!self.request.sources.is_empty(), "nothing to record"),
+        if !FPS.contains(self.request.fps) {
+            return Err(invalid_input("recording fps must be between 1 and 60"));
         }
-        anyhow::ensure!(
-            !self.request.out_dir.as_os_str().is_empty()
-                && !self.request.work_dir.as_os_str().is_empty(),
-            "recording directories must not be empty"
-        );
-        anyhow::ensure!(
-            !self.request.limits.source_ready_timeout.is_zero()
-                && !self.request.limits.ready_poll_interval.is_zero()
-                && !self.request.limits.capture_stop_timeout.is_zero()
-                && self.request.limits.ready_poll_interval
-                    <= self.request.limits.source_ready_timeout,
-            "recording source limits are invalid"
-        );
+        if !VIDEO_QUALITY.contains(u32::from(self.request.video_quality)) {
+            return Err(invalid_input("recording quality must be between 1 and 100"));
+        }
+        if !self.request.audio.is_empty() && !AUDIO_KBPS.contains(self.request.audio_kbps) {
+            return Err(invalid_input(
+                "audio bitrate must be between 32 and 320 kbps",
+            ));
+        }
+        match self.request.output {
+            OutputKind::Audio(_) => {
+                if !self.request.sources.is_empty() || self.request.audio.is_empty() {
+                    return Err(invalid_input("audio recording needs sound sources only"));
+                }
+            }
+            _ => {
+                if self.request.sources.is_empty() {
+                    return Err(invalid_input("nothing to record"));
+                }
+            }
+        }
+        if self.request.out_dir.as_os_str().is_empty()
+            || self.request.work_dir.as_os_str().is_empty()
+        {
+            return Err(invalid_input("recording directories must not be empty"));
+        }
+        if self.request.limits.source_ready_timeout.is_zero()
+            || self.request.limits.ready_poll_interval.is_zero()
+            || self.request.limits.capture_stop_timeout.is_zero()
+            || self.request.limits.ready_poll_interval > self.request.limits.source_ready_timeout
+        {
+            return Err(invalid_input("recording source limits are invalid"));
+        }
         if !matches!(self.request.output, OutputKind::Anim(AnimFormat::Webp)) {
             self.request.webp_mode = WebpMode::Direct;
         }

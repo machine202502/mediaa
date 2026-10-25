@@ -22,7 +22,7 @@ image.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
 chrono.workspace = true
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "persistence", "x11", "wayland"] }
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
 egui-phosphor = "0.14"
 fontdb = "0.23"
 global-hotkey = "0.8"

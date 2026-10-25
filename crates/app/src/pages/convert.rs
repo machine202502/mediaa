@@ -47,13 +47,22 @@ pub enum ConversionOutcome {
     Cancelled,
 }
 
-type ProbeResult = Result<(MediaKind, MediaInfo), String>;
+#[derive(Clone)]
+struct ProbeInfo {
+    kind: MediaKind,
+    info: MediaInfo,
+    size: Option<u64>,
+}
+
+type ProbeResult = Result<ProbeInfo, String>;
 
 #[derive(Default)]
 pub struct ConvertUi {
     input: Option<PathBuf>,
     probed: Option<ProbeResult>,
     probe_rx: Option<Receiver<ProbeResult>>,
+    probe_task: Option<TaskId>,
+    probe_cancel: Arc<AtomicBool>,
     target: Option<Target>,
     settings: ConvertSettings,
     max_height: u32,
@@ -65,6 +74,7 @@ pub struct ConvertUi {
 }
 
 const ESTIMATE_DELAY: Duration = Duration::from_millis(500);
+const ESTIMATE_TIMEOUT: Duration = Duration::from_secs(120);
 
 struct Estimate {
     key: (PathBuf, Target, ConvertSettings),
@@ -73,6 +83,7 @@ struct Estimate {
     rx: Option<Receiver<Result<u64, String>>>,
     result: Option<Result<u64, String>>,
     previous: Option<u64>,
+    task: Option<TaskId>,
 }
 
 impl Drop for Estimate {
@@ -85,29 +96,16 @@ impl ConvertUi {
     pub fn set_input(&mut self, path: PathBuf) {
         self.estimate = None;
         self.probe_rx = None;
+        self.probe_task = None;
+        self.probe_cancel.store(true, Ordering::Relaxed);
+        self.probe_cancel = Arc::default();
         self.name.clear();
         self.input = Some(path.clone());
         self.last = None;
-        match MediaKind::detect(&path) {
-            None => {
-                self.probed = Some(Err(t!("convert.unsupported").into()));
-            }
-            Some(kind) => {
-                self.probed = None;
-                let (tx, rx) = crossbeam_channel::bounded(1);
-                let result = std::thread::Builder::new()
-                    .name("convert-probe".into())
-                    .spawn(move || {
-                        let result = mediaa_media::preview::details(&path, kind)
-                            .map(|info| (kind, info))
-                            .map_err(|error| format!("{error:#}"));
-                        let _ = tx.send(result);
-                    });
-                match result {
-                    Ok(_) => self.probe_rx = Some(rx),
-                    Err(error) => self.probed = Some(Err(format!("probe: {error}"))),
-                }
-            }
+        if MediaKind::detect(&path).is_none() {
+            self.probed = Some(Err(t!("convert.unsupported").into()));
+        } else {
+            self.probed = None;
         }
     }
 
@@ -119,7 +117,39 @@ impl ConvertUi {
         self.estimate = None;
     }
 
-    pub fn poll_probe(&mut self, ctx: &egui::Context) {
+    fn poll_probe(&mut self, tasks: &mut TaskSupervisor, ctx: &egui::Context) {
+        if self.probe_rx.is_none() && self.probed.is_none() {
+            let Some(path) = self.input.clone() else {
+                return;
+            };
+            let Some(kind) = MediaKind::detect(&path) else {
+                self.probed = Some(Err(t!("convert.unsupported").into()));
+                return;
+            };
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let cancel = self.probe_cancel.clone();
+            match tasks.spawn(
+                TaskKind::ConversionProbe,
+                "convert-probe",
+                Some(cancel.clone()),
+                move || {
+                    let result = mediaa_media::preview::details_cancellable(&path, kind, &cancel)
+                        .map(|info| ProbeInfo {
+                            kind,
+                            info,
+                            size: std::fs::metadata(&path).ok().map(|metadata| metadata.len()),
+                        })
+                        .map_err(|error| format!("{error:#}"));
+                    let _ = tx.send(result);
+                },
+            ) {
+                Ok(task) => {
+                    self.probe_rx = Some(rx);
+                    self.probe_task = Some(task);
+                }
+                Err(error) => self.probed = Some(Err(format!("probe: {error}"))),
+            }
+        }
         let Some(rx) = &self.probe_rx else {
             return;
         };
@@ -127,17 +157,23 @@ impl ConvertUi {
             Ok(result) => {
                 self.probed = Some(result);
                 self.probe_rx = None;
+                if let Some(task) = self.probe_task.take() {
+                    tasks.finish(task);
+                }
                 let targets = self.targets();
                 if self.target.is_some_and(|target| !targets.contains(&target)) {
                     self.target = None;
                 }
             }
             Err(crossbeam_channel::TryRecvError::Empty) => {
-                ctx.request_repaint_after(Duration::from_millis(50))
+                ctx.request_repaint_after(Duration::from_millis(50));
             }
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
                 self.probed = Some(Err(t!("convert.probe_stopped").into()));
                 self.probe_rx = None;
+                if let Some(task) = self.probe_task.take() {
+                    tasks.finish(task);
+                }
             }
         }
     }
@@ -160,7 +196,7 @@ impl ConvertUi {
             },
         };
         let job = self.job.take().expect("job checked above");
-        let thread_failed = tasks.join(job.task).is_some_and(|exit| exit.panicked);
+        let thread_failed = tasks.finish(job.task).is_some_and(|exit| exit.panicked);
         let outcome = match received {
             ConversionTaskResult::Completed => {
                 self.last = Some(job.output.clone().into_path());
@@ -190,9 +226,9 @@ impl ConvertUi {
 
     fn targets(&self) -> Vec<Target> {
         match &self.probed {
-            Some(Ok((kind, info))) => Target::for_kind(*kind)
+            Some(Ok(probe)) => Target::for_kind(probe.kind)
                 .into_iter()
-                .filter(|t| !matches!(t, Target::Audio(_)) || info.has_audio())
+                .filter(|t| !matches!(t, Target::Audio(_)) || probe.info.has_audio())
                 .collect(),
             _ => Vec::new(),
         }
@@ -210,11 +246,11 @@ use controls::{
 
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
-    app.conv.poll_probe(&ctx);
+    app.conv.poll_probe(&mut app.tasks, &ctx);
     header(ui, &t!("convert.title"), "");
     if app.conv.input.is_none() {
-        if let Some(p) = std::env::var_os("MEDIAA_DEV_CONVERT") {
-            app.conv.set_input(p.into());
+        if let Some(p) = mediaa_core::dev::convert_input() {
+            app.conv.set_input(p);
         }
     }
     let busy = app.conv.is_busy();
@@ -255,20 +291,20 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         match (&app.conv.input, &app.conv.probed) {
-            (Some(path), Some(Ok((kind, info)))) => {
-                let mut facts = vec![i18n::media_kind(*kind)];
-                facts.extend(std::fs::metadata(path).ok().map(|m| human_size(m.len())));
-                if info.width > 0 {
-                    facts.push(format!("{}×{}", info.width, info.height));
+            (Some(_), Some(Ok(probe))) => {
+                let mut facts = vec![i18n::media_kind(probe.kind)];
+                facts.extend(probe.size.map(human_size));
+                if probe.info.width > 0 {
+                    facts.push(format!("{}×{}", probe.info.width, probe.info.height));
                 }
-                if let Some(d) = info.duration_secs() {
+                if let Some(d) = probe.info.duration_secs() {
                     facts.push(human_duration(d));
                 }
-                if info.fps > 0.0 && *kind == MediaKind::Video {
-                    facts.push(format!("{:.0} fps", info.fps));
+                if probe.info.fps > 0.0 && probe.kind == MediaKind::Video {
+                    facts.push(format!("{:.0} fps", probe.info.fps));
                 }
-                if *kind == MediaKind::Video {
-                    facts.push(if info.has_audio() {
+                if probe.kind == MediaKind::Video {
+                    facts.push(if probe.info.has_audio() {
                         t!("record.with_audio").into()
                     } else {
                         t!("record.no_audio").into()
@@ -283,9 +319,10 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         }
     });
 
-    let Some(Ok((_, info))) = app.conv.probed.clone() else {
+    let Some(Ok(probe)) = app.conv.probed.clone() else {
         return;
     };
+    let info = probe.info;
     ui.add_space(4.0);
 
     let targets = app.conv.targets();
@@ -478,7 +515,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     ui.add(egui::Label::new(folder.to_string_lossy()).truncate());
                 });
             });
-            estimate_row(ui, app.conv.estimate.as_ref(), app.conv.input.as_deref());
+            estimate_row(ui, app.conv.estimate.as_ref(), probe.size);
         },
     );
     if changed {
@@ -537,10 +574,10 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                             .color(theme::palette(ui).text_weak),
                     );
                     if theme::icon_button(ui, icon::ARROW_SQUARE_OUT, &t!("lib.open")).clicked() {
-                        app.open_path(&last);
+                        app.open_path(ui.ctx(), &last);
                     }
                     if theme::icon_button(ui, icon::FOLDER_OPEN, &t!("lib.reveal")).clicked() {
-                        let _ = mediaa_platform::files::reveal(&last);
+                        app.reveal_path(ui.ctx(), last.clone());
                     }
                 });
             }

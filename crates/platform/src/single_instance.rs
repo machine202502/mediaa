@@ -4,7 +4,7 @@ pub struct SingleInstance {
 
 impl SingleInstance {
     pub fn acquire() -> anyhow::Result<Option<Self>> {
-        Self::acquire_scoped(development_scope())
+        Self::acquire_scoped(mediaa_core::dev::instance_scope())
     }
 
     fn acquire_scoped(scope: Option<String>) -> anyhow::Result<Option<Self>> {
@@ -18,13 +18,6 @@ impl SingleInstance {
     pub fn take_activation(&self) -> bool {
         self._guard.take_activation()
     }
-}
-
-fn development_scope() -> Option<String> {
-    let value = std::env::var_os("MEDIAA_INSTANCE_ID")
-        .or_else(|| std::env::var_os("MEDIAA_DEV_LIBRARY"))?;
-    let hash = mediaa_core::hash::stable_hash(value.to_string_lossy().as_bytes());
-    Some(format!("{hash:016x}"))
 }
 
 #[cfg(windows)]
@@ -102,7 +95,7 @@ mod imp {
     }
 
     pub fn activate_existing() {
-        let scope = super::development_scope();
+        let scope = mediaa_core::dev::instance_scope();
         let name = wide_name(scope.as_deref(), ".activate");
         // SAFETY: the name is NUL-terminated and the handle is closed after signalling.
         unsafe {

@@ -5,7 +5,27 @@ use super::{
 use eframe::egui::vec2;
 use mediaa_core::library::LibraryEntry;
 use mediaa_storage::library_index::LibraryIndex;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+
+#[test]
+fn a_running_scan_is_not_duplicated_by_manual_refresh() {
+    use crate::app::tasks::TaskSupervisor;
+    use mediaa_core::Settings;
+    let dir = tempfile::tempdir().unwrap();
+    let (_sender, receiver) = crossbeam_channel::bounded(1);
+    let mut ui = LibraryUi {
+        index: Some(LibraryIndex::load(dir.path())),
+        scan: Some(receiver),
+        ..LibraryUi::default()
+    };
+    let settings = Settings {
+        media_dir: dir.path().to_path_buf(),
+        ..Settings::default()
+    };
+    ui.refresh(&settings, &mut TaskSupervisor::default());
+    assert!(ui.scan.is_some());
+}
 
 fn entry(path: std::path::PathBuf, modified: SystemTime) -> LibraryEntry {
     LibraryEntry {
@@ -22,6 +42,34 @@ fn entry(path: std::path::PathBuf, modified: SystemTime) -> LibraryEntry {
         taken: chrono::NaiveDateTime::default(),
         details: None,
     }
+}
+
+#[test]
+fn unchanged_library_views_reuse_the_same_entry_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Recording_2026-01-01_10-00-00.mkv");
+    let mut index = LibraryIndex::load(dir.path());
+    index.apply_scan(vec![entry(path.clone(), SystemTime::UNIX_EPOCH)]);
+    let mut ui = LibraryUi {
+        index: Some(index),
+        ..LibraryUi::default()
+    };
+    let first = ui.hits().unwrap();
+    let second = ui.hits().unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+    ui.index.as_mut().unwrap().set_details(
+        &path,
+        mediaa_core::library::Details {
+            width: 640,
+            height: 360,
+            ..Default::default()
+        },
+    );
+    let detailed = ui.hits().unwrap();
+    assert!(!Arc::ptr_eq(&second, &detailed));
+    assert_eq!(detailed.entries[0].details.unwrap().width, 640);
+    ui.limit += super::CHUNK;
+    assert!(!Arc::ptr_eq(&detailed, &ui.hits().unwrap()));
 }
 
 #[test]

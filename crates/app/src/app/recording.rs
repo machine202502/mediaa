@@ -1,4 +1,5 @@
 use super::*;
+use crate::clipboard_service::Purpose;
 use mediaa_core::limits::DEFAULT_VIDEO_AUDIO_KBPS;
 
 impl App {
@@ -49,8 +50,10 @@ impl App {
         if !self.recorder.is_idle() || self.recovery_rx.is_some() {
             return;
         }
-        self.refresh_mics();
-        let default_mic = mediaa_platform::audio::default_input_device();
+        if self.mic_devices.is_empty() {
+            self.refresh_mics();
+        }
+        let default_mic = self.default_mic_device.clone();
         let (r, anim) = self.settings.profile(profile);
         let fps = r.fps;
         let max_height = r.max_height();
@@ -267,10 +270,11 @@ impl App {
                 let sound_on_completion = recording_completion_sound(session.output(), source);
                 let progress_state = session.progress();
                 let task = match session.stop(action, cancel.clone()) {
-                    Ok(handle) => Some(self.tasks.manage(
+                    Ok(handle) => Some(self.tasks.manage_with_deadline(
                         TaskKind::RecordingFinalize,
                         handle,
                         Some(cancel.clone()),
+                        None,
                     )),
                     Err(error) => {
                         log::warn!("finalizer ran inline: {error:#}");
@@ -319,7 +323,7 @@ impl App {
                 })
             }
         };
-        let result = match self.tasks.join(task) {
+        let result = match self.tasks.finish(task) {
             Some(exit) if exit.panicked => Err(RecordingStartFailure::Failed {
                 kind: mediaa_media::error::MediaErrorKind::Internal,
                 message: t!("toast.recording_worker_stopped").into(),
@@ -333,10 +337,11 @@ impl App {
                     let cancel = Arc::new(AtomicBool::new(false));
                     let progress_state = session.progress();
                     let task = match session.stop(StopAction::Discard, cancel.clone()) {
-                        Ok(handle) => Some(self.tasks.manage(
+                        Ok(handle) => Some(self.tasks.manage_with_deadline(
                             TaskKind::RecordingFinalize,
                             handle,
                             Some(cancel.clone()),
+                            None,
                         )),
                         Err(error) => {
                             log::warn!("finalizer ran inline: {error:#}");
@@ -455,6 +460,7 @@ impl App {
                     self.recorder = RecState::Idle;
                     self.recording_region = None;
                     self.lib.files_changed(&paths);
+                    let mut sound_deferred = false;
                     let action_succeeded = match self.settings.after_completion {
                         AfterCompletionAction::OpenLibrary => {
                             self.show_window(ctx);
@@ -474,17 +480,23 @@ impl App {
                             true
                         }
                         AfterCompletionAction::CopyFile => {
-                            let files: Vec<_> = paths.iter().map(PathBuf::as_path).collect();
-                            match clipboard::copy_files(&files) {
+                            match self.clipboard.handle().copy_files(
+                                paths,
+                                Purpose::Recording {
+                                    success: t!("toast.recording_copied").into_owned(),
+                                    sound: sound_on_completion,
+                                },
+                            ) {
                                 Ok(()) => {
-                                    if !self.hidden_by_us {
-                                        self.success(t!("toast.recording_copied"));
+                                    sound_deferred = sound_on_completion;
+                                    if !self.quit_when_idle {
+                                        self.page = Page::Library;
                                     }
                                     true
                                 }
                                 Err(e) => {
                                     self.show_window(ctx);
-                                    self.error(t!("err.copy_failed", error = format!("{e:#}")));
+                                    self.error(t!("err.copy_failed", error = e));
                                     if !self.quit_when_idle {
                                         self.page = Page::Library;
                                     }
@@ -493,7 +505,9 @@ impl App {
                             }
                         }
                     };
-                    if completion_sound_after_action(sound_on_completion, action_succeeded) {
+                    if !sound_deferred
+                        && completion_sound_after_action(sound_on_completion, action_succeeded)
+                    {
                         mediaa_platform::audio::confirmation_tone();
                     }
                     break;
@@ -532,7 +546,7 @@ impl App {
                             detail,
                             log_ref,
                             Vec::new(),
-                            kind == mediaa_media::error::MediaErrorKind::Io,
+                            kind.requires_attention(),
                         );
                     } else {
                         self.lib.files_changed(&recovery_files);
@@ -560,6 +574,6 @@ impl App {
             RecState::Saving { task, .. } => task.take(),
             _ => None,
         }?;
-        self.tasks.join(task).map(|exit| exit.panicked)
+        self.tasks.finish(task).map(|exit| exit.panicked)
     }
 }

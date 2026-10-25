@@ -20,7 +20,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         app.settings_changed();
     }
     if refresh_mics {
-        app.refresh_mics();
+        app.refresh_catalogs(ui.ctx());
     }
 }
 

@@ -82,7 +82,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         .clicked()
         {
             app.rec.target = TargetKind::Screen;
-            app.refresh_monitors();
+            app.refresh_catalogs(ui.ctx());
         }
         if tile(
             ui,
@@ -95,7 +95,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         .clicked()
         {
             app.rec.target = TargetKind::Windows;
-            app.refresh_windows();
+            app.refresh_catalogs(ui.ctx());
         }
     });
     ui.add_space(4.0);
@@ -120,7 +120,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         app.settings_changed();
     }
     if refresh_mics {
-        app.refresh_mics();
+        app.refresh_catalogs(ui.ctx());
     }
 }
 
@@ -367,7 +367,7 @@ fn source_details(app: &mut App, ui: &mut egui::Ui) {
                     if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh"))
                         .clicked()
                     {
-                        app.refresh_monitors();
+                        app.refresh_catalogs(ui.ctx());
                     }
                 });
             });
@@ -411,7 +411,7 @@ fn source_details(app: &mut App, ui: &mut egui::Ui) {
                     if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh"))
                         .clicked()
                     {
-                        app.refresh_windows();
+                        app.refresh_catalogs(ui.ctx());
                     }
                 });
             });

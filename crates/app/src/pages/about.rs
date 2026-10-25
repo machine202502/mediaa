@@ -39,8 +39,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 .on_hover_text(t!("settings.devices_hint"))
                 .clicked()
             {
-                app.mic_devices = mediaa_platform::audio::input_devices();
-                app.refresh_monitors();
+                app.refresh_catalogs(ui.ctx());
             }
         });
         ui.add_space(8.0);
@@ -56,7 +55,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 .on_hover_text(t!("settings.logs_hint"))
                 .clicked()
             {
-                app.open_path(&paths::logs_dir());
+                app.open_path(ui.ctx(), &paths::logs_dir());
             }
             if ui
                 .add(theme::secondary(

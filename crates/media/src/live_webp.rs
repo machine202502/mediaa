@@ -7,8 +7,9 @@ use mediaa_webp_pipeline::{self, PipelineConfig, PipelineTuning};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::Duration;
+
+const LIVE_CANCEL_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
 struct LiveChunk {
@@ -20,12 +21,13 @@ struct LiveChunk {
 pub(crate) struct LiveResult {
     pub parts: Vec<Vec<PathBuf>>,
     pub error: Option<String>,
+    pub timed_out: bool,
 }
 
 pub(crate) struct LiveWebp {
     control: Sender<bool>,
     cancel: Arc<AtomicBool>,
-    join: JoinHandle<LiveResult>,
+    result: Receiver<LiveResult>,
 }
 
 impl LiveWebp {
@@ -48,13 +50,14 @@ impl LiveWebp {
         .with_tuning(&scheduling);
         let workers = mediaa_webp_pipeline::recommended_workers(&config).max(1);
         let (control, control_rx) = bounded(8);
+        let (result_tx, result) = bounded(1);
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         log::info!("[{trace_id}] stage=live start size={}x{}", size.0, size.1);
-        let join = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("live-webp".into())
             .spawn(move || {
-                run_manager(
+                let result = run_manager(
                     lists,
                     root,
                     settings,
@@ -63,55 +66,80 @@ impl LiveWebp {
                     control_rx,
                     worker_cancel,
                     trace_id,
-                )
+                );
+                let _ = result_tx.send(result);
             })?;
         Ok(Self {
             control,
             cancel,
-            join,
+            result,
         })
     }
 
     pub(crate) fn finish(self, external_cancel: Arc<AtomicBool>) -> LiveResult {
-        let Self {
-            control,
-            cancel,
-            join,
-        } = self;
-        let done = Arc::new(AtomicBool::new(false));
-        let watcher_done = done.clone();
-        let watcher_cancel = cancel.clone();
-        let watcher = std::thread::Builder::new()
-            .name("live-webp-cancel".into())
-            .spawn(move || {
-                while !watcher_done.load(Ordering::Relaxed) {
-                    if external_cancel.load(Ordering::Relaxed) {
-                        watcher_cancel.store(true, Ordering::Relaxed);
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-            })
-            .ok();
-        let _ = control.send(true);
-        let result = join.join().unwrap_or_else(|_| LiveResult {
-            parts: Vec::new(),
-            error: Some("live WebP manager panicked".into()),
-        });
-        done.store(true, Ordering::Relaxed);
-        if let Some(watcher) = watcher {
-            let _ = watcher.join();
-        }
-        result
+        self.wait_for_result(true, Some(external_cancel), None)
     }
 
     pub(crate) fn cancel(self) -> LiveResult {
-        self.cancel.store(true, Ordering::Relaxed);
-        let _ = self.control.send(false);
-        self.join.join().unwrap_or_else(|_| LiveResult {
-            parts: Vec::new(),
-            error: Some("live WebP manager panicked".into()),
-        })
+        self.wait_for_result(false, None, Some(LIVE_CANCEL_TIMEOUT))
+    }
+
+    fn wait_for_result(
+        self,
+        finish: bool,
+        external_cancel: Option<Arc<AtomicBool>>,
+        timeout: Option<Duration>,
+    ) -> LiveResult {
+        let Self {
+            control,
+            cancel,
+            result,
+        } = self;
+        let deadline = timeout.map(|timeout| std::time::Instant::now() + timeout);
+        let cancelled = || {
+            external_cancel
+                .as_ref()
+                .is_some_and(|value| value.load(Ordering::Relaxed))
+        };
+        if cancelled() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        let _ = control.send(finish && !cancelled());
+        loop {
+            if cancelled() {
+                cancel.store(true, Ordering::Relaxed);
+                let _ = control.try_send(false);
+            }
+            let remaining = deadline
+                .map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()));
+            if remaining.is_some_and(|remaining| remaining.is_zero()) {
+                cancel.store(true, Ordering::Relaxed);
+                let _ = control.try_send(false);
+                let seconds = timeout.unwrap_or_default().as_secs();
+                log::warn!("live WebP cancel acknowledgement timed out after {seconds} s");
+                return LiveResult {
+                    parts: Vec::new(),
+                    error: Some(format!(
+                        "live WebP cancel acknowledgement timed out after {seconds} s"
+                    )),
+                    timed_out: true,
+                };
+            }
+            let wait = remaining
+                .map(|remaining| remaining.min(Duration::from_millis(25)))
+                .unwrap_or(Duration::from_millis(25));
+            match result.recv_timeout(wait) {
+                Ok(result) => return result,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    return LiveResult {
+                        parts: Vec::new(),
+                        error: Some("live WebP manager stopped without a result".into()),
+                        timed_out: false,
+                    };
+                }
+            }
+        }
     }
 }
 
@@ -258,7 +286,11 @@ fn run_manager(
             parts.iter().map(Vec::len).sum::<usize>()
         ),
     }
-    LiveResult { parts, error }
+    LiveResult {
+        parts,
+        error,
+        timed_out: false,
+    }
 }
 
 fn scan_lists(
@@ -312,13 +344,14 @@ fn scan_lists(
 
 #[cfg(test)]
 mod tests {
-    use super::{scan_lists, LiveWebp};
+    use super::{scan_lists, LiveResult, LiveWebp};
     use crossbeam_channel::bounded;
     use mediaa_core::settings::AnimSettings;
     use mediaa_webp_pipeline::PipelineTuning;
     use std::path::Path;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::time::Duration;
 
     #[test]
     fn live_scan_leaves_the_open_segment_for_the_final_scan() {
@@ -388,5 +421,51 @@ mod tests {
         let result = live.finish(Arc::new(AtomicBool::new(false)));
         let error = result.error.expect("missing chunk must fail");
         assert!(error.contains("missing.mkv"), "{error}");
+    }
+
+    #[test]
+    fn cancel_wait_returns_after_its_deadline() {
+        let (control, _control_rx) = bounded(1);
+        let (result_tx, result) = bounded(1);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = result_tx.send(LiveResult {
+                parts: Vec::new(),
+                error: None,
+                timed_out: false,
+            });
+        });
+        let live = LiveWebp {
+            control,
+            cancel: Arc::new(AtomicBool::new(false)),
+            result,
+        };
+        let started = std::time::Instant::now();
+        let output = live.wait_for_result(false, None, Some(Duration::from_millis(10)));
+        assert!(output
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("cancel acknowledgement")));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn finish_waits_for_the_manager_result() {
+        let (control, _control_rx) = bounded(1);
+        let (result_tx, result) = bounded(1);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            let _ = result_tx.send(LiveResult {
+                parts: Vec::new(),
+                error: None,
+                timed_out: false,
+            });
+        });
+        let live = LiveWebp {
+            control,
+            cancel: Arc::new(AtomicBool::new(false)),
+            result,
+        };
+        assert!(live.wait_for_result(true, None, None).error.is_none());
     }
 }

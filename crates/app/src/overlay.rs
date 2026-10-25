@@ -26,6 +26,8 @@ pub enum Outcome {
     Cancel,
     Image {
         frame: Frame,
+        selection: Rect,
+        shapes: Vec<Shape>,
         action: AfterCapture,
         format: Option<ImageFormat>,
         after_completion: bool,
@@ -37,6 +39,10 @@ pub enum Outcome {
     RecordArea {
         monitor: MonitorInfo,
         rect: Rect,
+    },
+    CaptureMonitor {
+        index: usize,
+        monitor: MonitorInfo,
     },
 }
 
@@ -103,6 +109,15 @@ pub struct Overlay {
 }
 
 impl Overlay {
+    pub(super) fn set_monitor_frame(&self, index: usize, frame: Frame) {
+        let mut state = self.state.lock();
+        let Some(shot) = state.shots.get_mut(index) else {
+            return;
+        };
+        shot.1 = Some(frame);
+        state.activate_monitor(index);
+    }
+
     pub fn new(
         ctx: &egui::Context,
         purpose: Purpose,
@@ -116,7 +131,7 @@ impl Overlay {
         let current = start.min(monitors.len().saturating_sub(1));
         let mut editor =
             SelectionEditor::new(Rect::new(0, 0, first.width as i32, first.height as i32));
-        if std::env::var_os("MEDIAA_DEV_PICKER").is_some() {
+        if mediaa_core::dev::picker_enabled() {
             editor.select_all();
         }
         let texture = Some((current, upload(ctx, &first)));
@@ -253,29 +268,34 @@ impl State {
             .expect("current monitor is always captured")
     }
 
+    fn activate_monitor(&mut self, index: usize) {
+        self.current = index;
+        let frame = self.frame();
+        self.editor =
+            SelectionEditor::new(Rect::new(0, 0, frame.width as i32, frame.height as i32));
+        self.shapes.clear();
+        self.drawing = None;
+        self.text = None;
+        self.frames_drawn = 0;
+        self.shown = false;
+        self.opened = Instant::now();
+    }
+
     fn switch_monitor(&mut self) {
-        let n = self.shots.len();
-        for step in 1..n {
-            let next = (self.current + step) % n;
-            if self.shots[next].1.is_none() {
-                match mediaa_platform::screen::capture_monitor(self.shots[next].0.id) {
-                    Ok(f) => self.shots[next].1 = Some(f),
-                    Err(e) => {
-                        log::warn!("capture {}: {e:#}", self.shots[next].0.name);
-                        continue;
-                    }
-                }
+        let count = self.shots.len();
+        for step in 1..count {
+            let next = (self.current + step) % count;
+            if self.shots[next].1.is_some() {
+                self.activate_monitor(next);
+                return;
             }
-            self.current = next;
-            let f = self.frame();
-            self.editor = SelectionEditor::new(Rect::new(0, 0, f.width as i32, f.height as i32));
-            self.shapes.clear();
-            self.drawing = None;
-            self.text = None;
-            self.frames_drawn = 0;
-            self.shown = false;
-            self.opened = Instant::now();
-            return;
+        }
+        let next = (self.current + 1) % count;
+        if let Some((monitor, _)) = self.shots.get(next) {
+            self.outcome = Some(Outcome::CaptureMonitor {
+                index: next,
+                monitor: monitor.clone(),
+            });
         }
     }
 
@@ -287,16 +307,13 @@ impl State {
         }
     }
 
-    fn result(&mut self) -> Option<Frame> {
-        self.commit_text();
-        let sel = self.editor.usable_selection()?;
-        Some(annotate::render_crop(self.frame(), sel, &self.shapes))
-    }
-
     fn finish_image(&mut self, action: AfterCapture, format: Option<ImageFormat>) {
-        if let Some(frame) = self.result() {
+        self.commit_text();
+        if let Some(selection) = self.editor.usable_selection() {
             self.outcome = Some(Outcome::Image {
-                frame,
+                frame: self.frame().clone(),
+                selection,
+                shapes: self.shapes.clone(),
                 action,
                 format,
                 after_completion: self.after_completion,
@@ -352,7 +369,7 @@ impl State {
             return;
         }
         mediaa_platform::window::disable_open_animation(WINDOW_TITLE);
-        if std::env::var_os("MEDIAA_DEV_PICKER").is_none() {
+        if !mediaa_core::dev::picker_enabled() {
             mediaa_platform::window::exclude_from_capture(WINDOW_TITLE);
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));

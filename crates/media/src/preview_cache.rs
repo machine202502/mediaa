@@ -1,5 +1,6 @@
 use crate::info::probe;
 use crate::job;
+use crate::webp_decode::WebpReader;
 use ez_ffmpeg::core::context::output::VSyncMethod;
 use ez_ffmpeg::{FfmpegContext, FramePushSource, Input, Output};
 use mediaa_core::atomic_file::AtomicFile;
@@ -12,6 +13,10 @@ use std::time::UNIX_EPOCH;
 pub struct PreviewLimits {
     pub max_height: u32,
     pub max_fps: u32,
+}
+
+pub fn previews_dir(media_dir: &Path) -> std::path::PathBuf {
+    media_dir.join(".cache").join("previews")
 }
 
 impl Default for PreviewLimits {
@@ -49,12 +54,7 @@ pub fn proxy_path(source: &Path) -> CachePath {
     );
     let hash = hasher.finish();
     CachePath::new(
-        source
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(".cache")
-            .join("previews")
-            .join(format!("{hash:016x}.mp4")),
+        previews_dir(source.parent().unwrap_or(Path::new("."))).join(format!("{hash:016x}.mp4")),
     )
 }
 
@@ -134,17 +134,15 @@ fn encode_webp(
     cancel: &AtomicBool,
     limits: PreviewLimits,
 ) -> anyhow::Result<()> {
-    let mut decoder =
-        image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(source)?))?;
-    let (width, height) = decoder.dimensions();
-    mediaa_core::formats::ensure_safe_dimensions(width, height)?;
-    let alpha = decoder.has_alpha();
-    let delay = decoder.loop_duration();
-    let fps = if delay == 0 {
-        limits.max_fps
-    } else {
-        (decoder.num_frames() * 1000 / delay as u32).clamp(1, limits.max_fps)
-    };
+    let mut reader = WebpReader::open(source)?;
+    let (width, height) = reader.dimensions();
+    let alpha = reader.has_alpha();
+    let delay = reader.duration_ms();
+    let fps = (u64::from(reader.frame_count()) * 1000)
+        .checked_div(delay)
+        .unwrap_or(u64::from(limits.max_fps))
+        .min(u64::from(limits.max_fps))
+        .max(1) as u32;
     let (source, mut frames) = FramePushSource::builder(width, height)
         .pixel_format(if alpha { "rgba" } else { "rgb24" })
         .time_base(1, 1000)
@@ -155,27 +153,18 @@ fn encode_webp(
         .output(preview_output(target))
         .build()?;
     let scheduler = context.start()?;
-    let mut buffer = vec![
-        0u8;
-        decoder
-            .output_buffer_size()
-            .ok_or_else(|| anyhow::anyhow!("WebP is too large"))?
-    ];
     let mut pts = 0i64;
-    let animated = decoder.is_animated();
-    for _ in 0..decoder.num_frames().max(1) {
+    let animated = reader.is_animated();
+    let count = reader.frame_count().max(1);
+    for _ in 0..count {
         if cancel.load(Ordering::Relaxed) {
             scheduler.abort();
             return Err(job::Cancelled.into());
         }
-        let duration = if animated {
-            decoder.read_frame(&mut buffer)?.max(1)
-        } else {
-            decoder.read_image(&mut buffer)?;
-            1_000
-        };
+        let frame = reader.read_frame()?;
+        let duration = if animated { frame.delay_ms } else { 1_000 };
         if frames
-            .push(&buffer, pts, Some(i64::from(duration)))
+            .push(frame.data, pts, Some(i64::from(duration)))
             .is_err()
         {
             break;

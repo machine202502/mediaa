@@ -409,4 +409,28 @@ mod tests {
         normalize_animation(&path, 1_000_000).unwrap();
         assert_eq!(std::fs::read(path).unwrap(), original);
     }
+
+    #[test]
+    fn malformed_chunk_corpus_returns_errors_without_panicking() {
+        let path = Path::new("fuzz.webp");
+        for len in 0..256usize {
+            let mut state = 0x9e37_79b9u32 ^ len as u32;
+            let mut bytes = vec![0u8; len];
+            for byte in &mut bytes {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *byte = state as u8;
+            }
+            let _ = parse_chunks(&bytes, path);
+        }
+        let mut truncated = synthetic_animation(1);
+        truncated.truncate(truncated.len() - 3);
+        assert!(parse_chunks(&truncated, path).is_err());
+        let mut bad_padding = synthetic_animation(1);
+        bad_padding.push(7);
+        let riff_size = (bad_padding.len() - 8) as u32;
+        bad_padding[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        assert!(parse_chunks(&bad_padding, path).is_err());
+    }
 }

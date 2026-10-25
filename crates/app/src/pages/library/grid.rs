@@ -58,7 +58,7 @@ pub(super) fn toolbar_tools(app: &mut App, ui: &mut egui::Ui, total: usize, view
     if theme::icon_button(ui, icon::FOLDER_OPEN, &t!("lib.open_folder")).clicked() {
         let dir = library_dir(&app.settings);
         let _ = std::fs::create_dir_all(&dir);
-        app.open_path(&dir);
+        app.open_path(ui.ctx(), &dir);
     }
     cleanup_button(app, ui, CleanupOlder::Week);
     cleanup_button(app, ui, CleanupOlder::Month);
@@ -149,8 +149,8 @@ pub(super) fn tile(
                 painter.rect_filled(rect, top, p.card_hover);
 
                 let playable = matches!(e.kind, MediaKind::Video | MediaKind::Animation);
-                let dev = std::env::var("MEDIAA_DEV_PREVIEW")
-                    .is_ok_and(|n| !n.is_empty() && e.name.contains(&n));
+                let dev = mediaa_core::dev::preview_filter()
+                    .is_some_and(|name| !name.is_empty() && e.name.contains(&name));
                 let active = resp.hovered() || resp.dragged() || dev;
                 let mut texture = data.texture.clone();
                 let mut timeline = None;

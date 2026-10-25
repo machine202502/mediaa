@@ -130,7 +130,11 @@ pub fn remove_stale_temporary_files(dir: &Path, max_age: Duration) -> usize {
     let now = SystemTime::now();
     let mut removed = 0;
     for entry in entries.flatten() {
-        if !entry.file_name().to_string_lossy().starts_with(".mediaa-") {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(crate::atomic_file::TEMP_PREFIX)
+        {
             continue;
         }
         let Ok(metadata) = entry.metadata() else {

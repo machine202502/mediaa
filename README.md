@@ -180,13 +180,15 @@ virtual X server and a screenshot is saved to `dist/linux/smoke.png`:
 
 ```powershell
 .\scripts\windows\test.ps1          # or: cargo test --workspace (with the env from env.ps1)
-cargo check --workspace --all-targets --profile dev-check
+cargo check --workspace --lib --bins --profile dev-check
 .\scripts\windows\test-fast.ps1
 .\scripts\windows\test-release.ps1
 ```
 
 The `dev-check` profile is for fast edit/feedback loops: it disables dependency optimization and
-debug info while the normal dev profile keeps internal crates optimized for recording tests.
+debug info, while the local command skips examples and test binaries. The full
+`--all-targets` check runs before acceptance. The normal dev profile keeps internal crates
+optimized for recording tests.
 Debug test scripts use the `rust-lld` linker. Release testing is never part of the normal loop and
 is run only on request. The release artifact remains a single `dist/windows/mediaa.exe`.
 

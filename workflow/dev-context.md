@@ -45,10 +45,10 @@
 
 | Крейт | Что внутри |
 |---|---|
-| `crates/core` | модель и общие правила: настройки, геометрия, `Frame`, форматы, limits, имена, пейсинг, WAV, identity, typed paths, `AtomicFile` |
+| `crates/core` | модель и общие правила: настройки, геометрия, `Frame`, форматы, limits, имена, пейсинг, WAV, identity, typed paths, `AtomicFile`, debug-only env |
 | `crates/storage` | фоновый SQLite-writer индекса, кэши, watcher, thumbnail atlas и запись скриншотов |
 | `crates/render` | аннотации и размещение панелей поверх кадра; шрифты и `tiny-skia` не попадают в platform |
-| `crates/media` | FFmpeg-запись и конвертация, preview/thumbnail, live WebP adapter; внутри `recorder/{request,capture,finalize,recovery}` |
+| `crates/media` | FFmpeg-запись и конвертация, preview/thumbnail, live WebP adapter и общий WebP reader; внутри `recorder/{request,capture,finalize,recovery}` |
 | `crates/platform` | Windows/X11/macOS захват, audio I/O, clipboard/files, tray/window helpers и single-instance |
 | `crates/webp-pipeline` | независимый budgeted scheduler сегментов WebP и merge/normalize |
 | `crates/app` | тонкий `main.rs`, library facade, UI, команды и `TaskSupervisor`; крупные контроллеры разнесены по файлам |
@@ -72,16 +72,18 @@
 
 ```powershell
 . C:\shared-data\reps\.old\gifcap2\scripts\windows\env.ps1
-cargo check --workspace --all-targets --profile dev-check
+cargo check --workspace --lib --bins --profile dev-check
 . C:\shared-data\reps\.old\gifcap2\scripts\windows\env-fast.ps1
 cargo test -p mediaa --lib --profile test-fast
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Для быстрой обратной связи после правок Rust используется
-`cargo check --workspace --all-targets --profile dev-check`: профиль отключает debug-info и
-оптимизацию зависимостей. Обычный dev-профиль оставляет `opt-level=1` зависимостям и
-`opt-level=2` внутренним крейтам, чтобы тесты и запись не становились заметно медленнее.
+`cargo check --workspace --lib --bins --profile dev-check`: профиль отключает debug-info и
+оптимизацию зависимостей, а локальный цикл не собирает примеры и тестовые бинарники.
+Перед приёмкой полный `--all-targets` запускается через Clippy. Обычный dev-профиль оставляет
+`opt-level=1` зависимостям и `opt-level=2` внутренним крейтам, чтобы тесты и запись не
+становились заметно медленнее.
 
 `test.ps1` и `test-fast.ps1` используют `env-fast.ps1`: в debug/test подключается `rust-lld`
 (замер link приложения — 4,5 с вместо 9,9 с; предупреждения `LNK4217` относятся к bundled
@@ -407,6 +409,8 @@ kill $(cat /tmp/mediaa.pid)
 * `ez_ffmpeg`: при остановке `sink` обязан проглотить остаток и вернуть успех — ошибка рвёт
   муксер посреди записи («Error muxing a packet»); останавливает ожидающий поток.
 * Настройки пишутся во временный файл и переименовываются: крах не оставляет половину файла.
+  `SettingsWriter` объединяет быстрые изменения, пишет вне UI-потока и при exit сохраняет
+  последнюю версию с пределом ожидания 2 s.
 * `thumb_cache`: сначала страница атласа пишется на диск, потом её строки — строка никогда не
   указывает на ещё не записанные пиксели.
 * `pacer`: кадр получает слот по активному времени записи, а не по счёту кадров; опоздавший
@@ -423,7 +427,47 @@ kill $(cat /tmp/mediaa.pid)
 * SQLite-запись индекса идёт через bounded-очередь `library-index-writer`: UI обновляет
   in-memory snapshot без ожидания диска. При переполнении сохраняется флаг и следующий
   успешный проход публикует полный snapshot. Блокирующее ожидание допустимо только в `on_exit`
-  и ограничено двумя секундами.
+  и ограничено двумя секундами; фоновая нить при timeout отсоединяется, а не блокирует выход.
 * Capture-потоки завершаются через общий `capture_stop_timeout` (20 s). Зависший native-источник
   не блокирует UI бесконечно; рабочий каталог сохраняется для recovery, а пользователь получает
   warning. `MonitorId` и `WindowId` — разные типы, смешать их нельзя.
+* One-shot фоновая работа идёт через `TaskSupervisor`: probe, estimate, конвертация, recovery,
+  очистка, скриншот, копирование изображения и запись имеют `TaskId`, terminal event,
+  cancellation и неблокирующий `finish`. Deadline не является универсальным признаком ошибки:
+  он допустим только для catalog/estimate и короткого native capture response. Прямой
+  `thread::spawn` допустим только в
+  `latest_worker`, `settings_writer`, clipboard/thumbnail services и самом supervisor.
+  Quit отсоединяет catalog, housekeeping, viewer lookup, probe/estimate, screenshot/copy-image
+  result и внешние open/rename; запись, конвертация, cleanup и сохранение результата остаются
+  обязательными до safe point.
+* Плеер и hover-preview имеют по одному постоянному latest-value worker. Новый seek или hover
+  отменяет только текущее поколение, а не создаёт новый поток; старые результаты отбрасываются.
+  Hover хранит не более 96 кадров шириной 320 px.
+* Рендер и обрезка аннотаций, копирование изображения, кодирование и запись скриншота,
+  копирование файла и удаление одного элемента выполняются в фоне. UI только запускает job и
+  обрабатывает terminal result. Открытие/reveal файлов и переименование идут через typed
+  `DesktopAction`; библиотечный индекс меняется только после успешного rename. Списки
+  мониторов, окон и микрофонов обновляются одной фоновой задачей с deadline 15 s.
+* `AudioOut`, аудиозахват и отмена live WebP имеют bounded stop/ack. Финальное кодирование live
+  WebP deadline не имеет. Drop `AudioOut` только посылает stop и присоединяет уже завершённый
+  поток, поэтому закрытие viewer не ждёт аудиоустройство.
+  `confirmation_tone` работает в собственном потоке и не задерживает UI. Аудиовыход
+  просмотрщика открывается асинхронно; место под звуковые контролы резервируется заранее.
+* Clipboard работает через FIFO worker с terminal events и timeout одной операции. После
+  timeout следующий вызов создаёт новый worker, а не отключает clipboard до перезапуска.
+  Копирование изображения передаёт `Frame` по владению, без второй полной копии пикселей.
+* `MediaErrorKind` различает permission, отсутствующий источник, неверный ввод, формат,
+  занятость, нехватку места, timeout и внутреннюю ошибку. `RecoveryAction` добавляет
+  локализованную подсказку, UI не разбирает текст ошибки.
+* Dev-переменные `MEDIAA_DEV_*` и `MEDIAA_INSTANCE_ID` доступны только в debug-сборке через
+  `mediaa_core::dev`; release не меняет библиотеку и поведение из окружения.
+* WebP frames читаются через один `WebpReader`. RIFF parser проверяется corpus-тестом на
+  случайные и обрезанные данные; замена ручного mux допускается только при полном совпадении
+  поведения по alpha, timing и merge.
+* У пользовательских конвертации, финализации записи, live WebP finish и сохранения нет общего
+  wall-clock deadline: их длительность зависит от объёма работы. Пользователь видит прогресс и
+  может отменить операцию. Общий stall watchdog по `output timestamp` запрещён: FFmpeg не даёт
+  одинаково надёжный heartbeat во всех сценариях. Native encoder внутри процесса нельзя убить;
+  hard cancellation требует отдельного процесса, а timeout без kill не освобождает память.
+* Библиотека кэширует `HitList` (query indices + выбранные entries) до смены версии индекса,
+  query или limit. `set_details` обязан увеличивать версию, иначе UI покажет старые metadata.

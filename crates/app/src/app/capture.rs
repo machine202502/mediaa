@@ -1,6 +1,99 @@
+use super::state::{CaptureJob, CaptureKind};
+use super::state::{ScreenshotDone, ScreenshotJob};
 use super::*;
+use crate::clipboard_service::ClipboardHandle;
+
+const CAPTURE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub(super) struct CapturedImage {
+    pub frame: Frame,
+    pub selection: Rect,
+    pub shapes: Vec<mediaa_render::annotate::Shape>,
+    pub action: AfterCapture,
+    pub format: Option<ImageFormat>,
+    pub after_completion: bool,
+}
+
+impl CapturedImage {
+    pub(super) fn whole(frame: Frame, action: AfterCapture) -> Self {
+        let selection = Rect::new(0, 0, frame.width as i32, frame.height as i32);
+        Self {
+            frame,
+            selection,
+            shapes: Vec::new(),
+            action,
+            format: None,
+            after_completion: false,
+        }
+    }
+}
+
+struct ScreenshotWork {
+    image: CapturedImage,
+    copy_image: bool,
+    path: Option<std::path::PathBuf>,
+    format: ImageFormat,
+    copy_file: bool,
+    clipboard: Option<ClipboardHandle>,
+}
+
+fn process_screenshot(work: ScreenshotWork) -> ScreenshotDone {
+    let CapturedImage {
+        frame,
+        selection,
+        shapes,
+        ..
+    } = work.image;
+    let frame = mediaa_render::annotate::render_crop(&frame, selection, &shapes);
+    let mut output = ScreenshotDone {
+        copied: false,
+        saved: None,
+        copy_error: None,
+        save_error: None,
+        copy_file_error: None,
+        size: format!("{}×{}", frame.width, frame.height),
+    };
+    if let Some(path) = work.path {
+        match screenshot::save(&frame, work.format, &path) {
+            Ok(()) => {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                output.saved = Some((path, name));
+            }
+            Err(error) => output.save_error = Some(format!("{error:#}")),
+        }
+    }
+    if work.copy_image {
+        match work.clipboard.as_ref().map_or_else(
+            || Err("clipboard service is unavailable".into()),
+            |clipboard| clipboard.copy_image_wait(frame),
+        ) {
+            Ok(()) => output.copied = true,
+            Err(error) => output.copy_error = Some(error),
+        }
+    }
+    if work.copy_file {
+        if let Some((path, _)) = &output.saved {
+            let files = vec![path.clone()];
+            if let Err(error) = work.clipboard.as_ref().map_or_else(
+                || Err("clipboard service is unavailable".into()),
+                |clipboard| clipboard.copy_files_wait(files),
+            ) {
+                output.copy_file_error = Some(error);
+            }
+        }
+    }
+    output
+}
 
 impl App {
+    pub(crate) fn image_io_busy(&self) -> bool {
+        self.capture_job.is_some() || self.screenshot_job.is_some() || self.copy_image_job.is_some()
+    }
+
     pub fn start_region_screenshot(&mut self, ctx: &egui::Context, purpose: overlay::Purpose) {
         self.start_region_screenshot_with_completion(ctx, purpose, false);
     }
@@ -14,7 +107,13 @@ impl App {
         if self.overlay.is_some() {
             return;
         }
-        self.refresh_monitors();
+        if self.image_io_busy() {
+            self.warning(t!("toast.finish_current"));
+            return;
+        }
+        if self.monitors.is_empty() {
+            self.refresh_monitors();
+        }
         if ctx.input(|i| i.viewport().minimized == Some(true)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         }
@@ -42,7 +141,13 @@ impl App {
         monitor: Option<MonitorInfo>,
         after_completion: bool,
     ) {
-        self.refresh_monitors();
+        if self.image_io_busy() {
+            self.warning(t!("toast.finish_current"));
+            return;
+        }
+        if self.monitors.is_empty() {
+            self.refresh_monitors();
+        }
         let monitor = monitor
             .or_else(|| self.monitors.get(self.current_monitor_index(ctx)).cloned())
             .or_else(|| self.monitors.first().cloned());
@@ -63,51 +168,257 @@ impl App {
     }
 
     pub fn start_window_screenshot(&mut self, ctx: &egui::Context, window_id: screen::WindowId) {
+        if self.image_io_busy() {
+            self.warning(t!("toast.finish_current"));
+            return;
+        }
         let hide = self.settings.screenshot.hide_window;
         self.schedule(ctx, Pending::WindowScreenshot(window_id), hide);
     }
 
-    pub fn deliver_image(
+    pub(super) fn queue_monitor_capture(
         &mut self,
         ctx: &egui::Context,
-        frame: Frame,
-        action: AfterCapture,
-        format: Option<ImageFormat>,
-        after_completion: bool,
+        kind: CaptureKind,
+        monitor: screen::MonitorId,
     ) {
-        let mut copied = false;
-        let mut saved = None;
-        let copies_file =
-            after_completion && self.settings.after_completion == AfterCompletionAction::CopyFile;
-        if action.copies() && !copies_file {
-            match clipboard::copy_image(&frame) {
-                Ok(()) => copied = true,
-                Err(e) => self.error(t!("err.copy_failed", error = format!("{e:#}"))),
+        self.queue_capture(ctx, kind, move || {
+            screen::capture_monitor(monitor).map_err(|error| format!("{error:#}"))
+        });
+    }
+
+    fn queue_window_capture(
+        &mut self,
+        ctx: &egui::Context,
+        kind: CaptureKind,
+        window: screen::WindowId,
+    ) {
+        self.queue_capture(ctx, kind, move || {
+            screen::capture_window(window).map_err(|error| format!("{error:#}"))
+        });
+    }
+
+    fn queue_capture(
+        &mut self,
+        ctx: &egui::Context,
+        kind: CaptureKind,
+        worker: impl FnOnce() -> Result<Frame, String> + Send + 'static,
+    ) {
+        if self.image_io_busy() {
+            self.restore_after_capture(ctx);
+            self.warning(t!("toast.finish_current"));
+            return;
+        }
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let ctx2 = ctx.clone();
+        match self.tasks.spawn_with_deadline(
+            TaskKind::ScreenCapture,
+            "screen-capture",
+            None,
+            Some(CAPTURE_RESPONSE_TIMEOUT),
+            move || {
+                let _ = tx.send(worker());
+                ctx2.request_repaint();
+            },
+        ) {
+            Ok(task) => {
+                self.capture_job = Some(CaptureJob { rx, task, kind });
+                ctx.request_repaint();
+            }
+            Err(error) => {
+                self.restore_after_capture(ctx);
+                self.error(t!("err.capture_failed_detail", error = error));
             }
         }
-        if action.saves() || after_completion {
-            let fmt = format.unwrap_or(self.settings.screenshot.format);
-            let path = naming::media_path(
+    }
+
+    pub(super) fn poll_capture(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.capture_job else {
+            return;
+        };
+        let result = match job.rx.try_recv() {
+            Ok(result) => result,
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                if self.tasks.overdue(job.task) {
+                    let job = self.capture_job.take().expect("job checked");
+                    self.tasks.detach(job.task);
+                    self.restore_after_capture(ctx);
+                    self.show_window(ctx);
+                    self.error(t!("err.capture_timeout"));
+                    return;
+                }
+                ctx.request_repaint_after(Duration::from_millis(50));
+                return;
+            }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                let job = self.capture_job.take().expect("job checked");
+                self.tasks.finish(job.task);
+                self.restore_after_capture(ctx);
+                self.show_window(ctx);
+                self.error(t!("err.capture_worker_stopped"));
+                return;
+            }
+        };
+        let job = self.capture_job.take().expect("job checked");
+        self.tasks.finish(job.task);
+        match (job.kind, result) {
+            (
+                CaptureKind::Region {
+                    purpose,
+                    after_completion,
+                    start,
+                },
+                Ok(first),
+            ) => {
+                let after = self.settings.screenshot.after_capture;
+                let purpose = match purpose {
+                    overlay::Purpose::Area if !self.recorder.is_idle() => {
+                        overlay::Purpose::Screenshot
+                    }
+                    purpose => purpose,
+                };
+                if self.hidden_by_us {
+                    self.ghosted = self
+                        .native_window
+                        .is_some_and(|window| window.set_ghost(true));
+                    if !self.ghosted {
+                        self.show_window(ctx);
+                    }
+                }
+                self.overlay = Some(Overlay::new(
+                    ctx,
+                    purpose,
+                    self.monitors.clone(),
+                    start,
+                    first,
+                    after,
+                    after_completion,
+                ));
+                ctx.request_repaint();
+            }
+            (CaptureKind::Fullscreen { after_completion }, Ok(frame)) => {
+                if !after_completion {
+                    self.restore_after_capture(ctx);
+                }
+                let mut image = CapturedImage::whole(frame, self.settings.screenshot.after_capture);
+                image.after_completion = after_completion;
+                self.deliver_image(ctx, image);
+            }
+            (CaptureKind::Window, Ok(frame)) => {
+                self.restore_after_capture(ctx);
+                self.deliver_image(
+                    ctx,
+                    CapturedImage::whole(frame, self.settings.screenshot.after_capture),
+                );
+            }
+            (CaptureKind::OverlayMonitor { index }, Ok(frame)) => {
+                if let Some(overlay) = self.overlay.as_ref() {
+                    overlay.set_monitor_frame(index, frame);
+                    ctx.request_repaint();
+                }
+            }
+            (CaptureKind::Region { .. }, Err(error)) => {
+                self.restore_after_capture(ctx);
+                self.error(t!("err.capture_failed_detail", error = error));
+            }
+            (CaptureKind::Fullscreen { .. }, Err(error)) => {
+                self.show_window(ctx);
+                self.error(t!("err.capture_failed_detail", error = error));
+            }
+            (CaptureKind::Window, Err(error)) => {
+                self.error(t!("err.window_capture_failed", error = error));
+            }
+            (CaptureKind::OverlayMonitor { .. }, Err(error)) => {
+                self.error(t!("err.capture_failed_detail", error = error));
+            }
+        }
+    }
+
+    pub(super) fn deliver_image(&mut self, ctx: &egui::Context, image: CapturedImage) {
+        let action = image.action;
+        let format = image.format;
+        let after_completion = image.after_completion;
+        if self.image_io_busy() {
+            self.warning(t!("toast.finish_current"));
+            return;
+        }
+        let copies_file =
+            after_completion && self.settings.after_completion == AfterCompletionAction::CopyFile;
+        let save = action.saves() || after_completion;
+        let format = format.unwrap_or(self.settings.screenshot.format);
+        let path = save.then(|| {
+            naming::media_path(
                 &self.settings.media_dir,
                 "Screenshot",
                 chrono::Local::now(),
-                fmt.extension(),
-            );
-            match screenshot::save(&frame, fmt, &path) {
-                Ok(()) => {
-                    let name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    self.lib.files_changed(std::slice::from_ref(&path));
-                    saved = Some((path, name));
-                }
-                Err(e) => self.error(t!("err.save_failed", error = format!("{e:#}"))),
+                format.extension(),
+            )
+        });
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let ctx2 = ctx.clone();
+        let copy_image = action.copies() && !copies_file;
+        let copy_file = copies_file;
+        let clipboard = self.clipboard.handle();
+        let task = match self
+            .tasks
+            .spawn(TaskKind::Screenshot, "screenshot", None, move || {
+                let output = process_screenshot(ScreenshotWork {
+                    image,
+                    copy_image,
+                    path,
+                    format,
+                    copy_file,
+                    clipboard: Some(clipboard),
+                });
+                let _ = tx.send(output);
+                ctx2.request_repaint();
+            }) {
+            Ok(task) => task,
+            Err(error) => {
+                self.show_window(ctx);
+                self.error(t!("err.save_failed", error = error));
+                return;
             }
+        };
+        self.screenshot_job = Some(ScreenshotJob {
+            rx,
+            task,
+            after_completion,
+            copies_file,
+        });
+        ctx.request_repaint();
+    }
+
+    pub(super) fn poll_screenshot(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.screenshot_job else {
+            return;
+        };
+        let result = match job.rx.try_recv() {
+            Ok(result) => result,
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(50));
+                return;
+            }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                let task = self.screenshot_job.take().expect("job checked");
+                self.tasks.finish(task.task);
+                self.show_window(ctx);
+                self.error(t!("err.image_worker_stopped"));
+                return;
+            }
+        };
+        let job = self.screenshot_job.take().expect("job checked");
+        self.tasks.finish(job.task);
+        if let Some(error) = result.copy_error {
+            self.error(t!("err.copy_failed", error = error));
         }
-        let size = format!("{}×{}", frame.width, frame.height);
-        if after_completion {
+        if let Some(error) = result.save_error {
+            self.error(t!("err.save_failed", error = error));
+        }
+        if let Some((path, _)) = &result.saved {
+            self.lib.files_changed(std::slice::from_ref(path));
+        }
+        if job.after_completion {
             match self.settings.after_completion {
                 AfterCompletionAction::OpenLibrary => {
                     self.show_window(ctx);
@@ -115,38 +426,60 @@ impl App {
                         self.page = Page::Library;
                     }
                 }
-                AfterCompletionAction::CopyFile => match saved.as_ref() {
-                    Some((path, _)) => match clipboard::copy_files(&[path.as_path()]) {
-                        Ok(()) => {
-                            if !self.hidden_by_us {
-                                self.success(t!("toast.shot_file_copied"));
-                            }
+                AfterCompletionAction::CopyFile => {
+                    if let Some(error) = result.copy_file_error {
+                        self.show_window(ctx);
+                        self.error(t!("err.copy_failed", error = error));
+                        if !self.quit_when_idle {
+                            self.page = Page::Library;
                         }
-                        Err(e) => {
-                            self.show_window(ctx);
-                            self.error(t!("err.copy_failed", error = format!("{e:#}")));
-                            if !self.quit_when_idle {
-                                self.page = Page::Library;
-                            }
-                        }
-                    },
-                    None => {
+                    } else if result.saved.is_none() {
                         self.show_window(ctx);
                         if !self.quit_when_idle {
                             self.page = Page::Library;
                         }
+                    } else if !self.hidden_by_us {
+                        self.success(t!("toast.shot_file_copied"));
                     }
-                },
+                }
             }
         }
-        let msg = match (copied, saved.as_ref().map(|(_, name)| name)) {
-            (true, Some(name)) => t!("toast.shot_copied_saved", size = size, name = name),
-            (false, Some(name)) => t!("toast.shot_saved", size = size, name = name),
-            (true, None) => t!("toast.shot_copied", size = size),
+        let msg = match (
+            result.copied,
+            result.saved.as_ref().map(|(_, name)| name.as_str()),
+        ) {
+            (true, Some(name)) => t!("toast.shot_copied_saved", size = result.size, name = name),
+            (false, Some(name)) => t!("toast.shot_saved", size = result.size, name = name),
+            (true, None) => t!("toast.shot_copied", size = result.size),
             (false, None) => return,
         };
-        if !copies_file {
+        if !job.copies_file {
             self.success(msg);
+        }
+    }
+
+    pub(super) fn poll_copy_image(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.copy_image_job else {
+            return;
+        };
+        let result = match job.rx.try_recv() {
+            Ok(result) => result,
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(50));
+                return;
+            }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                let job = self.copy_image_job.take().expect("job checked");
+                self.tasks.finish(job.task);
+                self.error(t!("err.image_worker_stopped"));
+                return;
+            }
+        };
+        let job = self.copy_image_job.take().expect("job checked");
+        self.tasks.finish(job.task);
+        match result {
+            Ok(message) => self.success(message),
+            Err(error) => self.error(t!("err.copy_failed", error = error)),
         }
     }
 
@@ -164,73 +497,28 @@ impl App {
                     self.error(t!("err.no_display"));
                     return;
                 };
-                match screen::capture_monitor(monitor.id) {
-                    Ok(first) => {
-                        let after = self.settings.screenshot.after_capture;
-                        let purpose = match purpose {
-                            overlay::Purpose::Area if !self.recorder.is_idle() => {
-                                overlay::Purpose::Screenshot
-                            }
-                            p => p,
-                        };
-                        if self.hidden_by_us {
-                            self.ghosted = self.native_window.is_some_and(|w| w.set_ghost(true));
-                            if !self.ghosted {
-                                self.show_window(ctx);
-                            }
-                        }
-                        self.overlay = Some(Overlay::new(
-                            ctx,
-                            purpose,
-                            self.monitors.clone(),
-                            start,
-                            first,
-                            after,
-                            after_completion,
-                        ));
-                        ctx.request_repaint();
-                    }
-                    Err(e) => {
-                        self.restore_after_capture(ctx);
-                        self.error(t!("err.capture_failed_detail", error = format!("{e:#}")));
-                    }
-                }
+                self.queue_monitor_capture(
+                    ctx,
+                    CaptureKind::Region {
+                        purpose,
+                        after_completion,
+                        start,
+                    },
+                    monitor.id,
+                );
             }
             Pending::FullscreenScreenshot {
                 monitor,
                 after_completion,
             } => {
-                let shot = screen::capture_monitor(monitor.id);
-                if !after_completion {
-                    self.restore_after_capture(ctx);
-                }
-                match shot {
-                    Ok(f) => self.deliver_image(
-                        ctx,
-                        f,
-                        self.settings.screenshot.after_capture,
-                        None,
-                        after_completion,
-                    ),
-                    Err(e) => {
-                        self.show_window(ctx);
-                        self.error(t!("err.capture_failed_detail", error = format!("{e:#}")));
-                    }
-                }
+                self.queue_monitor_capture(
+                    ctx,
+                    CaptureKind::Fullscreen { after_completion },
+                    monitor.id,
+                );
             }
             Pending::WindowScreenshot(id) => {
-                let shot = screen::capture_window(id);
-                self.restore_after_capture(ctx);
-                match shot {
-                    Ok(f) => self.deliver_image(
-                        ctx,
-                        f,
-                        self.settings.screenshot.after_capture,
-                        None,
-                        false,
-                    ),
-                    Err(e) => self.error(t!("err.window_capture_failed", error = format!("{e:#}"))),
-                }
+                self.queue_window_capture(ctx, CaptureKind::Window, id);
             }
             Pending::BeginRecording(target, profile) => self.begin_recording(ctx, target, profile),
         }
@@ -240,5 +528,39 @@ impl App {
         if self.hidden_by_us && self.recorder.is_idle() {
             self.show_window(ctx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{process_screenshot, CapturedImage, ScreenshotWork};
+    use mediaa_core::settings::AfterCapture;
+    use mediaa_core::{Frame, ImageFormat, Rect};
+
+    #[test]
+    fn screenshot_worker_crops_and_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        let frame = Frame::filled(8, 6, [10, 20, 30, 255]);
+        let output = process_screenshot(ScreenshotWork {
+            image: CapturedImage {
+                frame,
+                selection: Rect::new(2, 1, 4, 3),
+                shapes: Vec::new(),
+                action: AfterCapture::Save,
+                format: Some(ImageFormat::Png),
+                after_completion: false,
+            },
+            copy_image: false,
+            path: Some(path.clone()),
+            format: ImageFormat::Png,
+            copy_file: false,
+            clipboard: None,
+        });
+        assert_eq!(output.size, "4×3");
+        assert!(output.copy_error.is_none());
+        assert!(output.save_error.is_none());
+        assert_eq!(output.saved.unwrap().0, path);
+        assert_eq!(image::image_dimensions(path).unwrap(), (4, 3));
     }
 }

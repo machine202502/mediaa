@@ -1,36 +1,88 @@
 use super::*;
+use crate::app::state::CopyImageJob;
+use crate::app::tasks::TaskKind;
+use crate::clipboard_service::Purpose;
 
-pub(super) fn run(app: &mut App, action: Action) {
+pub(super) fn run(app: &mut App, ctx: &egui::Context, action: Action) {
     let res: anyhow::Result<Option<String>> = match action {
-        Action::Open(p) => files::open(&p).map(|_| None),
+        Action::Open(p) => {
+            app.open_path(ctx, &p);
+            Ok(None)
+        }
         Action::View(p, kind, info) => {
             app.lib.previews.stop();
+            if let Some(mut viewer) = app.lib.viewer.take() {
+                viewer.cancel_pending(&mut app.tasks);
+            }
             app.lib.viewer = Some(Viewer::open(
                 &p,
                 kind,
                 info.and_then(|d| d.duration_secs),
                 info.is_some_and(|d| d.audio),
+                &mut app.tasks,
             ));
             Ok(None)
         }
-        Action::Reveal(p) => files::reveal(&p).map(|_| None),
-        Action::CopyFile(p) => {
-            clipboard::copy_files(&[&p]).map(|_| Some(t!("lib.copied_file").into()))
+        Action::Reveal(p) => {
+            app.reveal_path(ctx, p);
+            Ok(None)
         }
-        Action::CopyImage(p) => image::image_dimensions(&p)
-            .map_err(anyhow::Error::from)
-            .and_then(|(width, height)| {
-                mediaa_core::formats::ensure_safe_dimensions(width, height)?;
-                image::open(&p).map_err(anyhow::Error::from)
-            })
-            .and_then(|img| clipboard::copy_image(&mediaa_core::Frame::from_image(img.to_rgba8())))
-            .map(|_| Some(t!("lib.copied_image").into())),
-        Action::CopyPath(p) => {
-            clipboard::copy_text(&p.to_string_lossy()).map(|_| Some(t!("lib.copied_path").into()))
+        Action::CopyFile(p) => app
+            .clipboard
+            .handle()
+            .copy_files(vec![p], Purpose::Toast(t!("lib.copied_file").into_owned()))
+            .map(|_| None),
+        Action::CopyImage(p) => {
+            if app.image_io_busy() {
+                app.warning(t!("toast.finish_current"));
+                return;
+            }
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            let ctx2 = ctx.clone();
+            let success = t!("lib.copied_image").into_owned();
+            let clipboard = app.clipboard.handle();
+            match app.tasks.spawn(
+                TaskKind::LibraryCopyImage,
+                "library-copy-image",
+                None,
+                move || {
+                    let result = image::image_dimensions(&p)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|(width, height)| {
+                            mediaa_core::formats::ensure_safe_dimensions(width, height)?;
+                            image::open(&p).map_err(anyhow::Error::from)
+                        })
+                        .and_then(|image| {
+                            clipboard
+                                .copy_image_wait(mediaa_core::Frame::from_image(image.to_rgba8()))
+                                .map_err(anyhow::Error::msg)
+                        })
+                        .map(|()| success)
+                        .map_err(|error| format!("{error:#}"));
+                    let _ = tx.send(result);
+                    ctx2.request_repaint();
+                },
+            ) {
+                Ok(task) => {
+                    app.copy_image_job = Some(CopyImageJob { rx, task });
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
         }
-        Action::CopyLink(url) => {
-            clipboard::copy_text(&url).map(|_| Some(t!("lib.copied_link").into()))
-        }
+        Action::CopyPath(p) => app
+            .clipboard
+            .handle()
+            .copy_text(
+                p.to_string_lossy().into_owned(),
+                Purpose::Toast(t!("lib.copied_path").into_owned()),
+            )
+            .map(|_| None),
+        Action::CopyLink(url) => app
+            .clipboard
+            .handle()
+            .copy_text(url, Purpose::Toast(t!("lib.copied_link").into_owned()))
+            .map(|_| None),
         Action::Convert(p) => {
             app.open_in_convert(p);
             Ok(None)
@@ -87,18 +139,9 @@ pub(super) fn delete_dialog(app: &mut App, ctx: &egui::Context) {
     match decision {
         Some(true) => {
             app.lib.confirm_delete = None;
-            let size = std::fs::metadata(&path)
-                .map(|metadata| metadata.len())
-                .unwrap_or_default();
-            let report = perform_cleanup(
-                app,
-                &[CleanupItem {
-                    path: path.clone(),
-                    size,
-                }],
-                None,
-            );
-            finish_cleanup(app, report, t!("lib.deleted", name = name).into());
+            if let Err(error) = app.lib.start_delete(path, &mut app.tasks) {
+                app.error(format!("{error:#}"));
+            }
         }
         Some(false) => app.lib.confirm_delete = None,
         None => {}
@@ -154,20 +197,6 @@ pub(super) fn cleanup_modal(ctx: &egui::Context, plan: &CleanupPlan) -> Option<b
         decision = Some(false);
     }
     decision
-}
-
-fn perform_cleanup(
-    app: &mut App,
-    items: &[CleanupItem],
-    older: Option<CleanupOlder>,
-) -> CleanupReport {
-    app.lib.prepare_for_removal(items);
-    let report = match older {
-        Some(older) => cleanup_old_selected(items, older, SystemTime::now(), files::move_to_trash),
-        None => cleanup_selected(items, files::move_to_trash),
-    };
-    apply_cleanup_report(app, &report);
-    report
 }
 
 pub(super) fn apply_cleanup_report(app: &mut App, report: &CleanupReport) {
@@ -277,19 +306,7 @@ pub(super) fn rename_dialog(app: &mut App, ctx: &egui::Context) {
     match decision {
         Some(true) => {
             app.lib.renaming = None;
-            let proxy = mediaa_media::preview_cache::proxy_path(&path);
-            match naming::rename(&path, &title) {
-                Ok(new) if new != path => {
-                    app.thumbs.forget(&path, proxy);
-                    app.lib.files_changed(&[path.clone(), new.clone()]);
-                    app.success(t!(
-                        "lib.renamed",
-                        name = new.file_name().unwrap_or_default().to_string_lossy()
-                    ));
-                }
-                Ok(_) => {}
-                Err(e) => app.error(format!("{e:#}")),
-            }
+            app.rename_media(ctx, path, title);
         }
         Some(false) => app.lib.renaming = None,
         None => app.lib.renaming = Some((path, title)),

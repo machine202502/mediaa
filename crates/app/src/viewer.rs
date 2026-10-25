@@ -1,3 +1,4 @@
+use crate::app::tasks::{TaskId, TaskKind, TaskSupervisor};
 use crate::player::Player;
 use crate::theme;
 use crossbeam_channel::Receiver;
@@ -5,8 +6,11 @@ use eframe::egui::{self, Color32, CornerRadius, FontId, Rect, RichText, Sense, S
 use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
 use mediaa_core::{Frame, MediaKind};
+use mediaa_platform::audio::AudioOut;
 use rust_i18n::t;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 const MAX_TEXTURE: u32 = 8192;
@@ -23,6 +27,11 @@ pub struct Viewer {
     kind: MediaKind,
     texture: Option<egui::TextureHandle>,
     image_rx: Option<Receiver<Frame>>,
+    image_task: Option<TaskId>,
+    image_cancel: Arc<AtomicBool>,
+    audio_rx: Option<Receiver<Result<AudioOut, String>>>,
+    audio_task: Option<TaskId>,
+    audio_cancel: Arc<AtomicBool>,
     zoom: f32,
     pan: Vec2,
     player: Option<Player>,
@@ -33,7 +42,26 @@ impl Viewer {
         &self.path
     }
 
-    pub fn open(path: &Path, kind: MediaKind, duration: Option<f64>, audio: bool) -> Viewer {
+    pub fn cancel_pending(&mut self, tasks: &mut TaskSupervisor) {
+        self.image_cancel.store(true, Ordering::Relaxed);
+        self.audio_cancel.store(true, Ordering::Relaxed);
+        self.image_rx = None;
+        self.audio_rx = None;
+        if let Some(task) = self.image_task.take() {
+            tasks.detach(task);
+        }
+        if let Some(task) = self.audio_task.take() {
+            tasks.detach(task);
+        }
+    }
+
+    pub fn open(
+        path: &Path,
+        kind: MediaKind,
+        duration: Option<f64>,
+        audio: bool,
+        tasks: &mut TaskSupervisor,
+    ) -> Viewer {
         let name = path
             .file_name()
             .unwrap_or_default()
@@ -45,6 +73,11 @@ impl Viewer {
             kind,
             texture: None,
             image_rx: None,
+            image_task: None,
+            image_cancel: Arc::new(AtomicBool::new(false)),
+            audio_rx: None,
+            audio_task: None,
+            audio_cancel: Arc::new(AtomicBool::new(false)),
             zoom: 1.0,
             pan: Vec2::ZERO,
             player: None,
@@ -52,46 +85,128 @@ impl Viewer {
         if kind == MediaKind::Image {
             let (tx, rx) = crossbeam_channel::bounded(1);
             let p = path.to_path_buf();
-            let _ = std::thread::Builder::new()
-                .name("viewer-image".into())
-                .spawn(move || {
-                    match image::image_dimensions(&p)
-                        .map_err(anyhow::Error::from)
-                        .and_then(|(width, height)| {
-                            mediaa_core::formats::ensure_safe_dimensions(width, height)?;
-                            Ok(())
-                        })
-                        .and_then(|()| image::open(&p).map_err(anyhow::Error::from))
-                    {
-                        Ok(img) => {
-                            let img = if img.width().max(img.height()) > MAX_TEXTURE {
-                                img.thumbnail(MAX_TEXTURE, MAX_TEXTURE)
-                            } else {
-                                img
-                            };
+            let cancel = v.image_cancel.clone();
+            let worker_cancel = cancel.clone();
+            match tasks.spawn(
+                TaskKind::ViewerImage,
+                "viewer-image",
+                Some(cancel),
+                move || match image::image_dimensions(&p)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|(width, height)| {
+                        mediaa_core::formats::ensure_safe_dimensions(width, height)?;
+                        Ok(())
+                    })
+                    .and_then(|()| image::open(&p).map_err(anyhow::Error::from))
+                {
+                    Ok(img) => {
+                        let img = if img.width().max(img.height()) > MAX_TEXTURE {
+                            img.thumbnail(MAX_TEXTURE, MAX_TEXTURE)
+                        } else {
+                            img
+                        };
+                        if !worker_cancel.load(Ordering::Relaxed) {
                             let _ = tx.send(Frame::from_image(img.to_rgba8()));
                         }
-                        Err(e) => log::warn!("viewer {}: {e}", p.display()),
                     }
-                });
-            v.image_rx = Some(rx);
+                    Err(e) => log::warn!("viewer {}: {e}", p.display()),
+                },
+            ) {
+                Ok(task) => {
+                    v.image_rx = Some(rx);
+                    v.image_task = Some(task);
+                }
+                Err(error) => log::warn!("viewer image worker: {error}"),
+            }
         } else {
-            v.player = Some(Player::new(
+            let mut player = Player::new(
                 path,
                 duration.unwrap_or(0.0),
-                audio,
                 kind == MediaKind::Animation,
                 kind != MediaKind::Audio,
-            ));
+            );
+            if audio {
+                player.expect_audio();
+            }
+            v.player = Some(player);
+            if audio {
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                let cancel = v.audio_cancel.clone();
+                let worker_cancel = cancel.clone();
+                match tasks.spawn(
+                    TaskKind::ViewerAudio,
+                    "viewer-audio-open",
+                    Some(cancel),
+                    move || {
+                        let result = AudioOut::open().map_err(|error| format!("{error:#}"));
+                        if !worker_cancel.load(Ordering::Relaxed) {
+                            let _ = tx.send(result);
+                        }
+                    },
+                ) {
+                    Ok(task) => {
+                        v.audio_rx = Some(rx);
+                        v.audio_task = Some(task);
+                    }
+                    Err(error) => log::warn!("viewer audio worker: {error}"),
+                }
+            }
         }
         v
     }
 
-    pub fn show(&mut self, ctx: &egui::Context) -> Option<ViewerAction> {
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        tasks: &mut TaskSupervisor,
+    ) -> Option<ViewerAction> {
         if let Some(rx) = &self.image_rx {
-            if let Ok(f) = rx.try_recv() {
-                self.texture = Some(upload(ctx, None, &f));
-                self.image_rx = None;
+            match rx.try_recv() {
+                Ok(frame) => {
+                    self.texture = Some(upload(ctx, None, &frame));
+                    self.image_rx = None;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(Duration::from_millis(50));
+                }
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.image_rx = None;
+                }
+            }
+            if self.image_rx.is_none() {
+                if let Some(task) = self.image_task.take() {
+                    tasks.finish(task);
+                }
+            }
+        }
+        if let Some(rx) = &self.audio_rx {
+            match rx.try_recv() {
+                Ok(Ok(audio)) => {
+                    if let Some(player) = self.player.as_mut() {
+                        player.attach_audio(audio);
+                    }
+                    self.audio_rx = None;
+                }
+                Ok(Err(error)) => {
+                    log::warn!("audio output: {error}");
+                    self.audio_rx = None;
+                    if let Some(player) = self.player.as_mut() {
+                        player.audio_unavailable();
+                    }
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    log::warn!("audio output worker stopped");
+                    self.audio_rx = None;
+                    if let Some(player) = self.player.as_mut() {
+                        player.audio_unavailable();
+                    }
+                }
+            }
+            if self.audio_rx.is_none() {
+                if let Some(task) = self.audio_task.take() {
+                    tasks.finish(task);
+                }
             }
         }
         if let Some(p) = self.player.as_mut() {
@@ -320,6 +435,13 @@ impl Viewer {
     }
 }
 
+impl Drop for Viewer {
+    fn drop(&mut self) {
+        self.image_cancel.store(true, Ordering::Relaxed);
+        self.audio_cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 10.0;
 
@@ -476,7 +598,25 @@ fn player_controls(p: &mut Player, ui: &mut egui::Ui, open: &mut bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{frac_to_zoom, zoom_to_frac, MAX_ZOOM, MIN_ZOOM};
+    use super::{frac_to_zoom, zoom_to_frac, Viewer, MAX_ZOOM, MIN_ZOOM};
+    use crate::app::tasks::TaskSupervisor;
+    use mediaa_core::MediaKind;
+    use std::path::Path;
+
+    #[test]
+    fn closing_a_viewer_detaches_pending_lookup() {
+        let mut tasks = TaskSupervisor::default();
+        let mut viewer = Viewer::open(
+            Path::new("missing.png"),
+            MediaKind::Image,
+            None,
+            false,
+            &mut tasks,
+        );
+        assert_eq!(tasks.active_count(), 1);
+        viewer.cancel_pending(&mut tasks);
+        assert_eq!(tasks.active_count(), 0);
+    }
 
     #[test]
     fn zoom_slider_is_centred_on_100_percent() {

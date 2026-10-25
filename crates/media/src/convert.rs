@@ -1,11 +1,12 @@
 use crate::animation_backends::{self, AnimationEncodeRequest, AnimationOrigin, WebpSegmentation};
+use crate::error::invalid_input;
 use crate::filters;
 use crate::info::{probe, MediaInfo};
 use crate::job;
 use ez_ffmpeg::{FfmpegContext, Input, Output};
 use mediaa_core::atomic_file::AtomicFile;
 use mediaa_core::formats::{self, AnimFormat, AudioFormat, MediaKind, VideoContainer};
-use mediaa_core::limits::DEFAULT_MUSIC_AUDIO_KBPS;
+use mediaa_core::limits::{AUDIO_KBPS, DEFAULT_MUSIC_AUDIO_KBPS};
 use mediaa_core::naming;
 use mediaa_core::paths::{MediaDir, OutputPath, SourcePath};
 use mediaa_core::settings::AnimSettings;
@@ -224,7 +225,7 @@ fn run_tracked(
 }
 
 fn bitrate(kbps: u32) -> String {
-    format!("{}k", kbps.clamp(32, 320))
+    format!("{}k", AUDIO_KBPS.clamp(kbps))
 }
 
 fn video_output(out: Output, format: VideoFormat, s: &ConvertSettings, audio: bool) -> Output {
@@ -475,18 +476,22 @@ fn convert_part(
                     Target::Still(_) => job::run(ctx, None, &mut |_| {}, cancel),
                 }
             });
-            let produced = producer
-                .join()
-                .map_err(|_| anyhow::anyhow!("webp decoder panicked"))?;
-            r.and(produced)
+            r?;
+            producer.wait()
         })
     } else {
         probe(input).and_then(|info| {
             match target {
                 Target::Audio(_) => {
-                    anyhow::ensure!(info.has_audio(), "{} has no sound", input.display())
+                    if !info.has_audio() {
+                        return Err(invalid_input(format!("{} has no sound", input.display())));
+                    }
                 }
-                _ => anyhow::ensure!(info.has_video(), "{} has no picture", input.display()),
+                _ => {
+                    if !info.has_video() {
+                        return Err(invalid_input(format!("{} has no picture", input.display())));
+                    }
+                }
             }
             let (start, total) = match window {
                 Some((start, len)) => (start, Some(len)),
@@ -584,6 +589,7 @@ pub(crate) fn mux_recording(
     audio_tracks: &[PathBuf],
     output: &Path,
     container: VideoContainer,
+    audio_kbps: u32,
     on_progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
@@ -602,7 +608,7 @@ pub(crate) fn mux_recording(
         out = out
             .add_stream_map("[a]")
             .set_audio_codec("aac")
-            .set_audio_bitrate("192k");
+            .set_audio_bitrate(bitrate(audio_kbps));
     }
     let total = ez_ffmpeg::container_info::get_duration_us(url(video)).ok();
     let result = builder
@@ -666,6 +672,13 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn audio_bitrate_uses_the_shared_limits() {
+        assert_eq!(bitrate(0), "32k");
+        assert_eq!(bitrate(192), "192k");
+        assert_eq!(bitrate(1000), "320k");
     }
 
     #[test]
