@@ -70,6 +70,18 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     changed.set(true);
                 }
             });
+            theme::row(ui, "", |ui| {
+                if ui.checkbox(&mut app.settings.highlight_recording_region, t!("settings.highlight_recording_region")).changed() {
+                    changed.set(true);
+                }
+            });
+            ui.add_enabled_ui(app.settings.highlight_recording_region, |ui| {
+                theme::row(ui, &t!("settings.recording_region_outline_width"), |ui| {
+                    if ui.add(egui::Slider::new(&mut app.settings.recording_region_outline_width, 2..=32).suffix(" px")).changed() {
+                        changed.set(true);
+                    }
+                });
+            });
             theme::section(ui, icon::RECORD, &t!("settings.after_completion"));
             theme::row(ui, &t!("settings.after_completion_action"), |ui| {
                 let opts = [

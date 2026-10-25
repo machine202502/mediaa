@@ -3,6 +3,7 @@ pub mod clipboard;
 pub mod cursor;
 pub mod files;
 pub mod keys;
+pub mod outline;
 pub mod screen;
 pub mod window;
 #[cfg(windows)]

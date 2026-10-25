@@ -7,6 +7,7 @@ mod icon;
 mod overlay;
 mod pages;
 mod player;
+mod region_marker;
 mod theme;
 mod thumbs;
 mod hover_preview;
@@ -35,6 +36,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("MediaA")
             .with_app_id("mediaa")
+            .with_transparent(true)
             .with_inner_size([1120.0, 760.0])
             .with_min_inner_size([480.0, 480.0])
             .with_icon(std::sync::Arc::new(egui::IconData {

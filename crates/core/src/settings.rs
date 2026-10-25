@@ -270,6 +270,8 @@ pub struct Settings {
     pub tray_left_click: TrayClickAction,
     pub stop_recording_on_left_click: bool,
     pub after_completion: AfterCompletionAction,
+    pub highlight_recording_region: bool,
+    pub recording_region_outline_width: u32,
 }
 
 impl Default for Settings {
@@ -304,6 +306,8 @@ impl Default for Settings {
             tray_left_click: TrayClickAction::default(),
             stop_recording_on_left_click: true,
             after_completion: AfterCompletionAction::default(),
+            highlight_recording_region: true,
+            recording_region_outline_width: 4,
         }
     }
 }
@@ -357,6 +361,7 @@ impl Settings {
         if self.media_dir.as_os_str().is_empty() {
             self.media_dir = paths::default_media_dir();
         }
+        self.recording_region_outline_width = self.recording_region_outline_width.clamp(2, 32);
         self
     }
 
@@ -408,6 +413,8 @@ mod tests {
         s.tray_left_click = TrayClickAction::OpenWindow;
         s.stop_recording_on_left_click = false;
         s.after_completion = AfterCompletionAction::CopyFile;
+        s.highlight_recording_region = false;
+        s.recording_region_outline_width = 17;
         s.save_to(&path).unwrap();
         assert_eq!(Settings::load_from(&path), s);
     }
@@ -480,6 +487,18 @@ mod tests {
         assert_eq!(Settings::load_from(&path).after_completion, AfterCompletionAction::OpenLibrary);
         std::fs::write(&path, "after_completion = \"copy_file\"\n").unwrap();
         assert_eq!(Settings::load_from(&path).after_completion, AfterCompletionAction::CopyFile);
+    }
+
+    #[test]
+    fn recording_region_highlight_is_enabled_by_default() {
+        assert!(Settings::default().highlight_recording_region);
+        assert_eq!(Settings::default().recording_region_outline_width, 4);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.toml");
+        std::fs::write(&path, "theme = \"light\"\n").unwrap();
+        assert!(Settings::load_from(&path).highlight_recording_region);
+        std::fs::write(&path, "highlight_recording_region = false\n").unwrap();
+        assert!(!Settings::load_from(&path).highlight_recording_region);
     }
 
     #[test]

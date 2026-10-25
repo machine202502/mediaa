@@ -83,6 +83,8 @@ pub struct App {
     ghosted: bool,
     pub rec: pages::record::RecordUi,
     pub recorder: RecState,
+    recording_region: Option<(MonitorInfo, Rect)>,
+    region_outline: mediaa_platform::outline::RegionOutline,
     pub lib: pages::library::LibraryUi,
     pub thumbs: Thumbnails,
     pub conv: pages::convert::ConvertUi,
@@ -162,6 +164,8 @@ impl App {
             ghosted: false,
             rec: Default::default(),
             recorder: RecState::Idle,
+            recording_region: None,
+            region_outline: Default::default(),
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
             conv: Default::default(),
@@ -527,6 +531,10 @@ impl App {
         let max_height = r.max_height();
         let anim = recording_animation_settings(r.output, fps, max_height, anim);
         let cursor = r.record_cursor;
+        self.recording_region = match &target {
+            RecordTarget::Region(monitor, rect) => Some((monitor.clone(), *rect)),
+            RecordTarget::Audio | RecordTarget::Screens(_) | RecordTarget::Windows(_) => None,
+        };
         let sources: Vec<SourceFactory> = match &target {
             RecordTarget::Audio => Vec::new(),
             RecordTarget::Screens(ms) => ms
@@ -594,6 +602,7 @@ impl App {
                 }
             }
             Err(e) => {
+                self.recording_region = None;
                 self.show_window(ctx);
                 self.error(format!("{e:#}"));
             }
@@ -630,6 +639,7 @@ impl App {
     }
 
     fn stop_recording_with_sound(&mut self, ctx: &egui::Context, save: bool, with_sound: bool) {
+        self.recording_region = None;
         match std::mem::replace(&mut self.recorder, RecState::Idle) {
             RecState::Recording { session, events } => {
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -668,6 +678,7 @@ impl App {
                 SessionEvent::Finished(paths) => {
                     let sound_on_completion = matches!(&self.recorder, RecState::Saving { sound_on_completion: true, .. });
                     self.recorder = RecState::Idle;
+                    self.recording_region = None;
                     self.lib.files_changed(&paths);
                     match self.settings.after_completion {
                         AfterCompletionAction::OpenLibrary => {
@@ -705,12 +716,14 @@ impl App {
                 }
                 SessionEvent::Cancelled => {
                     self.recorder = RecState::Idle;
+                    self.recording_region = None;
                     self.show_window(ctx);
                     self.info(t!("toast.discarded"));
 
                 }
                 SessionEvent::Failed(e) => {
                     self.recorder = RecState::Idle;
+                    self.recording_region = None;
                     self.show_window(ctx);
                     self.error(t!("toast.saving_failed", error = e));
 
@@ -869,6 +882,28 @@ impl App {
         }
     }
 
+    fn show_recording_region(&mut self, ctx: &egui::Context) {
+        if !self.settings.highlight_recording_region {
+            self.region_outline.hide();
+            return;
+        }
+        let (Some((monitor, rect)), RecState::Recording { session, .. }) = (&self.recording_region, &self.recorder) else {
+            self.region_outline.hide();
+            return;
+        };
+        let blink_on = ((ctx.input(|i| i.time) * 2.0) as u64).is_multiple_of(2);
+        crate::region_marker::show(
+            ctx,
+            monitor,
+            *rect,
+            session.is_paused(),
+            blink_on,
+            self.settings.recording_region_outline_width,
+            &mut self.region_outline,
+        );
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
     pub fn open_path(&mut self, path: &std::path::Path) {
         if let Err(e) = files::open(path) {
             self.error(format!("{e:#}"));
@@ -896,6 +931,7 @@ impl eframe::App for App {
         }
         self.poll_recorder(ctx);
         self.update_tray();
+        self.show_recording_region(ctx);
 
         let closing = ctx.input(|i| i.viewport().close_requested()) && !self.quit_after_save;
         if closing && close_goes_to_tray(self.settings.close_to_tray, self.tray.is_some(), !self.recorder.is_idle()) {
@@ -925,7 +961,11 @@ impl eframe::App for App {
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        visuals.panel_fill.to_normalized_gamma_f32()
+        if self.settings.highlight_recording_region && matches!(self.recorder, RecState::Recording { .. }) && self.recording_region.is_some() {
+            [0.0; 4]
+        } else {
+            visuals.panel_fill.to_normalized_gamma_f32()
+        }
     }
 
     fn on_exit(&mut self) {
