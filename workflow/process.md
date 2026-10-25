@@ -646,3 +646,4 @@
 | 4 | Убрать блокирующий thumbnail flush и добавить capture join watchdog | голова | готово: `try_send`, общий `capture_stop_timeout`, recovery каталога | — |
 | 5 | Проверка: fmt, clippy, Rust/Node tests и audit | голова | готово: 266 Rust, 4 desktop-live пропущены, 41 Node, clippy `-D warnings`, audit 0 blocking | — |
 | — | Release build/tests | голова | не запускалось: нет отдельного запроса | — |
+| — | Коммит, задача закрыта | пользователь | готово, `c51dda6` | — |

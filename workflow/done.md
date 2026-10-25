@@ -33,6 +33,7 @@
   частичный work directory сохраняется для recovery.
 * Проверка: 266 Rust-тестов, 4 desktop-live пропущены; 41 Node-тест; fmt, clippy
   `-D warnings`, debug `dev-check`, RustSec без blocking advisories. Release не запускался.
+  Коммит `c51dda6`.
 
 ### 2026-10-25 — архитектурный аудит под LLM, границы крейтов и повторная проверка
 
