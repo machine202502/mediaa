@@ -49,15 +49,15 @@ fn main() -> anyhow::Result<()> {
     };
     let dir = std::env::temp_dir().join("mediaa-capture-bench");
     let id = m.id;
-    let window = std::env::var("WINDOW")
-        .ok()
-        .map(|t| -> anyhow::Result<u32> {
+    let window = std::env::var("WINDOW").ok().map(
+        |t| -> anyhow::Result<mediaa_platform::screen::WindowId> {
             let w = mediaa_platform::screen::windows()?
                 .into_iter()
                 .find(|w| w.title.contains(&t));
             Ok(w.ok_or_else(|| anyhow::anyhow!("no window matching {t}"))?
                 .id)
-        });
+        },
+    );
     let factory: SourceFactory = match window.transpose()? {
         Some(wid) => Box::new(move || mediaa_platform::screen::window_source(wid, true)),
         None => {

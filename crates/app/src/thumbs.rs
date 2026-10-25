@@ -241,7 +241,7 @@ impl Thumbnails {
 
     pub fn flush(&self) {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        if self.req_tx.send(Msg::Flush(tx)).is_ok() {
+        if self.req_tx.try_send(Msg::Flush(tx)).is_ok() {
             let _ = rx.recv_timeout(Duration::from_secs(2));
         }
     }

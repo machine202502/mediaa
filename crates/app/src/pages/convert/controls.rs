@@ -1,4 +1,5 @@
 use super::*;
+use mediaa_core::limits::VIDEO_QUALITY;
 
 pub(super) fn estimate_row(
     ui: &mut egui::Ui,
@@ -121,7 +122,10 @@ pub(super) fn png_colors_combo(ui: &mut egui::Ui, colors: &mut Option<u16>) {
 
 pub(super) fn quality_row(ui: &mut egui::Ui, quality: &mut u8) {
     theme::row(ui, &t!("record.quality"), |ui| {
-        ui.add(egui::Slider::new(quality, 1..=100).suffix("%"));
+        ui.add(
+            egui::Slider::new(quality, VIDEO_QUALITY.min as u8..=VIDEO_QUALITY.max as u8)
+                .suffix("%"),
+        );
     });
 }
 

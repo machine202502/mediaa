@@ -1,3 +1,4 @@
+use crate::screen::{MonitorId, WindowId};
 use anyhow::{anyhow, Context as _};
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
@@ -75,19 +76,20 @@ pub struct WgcSource {
 
 impl WgcSource {
     pub fn monitor(
-        monitor_id: u32,
+        monitor_id: MonitorId,
         name: String,
         size: (u32, u32),
         region: Option<Rect>,
         cursor: bool,
     ) -> anyhow::Result<Self> {
         let monitor =
-            Monitor::from_raw_hmonitor(monitor_id as i32 as isize as *mut std::ffi::c_void);
+            Monitor::from_raw_hmonitor(monitor_id.get() as i32 as isize as *mut std::ffi::c_void);
         Self::start(monitor, name, size, region, cursor)
     }
 
-    pub fn window(window_id: u32, name: String, cursor: bool) -> anyhow::Result<Self> {
-        let window = Window::from_raw_hwnd(window_id as i32 as isize as *mut std::ffi::c_void);
+    pub fn window(window_id: WindowId, name: String, cursor: bool) -> anyhow::Result<Self> {
+        let window =
+            Window::from_raw_hwnd(window_id.get() as i32 as isize as *mut std::ffi::c_void);
         let mut s = Self::start(window, name, (0, 0), None, cursor)?;
         let first = s.wait_first()?;
         s.size = (first.width & !1, first.height & !1);
@@ -98,8 +100,9 @@ impl WgcSource {
         Ok(s)
     }
 
-    pub fn window_frame(window_id: u32) -> anyhow::Result<Frame> {
-        let window = Window::from_raw_hwnd(window_id as i32 as isize as *mut std::ffi::c_void);
+    pub fn window_frame(window_id: WindowId) -> anyhow::Result<Frame> {
+        let window =
+            Window::from_raw_hwnd(window_id.get() as i32 as isize as *mut std::ffi::c_void);
         Self::start(window, String::new(), (0, 0), None, false)?.wait_first()
     }
 

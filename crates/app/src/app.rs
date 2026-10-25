@@ -17,6 +17,7 @@ use command::{AppCommand, RecordingCommand};
 use crossbeam_channel::Receiver;
 use eframe::egui;
 use mediaa_core::geometry::Rect;
+use mediaa_core::limits::FPS;
 use mediaa_core::settings::{
     AfterCapture, AfterCompletionAction, AnimSettings, RecordProfile, ScreenChoice, TrayClickAction,
 };
@@ -370,7 +371,7 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.thumbs.flush();
-        self.lib.flush_details();
+        self.lib.flush();
         if let Err(e) = self.settings.save() {
             log::error!("saving settings on exit: {e:#}");
         }
@@ -412,7 +413,7 @@ fn recording_animation_settings(
 ) -> AnimSettings {
     let mut animation = animation.clone();
     if matches!(output, OutputKind::Anim(_)) {
-        animation.fps = fps.clamp(1, 60);
+        animation.fps = FPS.clamp(fps);
         animation.max_height = max_height.unwrap_or(0);
     }
     animation

@@ -1,4 +1,5 @@
 use crate::cursor_overlay::CursorImage;
+use crate::screen::WindowId;
 use anyhow::{anyhow, bail, Context as _};
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
@@ -7,7 +8,7 @@ use xcb::{shm, x, xfixes, Connection};
 #[derive(Debug, Clone, Copy)]
 pub enum Target {
     Area(Rect),
-    Window(u32),
+    Window(WindowId),
 }
 
 pub struct X11Source {
@@ -166,8 +167,8 @@ impl X11Source {
     }
 }
 
-fn window(id: u32) -> x::Window {
-    <x::Window as xcb::XidNew>::new(id)
+fn window(id: WindowId) -> x::Window {
+    <x::Window as xcb::XidNew>::new(id.get())
 }
 
 fn cursor_image(c: &xfixes::GetCursorImageReply) -> CursorImage {

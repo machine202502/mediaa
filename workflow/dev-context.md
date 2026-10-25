@@ -45,8 +45,8 @@
 
 | Крейт | Что внутри |
 |---|---|
-| `crates/core` | чистые модель и правила: настройки, геометрия, `Frame`, форматы, имена, пейсинг, WAV, identity и typed paths |
-| `crates/storage` | SQLite-кэши, индекс библиотеки, watcher, thumbnail atlas, атомарная публикация и запись скриншотов |
+| `crates/core` | модель и общие правила: настройки, геометрия, `Frame`, форматы, limits, имена, пейсинг, WAV, identity, typed paths, `AtomicFile` |
+| `crates/storage` | фоновый SQLite-writer индекса, кэши, watcher, thumbnail atlas и запись скриншотов |
 | `crates/render` | аннотации и размещение панелей поверх кадра; шрифты и `tiny-skia` не попадают в platform |
 | `crates/media` | FFmpeg-запись и конвертация, preview/thumbnail, live WebP adapter; внутри `recorder/{request,capture,finalize,recovery}` |
 | `crates/platform` | Windows/X11/macOS захват, audio I/O, clipboard/files, tray/window helpers и single-instance |
@@ -420,3 +420,10 @@ kill $(cat /tmp/mediaa.pid)
   `mediaa_core::atomic_file::AtomicFile`: временный файл в той же папке синхронизируется и
   атомарно публикуется без перезаписи существующего результата.
 * Продакшен-запуск — один экземпляр; отдельные dev-scope описаны в разделе запуска UI.
+* SQLite-запись индекса идёт через bounded-очередь `library-index-writer`: UI обновляет
+  in-memory snapshot без ожидания диска. При переполнении сохраняется флаг и следующий
+  успешный проход публикует полный snapshot. Блокирующее ожидание допустимо только в `on_exit`
+  и ограничено двумя секундами.
+* Capture-потоки завершаются через общий `capture_stop_timeout` (20 s). Зависший native-источник
+  не блокирует UI бесконечно; рабочий каталог сохраняется для recovery, а пользователь получает
+  warning. `MonitorId` и `WindowId` — разные типы, смешать их нельзя.

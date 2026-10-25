@@ -1,4 +1,5 @@
 use super::*;
+use mediaa_core::limits::DEFAULT_VIDEO_AUDIO_KBPS;
 
 impl App {
     pub(crate) fn dispatch_command(&mut self, ctx: &egui::Context, command: AppCommand) {
@@ -141,7 +142,11 @@ impl App {
         } else {
             AudioLayout::FirstFileOnly
         })
-        .audio_kbps(if audio_only { audio_settings.kbps } else { 192 })
+        .audio_kbps(if audio_only {
+            audio_settings.kbps
+        } else {
+            DEFAULT_VIDEO_AUDIO_KBPS
+        })
         .animation(anim)
         .webp_mode(webp_mode)
         .build()

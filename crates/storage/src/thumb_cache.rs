@@ -80,21 +80,21 @@ fn load_items(db: &Connection) -> rusqlite::Result<(HashMap<String, Slot>, u32)>
     let mut q = db.prepare("SELECT name, size, modified_ms, page, x, y, w, h FROM thumbs")?;
     let rows = q.query_map([], |r| {
         Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, i64>(2)?,
-            r.get::<_, i64>(3)?,
-            r.get::<_, i64>(4)?,
-            r.get::<_, i64>(5)?,
-            r.get::<_, i64>(6)?,
-            r.get::<_, i64>(7)?,
+            r.get::<_, String>("name")?,
+            r.get::<_, i64>("size")?,
+            r.get::<_, i64>("modified_ms")?,
+            r.get::<_, i64>("page")?,
+            r.get::<_, i64>("x")?,
+            r.get::<_, i64>("y")?,
+            r.get::<_, i64>("w")?,
+            r.get::<_, i64>("h")?,
         ))
     })?;
     let next_page = db
         .query_row(
             "SELECT value FROM counters WHERE key = 'next_page'",
             [],
-            |r| r.get::<_, i64>(0),
+            |r| r.get::<_, i64>("value"),
         )
         .ok()
         .and_then(|value| u32::try_from(value).ok())

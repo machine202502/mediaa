@@ -62,7 +62,7 @@ impl App {
         }
     }
 
-    pub fn start_window_screenshot(&mut self, ctx: &egui::Context, window_id: u32) {
+    pub fn start_window_screenshot(&mut self, ctx: &egui::Context, window_id: screen::WindowId) {
         let hide = self.settings.screenshot.hide_window;
         self.schedule(ctx, Pending::WindowScreenshot(window_id), hide);
     }

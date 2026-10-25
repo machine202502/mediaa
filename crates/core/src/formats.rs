@@ -214,6 +214,26 @@ pub fn all_media_extensions() -> Vec<&'static str> {
 }
 
 impl MediaKind {
+    pub const ALL: [MediaKind; 4] = [
+        MediaKind::Image,
+        MediaKind::Video,
+        MediaKind::Animation,
+        MediaKind::Audio,
+    ];
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            MediaKind::Image => "image",
+            MediaKind::Video => "video",
+            MediaKind::Animation => "animation",
+            MediaKind::Audio => "audio",
+        }
+    }
+
+    pub fn from_code(code: &str) -> Option<MediaKind> {
+        MediaKind::ALL.into_iter().find(|kind| kind.code() == code)
+    }
+
     pub fn from_extension(ext: &str) -> Option<MediaKind> {
         let ext = ext.to_ascii_lowercase();
         [
@@ -288,6 +308,14 @@ mod tests {
         assert_eq!(MediaKind::from_extension("Gif"), Some(MediaKind::Animation));
         assert_eq!(MediaKind::from_extension("png"), Some(MediaKind::Image));
         assert_eq!(MediaKind::from_extension("txt"), None);
+    }
+
+    #[test]
+    fn media_kind_codes_roundtrip_for_every_kind() {
+        for kind in MediaKind::ALL {
+            assert_eq!(MediaKind::from_code(kind.code()), Some(kind));
+        }
+        assert_eq!(MediaKind::from_code("unknown"), None);
     }
 
     #[test]

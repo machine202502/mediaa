@@ -5,7 +5,7 @@ use mediaa_core::geometry::Rect;
 use mediaa_core::settings::RecordProfile;
 use mediaa_media::error::MediaErrorKind;
 use mediaa_media::recorder::{RecordingProgress, RecordingSession, SessionEvent};
-use mediaa_platform::screen::{MonitorInfo, WindowInfo};
+use mediaa_platform::screen::{MonitorInfo, WindowId, WindowInfo};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,7 +39,7 @@ pub(crate) enum Pending {
         monitor: MonitorInfo,
         after_completion: bool,
     },
-    WindowScreenshot(u32),
+    WindowScreenshot(WindowId),
     BeginRecording(RecordTarget, RecordProfile),
 }
 

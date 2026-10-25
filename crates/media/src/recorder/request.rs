@@ -1,5 +1,6 @@
 use crate::error::MediaErrorKind;
 use mediaa_core::formats::{AnimFormat, OutputKind};
+use mediaa_core::limits::{AUDIO_KBPS, DEFAULT_VIDEO_AUDIO_KBPS, FPS, VIDEO_QUALITY};
 use mediaa_core::paths::{MediaDir, WorkDir};
 use mediaa_core::settings::AnimSettings;
 use mediaa_core::source::{AudioSource, SourceFactory};
@@ -40,6 +41,7 @@ pub struct RecordingRequest {
 pub struct RecordingLimits {
     pub source_ready_timeout: Duration,
     pub ready_poll_interval: Duration,
+    pub capture_stop_timeout: Duration,
 }
 
 impl Default for RecordingLimits {
@@ -47,6 +49,7 @@ impl Default for RecordingLimits {
         Self {
             source_ready_timeout: Duration::from_secs(65),
             ready_poll_interval: Duration::from_millis(100),
+            capture_stop_timeout: Duration::from_secs(20),
         }
     }
 }
@@ -73,7 +76,7 @@ impl RecordingRequest {
                 video_quality: 80,
                 max_height: None,
                 audio_layout: AudioLayout::FirstFileOnly,
-                audio_kbps: 192,
+                audio_kbps: DEFAULT_VIDEO_AUDIO_KBPS,
                 anim: AnimSettings::default(),
                 webp_mode: WebpMode::Direct,
                 out_dir,
@@ -128,15 +131,15 @@ impl RecordingRequestBuilder {
 
     pub fn build(mut self) -> anyhow::Result<RecordingRequest> {
         anyhow::ensure!(
-            (1..=60).contains(&self.request.fps),
+            FPS.contains(self.request.fps),
             "recording fps must be between 1 and 60"
         );
         anyhow::ensure!(
-            (1..=100).contains(&self.request.video_quality),
+            VIDEO_QUALITY.contains(u32::from(self.request.video_quality)),
             "recording quality must be between 1 and 100"
         );
         anyhow::ensure!(
-            self.request.audio.is_empty() || (32..=320).contains(&self.request.audio_kbps),
+            self.request.audio.is_empty() || AUDIO_KBPS.contains(self.request.audio_kbps),
             "audio bitrate must be between 32 and 320 kbps"
         );
         match self.request.output {
@@ -154,6 +157,7 @@ impl RecordingRequestBuilder {
         anyhow::ensure!(
             !self.request.limits.source_ready_timeout.is_zero()
                 && !self.request.limits.ready_poll_interval.is_zero()
+                && !self.request.limits.capture_stop_timeout.is_zero()
                 && self.request.limits.ready_poll_interval
                     <= self.request.limits.source_ready_timeout,
             "recording source limits are invalid"

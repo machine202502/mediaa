@@ -144,6 +144,7 @@ impl LibraryUi {
             self.refresh(settings, tasks);
         }
         let index = self.index.as_mut()?;
+        index.flush_cache();
         let mut scanned = None;
         if self.watcher.is_none() && Instant::now() >= self.watcher_retry {
             let c = ctx.clone();
@@ -236,6 +237,12 @@ impl LibraryUi {
     pub fn flush_details(&mut self) {
         if let Some(index) = self.index.as_mut() {
             index.flush_details();
+        }
+    }
+
+    pub fn flush(&mut self) {
+        if let Some(index) = self.index.as_mut() {
+            index.flush();
         }
     }
 

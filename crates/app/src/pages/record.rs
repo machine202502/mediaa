@@ -8,13 +8,14 @@ use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
 use mediaa_core::geometry::Rect;
 use mediaa_core::library::human_duration;
+use mediaa_core::limits::{FPS, GIF_COLORS, VIDEO_QUALITY};
 use mediaa_core::settings::{
     AnimSettings, GifDither, MicChoice, RecordProfile, ANIM_HEIGHTS, OUTPUT_HEIGHTS,
 };
 use mediaa_core::Settings;
 use mediaa_core::{AnimFormat, OutputKind};
 use mediaa_media::recorder::StopAction;
-use mediaa_platform::screen::MonitorInfo;
+use mediaa_platform::screen::{MonitorId, MonitorInfo, WindowId};
 use rust_i18n::t;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -32,9 +33,9 @@ pub enum TargetKind {
 #[derive(Default)]
 pub struct RecordUi {
     pub target: TargetKind,
-    pub monitors: BTreeSet<u32>,
+    pub monitors: BTreeSet<MonitorId>,
     pub region: Option<(MonitorInfo, Rect)>,
-    pub windows: BTreeSet<u32>,
+    pub windows: BTreeSet<WindowId>,
 }
 
 pub fn monitor_label(m: &MonitorInfo) -> String {
@@ -178,15 +179,21 @@ pub fn profile_editor(
             });
             theme::row(ui, &t!("record.fps"), |ui| {
                 mark(
-                    ui.add(egui::Slider::new(fps, 5..=60).suffix(" fps"))
+                    ui.add(egui::Slider::new(fps, 5..=FPS.max).suffix(" fps"))
                         .changed(),
                 );
             });
             if let OutputKind::Video(_) = kind {
                 theme::row(ui, &t!("record.quality"), |ui| {
                     mark(
-                        ui.add(egui::Slider::new(quality, 1..=100).suffix("%"))
-                            .changed(),
+                        ui.add(
+                            egui::Slider::new(
+                                quality,
+                                VIDEO_QUALITY.min as u8..=VIDEO_QUALITY.max as u8,
+                            )
+                            .suffix("%"),
+                        )
+                        .changed(),
                     );
                 });
             }
@@ -461,7 +468,10 @@ pub fn anim_options(
     if fmt != Some(AnimFormat::Webp) {
         theme::row(ui, &t!("anim.colors"), |ui| {
             changed |= ui
-                .add(egui::Slider::new(&mut a.gif_colors, 4..=256))
+                .add(egui::Slider::new(
+                    &mut a.gif_colors,
+                    GIF_COLORS.min..=GIF_COLORS.max,
+                ))
                 .changed();
         });
         theme::row(ui, &t!("anim.dither"), |ui| {
@@ -479,7 +489,10 @@ pub fn anim_options(
     if fmt != Some(AnimFormat::Gif) {
         theme::row(ui, &t!("anim.webp_quality"), |ui| {
             changed |= ui
-                .add(egui::Slider::new(&mut a.webp_quality, 0..=100))
+                .add(egui::Slider::new(
+                    &mut a.webp_quality,
+                    VIDEO_QUALITY.min as u8..=VIDEO_QUALITY.max as u8,
+                ))
                 .changed();
         });
     }

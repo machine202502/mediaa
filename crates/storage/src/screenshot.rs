@@ -1,4 +1,4 @@
-use crate::atomic_file::AtomicFile;
+use mediaa_core::atomic_file::AtomicFile;
 use mediaa_core::formats::ImageFormat;
 use mediaa_core::frame::Frame;
 use std::path::Path;

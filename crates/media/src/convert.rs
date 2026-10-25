@@ -3,11 +3,12 @@ use crate::filters;
 use crate::info::{probe, MediaInfo};
 use crate::job;
 use ez_ffmpeg::{FfmpegContext, Input, Output};
+use mediaa_core::atomic_file::AtomicFile;
 use mediaa_core::formats::{self, AnimFormat, AudioFormat, MediaKind, VideoContainer};
+use mediaa_core::limits::DEFAULT_MUSIC_AUDIO_KBPS;
 use mediaa_core::naming;
 use mediaa_core::paths::{MediaDir, OutputPath, SourcePath};
 use mediaa_core::settings::AnimSettings;
-use mediaa_storage::atomic_file::AtomicFile;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -172,7 +173,7 @@ impl Default for ConvertSettings {
             max_fps: None,
             remove_audio: false,
             anim: AnimSettings::default(),
-            audio_kbps: 256,
+            audio_kbps: DEFAULT_MUSIC_AUDIO_KBPS,
             mono: false,
             png_colors: None,
             webp_lossless: false,

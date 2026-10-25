@@ -1,8 +1,8 @@
 use super::{
-    animation_path, concat_chunks, encode_with_linear_fallback, linked_title, preserve_recordings,
-    recover_incomplete_sessions, wait_for_source, AnimationPath, AudioLayout, RecordingLimits,
-    RecordingRequest, RecordingSession, RecordingStartCancelled, SourceReady, SourceReadyResult,
-    WebpMode,
+    animation_path, concat_chunks, encode_with_linear_fallback, join_with_timeout, linked_title,
+    preserve_recordings, recover_incomplete_sessions, wait_for_source, AnimationPath, AudioLayout,
+    RecordingLimits, RecordingRequest, RecordingSession, RecordingStartCancelled, SourceReady,
+    SourceReadyResult, TimedJoin, WebpMode,
 };
 use chrono::{Local, TimeZone};
 use ez_ffmpeg::{FfmpegContext, Input, Output};
@@ -12,6 +12,17 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+#[test]
+fn capture_join_timeout_returns_without_waiting_for_a_stuck_worker() {
+    let worker = std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(500));
+    });
+    let started = Instant::now();
+    let outcome = join_with_timeout(worker, Duration::from_millis(20));
+    assert!(matches!(outcome, TimedJoin::TimedOut));
+    assert!(started.elapsed() < Duration::from_millis(400));
+}
 
 #[test]
 fn linked_names() {
@@ -72,6 +83,7 @@ fn recording_limits_can_be_overridden_and_are_validated() {
     let limits = RecordingLimits {
         source_ready_timeout: Duration::from_millis(250),
         ready_poll_interval: Duration::from_millis(10),
+        capture_stop_timeout: Duration::from_secs(1),
     };
     let request = RecordingRequest::builder(
         OutputKind::Video(VideoContainer::Mp4),
@@ -97,9 +109,26 @@ fn recording_limits_can_be_overridden_and_are_validated() {
     .limits(RecordingLimits {
         source_ready_timeout: Duration::from_millis(10),
         ready_poll_interval: Duration::from_millis(20),
+        capture_stop_timeout: Duration::from_secs(1),
     })
     .build();
     assert!(invalid.is_err());
+
+    let invalid_stop = RecordingRequest::builder(
+        OutputKind::Video(VideoContainer::Mp4),
+        vec![Box::new(|| anyhow::bail!("unused"))],
+        Vec::new(),
+        mediaa_core::paths::MediaDir::new(dir.path().join("out")),
+        mediaa_core::paths::WorkDir::new(dir.path().join("work")),
+        "Recording".into(),
+    )
+    .limits(RecordingLimits {
+        source_ready_timeout: Duration::from_secs(1),
+        ready_poll_interval: Duration::from_millis(10),
+        capture_stop_timeout: Duration::ZERO,
+    })
+    .build();
+    assert!(invalid_stop.is_err());
 }
 
 #[test]

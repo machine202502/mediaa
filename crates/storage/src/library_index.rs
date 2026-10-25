@@ -1,3 +1,4 @@
+use crossbeam_channel::{Receiver, Sender};
 use mediaa_core::formats::MediaKind;
 use mediaa_core::library::{Details, KindFilter, LibraryEntry};
 use mediaa_core::naming;
@@ -6,7 +7,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const CACHE_DIR: &str = ".cache";
 pub fn cache_dir(media_dir: &Path) -> PathBuf {
@@ -84,8 +86,118 @@ pub struct LibraryIndex {
     dir: PathBuf,
     entries: Vec<LibraryEntry>,
     version: u64,
-    db: Option<rusqlite::Connection>,
+    writer: Option<IndexWriter>,
+    cache_dirty: bool,
+    next_cache_flush: Instant,
     pending_details: Vec<String>,
+}
+
+enum WriteBatch {
+    Changes {
+        upsert: Vec<LibraryEntry>,
+        delete: Vec<String>,
+    },
+    ReplaceAll(Vec<LibraryEntry>),
+    Flush(Sender<()>),
+}
+
+struct IndexWriter {
+    sender: Option<Sender<WriteBatch>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl IndexWriter {
+    fn new(db: rusqlite::Connection) -> Self {
+        let (sender, receiver) = crossbeam_channel::bounded(32);
+        let join = std::thread::Builder::new()
+            .name("library-index-writer".into())
+            .spawn(move || run_writer(db, receiver))
+            .ok();
+        Self {
+            sender: Some(sender),
+            join,
+        }
+    }
+
+    fn try_submit(&self, batch: WriteBatch) -> Result<(), WriteBatch> {
+        let Some(sender) = &self.sender else {
+            return Err(batch);
+        };
+        sender.try_send(batch).map_err(|error| error.into_inner())
+    }
+}
+
+impl Drop for IndexWriter {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
+fn run_writer(db: rusqlite::Connection, receiver: Receiver<WriteBatch>) {
+    while let Ok(batch) = receiver.recv() {
+        let result = match batch {
+            WriteBatch::Changes { upsert, delete } => write_changes(&db, &upsert, &delete),
+            WriteBatch::ReplaceAll(entries) => replace_all(&db, &entries),
+            WriteBatch::Flush(ack) => {
+                let _ = ack.send(());
+                Ok(())
+            }
+        };
+        if let Err(error) = result {
+            log::warn!("library index writer: {error}");
+        }
+    }
+}
+
+fn write_entries(
+    transaction: &rusqlite::Transaction<'_>,
+    entries: &[LibraryEntry],
+) -> rusqlite::Result<()> {
+    let mut put = transaction.prepare_cached(
+        "INSERT OR REPLACE INTO files (name, title, kind, size, modified_ms, width, height, duration, audio)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )?;
+    for entry in entries {
+        let details = entry.details;
+        put.execute(rusqlite::params![
+            entry.name,
+            entry.title,
+            entry.kind.code(),
+            entry.size as i64,
+            to_ms(entry.modified) as i64,
+            details.map(|details| details.width),
+            details.map(|details| details.height),
+            details.and_then(|details| details.duration_secs),
+            details.map(|details| details.audio),
+        ])?;
+    }
+    Ok(())
+}
+
+fn write_changes(
+    db: &rusqlite::Connection,
+    upsert: &[LibraryEntry],
+    delete: &[String],
+) -> rusqlite::Result<()> {
+    let transaction = db.unchecked_transaction()?;
+    write_entries(&transaction, upsert)?;
+    {
+        let mut remove = transaction.prepare_cached("DELETE FROM files WHERE name = ?1")?;
+        for name in delete {
+            remove.execute([name])?;
+        }
+    }
+    transaction.commit()
+}
+
+fn replace_all(db: &rusqlite::Connection, entries: &[LibraryEntry]) -> rusqlite::Result<()> {
+    let transaction = db.unchecked_transaction()?;
+    transaction.execute("DELETE FROM files", [])?;
+    write_entries(&transaction, entries)?;
+    transaction.commit()
 }
 
 fn to_ms(t: SystemTime) -> u64 {
@@ -132,45 +244,25 @@ fn unchanged(a: &LibraryEntry, b: &LibraryEntry) -> bool {
     a.size == b.size && to_ms(a.modified) == to_ms(b.modified)
 }
 
-fn kind_code(kind: MediaKind) -> &'static str {
-    match kind {
-        MediaKind::Image => "image",
-        MediaKind::Video => "video",
-        MediaKind::Animation => "animation",
-        MediaKind::Audio => "audio",
-    }
-}
-
-fn kind_from(code: &str) -> Option<MediaKind> {
-    [
-        MediaKind::Image,
-        MediaKind::Video,
-        MediaKind::Animation,
-        MediaKind::Audio,
-    ]
-    .into_iter()
-    .find(|k| kind_code(*k) == code)
-}
-
 fn read_rows(db: &rusqlite::Connection, dir: &Path) -> rusqlite::Result<Vec<LibraryEntry>> {
     let mut q = db.prepare(
         "SELECT name, title, kind, size, modified_ms, width, height, duration, audio FROM files",
     )?;
     let rows = q.query_map([], |r| {
-        let name: String = r.get(0)?;
-        let title: String = r.get(1)?;
-        let kind: String = r.get(2)?;
-        let width: Option<u32> = r.get(5)?;
+        let name: String = r.get("name")?;
+        let title: String = r.get("title")?;
+        let kind: String = r.get("kind")?;
+        let width: Option<u32> = r.get("width")?;
         let details = width.map(|width| -> rusqlite::Result<Details> {
             Ok(Details {
                 width,
-                height: r.get::<_, Option<u32>>(6)?.unwrap_or(0),
-                duration_secs: r.get(7)?,
-                audio: r.get::<_, Option<bool>>(8)?.unwrap_or(false),
+                height: r.get::<_, Option<u32>>("height")?.unwrap_or(0),
+                duration_secs: r.get("duration")?,
+                audio: r.get::<_, Option<bool>>("audio")?.unwrap_or(false),
             })
         });
-        let size = u64::try_from(r.get::<_, i64>(3)?).ok();
-        let modified_ms = u64::try_from(r.get::<_, i64>(4)?).ok();
+        let size = u64::try_from(r.get::<_, i64>("size")?).ok();
+        let modified_ms = u64::try_from(r.get::<_, i64>("modified_ms")?).ok();
         let details = details.transpose()?;
         Ok(size
             .zip(modified_ms)
@@ -181,8 +273,10 @@ fn read_rows(db: &rusqlite::Connection, dir: &Path) -> rusqlite::Result<Vec<Libr
         let Some((name, title, kind, size, modified_ms, details)) = row? else {
             continue;
         };
-        let (Some(parsed), Some(kind)) = (naming::parse_path(Path::new(&name)), kind_from(&kind))
-        else {
+        let (Some(parsed), Some(kind)) = (
+            naming::parse_path(Path::new(&name)),
+            MediaKind::from_code(&kind),
+        ) else {
             continue;
         };
         let Some(modified) = from_ms(modified_ms) else {
@@ -218,11 +312,14 @@ impl LibraryIndex {
                 .cmp(&a.modified)
                 .then_with(|| a.name.cmp(&b.name))
         });
+        let writer = db.map(IndexWriter::new);
         LibraryIndex {
             dir: dir.to_path_buf(),
             entries,
             version: 1,
-            db,
+            writer,
+            cache_dirty: false,
+            next_cache_flush: Instant::now(),
             pending_details: Vec::new(),
         }
     }
@@ -256,41 +353,48 @@ impl LibraryIndex {
         });
     }
 
-    fn store(&self, upsert: &[&LibraryEntry], delete: &[&str]) {
-        let Some(db) = &self.db else { return };
+    fn store(&mut self, upsert: Vec<LibraryEntry>, delete: Vec<String>) {
         if upsert.is_empty() && delete.is_empty() {
             return;
         }
-        let write = || -> rusqlite::Result<()> {
-            let tx = db.unchecked_transaction()?;
-            {
-                let mut put = tx.prepare_cached(
-                    "INSERT OR REPLACE INTO files (name, title, kind, size, modified_ms, width, height, duration, audio)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                )?;
-                for e in upsert {
-                    let d = e.details;
-                    put.execute(rusqlite::params![
-                        e.name,
-                        e.title,
-                        kind_code(e.kind),
-                        e.size as i64,
-                        to_ms(e.modified) as i64,
-                        d.map(|d| d.width),
-                        d.map(|d| d.height),
-                        d.and_then(|d| d.duration_secs),
-                        d.map(|d| d.audio),
-                    ])?;
-                }
-                let mut del = tx.prepare_cached("DELETE FROM files WHERE name = ?1")?;
-                for name in delete {
-                    del.execute([name])?;
-                }
-            }
-            tx.commit()
-        };
-        if let Err(e) = write() {
-            log::warn!("library index: {e}");
+        let batch = WriteBatch::Changes { upsert, delete };
+        if self
+            .writer
+            .as_ref()
+            .is_none_or(|writer| writer.try_submit(batch).is_err())
+        {
+            self.cache_dirty = true;
+        }
+    }
+
+    pub fn flush_cache(&mut self) {
+        if !self.cache_dirty || Instant::now() < self.next_cache_flush {
+            return;
+        }
+        let batch = WriteBatch::ReplaceAll(self.entries.clone());
+        if self
+            .writer
+            .as_ref()
+            .is_some_and(|writer| writer.try_submit(batch).is_ok())
+        {
+            self.cache_dirty = false;
+        } else {
+            self.next_cache_flush = Instant::now() + Duration::from_millis(500);
+        }
+    }
+
+    pub fn flush(&mut self) {
+        self.flush_cache();
+        if self.cache_dirty {
+            return;
+        }
+        let (ack, done) = crossbeam_channel::bounded(1);
+        if self
+            .writer
+            .as_ref()
+            .is_some_and(|writer| writer.try_submit(WriteBatch::Flush(ack)).is_ok())
+        {
+            let _ = done.recv_timeout(Duration::from_secs(2));
         }
     }
 
@@ -311,14 +415,12 @@ impl LibraryIndex {
         }
         self.entries = fresh;
         let gone: Vec<&str> = known.keys().map(String::as_str).collect();
+        let changed = !updated.is_empty() || !gone.is_empty();
         self.store(
-            &updated
-                .iter()
-                .map(|&i| &self.entries[i])
-                .collect::<Vec<_>>(),
-            &gone,
+            updated.iter().map(|&i| self.entries[i].clone()).collect(),
+            gone.into_iter().map(str::to_string).collect(),
         );
-        if updated.is_empty() && gone.is_empty() {
+        if !changed {
             self.entries.sort_by(|a, b| {
                 b.modified
                     .cmp(&a.modified)
@@ -361,10 +463,7 @@ impl LibraryIndex {
         if upserts.is_empty() && deletes.is_empty() {
             return;
         }
-        self.store(
-            &upserts.iter().collect::<Vec<_>>(),
-            &deletes.iter().map(String::as_str).collect::<Vec<_>>(),
-        );
+        self.store(upserts, deletes);
         self.changed();
     }
 
@@ -382,16 +481,15 @@ impl LibraryIndex {
     }
 
     pub fn flush_details(&mut self) {
-        if self.pending_details.is_empty() {
-            return;
+        if !self.pending_details.is_empty() {
+            let pending = std::mem::take(&mut self.pending_details);
+            let upserts: Vec<_> = self
+                .entries
+                .iter()
+                .filter(|entry| pending.contains(&entry.name))
+                .collect();
+            self.store(upserts.into_iter().cloned().collect(), Vec::new());
         }
-        let pending = std::mem::take(&mut self.pending_details);
-        let upserts: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|entry| pending.contains(&entry.name))
-            .collect();
-        self.store(&upserts, &[]);
     }
 
     pub fn query(&self, q: &Query) -> Vec<usize> {

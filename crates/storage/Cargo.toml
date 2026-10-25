@@ -14,7 +14,6 @@ log.workspace = true
 regex = "1.13.1"
 notify = "8.2.0"
 rusqlite.workspace = true
-tempfile.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

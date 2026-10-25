@@ -1,4 +1,5 @@
 use crate::formats::{AnimFormat, AudioFormat, ImageFormat, OutputKind, VideoContainer};
+use crate::limits::{AUDIO_KBPS, DEFAULT_MUSIC_AUDIO_KBPS, FPS, GIF_COLORS, VIDEO_QUALITY};
 use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -157,7 +158,7 @@ impl Default for AudioRecordSettings {
     fn default() -> Self {
         Self {
             format: AudioFormat::Mp3,
-            kbps: 256,
+            kbps: DEFAULT_MUSIC_AUDIO_KBPS,
             microphone: MicChoice::Auto,
             system_audio: true,
         }
@@ -374,13 +375,16 @@ impl Settings {
             &mut self.hotkey_record,
             &mut self.region_record,
         ] {
-            r.fps = r.fps.clamp(1, 60);
-            r.video_quality = r.video_quality.clamp(1, 100);
+            r.fps = FPS.clamp(r.fps);
+            r.video_quality = VIDEO_QUALITY.clamp(u32::from(r.video_quality)) as u8;
         }
         for a in [&mut self.anim, &mut self.hotkey_anim, &mut self.region_anim] {
-            a.fps = a.fps.clamp(1, 50);
-            a.gif_colors = a.gif_colors.clamp(4, 256);
-            a.webp_quality = a.webp_quality.min(100);
+            a.fps = FPS.clamp(a.fps);
+            a.gif_colors = GIF_COLORS.clamp(a.gif_colors);
+            a.webp_quality = VIDEO_QUALITY.clamp(u32::from(a.webp_quality)) as u8;
+        }
+        for audio in [&mut self.audio_record, &mut self.hotkey_audio] {
+            audio.kbps = AUDIO_KBPS.clamp(audio.kbps);
         }
         if !matches!(self.hotkey_record.output, OutputKind::Video(_)) {
             self.hotkey_record.output = OutputKind::Video(VideoContainer::Mkv);

@@ -634,3 +634,15 @@
 | 15 | W3.5 Замерить build loop и проверить состав workspace | голова | готово: warm `dev-check` 1,35–4,96 s; один runtime artifact | — |
 | 16 | Финальная проверка: fmt, clippy, Rust/Node tests, audit, UI и single-exe policy | голова | готово: 263 Rust, 4 desktop-live пропущены, 41 Node, clippy `-D warnings`; audit 0 blocking | — |
 | 17 | Release build/tests | голова | не запускалось: запрещено без отдельного запроса | — |
+| — | Коммит, задача закрыта | пользователь | готово, `9b6cb30` | — |
+
+## Партия 23-5 — типы, I/O-границы и watchdog (запрос пользователя 2026-10-25)
+
+| Шаг | Что | Исполнитель | Состояние | Лог |
+|---|---|---|---|---|
+| 1 | Вынести `AtomicFile` из storage в core и разорвать production-зависимость media → storage | голова | готово | `Cargo.toml` |
+| 2 | Ввести общие limits и разные `MonitorId`/`WindowId` | голова | готово: FPS/quality/GIF/audio bounds и typed native IDs | — |
+| 3 | Убрать SQLite-запись и чтение колонок из UI-потока; добавить bounded writer и codec `MediaKind` | голова | готово: named columns, async writer, full-snapshot recovery | — |
+| 4 | Убрать блокирующий thumbnail flush и добавить capture join watchdog | голова | готово: `try_send`, общий `capture_stop_timeout`, recovery каталога | — |
+| 5 | Проверка: fmt, clippy, Rust/Node tests и audit | голова | готово: 266 Rust, 4 desktop-live пропущены, 41 Node, clippy `-D warnings`, audit 0 blocking | — |
+| — | Release build/tests | голова | не запускалось: нет отдельного запроса | — |

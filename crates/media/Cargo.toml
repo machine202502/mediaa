@@ -9,7 +9,6 @@ build = "build.rs"
 [dependencies]
 chrono.workspace = true
 mediaa-core.workspace = true
-mediaa-storage.workspace = true
 mediaa-webp-pipeline.workspace = true
 anyhow.workspace = true
 log.workspace = true
@@ -23,3 +22,4 @@ tempfile.workspace = true
 
 [dev-dependencies]
 hound.workspace = true
+mediaa-storage.workspace = true

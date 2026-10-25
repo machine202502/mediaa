@@ -16,6 +16,24 @@
 
 ## Сделано
 
+### 2026-10-25 — типы native ID, фоновая запись SQLite и watchdog capture
+
+* `AtomicFile` перенесён в core. `mediaa-media` больше не зависит от `mediaa-storage`;
+  production-граф media снова содержит только core и webp-pipeline.
+* `MonitorId` и `WindowId` стали разными newtype-типами. Смешать native monitor/window IDs
+  теперь нельзя; typed ID протянуты через platform, UI, примеры и снимки.
+* FPS, video quality, GIF colors и audio bitrate получили единые ограничения в core.
+  UI, Settings, RecordingRequest и FFmpeg graph используют один источник истины.
+* SQLite-индекс пишется фоновым worker через bounded queue. UI обновляет snapshot без ожидания
+  диска; переполнение включает последующую публикацию полного snapshot. На exit ожидание
+  ограничено двумя секундами.
+* Колонки SQLite читаются по именам, `MediaKind` получил единый codec и roundtrip-тест.
+* Thumbnail shutdown больше не делает блокирующий `send`. Capture join имеет общий
+  20-секундный watchdog: зависший native-источник больше не держит UI в `Saving` бесконечно,
+  частичный work directory сохраняется для recovery.
+* Проверка: 266 Rust-тестов, 4 desktop-live пропущены; 41 Node-тест; fmt, clippy
+  `-D warnings`, debug `dev-check`, RustSec без blocking advisories. Release не запускался.
+
 ### 2026-10-25 — архитектурный аудит под LLM, границы крейтов и повторная проверка
 
 * `app.rs` уменьшен до 453 строк: окно, уведомления и пользовательские действия разнесены;
@@ -41,6 +59,7 @@
   (`ttf-parser` через font stack, `zbus_names`/`zvariant` через Linux D-Bus). Warm `dev-check`
   после типовой правки — 1,35–4,96 s. UX и пользовательская компоновка не менялись.
   Release-сборка и release-тесты не запускались по политике; артефакт остаётся одним exe.
+  Коммит `9b6cb30`.
 
 ### 2026-10-25 — единый release, быстрый debug и полное разбиение крупных модулей
 

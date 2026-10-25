@@ -1,9 +1,11 @@
+pub mod atomic_file;
 pub mod audio;
 pub mod formats;
 pub mod frame;
 pub mod geometry;
 pub mod hash;
 pub mod library;
+pub mod limits;
 pub mod logging;
 pub mod naming;
 pub mod pacer;

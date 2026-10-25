@@ -5,14 +5,15 @@ use crate::filters::Effort;
 use crate::live_webp::{LiveResult, LiveWebp};
 use crossbeam_channel::{Receiver, Sender};
 use ez_ffmpeg::{FfmpegContext, FramePushSource, Input, Output};
+use mediaa_core::atomic_file::AtomicFile;
 use mediaa_core::audio::{AudioTrack, Clock};
 use mediaa_core::formats::{AnimFormat, OutputKind};
+use mediaa_core::limits::FPS as FPS_LIMIT;
 use mediaa_core::naming;
 use mediaa_core::pacer::{SessionClock, SlotTracker};
 use mediaa_core::paths::{MediaDir, WorkDir};
 use mediaa_core::settings::AnimSettings;
 use mediaa_core::source::{AudioSource, SourceFactory};
-use mediaa_storage::atomic_file::AtomicFile;
 use mediaa_webp_pipeline::{PipelineTuning, DEFAULT_MAX_WORKERS};
 use parking_lot::{Condvar, Mutex};
 use std::path::{Path, PathBuf};
@@ -148,6 +149,12 @@ fn encode_with_linear_fallback(
 struct FinalizeFailure {
     error: anyhow::Error,
     recovery_files: Vec<PathBuf>,
+    keep_work_dir: bool,
+}
+
+struct FinalizeOutput {
+    paths: Vec<PathBuf>,
+    keep_work_dir: bool,
 }
 
 impl From<anyhow::Error> for FinalizeFailure {
@@ -155,8 +162,52 @@ impl From<anyhow::Error> for FinalizeFailure {
         Self {
             error,
             recovery_files: Vec::new(),
+            keep_work_dir: false,
         }
     }
+}
+
+enum TimedJoin<T> {
+    Finished(T),
+    Panicked,
+    TimedOut,
+    Unavailable,
+}
+
+fn join_with_timeout<T: Send + 'static>(handle: JoinHandle<T>, timeout: Duration) -> TimedJoin<T> {
+    let (sender, receiver) = crossbeam_channel::bounded(1);
+    let spawned = std::thread::Builder::new()
+        .name("join-watchdog".into())
+        .spawn(move || {
+            let _ = sender.send(handle.join().ok());
+        });
+    if spawned.is_err() {
+        return TimedJoin::Unavailable;
+    }
+    match receiver.recv_timeout(timeout) {
+        Ok(Some(value)) => TimedJoin::Finished(value),
+        Ok(None) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => TimedJoin::Panicked,
+        Err(crossbeam_channel::RecvTimeoutError::Timeout) => TimedJoin::TimedOut,
+    }
+}
+
+fn reap_capture(
+    handle: JoinHandle<anyhow::Result<Vec<PathBuf>>>,
+    timeout: Duration,
+) -> Result<(), (bool, String)> {
+    match join_with_timeout(handle, timeout) {
+        TimedJoin::Finished(Ok(_)) => Ok(()),
+        TimedJoin::Finished(Err(error)) => Err((false, format!("{error:#}"))),
+        TimedJoin::Panicked => Err((false, "capture thread panicked".into())),
+        TimedJoin::TimedOut => Err((true, "capture thread did not stop".into())),
+        TimedJoin::Unavailable => Err((true, "capture thread could not be joined".into())),
+    }
+}
+
+struct CaptureShutdown {
+    videos: Vec<RecordedVideo>,
+    live: Option<LiveResult>,
+    failures: Vec<String>,
 }
 
 pub struct RecordingSession {
@@ -176,6 +227,7 @@ pub struct RecordingSession {
     work_dir: WorkDir,
     title: String,
     started: chrono::DateTime<chrono::Local>,
+    capture_stop_timeout: Duration,
     events_tx: Sender<SessionEvent>,
     events_rx: Receiver<SessionEvent>,
 }
@@ -262,6 +314,7 @@ impl RecordingSession {
         let mut captures = Vec::new();
         let mut errors = Vec::new();
         let mut fatal_error = None;
+        let mut preserve_work_dir = false;
         for (i, factory) in req.sources.into_iter().enumerate() {
             if start_cancel.load(Ordering::Relaxed) {
                 fatal_error = Some(StartFailure::Cancelled);
@@ -284,7 +337,7 @@ impl RecordingSession {
             let ctl = control.clone();
             let (kind, fps, quality, max_h) = (
                 req.output,
-                req.fps.clamp(1, 60),
+                FPS_LIMIT.clamp(req.fps),
                 req.video_quality,
                 req.max_height,
             );
@@ -329,23 +382,40 @@ impl RecordingSession {
                 }
                 SourceReady::Failed(error) => {
                     errors.push(error);
-                    let _ = join.join();
+                    if let Err((preserve, error)) = reap_capture(join, limits.capture_stop_timeout)
+                    {
+                        preserve_work_dir |= preserve;
+                        errors.push(error);
+                    }
                 }
                 SourceReady::Exited => {
                     errors.push("capture thread exited".into());
-                    let _ = join.join();
+                    if let Err((preserve, error)) = reap_capture(join, limits.capture_stop_timeout)
+                    {
+                        preserve_work_dir |= preserve;
+                        errors.push(error);
+                    }
                 }
                 SourceReady::TimedOut => {
                     let error = "capture source did not become ready";
                     errors.push(error.into());
                     control.stop();
-                    let _ = join.join();
+                    if let Err((preserve, stop_error)) =
+                        reap_capture(join, limits.capture_stop_timeout)
+                    {
+                        preserve_work_dir |= preserve;
+                        errors.push(stop_error);
+                    }
                     fatal_error = Some(StartFailure::Message(error.into()));
                     break;
                 }
                 SourceReady::Cancelled => {
                     control.stop();
-                    let _ = join.join();
+                    if let Err((preserve, error)) = reap_capture(join, limits.capture_stop_timeout)
+                    {
+                        preserve_work_dir |= preserve;
+                        errors.push(error);
+                    }
                     fatal_error = Some(StartFailure::Cancelled);
                     break;
                 }
@@ -398,14 +468,15 @@ impl RecordingSession {
             work_dir: req.work_dir,
             title: req.title,
             started: chrono::Local::now(),
+            capture_stop_timeout: limits.capture_stop_timeout,
             events_tx,
             events_rx,
         };
         if let Some(failure) = fatal_error {
-            session.discard();
+            session.discard_with_work_dir(!preserve_work_dir);
             return Err(failure.into());
         } else if start_cancel.load(Ordering::Relaxed) {
-            session.discard();
+            session.discard_with_work_dir(!preserve_work_dir);
             return Err(RecordingStartCancelled.into());
         } else if let OutputKind::Audio(_) = session.output {
             if session.tracks.is_empty() {
@@ -500,19 +571,45 @@ impl RecordingSession {
         &mut self,
         finish_live: bool,
         finalize_cancel: Option<Arc<AtomicBool>>,
-    ) -> (Vec<RecordedVideo>, Option<LiveResult>) {
+    ) -> CaptureShutdown {
         self.control.stop();
         let mut done = Vec::new();
+        let mut failures = Vec::new();
+        let deadline = Instant::now() + self.capture_stop_timeout;
         for c in self.captures.drain(..) {
-            let ok = c.join.join().map_err(|_| anyhow::anyhow!("panicked"));
             let frames = c.frames.load(Ordering::Relaxed);
-            match ok {
-                Ok(Ok(files)) if frames > 0 && !files.is_empty() => done.push(RecordedVideo {
-                    index: c.index,
-                    name: c.name,
-                    files,
-                }),
-                _ => log::warn!("capture \"{}\" produced no usable output", c.name),
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                failures.push(format!(
+                    "capture \"{}\" did not stop within {:?}",
+                    c.name, self.capture_stop_timeout
+                ));
+                continue;
+            }
+            match join_with_timeout(c.join, remaining) {
+                TimedJoin::Finished(Ok(files)) if frames > 0 && !files.is_empty() => {
+                    done.push(RecordedVideo {
+                        index: c.index,
+                        name: c.name,
+                        files,
+                    });
+                }
+                TimedJoin::Finished(Ok(_)) => {
+                    failures.push(format!("capture \"{}\" produced no usable output", c.name));
+                }
+                TimedJoin::Finished(Err(error)) => {
+                    failures.push(format!("capture \"{}\" failed: {error:#}", c.name));
+                }
+                TimedJoin::Panicked => {
+                    failures.push(format!("capture \"{}\" panicked", c.name));
+                }
+                TimedJoin::TimedOut => failures.push(format!(
+                    "capture \"{}\" did not stop within {:?}",
+                    c.name, self.capture_stop_timeout
+                )),
+                TimedJoin::Unavailable => {
+                    failures.push(format!("capture \"{}\" could not be joined", c.name));
+                }
             }
         }
         for a in &mut self.audio {
@@ -527,7 +624,11 @@ impl RecordingSession {
             }
         });
         done.sort_by_key(|video| video.index);
-        (done, live)
+        CaptureShutdown {
+            videos: done,
+            live,
+            failures,
+        }
     }
 
     fn finish_tracks(&mut self) -> Vec<PathBuf> {
@@ -542,14 +643,28 @@ impl RecordingSession {
             .collect()
     }
 
-    fn discard(mut self) {
-        self.shutdown(false, None);
-        let _ = self.finish_tracks();
-        let _ = std::fs::remove_dir_all(&self.work_dir);
+    fn discard(self) {
+        self.discard_with_work_dir(true);
     }
 
-    fn finalize(mut self, cancel: &Arc<AtomicBool>) -> Result<Vec<PathBuf>, FinalizeFailure> {
-        let (mut videos, live) = self.shutdown(true, Some(cancel.clone()));
+    fn discard_with_work_dir(mut self, remove_work_dir: bool) {
+        self.shutdown(false, None);
+        let _ = self.finish_tracks();
+        if remove_work_dir {
+            let _ = std::fs::remove_dir_all(&self.work_dir);
+        }
+    }
+
+    fn finalize(mut self, cancel: &Arc<AtomicBool>) -> Result<FinalizeOutput, FinalizeFailure> {
+        let CaptureShutdown {
+            mut videos,
+            live,
+            failures,
+        } = self.shutdown(true, Some(cancel.clone()));
+        let keep_work_dir = !failures.is_empty();
+        for failure in &failures {
+            let _ = self.events_tx.send(SessionEvent::Warning(failure.clone()));
+        }
         let wavs = self.finish_tracks();
         if cancel.load(Ordering::Relaxed) {
             return Err(anyhow::Error::from(crate::job::Cancelled).into());
@@ -574,10 +689,25 @@ impl RecordingSession {
                 cancel,
             )?;
             pending.commit()?;
-            return Ok(vec![out]);
+            return Ok(FinalizeOutput {
+                paths: vec![out],
+                keep_work_dir,
+            });
         }
         if videos.is_empty() {
-            return Err(anyhow::anyhow!("no frames were recorded").into());
+            let error = if failures.is_empty() {
+                anyhow::anyhow!("no frames were recorded")
+            } else {
+                anyhow::anyhow!(
+                    "recording captured no usable sources: {}",
+                    failures.join("; ")
+                )
+            };
+            return Err(FinalizeFailure {
+                error,
+                recovery_files: Vec::new(),
+                keep_work_dir,
+            });
         }
         let requested_path = animation_path(self.output, self.webp_mode);
         let trace = self.webp_trace.as_deref();
@@ -656,7 +786,10 @@ impl RecordingSession {
                 if let Some(trace) = trace {
                     log::info!("[{trace}] stage=live complete; merged=webp");
                 }
-                return Ok(live_outputs);
+                return Ok(FinalizeOutput {
+                    paths: live_outputs,
+                    keep_work_dir,
+                });
             }
             for output in live_outputs {
                 let _ = std::fs::remove_file(output);
@@ -683,6 +816,7 @@ impl RecordingSession {
                     return Err(FinalizeFailure {
                         error,
                         recovery_files,
+                        keep_work_dir,
                     });
                 }
                 video.files = vec![combined];
@@ -783,6 +917,7 @@ impl RecordingSession {
                 return Err(FinalizeFailure {
                     error,
                     recovery_files,
+                    keep_work_dir,
                 });
             }
             if matches!(self.output, OutputKind::Anim(_)) {
@@ -807,7 +942,10 @@ impl RecordingSession {
         } else if let Some(trace) = trace {
             log::info!("[{trace}] stage=complete fallback=false");
         }
-        Ok(outputs)
+        Ok(FinalizeOutput {
+            paths: outputs,
+            keep_work_dir,
+        })
     }
 }
 

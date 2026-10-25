@@ -57,25 +57,34 @@ pub(super) fn finish_session(
 ) {
     let events = session.events_tx.clone();
     let work_dir = session.work_dir.clone();
-    let event = if action == StopAction::Save {
+    let (event, keep_work_dir) = if action == StopAction::Save {
         match session.finalize(&cancel) {
-            Ok(paths) => SessionEvent::Finished(paths),
-            Err(failure) if crate::job::is_cancelled(&failure.error) => SessionEvent::Cancelled,
+            Ok(output) => (SessionEvent::Finished(output.paths), output.keep_work_dir),
+            Err(failure) if crate::job::is_cancelled(&failure.error) => {
+                (SessionEvent::Cancelled, failure.keep_work_dir)
+            }
             Err(failure) => {
                 let kind = classify_media_error(&failure.error);
-                SessionEvent::Failed(SessionFailure {
-                    error: format!("{:#}", failure.error),
-                    kind,
-                    recovery_files: failure.recovery_files,
-                    log_ref: webp_trace,
-                })
+                let keep_work_dir = failure.keep_work_dir
+                    || failure
+                        .recovery_files
+                        .iter()
+                        .any(|path| path.starts_with(&work_dir));
+                (
+                    SessionEvent::Failed(SessionFailure {
+                        error: format!("{:#}", failure.error),
+                        kind,
+                        recovery_files: failure.recovery_files,
+                        log_ref: webp_trace,
+                    }),
+                    keep_work_dir,
+                )
             }
         }
     } else {
         session.discard();
-        SessionEvent::Cancelled
+        (SessionEvent::Cancelled, false)
     };
-    let keep_work_dir = matches!(&event, SessionEvent::Failed(failure) if failure.recovery_files.iter().any(|path| path.starts_with(&work_dir)));
     if !keep_work_dir {
         let _ = std::fs::remove_dir_all(&work_dir);
     }

@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn marker_uses_monitor_scale_and_stays_outside_the_recorded_edge() {
         let monitor = MonitorInfo {
-            id: 1,
+            id: mediaa_platform::screen::MonitorId::new(1),
             device: "display".into(),
             index: 0,
             name: "Display".into(),

@@ -1,3 +1,4 @@
+use mediaa_core::limits::{FPS, GIF_COLORS, VIDEO_QUALITY};
 use mediaa_core::settings::{AnimSettings, GifDither};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -53,7 +54,7 @@ impl Effort {
 }
 
 pub fn crf_for_quality(quality: u8) -> u32 {
-    let q = u32::from(quality.clamp(1, 100));
+    let q = VIDEO_QUALITY.clamp(u32::from(quality));
     40 - (q - 1) * 24 / 99
 }
 
@@ -77,9 +78,9 @@ pub fn gif_graph(a: &AnimSettings) -> String {
     format!(
         "[0:v]fps={fps}{scale},split[a][b];[a]palettegen=max_colors={colors}:stats_mode=diff[p];\
          [b][p]paletteuse=dither={dither}:diff_mode=rectangle[v]",
-        fps = a.fps.clamp(1, 60),
+        fps = FPS.clamp(a.fps),
         scale = scale_step(a.height_limit()),
-        colors = a.gif_colors.clamp(4, 256),
+        colors = GIF_COLORS.clamp(a.gif_colors),
         dither = dither_option(a.gif_dither),
     )
 }
@@ -87,7 +88,7 @@ pub fn gif_graph(a: &AnimSettings) -> String {
 pub fn webp_graph(a: &AnimSettings) -> String {
     format!(
         "[0:v]fps={}{}[v]",
-        a.fps.clamp(1, 60),
+        FPS.clamp(a.fps),
         scale_step(a.height_limit())
     )
 }
@@ -95,7 +96,7 @@ pub fn webp_graph(a: &AnimSettings) -> String {
 pub fn webp_segment_graph(a: &AnimSettings) -> String {
     format!(
         "[0:v]fps={}{},setpts=PTS-STARTPTS[v]",
-        a.fps.clamp(1, 60),
+        FPS.clamp(a.fps),
         scale_step(a.height_limit())
     )
 }
@@ -121,17 +122,17 @@ pub fn palette_graph(max_height: Option<u32>, colors: u16) -> String {
     format!(
         "[0:v]{scale}split[a][b];[a]palettegen=max_colors={c}:reserve_transparent=1:stats_mode=single[p];\
          [b][p]paletteuse=dither=sierra2_4a:alpha_threshold=128[v]",
-        c = colors.clamp(2, 256)
+        c = GIF_COLORS.clamp(u32::from(colors))
     )
 }
 
 pub fn vp9_crf(quality: u8) -> u32 {
-    let q = u32::from(quality.clamp(1, 100));
+    let q = VIDEO_QUALITY.clamp(u32::from(quality));
     55 - (q - 1) * 40 / 99
 }
 
 pub fn qscale(quality: u8) -> i32 {
-    let q = i32::from(quality.clamp(1, 100));
+    let q = VIDEO_QUALITY.clamp(u32::from(quality)) as i32;
     31 - (q - 1) * 29 / 99
 }
 

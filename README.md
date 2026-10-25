@@ -47,8 +47,8 @@ The window has three sections:
 
 ```
 crates/
-  core/           pure models and rules: settings, geometry, frames, formats, pacing, names, WAV, paths
-  storage/        SQLite indexes/caches, library watcher, thumbnail atlas, atomic file publication
+  core/           models, rules and file primitives: settings, geometry, formats, limits, paths, atomic publication
+  storage/        background SQLite index writer, caches, library watcher and thumbnail atlas
   render/         annotations and overlay layout (tiny-skia, fonts)
   media/          FFmpeg via ez-ffmpeg: recording, muxing, conversion, previews and thumbnails
   platform/       OS capture, audio I/O, clipboard/files, cursor and window integration

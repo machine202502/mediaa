@@ -2,9 +2,35 @@ use anyhow::{anyhow, Context};
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MonitorId(u32);
+
+impl MonitorId {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct WindowId(u32);
+
+impl WindowId {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct MonitorInfo {
-    pub id: u32,
+    pub id: MonitorId,
     pub device: String,
     pub index: usize,
     pub name: String,
@@ -28,7 +54,7 @@ impl MonitorInfo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowInfo {
-    pub id: u32,
+    pub id: WindowId,
     pub title: String,
     pub app: String,
     pub pid: u32,
@@ -53,7 +79,7 @@ fn monitor_info(m: &xcap::Monitor, index: usize) -> anyhow::Result<MonitorInfo> 
         .filter(|n| !n.trim().is_empty() && !n.starts_with("Unknown"))
         .unwrap_or_else(|| format!("Display {}", index + 1));
     Ok(MonitorInfo {
-        id: m.id()?,
+        id: MonitorId::new(m.id()?),
         device: m.name().unwrap_or_default(),
         index,
         name,
@@ -76,27 +102,28 @@ pub fn monitors() -> anyhow::Result<Vec<MonitorInfo>> {
     Ok(list)
 }
 
-pub fn monitor_at(x: i32, y: i32) -> Option<u32> {
+pub fn monitor_at(x: i32, y: i32) -> Option<MonitorId> {
     xcap::Monitor::from_point(x, y)
         .ok()
         .and_then(|m| m.id().ok())
+        .map(MonitorId::new)
 }
 
-fn find_monitor(id: u32) -> anyhow::Result<xcap::Monitor> {
+fn find_monitor(id: MonitorId) -> anyhow::Result<xcap::Monitor> {
     xcap::Monitor::all()?
         .into_iter()
-        .find(|m| m.id().ok() == Some(id))
-        .ok_or_else(|| anyhow!("monitor {id} is no longer connected"))
+        .find(|m| m.id().ok() == Some(id.get()))
+        .ok_or_else(|| anyhow!("monitor {} is no longer connected", id.get()))
 }
 
-fn find_window(id: u32) -> anyhow::Result<xcap::Window> {
+fn find_window(id: WindowId) -> anyhow::Result<xcap::Window> {
     xcap::Window::all()?
         .into_iter()
-        .find(|w| w.id().ok() == Some(id))
-        .ok_or_else(|| anyhow!("window {id} was closed"))
+        .find(|w| w.id().ok() == Some(id.get()))
+        .ok_or_else(|| anyhow!("window {} was closed", id.get()))
 }
 
-pub fn capture_monitor(id: u32) -> anyhow::Result<Frame> {
+pub fn capture_monitor(id: MonitorId) -> anyhow::Result<Frame> {
     let img = find_monitor(id)?
         .capture_image()
         .context("screen capture failed")?;
@@ -116,7 +143,7 @@ pub fn windows() -> anyhow::Result<Vec<WindowInfo>> {
             continue;
         }
         list.push(WindowInfo {
-            id: w.id()?,
+            id: WindowId::new(w.id()?),
             title,
             app: w.app_name().unwrap_or_default(),
             pid: w.pid().unwrap_or(0),
@@ -127,7 +154,7 @@ pub fn windows() -> anyhow::Result<Vec<WindowInfo>> {
     Ok(list)
 }
 
-pub fn capture_window(id: u32) -> anyhow::Result<Frame> {
+pub fn capture_window(id: WindowId) -> anyhow::Result<Frame> {
     #[cfg(windows)]
     match crate::wgc::WgcSource::window_frame(id) {
         Ok(frame) => return Ok(frame),
@@ -148,7 +175,11 @@ pub struct MonitorSource {
 }
 
 impl MonitorSource {
-    pub fn new(monitor_id: u32, region: Option<Rect>, with_cursor: bool) -> anyhow::Result<Self> {
+    pub fn new(
+        monitor_id: MonitorId,
+        region: Option<Rect>,
+        with_cursor: bool,
+    ) -> anyhow::Result<Self> {
         let monitor = find_monitor(monitor_id)?;
         let info = monitor_info(&monitor, 0)?;
         let region = match region {
@@ -222,7 +253,7 @@ pub struct WindowSource {
 }
 
 impl WindowSource {
-    pub fn new(window_id: u32, with_cursor: bool) -> anyhow::Result<Self> {
+    pub fn new(window_id: WindowId, with_cursor: bool) -> anyhow::Result<Self> {
         let window = find_window(window_id)?;
         let first = window.capture_image().context("window capture failed")?;
         let size = (first.width() & !1, first.height() & !1);
@@ -283,7 +314,7 @@ fn draw_cursor(frame: &mut Frame, origin: (i32, i32), scale: f32) {
 }
 
 pub fn monitor_source(
-    monitor_id: u32,
+    monitor_id: MonitorId,
     region: Option<Rect>,
     with_cursor: bool,
 ) -> anyhow::Result<Box<dyn FrameSource>> {
@@ -314,7 +345,10 @@ pub fn monitor_source(
     Ok(Box::new(src))
 }
 
-pub fn window_source(window_id: u32, with_cursor: bool) -> anyhow::Result<Box<dyn FrameSource>> {
+pub fn window_source(
+    window_id: WindowId,
+    with_cursor: bool,
+) -> anyhow::Result<Box<dyn FrameSource>> {
     #[cfg(windows)]
     {
         let name = find_window(window_id)?
