@@ -1,6 +1,6 @@
-use crate::frame::Frame;
-use crate::geometry::Rect;
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
+use mediaa_core::frame::Frame;
+use mediaa_core::geometry::Rect;
 use std::sync::{Arc, OnceLock};
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, PixmapMut, Stroke, Transform};
 

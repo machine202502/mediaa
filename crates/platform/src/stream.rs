@@ -1,8 +1,9 @@
 use anyhow::Context as _;
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
+use parking_lot::{Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 const FIRST_FRAME_TIMEOUT: Duration =
@@ -33,10 +34,11 @@ impl StreamSource {
     ) -> anyhow::Result<Self> {
         let monitor_size = (monitor.width()?, monitor.height()?);
         let (recorder, rx) = monitor.video_recorder().context("screen recorder")?;
+        recorder.start().context("start screen recorder")?;
         let latest = Arc::new(Latest::default());
         let stop = Arc::new(AtomicBool::new(false));
         let (l, s) = (latest.clone(), stop.clone());
-        std::thread::Builder::new()
+        if let Err(error) = std::thread::Builder::new()
             .name("capture-stream".into())
             .spawn(move || {
                 while !s.load(Ordering::Relaxed) {
@@ -48,13 +50,15 @@ impl StreamSource {
                                 .iter_mut()
                                 .for_each(|p| p[3] = 255);
                         }
-                        *l.frame.lock().expect("frame lock") =
-                            Some(Frame::new(f.width, f.height, raw));
+                        *l.frame.lock() = Some(Frame::new(f.width, f.height, raw));
                         l.arrived.notify_all();
                     }
                 }
-            })?;
-        recorder.start().context("start screen recorder")?;
+            })
+        {
+            let _ = recorder.stop();
+            return Err(error.into());
+        }
         let mut s = Self {
             name,
             size: (0, 0),
@@ -65,12 +69,10 @@ impl StreamSource {
             stop,
             last: None,
         };
-        let guard = s.latest.frame.lock().expect("frame lock");
-        let (guard, _) = s
-            .latest
+        let mut guard = s.latest.frame.lock();
+        s.latest
             .arrived
-            .wait_timeout_while(guard, FIRST_FRAME_TIMEOUT, |f| f.is_none())
-            .expect("frame lock");
+            .wait_while_for(&mut guard, |f| f.is_none(), FIRST_FRAME_TIMEOUT);
         let first = guard.clone().context("no frame from the screen recorder")?;
         drop(guard);
         let first = s.cut(first);
@@ -123,7 +125,7 @@ impl FrameSource for StreamSource {
     }
 
     fn grab(&mut self) -> anyhow::Result<Frame> {
-        if let Some(f) = self.latest.frame.lock().expect("frame lock").take() {
+        if let Some(f) = self.latest.frame.lock().take() {
             self.last = Some(self.cut_to_size(self.cut(f)));
         }
         self.last.clone().context("no frame yet")

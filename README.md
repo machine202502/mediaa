@@ -40,16 +40,20 @@ The window has three sections:
   Russian (system language by default). Closing the window hides the app to the **tray** (on by
   default, switchable in Settings); a left click starts an area screenshot by default, can open the
   window instead, and stops and saves a running recording by default; quitting is done from the
-  tray menu.
+  tray menu. Only one instance runs at a time; launching it again restores the existing window.
+  Recordings interrupted by a crash or shutdown are recovered into the library on the next start.
 
 ## Project layout
 
 ```
 crates/
-  core/      settings, selection geometry, annotations (tiny-skia), pacing, naming, library, WAV  (no FFmpeg)
-  media/     FFmpeg pipeline via ez-ffmpeg: recording sessions, muxing, conversions, thumbnails
-  platform/  OS integration: xcap (screenshots; macOS/Wayland recording), windows-capture (Windows recording), xcb + MIT-SHM (X11 recording), cpal (audio), clipboard, open/trash
-  app/       egui UI (eframe + wgpu), tray, hotkeys, area picker, i18n (locales/*.toml) -> `mediaa`
+  core/           pure models and rules: settings, geometry, frames, formats, pacing, names, WAV, paths
+  storage/        SQLite indexes/caches, library watcher, thumbnail atlas, atomic file publication
+  render/         annotations and overlay layout (tiny-skia, fonts)
+  media/          FFmpeg via ez-ffmpeg: recording, muxing, conversion, previews and thumbnails
+  platform/       OS capture, audio I/O, clipboard/files, cursor and window integration
+  webp-pipeline/  budgeted parallel animated-WebP scheduler and segment merge
+  app/            library facade, egui UI (eframe + wgpu), tray, hotkeys, i18n -> `mediaa`
 scripts/     build / run / test helpers for every platform (see below)
 vcpkg.json   static FFmpeg 8.1 (avcodec, avformat, avfilter, swscale, swresample, x264, libvpx, libwebp, opus, mp3lame, dav1d)
 ```
@@ -176,7 +180,19 @@ virtual X server and a screenshot is saved to `dist/linux/smoke.png`:
 
 ```powershell
 .\scripts\windows\test.ps1          # or: cargo test --workspace (with the env from env.ps1)
+cargo check --workspace --all-targets --profile dev-check
+.\scripts\windows\test-fast.ps1
+.\scripts\windows\test-release.ps1
 ```
+
+The `dev-check` profile is for fast edit/feedback loops: it disables dependency optimization and
+debug info while the normal dev profile keeps internal crates optimized for recording tests.
+Debug test scripts use the `rust-lld` linker. Release testing is never part of the normal loop and
+is run only on request. The release artifact remains a single `dist/windows/mediaa.exe`.
+
+`test.ps1` also runs formatting, Clippy with warnings denied, the script tests and — when installed —
+`cargo audit --file Cargo.lock --deny unsound --deny yanked`. Install the optional RustSec scanner with
+`cargo install cargo-audit --locked`.
 
 ```bash
 scripts/linux/build.sh --test       # Linux
@@ -234,4 +250,5 @@ changed in Settings.
 
 Source code: MIT. The binaries link FFmpeg built with **libx264 (GPL)**, so distributed builds
 are covered by the GPL. To ship a non-GPL build, drop `gpl`/`x264` from `vcpkg.json` (e.g. use
-`openh264`) and adjust the encoder in `crates/media`.
+`openh264`) and adjust the encoder in `crates/media`. The source license text is in
+[LICENSE](LICENSE).

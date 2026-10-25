@@ -16,6 +16,143 @@
 
 ## Сделано
 
+### 2026-10-25 — архитектурный аудит под LLM, границы крейтов и повторная проверка
+
+* `app.rs` уменьшен до 453 строк: окно, уведомления и пользовательские действия разнесены;
+  `pages/convert`, `pages/record`, `pages/library`, WebP scheduler и integration tests разделены
+  по ответственности. `app.rs` больше не смешивает lifecycle, команды, tray/hotkey и UI.
+* `mediaa-storage` и `mediaa-render` выделены из core. `platform` больше не зависит от `render`
+  и production-части storage: курсор относится к платформенному слою, storage нужен platform
+  только примерам и тестам.
+* Введены `AppIdentity`, `RecordingLimits`, `PreviewLimits`, `TaskId`/`TaskKind`/`TaskExit`,
+  `TaskSupervisor`, `MediaErrorKind` и typed `SourcePath`/`OutputPath`/`MediaDir`/`WorkDir`/
+  `CachePath`. FNV-хеширование вынесено в core, формат даты имени имеет одного владельца,
+  библиотечный поиск больше не дублирует его.
+* Все production-каналы ограничены; progress имеет latest-value семантику. `TaskSupervisor`
+  сохраняет panic-статус после фонового reap. Watcher при переполнении запрашивает полный rescan.
+  Повреждённые numeric/geometry-строки SQLite-кэшей пропускаются вместо panic, Unix activation
+  не может зависнуть на чтении сокета. Windows activation использует scope-specific named event,
+  а не поиск окна по заголовку, поэтому dev-scope не активирует чужую копию.
+* Добавлены тесты на reap после panic, переполнение watcher, испорченную библиотечную БД,
+  испорченные thumbnail-slots и malformed `Frame`, typed conversion paths и limits.
+  Навигация «задача → файлы → тесты → команда» записана в `workflow/dev-context.md`.
+* Проверка: 263 Rust-теста, 4 desktop-live пропущены; 41 Node-тест; fmt, clippy `-D warnings`,
+  debug `dev-check`. RustSec: 0 vulnerability/unsound/yanked, четыре `unmaintained`
+  (`ttf-parser` через font stack, `zbus_names`/`zvariant` через Linux D-Bus). Warm `dev-check`
+  после типовой правки — 1,35–4,96 s. UX и пользовательская компоновка не менялись.
+  Release-сборка и release-тесты не запускались по политике; артефакт остаётся одним exe.
+
+### 2026-10-25 — единый release, быстрый debug и полное разбиение крупных модулей
+
+* `media/recorder.rs` разделён на `request`, `capture`, `finalize`, `recovery` и `tests`;
+  корень уменьшен с 1608 до 782 строк. `overlay.rs` уменьшен до 620 строк (`overlay/editor.rs`),
+  `app.rs` — до 874 (`capture`, `recording`, `recovery`, `tasks`, `notices`, `state`),
+  `library.rs` — до 661 (`grid`, `cleanup`, `actions`).
+* App собран как library + thin binary: `lib.rs` содержит модули приложения, `main.rs` только
+  logging, single-instance и eframe startup. Появился отдельный быстрый target
+  `cargo test -p mediaa --lib`.
+* Старт, стоп, пауза и quit проходят через typed `AppCommand`/`RecordingCommand`; страницы, трей
+  и хоткеи используют один dispatcher. `RecordingRequest` получил private fields, builder и
+  validation: противоречивые audio/video requests теперь невозможно собрать.
+* Добавлены `test-fast`, ручной `test-release.ps1` и debug `env-fast.ps1` с `rust-lld`.
+  Link приложения: 4,5 с против 9,9 с стандартным linker. Холодный focused `test-fast` — 82 с,
+  после правки `app.rs` — 5,2 с. `cargo-nextest` отсутствует и не добавлялся скрыто.
+* Политика: обычные тесты и отладка только в debug; release-тесты запускаются только по явному
+  запросу; пользовательский артефакт всегда один `dist/windows/mediaa.exe`, split/DLL release
+  не поддерживается. Release в этой партии не запускался.
+* Проверка: 252 Rust-теста, 4 desktop-live пропущены; 41 Node-тест; fmt, clippy `-D warnings`,
+  RustSec без blocking advisories. `rust-lld` выдаёт известный `LNK4217` от bundled SQLite.
+
+### 2026-10-25 — единый release, быстрый debug и модули под LLM
+
+* `media/recorder.rs` разделён на `request`, `capture`, `finalize`, `recovery` и `tests`;
+  корневой файл уменьшен с 1608 до 782 строк. Public API сохранён через фасад модуля.
+* `app/overlay.rs` разделён на controller и `overlay/editor.rs`; screenshot lifecycle вынесен
+  в `app/capture.rs`. `app.rs` уменьшен до 874 строк, `library.rs` — до 661.
+* App разделён на library и thin binary: `src/lib.rs` содержит приложение для тестов,
+  `main.rs` отвечает только за logging, single-instance и eframe startup. `cargo test -p mediaa
+  --lib` больше не тестирует binary target.
+* Старт/стоп/пауза записи проходят через `AppCommand` → `RecordingCommand`; страницы, трей и
+  хоткеи больше не обходят dispatcher. Quit из трея также идёт через `AppCommand`.
+* `RecordingRequest` имеет private fields и builder с `build() -> Result`: нельзя создать
+  audio-only с video sources, video без sources, неверный fps/quality/bitrate или пустые каталоги.
+  Тест на невозможные комбинации добавлен.
+* Добавлены `test-fast`, `test-release.ps1` и debug-only `env-fast.ps1` с `rust-lld`. Замер link:
+  4,5 с против 9,9 с стандартным linker. `LNK4217` от bundled SQLite остаётся известным
+  диагностическим warning и не меняет код возврата.
+* Политика сборки зафиксирована: обычные тесты/отладка только debug; release-тесты запускаются
+  только по прямому запросу; пользовательский артефакт всегда один `dist/windows/mediaa.exe`.
+  Split-runtime/DLL-вариант не добавлялся.
+* `cargo-nextest` в окружении не установлен и скрыто не добавлялся. Проверка: 252 Rust-теста,
+  4 desktop-live пропущены; 41 Node-тест; fmt, clippy `-D warnings`, RustSec без blocking advisories.
+  Release-сборка по принятой политике не запускалась.
+
+### 2026-10-25 — границы для LLM, типизированные фоновые задачи и быстрый build loop
+
+* `app.rs` разгружен с 2308 до примерно 1054 строк: состояния и уведомления,
+  lifecycle записи, recovery, учёт фоновой работы и тесты вынесены в
+  `app/{state,notices,recording,recovery,tasks,tests}.rs`. Библиотека разделена на
+  контроллер, `grid.rs` и `cleanup.rs`; production-файлы вместо смешанных UI/данных/удаления
+  теперь имеют одну основную причину изменения.
+* `ActiveTasks`/`WorkKind` стали единым источником истины для close, quit и состояния трея;
+  вместо комбинации из четырёх boolean-флагов используется типизированный набор.
+* Публичные контракты защищены от boolean trap: `StopAction`, `AudioLayout`, `WebpMode`,
+  `WebpSegmentation`, `AutoStart`. UI-настройки по-прежнему хранят независимые boolean-поля,
+  но на границе преобразуются в валидный запрос.
+* Progress финализации больше не идёт через event-очередь: `RecordingProgress` хранит последнее
+  значение в atomic, а канал остаётся для предупреждений и терминальных событий. Значение
+  ограничивается диапазоном 0–100 %.
+* Production mutex/condvar для записи, захвата, аудиовыхода и overlay переведены на
+  `parking_lot`; poisoning больше не превращает первую ошибку потока в каскад паник.
+* Добавлен профиль `dev-check`: без debug-info и оптимизации зависимостей. Замер после прогрева:
+  проверка правки `app.rs` — 1,6 с против 5,0 с в обычном dev; холодный `dev-check` — 62,7 с.
+  Обычный dev оставляет `opt-level=1` зависимостям и `opt-level=2` внутренним крейтам. Новый
+  `mediaa-storage` по результату замера не выделялся: существующие границы уже дают быстрый loop.
+* Проверка: 251 Rust-тест, 4 desktop-live пропущены; 41 Node-тест; fmt, clippy с
+  `-D warnings`, `cargo audit --deny unsound --deny yanked`. Остаются прежние четыре
+  `unmaintained`-предупреждения и внешний linker warning `LNK4098`.
+
+### 2026-10-25 — системный аудит, надёжность записи и очистка архитектурных рисков
+
+* Асинхронный старт записи вынесен из UI-потока в `RecState::Starting`, добавлены таймауты
+  готовности источников и отмена из интерфейса, трея и хоткея. Старый синхронный старт мог
+  замораживать окно до 60 секунд на ожидании первого кадра.
+* Финализатор записи и фоновый job конвертации теперь наблюдаются приложением: разрыв канала,
+  panic или неожиданное завершение дают терминальное состояние, а не вечный `Saving`.
+  `quit` ждёт запись, конвертацию, recovery и очистку библиотеки; при отсутствии трея
+  незавершённая работа больше не прячет окно без возможности вернуться. Отмена старта
+  прерывает ожидание источника сразу, а отмены записи и конвертации передаются типизированными
+  состояниями вместо пустой строки. Если поток финализации не удаётся создать при исчерпании
+  системных ресурсов, сохранение выполняется синхронно, а приложение не падает.
+* Все итоговые файлы — скриншоты, записи, конвертации и preview-прокси — публикуются через
+  `AtomicFile`: файл синхронизируется и атомарно переименовывается без перезаписи существующего.
+  Старые временные файлы очищаются отдельно и не затрагивают пользовательские медиа.
+* Незавершённые каталоги записи после падения или выключения восстанавливаются в библиотеку
+  при следующем запуске. Удаление рабочих каталогов по возрасту без recovery убрано.
+* Ограничены hover-предпросмотр, очереди thumbnail-запросов и аудиоканал; texture-map и
+  preview-resume очищаются при сканировании, внешнем удалении и изменении файлов.
+* Очистка старой библиотеки теперь идёт в фоне, блокирует конфликтующие действия и повторно
+  проверяет тип, время изменения и размер каждого файла непосредственно перед корзиной.
+  Файл, изменившийся при открытом подтверждении, остаётся на месте.
+* Добавлен single-instance с отдельными dev-scope по `MEDIAA_DEV_LIBRARY`/`MEDIAA_INSTANCE_ID`;
+  file-link формируется через `url`. `rust-version` поднят до фактически нужного Rust 1.95.
+  Исправлены утечка потока `StreamSource`, гонка late thumbnail results, UNC-ссылки и
+  статические WebP с alpha-флагом.
+* Устранено дублирование `Effort`, аудиомиксов и части форматных проверок; probe файла, запись
+  деталей библиотеки в SQLite и массовая очистка вынесены из кадра UI. Стандартный Windows
+  test script теперь запускает fmt, clippy, workspace и Node-тесты. Добавлен MIT `LICENSE`.
+* Проверка: 250 Rust-тестов workspace, 4 desktop-live пропущены по проектной политике;
+  41 Node-тест; fmt и clippy без предупреждений; UI-снимок
+  [библиотеки](../target/audit-library.png). Остаются известные внешние ограничения:
+  `LNK4098` от статической сборки vpx/FFmpeg и непроверенные Linux/macOS в этом окружении.
+* `cargo-audit 0.22.2` установлен, проверены 610 crates по 1352 RustSec-advisories:
+  vulnerabilities не найдены. `tokio 1.53.2` обновлён до исправленной `1.53.3`,
+  yanked `clipboard-win 5.4.1` — до `5.4.3`. Остались четыре `unmaintained`-предупреждения:
+  `ttf-parser 0.25.1` и цепочка `zbus_names`/`zvariant`/`zvariant_derive` 5.15.0 из актуальных
+  `fontdb`/`ab_glyph` и Linux-зависимостей `opener`/`xcap`/`tray-icon`; исправленных версий
+  в этих ветках пока нет. `cargo audit` добавлен в стандартный Windows test script.
+* Изменение остаётся локальным, коммит не запрошен.
+
 ### 2026-10-25 — понятный экран «О программе»
 
 * Удалён бесполезный пользователю блок «Компоненты экспорта» с техническими именами кодеков

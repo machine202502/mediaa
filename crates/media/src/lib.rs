@@ -1,5 +1,6 @@
 pub mod animation_backends;
 pub mod convert;
+pub mod error;
 pub mod filters;
 pub mod info;
 pub mod job;

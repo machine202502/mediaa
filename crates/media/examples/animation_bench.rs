@@ -1,8 +1,9 @@
 use mediaa_core::formats::AnimFormat;
 use mediaa_core::settings::AnimSettings;
 use mediaa_media::animation_backends::{
-    self, AnimationEffort, AnimationEncodeRequest, AnimationOrigin,
+    self, AnimationEncodeRequest, AnimationOrigin, WebpSegmentation,
 };
+use mediaa_media::convert::Effort;
 use mediaa_media::info::probe;
 use mediaa_webp_pipeline::PipelineTuning;
 use std::path::Path;
@@ -53,9 +54,13 @@ fn main() -> anyhow::Result<()> {
             window: None,
             format: AnimFormat::Webp,
             settings: &settings,
-            effort: AnimationEffort::Balanced,
+            effort: Effort::Balanced,
             origin,
-            segmented_webp: segmented,
+            segmentation: if segmented {
+                WebpSegmentation::Segmented
+            } else {
+                WebpSegmentation::Direct
+            },
             scheduling: PipelineTuning {
                 memory_bytes: budget_mb * 1024 * 1024,
                 max_workers: 8,

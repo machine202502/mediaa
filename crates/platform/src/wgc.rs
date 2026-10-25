@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Context as _};
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
-use std::sync::{Arc, Condvar, Mutex};
+use parking_lot::{Condvar, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame as WgcFrame;
@@ -56,7 +57,7 @@ impl GraphicsCaptureApiHandler for Handler {
         };
         let (w, h) = (buffer.width(), buffer.height());
         let data = buffer.as_nopadding_buffer(&mut self.scratch).to_vec();
-        *self.latest.frame.lock().expect("frame lock") = Some(Frame::new(w, h, data));
+        *self.latest.frame.lock() = Some(Frame::new(w, h, data));
         self.latest.arrived.notify_all();
         Ok(())
     }
@@ -149,12 +150,10 @@ impl WgcSource {
     }
 
     fn wait_first(&mut self) -> anyhow::Result<Frame> {
-        let guard = self.latest.frame.lock().expect("frame lock");
-        let (guard, _) = self
-            .latest
+        let mut guard = self.latest.frame.lock();
+        self.latest
             .arrived
-            .wait_timeout_while(guard, Duration::from_secs(3), |f| f.is_none())
-            .expect("frame lock");
+            .wait_while_for(&mut guard, |f| f.is_none(), Duration::from_secs(3));
         let frame = guard
             .clone()
             .context("no frame from Windows Graphics Capture")?;
@@ -178,7 +177,7 @@ impl FrameSource for WgcSource {
             anyhow::bail!("capture ended (window closed or display disconnected)");
         }
         self.grabs += 1;
-        if let Some(f) = self.latest.frame.lock().expect("frame lock").take() {
+        if let Some(f) = self.latest.frame.lock().take() {
             self.last = Some(f);
             self.fresh += 1;
         }

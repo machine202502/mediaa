@@ -1,7 +1,9 @@
 use mediaa_core::formats::{AnimFormat, OutputKind, VideoContainer};
 use mediaa_core::settings::AnimSettings;
 use mediaa_core::source::{FrameSource, SourceFactory};
-use mediaa_media::recorder::{RecordingRequest, RecordingSession, SessionEvent};
+use mediaa_media::recorder::{
+    AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction, WebpMode,
+};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,32 +66,37 @@ fn main() -> anyhow::Result<()> {
             Box::new(move || mediaa_platform::screen::monitor_source(id, region, true))
         }
     };
-    let session = RecordingSession::start(RecordingRequest {
-        sources: vec![factory],
-        audio: if std::env::var_os("AUDIO").is_some() {
-            vec![Box::new(mediaa_platform::audio::CpalSource::new(
-                mediaa_platform::audio::CpalTarget::System,
-            )) as Box<dyn mediaa_core::source::AudioSource>]
-        } else {
-            vec![]
-        },
-        output,
-        fps: 60,
-        video_quality: 100,
-        max_height: if std::env::var_os("NATIVE").is_some() {
-            None
-        } else {
-            Some(1080)
-        },
-        audio_in_every_file: true,
-        audio_kbps: 192,
-        anim: AnimSettings::default(),
-        segmented_webp: true,
-        parallel_webp: true,
-        out_dir: dir.join("out"),
-        work_dir: dir.join(format!("work-{}", std::process::id())),
-        title: "bench".into(),
-    })?;
+    let session = RecordingSession::start(
+        RecordingRequest::builder(
+            output,
+            vec![factory],
+            if std::env::var_os("AUDIO").is_some() {
+                vec![Box::new(mediaa_platform::audio::CpalSource::new(
+                    mediaa_platform::audio::CpalTarget::System,
+                ))
+                    as Box<dyn mediaa_core::source::AudioSource>]
+            } else {
+                vec![]
+            },
+            mediaa_core::paths::MediaDir::new(dir.join("out")),
+            mediaa_core::paths::WorkDir::new(dir.join(format!("work-{}", std::process::id()))),
+            "bench".into(),
+        )
+        .video(
+            60,
+            100,
+            if std::env::var_os("NATIVE").is_some() {
+                None
+            } else {
+                Some(1080)
+            },
+        )
+        .audio_layout(AudioLayout::EveryFile)
+        .audio_kbps(192)
+        .animation(AnimSettings::default())
+        .webp_mode(WebpMode::SegmentedParallel)
+        .build()?,
+    )?;
     let _tone = std::env::var_os("AUDIO")
         .and_then(|_| mediaa_platform::audio::AudioOut::open().ok())
         .inspect(|out| {
@@ -106,7 +113,12 @@ fn main() -> anyhow::Result<()> {
     println!("captured {} frames in 3 s", session.frames_captured());
     let events = session.events();
     let t = Instant::now();
-    session.stop(true, Arc::new(AtomicBool::new(false)));
+    match session.stop(StopAction::Save, Arc::new(AtomicBool::new(false))) {
+        Ok(handle) => {
+            let _ = handle.join();
+        }
+        Err(error) => log::warn!("finalizer ran inline: {error:#}"),
+    }
     for e in events.iter() {
         match e {
             SessionEvent::Finished(paths) => {
@@ -120,7 +132,7 @@ fn main() -> anyhow::Result<()> {
                     let kind = mediaa_core::MediaKind::detect(&paths[0])
                         .unwrap_or(mediaa_core::MediaKind::Video);
                     let frame = mediaa_media::thumbnail::thumbnail(&paths[0], kind, 1600)?;
-                    mediaa_core::screenshot::save(
+                    mediaa_storage::screenshot::save(
                         &frame,
                         mediaa_core::ImageFormat::Png,
                         std::path::Path::new(&out),

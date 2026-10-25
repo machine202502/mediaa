@@ -12,17 +12,12 @@ toml.workspace = true
 chrono.workspace = true
 image.workspace = true
 hound.workspace = true
-tiny-skia = "0.12"
-ab_glyph = "0.2"
-epaint_default_fonts = "0.36"
 crossbeam-channel.workspace = true
 log.workspace = true
 directories.workspace = true
-fontdb = "0.23"
-regex = "1.13.1"
-notify = "8.2.0"
+fnv.workspace = true
 fast_image_resize = "6.1"
-rusqlite.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

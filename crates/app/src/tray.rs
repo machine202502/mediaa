@@ -22,6 +22,7 @@ pub enum TrayCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayState {
     Idle,
+    Starting,
     Recording,
     Paused,
     Saving,
@@ -85,7 +86,7 @@ impl Tray {
             .with_menu_on_left_click(false)
             .build()?;
 
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = crossbeam_channel::bounded(32);
         install_handlers(tx, ctx.clone());
         let mut tray = Tray {
             icon: tray,
@@ -112,6 +113,7 @@ impl Tray {
         }
         self.applied = Some((state, locale));
         let active = matches!(state, TrayState::Recording | TrayState::Paused);
+        let cancel_available = active || state == TrayState::Starting;
         for (cmd, text, enabled) in [
             (TrayCommand::ShowWindow, t!("tray.show"), true),
             (TrayCommand::RegionScreenshot, t!("tray.region"), true),
@@ -140,7 +142,11 @@ impl Tray {
                 active,
             ),
             (TrayCommand::StopAndSave, t!("tray.stop"), active),
-            (TrayCommand::CancelRecording, t!("tray.cancel"), active),
+            (
+                TrayCommand::CancelRecording,
+                t!("tray.cancel"),
+                cancel_available,
+            ),
             (TrayCommand::Quit, t!("tray.quit"), true),
         ] {
             let item = self.item(cmd);
@@ -163,6 +169,7 @@ impl Tray {
             .set_icon(if active { mark(Badge::Stop) } else { None });
         let tip = match state {
             TrayState::Idle => "MediaA".to_string(),
+            TrayState::Starting => format!("MediaA — {}", t!("record.starting")),
             TrayState::Recording => format!("MediaA — {}", t!("record.recording")),
             TrayState::Paused => format!("MediaA — {}", t!("record.paused")),
             TrayState::Saving => format!("MediaA — {}", t!("record.saving")),
@@ -170,6 +177,7 @@ impl Tray {
         let _ = self.icon.set_tooltip(Some(tip));
         let rgba = match state {
             TrayState::Idle => crate::icon::rgba(32),
+            TrayState::Starting => crate::icon::rgba_status(32, crate::icon::StatusDot::Saving),
             TrayState::Recording => crate::icon::rgba_status(32, crate::icon::StatusDot::Recording),
             TrayState::Paused => crate::icon::rgba_status(32, crate::icon::StatusDot::Paused),
             TrayState::Saving => crate::icon::rgba_status(32, crate::icon::StatusDot::Saving),
@@ -184,7 +192,7 @@ fn install_handlers(tx: Sender<TrayCommand>, ctx: egui::Context) {
     let (menu_tx, menu_ctx) = (tx.clone(), ctx.clone());
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         if let Some(cmd) = command_for(event.id.as_ref()) {
-            let _ = menu_tx.send(cmd);
+            let _ = menu_tx.try_send(cmd);
             menu_ctx.request_repaint();
         }
     }));
@@ -201,7 +209,7 @@ fn install_handlers(tx: Sender<TrayCommand>, ctx: egui::Context) {
             }
         );
         if left_click {
-            let _ = tx.send(TrayCommand::PrimaryClick);
+            let _ = tx.try_send(TrayCommand::PrimaryClick);
             ctx.request_repaint();
         }
     }));

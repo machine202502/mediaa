@@ -10,7 +10,7 @@ use rust_i18n::t;
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     header(ui, &t!("audio.title"), "");
-    if super::record::live_status(app, ui, &ctx) {
+    if super::record::status::live_status(app, ui, &ctx) {
         return;
     }
 
@@ -99,15 +99,18 @@ pub fn start_bar(app: &mut App, ui: &mut egui::Ui) {
     let a = &app.settings.audio_record;
     let has_source = a.microphone != MicChoice::Off
         || (a.system_audio && mediaa_platform::audio::system_audio_supported());
+    let available = has_source && !app.recovery_active();
     ui.vertical_centered(|ui| {
         let btn = theme::primary(ui, icon::MICROPHONE, &t!("audio.start"))
             .min_size(egui::vec2(220.0, 36.0));
-        let mut resp = ui.add_enabled(has_source, btn);
+        let mut resp = ui.add_enabled(available, btn);
         let hk = &app.settings.hotkeys;
         if hk.enabled && !hk.start_audio.is_empty() {
             resp = resp.on_hover_text(t!("record.hotkey_hint", key = hk.start_audio));
         }
-        if !has_source {
+        if app.recovery_active() {
+            resp = resp.on_disabled_hover_text(t!("record.recovery_wait"));
+        } else if !has_source {
             resp = resp.on_disabled_hover_text(t!("audio.no_source"));
         }
         if resp.clicked() {

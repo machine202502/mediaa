@@ -6,12 +6,15 @@ pub mod library;
 pub mod record;
 pub mod settings;
 
-use crate::app::{App, Page, RecState};
+use crate::app::command::{AppCommand, RecordingCommand};
+use crate::app::state::{Page, RecState};
+use crate::app::App;
 use crate::{i18n, theme};
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke};
 use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
 use mediaa_core::settings::ThemePreference;
+use mediaa_media::recorder::StopAction;
 use rust_i18n::t;
 use std::time::Duration;
 
@@ -236,6 +239,14 @@ fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)]) {
 fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     let p = theme::palette(ui);
     let (label, paused) = match &app.recorder {
+        RecState::Starting { started, .. } => (
+            format!(
+                "{} {}",
+                t!("record.starting"),
+                human_duration(started.elapsed().as_secs_f64())
+            ),
+            false,
+        ),
         RecState::Recording { session, .. } => (
             format!(
                 "{} {}",
@@ -267,10 +278,22 @@ fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     };
     if matches!(app.recorder, RecState::Recording { .. }) {
         if theme::icon_button(ui, icon::X, &t!("record.cancel")).clicked() {
-            app.stop_recording(ctx, false);
+            app.dispatch_command(
+                ctx,
+                AppCommand::Recording(RecordingCommand::Stop {
+                    action: StopAction::Discard,
+                    source: crate::app::state::StopSource::Ui,
+                }),
+            );
         }
         if theme::icon_button(ui, icon::STOP, &t!("record.stop_save")).clicked() {
-            app.stop_recording(ctx, true);
+            app.dispatch_command(
+                ctx,
+                AppCommand::Recording(RecordingCommand::Stop {
+                    action: StopAction::Save,
+                    source: crate::app::state::StopSource::Ui,
+                }),
+            );
         }
         let (ic, tip) = if paused {
             (icon::PLAY, t!("record.resume"))
@@ -278,7 +301,7 @@ fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
             (icon::PAUSE, t!("record.pause"))
         };
         if theme::icon_button(ui, ic, &tip).clicked() {
-            app.toggle_pause();
+            app.dispatch_command(ctx, AppCommand::Recording(RecordingCommand::TogglePause));
         }
     }
     ui.label(RichText::new(label).strong());

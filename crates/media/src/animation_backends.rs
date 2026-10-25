@@ -1,4 +1,5 @@
 use crate::filters;
+use crate::filters::Effort;
 use crate::info::{probe, MediaInfo};
 use crate::job;
 use ez_ffmpeg::{FfmpegContext, FramePushSource, Input, Output};
@@ -10,26 +11,15 @@ use std::sync::atomic::AtomicBool;
 use std::thread::JoinHandle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnimationEffort {
-    Fast,
-    Balanced,
-    Max,
-}
-
-impl AnimationEffort {
-    fn webp_level(self) -> &'static str {
-        match self {
-            Self::Fast => "2",
-            Self::Balanced => "4",
-            Self::Max => "6",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimationOrigin {
     Conversion,
     Recording,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebpSegmentation {
+    Direct,
+    Segmented,
 }
 
 pub struct AnimationEncodeRequest<'a> {
@@ -38,9 +28,9 @@ pub struct AnimationEncodeRequest<'a> {
     pub window: Option<(i64, i64)>,
     pub format: AnimFormat,
     pub settings: &'a AnimSettings,
-    pub effort: AnimationEffort,
+    pub effort: Effort,
     pub origin: AnimationOrigin,
-    pub segmented_webp: bool,
+    pub segmentation: WebpSegmentation,
     pub scheduling: PipelineTuning,
     pub threads: Option<u32>,
     pub trace_id: Option<&'a str>,
@@ -81,7 +71,11 @@ pub fn encode(
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
     encode_with(
-        backend(request.format, request.origin, request.segmented_webp),
+        backend(
+            request.format,
+            request.origin,
+            request.segmentation == WebpSegmentation::Segmented,
+        ),
         request,
         on_progress,
         cancel,
@@ -252,12 +246,7 @@ fn animation_context(
     }
 }
 
-fn webp_output(
-    output: Output,
-    quality: u8,
-    effort: AnimationEffort,
-    threads: Option<u32>,
-) -> Output {
+fn webp_output(output: Output, quality: u8, effort: Effort, threads: Option<u32>) -> Output {
     let output = output
         .set_format("webp")
         .set_video_codec("libwebp_anim")
@@ -281,6 +270,7 @@ pub(crate) fn webp_frames_input(
     let file = std::io::BufReader::new(std::fs::File::open(path)?);
     let mut decoder = image_webp::WebPDecoder::new(file)?;
     let (w, h) = decoder.dimensions();
+    mediaa_core::formats::ensure_safe_dimensions(w, h)?;
     let pix = if decoder.has_alpha() { "rgba" } else { "rgb24" };
     let info = crate::info::probe_webp(&decoder);
     let (source, mut handle) = FramePushSource::builder(w, h)
@@ -388,9 +378,9 @@ mod tests {
             window: None,
             format: AnimFormat::Gif,
             settings: &settings,
-            effort: AnimationEffort::Balanced,
+            effort: Effort::Balanced,
             origin: AnimationOrigin::Recording,
-            segmented_webp: false,
+            segmentation: WebpSegmentation::Direct,
             scheduling: PipelineTuning::default(),
             threads: None,
             trace_id: None,
@@ -418,9 +408,9 @@ mod tests {
             window: None,
             format: AnimFormat::Webp,
             settings: &settings,
-            effort: AnimationEffort::Balanced,
+            effort: Effort::Balanced,
             origin: AnimationOrigin::Conversion,
-            segmented_webp: false,
+            segmentation: WebpSegmentation::Direct,
             scheduling: PipelineTuning::default(),
             threads: None,
             trace_id: None,

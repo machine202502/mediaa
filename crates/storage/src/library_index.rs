@@ -1,9 +1,11 @@
-use crate::formats::MediaKind;
-use crate::library::{Details, KindFilter, LibraryEntry};
-use crate::naming;
+use mediaa_core::formats::MediaKind;
+use mediaa_core::library::{Details, KindFilter, LibraryEntry};
+use mediaa_core::naming;
 use regex::Regex;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const CACHE_DIR: &str = ".cache";
@@ -54,7 +56,7 @@ impl Search {
             && self
                 .date
                 .as_ref()
-                .is_none_or(|m| m.is_match(&e.taken.format("%Y-%m-%d_%H-%M-%S").to_string()))
+                .is_none_or(|m| m.is_match(&naming::date_stamp(e.taken)))
     }
 }
 
@@ -83,6 +85,7 @@ pub struct LibraryIndex {
     entries: Vec<LibraryEntry>,
     version: u64,
     db: Option<rusqlite::Connection>,
+    pending_details: Vec<String>,
 }
 
 fn to_ms(t: SystemTime) -> u64 {
@@ -90,8 +93,8 @@ fn to_ms(t: SystemTime) -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-fn from_ms(ms: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_millis(ms)
+fn from_ms(ms: u64) -> Option<SystemTime> {
+    UNIX_EPOCH.checked_add(Duration::from_millis(ms))
 }
 
 fn read_entry(path: &Path) -> Option<LibraryEntry> {
@@ -155,6 +158,7 @@ fn read_rows(db: &rusqlite::Connection, dir: &Path) -> rusqlite::Result<Vec<Libr
     )?;
     let rows = q.query_map([], |r| {
         let name: String = r.get(0)?;
+        let title: String = r.get(1)?;
         let kind: String = r.get(2)?;
         let width: Option<u32> = r.get(5)?;
         let details = width.map(|width| -> rusqlite::Result<Details> {
@@ -165,20 +169,23 @@ fn read_rows(db: &rusqlite::Connection, dir: &Path) -> rusqlite::Result<Vec<Libr
                 audio: r.get::<_, Option<bool>>(8)?.unwrap_or(false),
             })
         });
-        Ok((
-            name,
-            r.get::<_, String>(1)?,
-            kind,
-            r.get::<_, i64>(3)?,
-            r.get::<_, i64>(4)?,
-            details.transpose()?,
-        ))
+        let size = u64::try_from(r.get::<_, i64>(3)?).ok();
+        let modified_ms = u64::try_from(r.get::<_, i64>(4)?).ok();
+        let details = details.transpose()?;
+        Ok(size
+            .zip(modified_ms)
+            .map(|(size, modified_ms)| (name, title, kind, size, modified_ms, details)))
     })?;
     let mut entries = Vec::new();
     for row in rows {
-        let (name, title, kind, size, modified_ms, details) = row?;
+        let Some((name, title, kind, size, modified_ms, details)) = row? else {
+            continue;
+        };
         let (Some(parsed), Some(kind)) = (naming::parse_path(Path::new(&name)), kind_from(&kind))
         else {
+            continue;
+        };
+        let Some(modified) = from_ms(modified_ms) else {
             continue;
         };
         entries.push(LibraryEntry {
@@ -186,8 +193,8 @@ fn read_rows(db: &rusqlite::Connection, dir: &Path) -> rusqlite::Result<Vec<Libr
             name,
             title,
             kind,
-            size: size as u64,
-            modified: from_ms(modified_ms as u64),
+            size,
+            modified,
             taken: parsed.taken,
             details,
         });
@@ -216,6 +223,7 @@ impl LibraryIndex {
             entries,
             version: 1,
             db,
+            pending_details: Vec::new(),
         }
     }
 
@@ -366,8 +374,24 @@ impl LibraryIndex {
         };
         if self.entries[i].details != Some(details) {
             self.entries[i].details = Some(details);
-            self.store(&[&self.entries[i]], &[]);
+            let name = self.entries[i].name.clone();
+            if !self.pending_details.contains(&name) {
+                self.pending_details.push(name);
+            }
         }
+    }
+
+    pub fn flush_details(&mut self) {
+        if self.pending_details.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_details);
+        let upserts: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|entry| pending.contains(&entry.name))
+            .collect();
+        self.store(&upserts, &[]);
     }
 
     pub fn query(&self, q: &Query) -> Vec<usize> {
@@ -382,11 +406,11 @@ impl LibraryIndex {
         match q.sort {
             Sort::Newest => {}
             Sort::Oldest => hits.reverse(),
-            Sort::Title => hits.sort_by(|&a, &b| {
-                e[a].title
-                    .to_lowercase()
-                    .cmp(&e[b].title.to_lowercase())
-                    .then(e[b].modified.cmp(&e[a].modified))
+            Sort::Title => hits.sort_by_cached_key(|&index| {
+                (
+                    e[index].title.to_lowercase(),
+                    std::cmp::Reverse(e[index].modified),
+                )
             }),
             Sort::Largest => hits.sort_by(|&a, &b| e[b].size.cmp(&e[a].size)),
         }
@@ -416,6 +440,12 @@ fn changes_of(res: notify::Result<notify::Event>) -> Vec<Change> {
     }
 }
 
+fn queue_change(tx: &crossbeam_channel::Sender<Change>, overflowed: &AtomicBool, change: Change) {
+    if tx.try_send(change).is_err() {
+        overflowed.store(true, Ordering::Release);
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Changes {
     pub paths: Vec<PathBuf>,
@@ -425,6 +455,7 @@ pub struct Changes {
 pub struct LibraryWatcher {
     _watcher: notify::RecommendedWatcher,
     rx: crossbeam_channel::Receiver<Change>,
+    overflowed: Arc<AtomicBool>,
 }
 
 impl LibraryWatcher {
@@ -434,11 +465,13 @@ impl LibraryWatcher {
     ) -> anyhow::Result<LibraryWatcher> {
         use notify::Watcher;
         std::fs::create_dir_all(dir)?;
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = crossbeam_channel::bounded(128);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let callback_overflowed = overflowed.clone();
         let mut watcher =
             notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
                 for c in changes_of(res) {
-                    let _ = tx.send(c);
+                    queue_change(&tx, &callback_overflowed, c);
                 }
                 on_change();
             })?;
@@ -446,11 +479,15 @@ impl LibraryWatcher {
         Ok(LibraryWatcher {
             _watcher: watcher,
             rx,
+            overflowed,
         })
     }
 
     pub fn changes(&self) -> Changes {
         let mut out = Changes::default();
+        if self.overflowed.swap(false, Ordering::AcqRel) {
+            out.rescan = true;
+        }
         for c in self.rx.try_iter() {
             match c {
                 Change::Path(p) => out.paths.push(p),
@@ -512,6 +549,37 @@ mod tests {
     }
 
     #[test]
+    fn corrupted_numeric_rows_are_ignored_instead_of_panicking() {
+        let dir = tempfile::tempdir().unwrap();
+        touch(dir.path(), "Valid_2026-01-01_00-00-00.png", 0, b"valid");
+        drop(open(dir.path()));
+
+        let db = crate::cache_db::open(&cache_dir(dir.path())).unwrap();
+        db.execute(
+            "INSERT INTO files VALUES ('Bad_2026-01-01_00-00-00.png', 'Bad', 'image', -1, 0, NULL, NULL, NULL, NULL)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO files VALUES ('Huge_2026-01-01_00-00-00.png', 'Huge', 'image', 1, ?1, NULL, NULL, NULL, NULL)",
+            [i64::MAX],
+        )
+        .unwrap();
+        drop(db);
+
+        let loaded = LibraryIndex::load(dir.path());
+        assert_eq!(
+            loaded
+                .entries()
+                .iter()
+                .map(|e| e.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Valid"]
+        );
+        assert!(from_ms(u64::MAX).is_none());
+    }
+
+    #[test]
     fn index_tracks_the_folder_and_survives_reopening() {
         let dir = tempfile::tempdir().unwrap();
         touch(dir.path(), "Old_2026-01-01_10-00-00.png", 300, b"old");
@@ -546,6 +614,7 @@ mod tests {
                 audio: false,
             },
         );
+        index.flush_details();
         assert!(
             dir.path().join(".cache").join("library.db").is_file(),
             "stored in the cache folder"
@@ -725,5 +794,14 @@ mod tests {
             [Change::Path("/m/A_2026-01-01_10-00-00.png".into())],
             "cache folder ignored"
         );
+    }
+
+    #[test]
+    fn a_full_watcher_queue_requests_a_rescan() {
+        let (tx, _rx) = crossbeam_channel::bounded(1);
+        tx.send(Change::Path("/m/a.png".into())).unwrap();
+        let overflowed = AtomicBool::new(false);
+        queue_change(&tx, &overflowed, Change::Path("/m/b.png".into()));
+        assert!(overflowed.load(Ordering::Acquire));
     }
 }

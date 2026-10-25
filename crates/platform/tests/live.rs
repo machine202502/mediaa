@@ -1,6 +1,8 @@
 use mediaa_core::source::{FrameSource, SourceFactory};
 use mediaa_core::{OutputKind, Rect, VideoContainer};
-use mediaa_media::recorder::{RecordingRequest, RecordingSession, SessionEvent};
+use mediaa_media::recorder::{
+    AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction, WebpMode,
+};
 use mediaa_platform::screen::{self, MonitorSource};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -54,33 +56,34 @@ fn records_real_screen_area_to_mp4() {
         MonitorSource::new(id, Some(Rect::new(0, 0, 640, 360)), true)
             .map(|s| Box::new(s) as Box<dyn FrameSource>)
     });
-    let session = RecordingSession::start(RecordingRequest {
-        sources: vec![factory],
-        audio: vec![],
-        output: OutputKind::Video(VideoContainer::Mp4),
-        fps: 15,
-        video_quality: 60,
-        max_height: None,
-        audio_in_every_file: true,
-        audio_kbps: 192,
-        anim: Default::default(),
-        segmented_webp: true,
-        parallel_webp: true,
-        out_dir: dir.path().join("out"),
-        work_dir: dir.path().join("work"),
-        title: "live".into(),
-    })
+    let session = RecordingSession::start(
+        RecordingRequest::builder(
+            OutputKind::Video(VideoContainer::Mp4),
+            vec![factory],
+            vec![],
+            mediaa_core::paths::MediaDir::new(dir.path().join("out")),
+            mediaa_core::paths::WorkDir::new(dir.path().join("work")),
+            "live".into(),
+        )
+        .video(15, 60, None)
+        .audio_layout(AudioLayout::EveryFile)
+        .audio_kbps(192)
+        .webp_mode(WebpMode::SegmentedParallel)
+        .build()
+        .unwrap(),
+    )
     .unwrap();
     std::thread::sleep(Duration::from_millis(1500));
     let events = session.events();
     session
-        .stop(true, Arc::new(AtomicBool::new(false)))
+        .stop(StopAction::Save, Arc::new(AtomicBool::new(false)))
+        .unwrap()
         .join()
         .unwrap();
     let paths = loop {
         match events.recv_timeout(Duration::from_secs(30)).unwrap() {
             SessionEvent::Finished(p) => break p,
-            SessionEvent::Finalizing(_) | SessionEvent::Warning(_) | SessionEvent::Notice(_) => {}
+            SessionEvent::Warning(_) | SessionEvent::Notice(_) => {}
             other => panic!("{other:?}"),
         }
     };

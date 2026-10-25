@@ -51,7 +51,7 @@ impl HoverPreview {
                 done: false,
             });
         }
-        let (tx, rx) = crossbeam_channel::unbounded::<Msg>();
+        let (tx, rx) = crossbeam_channel::bounded::<Msg>(MAX_FRAMES as usize);
         let cancel = Arc::new(AtomicBool::new(false));
         let (p, c, ctx2, runs) = (
             path.to_path_buf(),
@@ -60,11 +60,13 @@ impl HoverPreview {
             passes.clone(),
         );
         let decode = move || {
+            let mut emitted = 0u32;
             for (i, pass) in runs.iter().enumerate() {
                 let res = preview_frames(&p, WIDTH, interval, pass.from, &c, &mut |frame| {
-                    if frame.at >= pass.until {
+                    if emitted >= MAX_FRAMES || frame.at >= pass.until {
                         return false;
                     }
+                    emitted += 1;
                     ctx2.request_repaint();
                     tx.send((i, Some(frame))).is_ok()
                 });
@@ -180,7 +182,11 @@ impl Previews {
         path: &Path,
         duration: Option<f64>,
     ) -> &mut HoverPreview {
-        if self.current.as_ref().is_none_or(|p| p.path != path) {
+        let replace = self
+            .current
+            .as_ref()
+            .is_none_or(|p| p.path != path || (p.duration.is_none() && duration.is_some()));
+        if replace {
             self.stop();
             let resume = self.resume.get(path).copied().unwrap_or(0.0);
             self.current = Some(HoverPreview::start(ctx, path, duration, resume));
@@ -195,6 +201,15 @@ impl Previews {
         if let Some(p) = self.current.take() {
             self.resume.insert(p.path.clone(), p.position());
         }
+    }
+
+    pub fn retain(&mut self, dir: &Path, entries: &HashMap<String, std::time::SystemTime>) {
+        self.resume.retain(|path, _| {
+            path.parent() == Some(dir)
+                && path
+                    .file_name()
+                    .is_some_and(|name| entries.contains_key(name.to_string_lossy().as_ref()))
+        });
     }
 }
 
@@ -222,6 +237,19 @@ mod tests {
                 < 0.5,
             "new clips start at 0"
         );
+    }
+
+    #[test]
+    fn metadata_arrival_restarts_with_a_bounded_interval_and_keeps_position() {
+        let ctx = eframe::egui::Context::default();
+        let mut previews = Previews::default();
+        let path = Path::new("missing-long.mp4");
+        previews.play(&ctx, path, None).seek(4.0);
+        let pos = previews.play(&ctx, path, Some(600.0)).position();
+        assert!(pos < 0.5, "{pos}");
+        assert!(previews.current.as_ref().is_some_and(|preview| {
+            preview.duration == Some(600.0) && preview.interval >= 600.0 / 180.0
+        }));
     }
 
     #[test]

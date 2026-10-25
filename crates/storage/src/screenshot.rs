@@ -1,18 +1,18 @@
-use crate::formats::ImageFormat;
-use crate::frame::Frame;
+use crate::atomic_file::AtomicFile;
+use mediaa_core::formats::ImageFormat;
+use mediaa_core::frame::Frame;
 use std::path::Path;
 
 pub fn save(frame: &Frame, format: ImageFormat, path: &Path) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let img = image::RgbaImage::from_raw(frame.width, frame.height, frame.data.clone())
         .ok_or_else(|| anyhow::anyhow!("frame buffer does not match its dimensions"))?;
     let fmt = match format {
         ImageFormat::Png => image::ImageFormat::Png,
         ImageFormat::Webp => image::ImageFormat::WebP,
     };
-    img.save_with_format(path, fmt)?;
+    let output = AtomicFile::new(path)?;
+    img.save_with_format(output.path(), fmt)?;
+    output.commit()?;
     Ok(())
 }
 

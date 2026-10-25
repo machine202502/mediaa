@@ -11,6 +11,7 @@ use std::time::Duration;
 pub fn details(path: &Path, kind: MediaKind) -> anyhow::Result<MediaInfo> {
     if kind == MediaKind::Image {
         let (width, height) = image::image_dimensions(path)?;
+        mediaa_core::formats::ensure_safe_dimensions(width, height)?;
         return Ok(MediaInfo {
             width,
             height,
@@ -85,6 +86,7 @@ fn webp_frames(
     let mut decoder =
         image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(path)?))?;
     let (w, h) = decoder.dimensions();
+    mediaa_core::formats::ensure_safe_dimensions(w, h)?;
     let alpha = decoder.has_alpha();
     let mut buf = vec![
         0u8;

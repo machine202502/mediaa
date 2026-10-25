@@ -6,6 +6,8 @@ use std::path::Path;
 pub fn thumbnail(path: &Path, kind: MediaKind, max_size: u32) -> anyhow::Result<Frame> {
     let max_size = max_size.max(16);
     if kind == MediaKind::Image {
+        let (width, height) = image::image_dimensions(path)?;
+        mediaa_core::formats::ensure_safe_dimensions(width, height)?;
         let img = image::open(path)?.thumbnail(max_size, max_size).to_rgba8();
         return Ok(Frame::from_image(img));
     }
@@ -29,6 +31,7 @@ pub fn thumbnail(path: &Path, kind: MediaKind, max_size: u32) -> anyhow::Result<
     }
     let frame = FrameExtractor::new(source.to_string_lossy().into_owned())
         .pixel(PixelLayout::Rgba32)
+        .width(max_size & !1)
         .max_frames(1)
         .frames()?
         .next()

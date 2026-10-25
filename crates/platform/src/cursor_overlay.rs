@@ -1,4 +1,4 @@
-use crate::frame::Frame;
+use mediaa_core::frame::Frame;
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -7,6 +7,10 @@ pub struct CursorImage {
     pub hotspot: (i32, i32),
 }
 
+#[cfg_attr(
+    windows,
+    allow(dead_code, reason = "Windows reads the native cursor image")
+)]
 pub fn arrow(scale: f32) -> CursorImage {
     let scale = scale.clamp(0.5, 8.0);
     let (w, h) = ((13.0 * scale).ceil() as u32, (20.0 * scale).ceil() as u32);

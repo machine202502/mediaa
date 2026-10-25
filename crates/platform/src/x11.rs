@@ -1,5 +1,5 @@
+use crate::cursor_overlay::CursorImage;
 use anyhow::{anyhow, bail, Context as _};
-use mediaa_core::cursor::CursorImage;
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
 use xcb::{shm, x, xfixes, Connection};
@@ -161,7 +161,7 @@ impl X11Source {
         }
         if let Some((_, img)) = &self.cursor {
             let (x, y) = (i32::from(c.x()) - origin.0, i32::from(c.y()) - origin.1);
-            mediaa_core::cursor::draw(frame, img, x, y);
+            crate::cursor_overlay::draw(frame, img, x, y);
         }
     }
 }

@@ -1,6 +1,7 @@
-use crate::animation_backends::{self, AnimationEffort, AnimationEncodeRequest, AnimationOrigin};
+use crate::animation_backends::{self, AnimationEncodeRequest, AnimationOrigin, WebpSegmentation};
+use crate::filters::Effort;
 use anyhow::Context;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use mediaa_core::settings::AnimSettings;
 use mediaa_webp_pipeline::{self, PipelineConfig, PipelineTuning};
 use std::path::{Path, PathBuf};
@@ -46,7 +47,7 @@ impl LiveWebp {
         )
         .with_tuning(&scheduling);
         let workers = mediaa_webp_pipeline::recommended_workers(&config).max(1);
-        let (control, control_rx) = unbounded();
+        let (control, control_rx) = bounded(8);
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
         log::info!("[{trace_id}] stage=live start size={}x{}", size.0, size.1);
@@ -128,8 +129,9 @@ fn run_manager(
     cancel: Arc<AtomicBool>,
     trace_id: String,
 ) -> LiveResult {
-    let (jobs_tx, jobs_rx): (Sender<LiveChunk>, Receiver<LiveChunk>) = unbounded();
-    let (results_tx, results_rx) = unbounded();
+    let (jobs_tx, jobs_rx): (Sender<LiveChunk>, Receiver<LiveChunk>) =
+        bounded(workers.saturating_mul(2).max(8));
+    let (results_tx, results_rx) = bounded(workers.max(1));
     let failed = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
     let mut error = None;
@@ -154,9 +156,9 @@ fn run_manager(
                         window: None,
                         format: mediaa_core::AnimFormat::Webp,
                         settings: &settings,
-                        effort: AnimationEffort::Balanced,
+                        effort: Effort::Balanced,
                         origin: AnimationOrigin::Recording,
-                        segmented_webp: false,
+                        segmentation: WebpSegmentation::Direct,
                         scheduling: scheduling.clone(),
                         threads: Some(1),
                         trace_id: Some(&worker_trace),
@@ -295,7 +297,7 @@ fn scan_lists(
             let _ = std::fs::create_dir_all(&dir);
             let output = dir.join(format!("part-{index:06}.webp"));
             if jobs
-                .send(LiveChunk {
+                .try_send(LiveChunk {
                     source,
                     input,
                     output,
@@ -311,7 +313,7 @@ fn scan_lists(
 #[cfg(test)]
 mod tests {
     use super::{scan_lists, LiveWebp};
-    use crossbeam_channel::unbounded;
+    use crossbeam_channel::bounded;
     use mediaa_core::settings::AnimSettings;
     use mediaa_webp_pipeline::PipelineTuning;
     use std::path::Path;
@@ -329,7 +331,7 @@ mod tests {
             "chunk-000000.mkv\nchunk-000001.mkv\nchunk-000002.mkv\n",
         )
         .unwrap();
-        let (jobs, queued) = unbounded();
+        let (jobs, queued) = bounded(64);
         let mut seen = [0];
         scan_lists(
             std::slice::from_ref(&list),

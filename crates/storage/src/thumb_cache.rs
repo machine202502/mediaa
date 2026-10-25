@@ -1,5 +1,5 @@
-use crate::Frame;
 use image::{ImageFormat, RgbImage};
+use mediaa_core::Frame;
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -78,30 +78,60 @@ pub struct ThumbCache {
 
 fn load_items(db: &Connection) -> rusqlite::Result<(HashMap<String, Slot>, u32)> {
     let mut q = db.prepare("SELECT name, size, modified_ms, page, x, y, w, h FROM thumbs")?;
-    let items = q
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                Slot {
-                    size: r.get::<_, i64>(1)? as u64,
-                    modified_ms: r.get::<_, i64>(2)? as u64,
-                    page: r.get(3)?,
-                    x: r.get(4)?,
-                    y: r.get(5)?,
-                    w: r.get(6)?,
-                    h: r.get(7)?,
-                },
-            ))
-        })?
-        .collect::<rusqlite::Result<HashMap<_, _>>>()?;
-    let next_page: Option<u32> = db
+    let rows = q.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+            r.get::<_, i64>(4)?,
+            r.get::<_, i64>(5)?,
+            r.get::<_, i64>(6)?,
+            r.get::<_, i64>(7)?,
+        ))
+    })?;
+    let next_page = db
         .query_row(
             "SELECT value FROM counters WHERE key = 'next_page'",
             [],
-            |r| r.get(0),
+            |r| r.get::<_, i64>(0),
         )
-        .ok();
-    Ok((items, next_page.unwrap_or(0)))
+        .ok()
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0);
+    let mut items = HashMap::new();
+    for row in rows {
+        let (name, size, modified_ms, page, x, y, w, h) = row?;
+        let slot = (|| {
+            Some(Slot {
+                size: u64::try_from(size).ok()?,
+                modified_ms: u64::try_from(modified_ms).ok()?,
+                page: u32::try_from(page).ok()?,
+                x: u32::try_from(x).ok()?,
+                y: u32::try_from(y).ok()?,
+                w: u32::try_from(w).ok()?,
+                h: u32::try_from(h).ok()?,
+            })
+        })();
+        if let Some(slot) = slot.filter(|slot| valid_slot(*slot, next_page)) {
+            items.insert(name, slot);
+        }
+    }
+    Ok((items, next_page))
+}
+
+fn valid_slot(slot: Slot, next_page: u32) -> bool {
+    slot.page < next_page
+        && slot.w > 0
+        && slot.h > 0
+        && slot
+            .x
+            .checked_add(slot.w)
+            .is_some_and(|right| right <= PAGE)
+        && slot
+            .y
+            .checked_add(slot.h)
+            .is_some_and(|bottom| bottom <= PAGE)
 }
 
 impl ThumbCache {
@@ -206,6 +236,7 @@ impl ThumbCache {
             || h == 0
             || w > PAGE
             || h > PAGE
+            || thumb.data.len() != w as usize * h as usize * 4
             || thumb.data.as_chunks::<4>().0.iter().any(|p| p[3] != 255)
         {
             return false;
@@ -372,6 +403,34 @@ mod tests {
             .flatten()
             .filter(|e| e.file_name().to_string_lossy().ends_with(".jpg"))
             .count()
+    }
+
+    #[test]
+    fn corrupted_slots_and_malformed_frames_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::cache_db::open(dir.path()).unwrap();
+        db.execute("INSERT INTO counters VALUES ('next_page', 1)", [])
+            .unwrap();
+        db.execute(
+            "INSERT INTO thumbs VALUES ('outside.png', 1, 1, 0, 2040, 0, 16, 16)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO thumbs VALUES ('negative.png', -1, -1, 0, 0, 0, 8, 8)",
+            [],
+        )
+        .unwrap();
+        drop(db);
+
+        let mut cache = ThumbCache::open(dir.path());
+        assert!(cache.items.is_empty());
+        let malformed = Frame {
+            width: 8,
+            height: 8,
+            data: vec![0; 3],
+        };
+        assert!(!cache.put("broken.png", 1, SystemTime::UNIX_EPOCH, &malformed));
     }
 
     #[test]

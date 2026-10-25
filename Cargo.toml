@@ -1,15 +1,25 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/media", "crates/platform", "crates/app", "crates/webp-pipeline"]
+members = [
+    "crates/core",
+    "crates/storage",
+    "crates/render",
+    "crates/media",
+    "crates/platform",
+    "crates/app",
+    "crates/webp-pipeline",
+]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.95"
 
 [workspace.dependencies]
 mediaa-core = { path = "crates/core" }
+mediaa-storage = { path = "crates/storage" }
+mediaa-render = { path = "crates/render" }
 mediaa-platform = { path = "crates/platform" }
 mediaa-media = { path = "crates/media" }
 mediaa-webp-pipeline = { path = "crates/webp-pipeline" }
@@ -21,20 +31,67 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg", "bmp", "tiff"] }
 hound = "3.5"
 crossbeam-channel = "0.5"
+parking_lot = "0.12"
 log = { version = "0.4", features = ["std"] }
 env_logger = "0.11"
+fnv = "1"
 directories = "6"
 tempfile = "3"
 rusqlite = { version = "0.40", features = ["bundled"] }
+url = "2"
 
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
 
+[profile.dev-check]
+inherits = "dev"
+debug = 0
+
+[profile.dev-check.package."*"]
+opt-level = 0
+
+[profile.dev-check.package.mediaa-core]
+opt-level = 0
+[profile.dev-check.package.mediaa-storage]
+opt-level = 0
+[profile.dev-check.package.mediaa-render]
+opt-level = 0
+[profile.dev-check.package.mediaa-platform]
+opt-level = 0
+[profile.dev-check.package.mediaa-media]
+opt-level = 0
+[profile.dev-check.package.mediaa-webp-pipeline]
+opt-level = 0
+
+[profile.test-fast]
+inherits = "dev"
+debug = 0
+
+[profile.test-fast.package."*"]
+opt-level = 0
+
+[profile.test-fast.package.mediaa-core]
+opt-level = 2
+[profile.test-fast.package.mediaa-storage]
+opt-level = 2
+[profile.test-fast.package.mediaa-render]
+opt-level = 2
+[profile.test-fast.package.mediaa-platform]
+opt-level = 2
+[profile.test-fast.package.mediaa-media]
+opt-level = 2
+
 [profile.dev.package."*"]
-opt-level = 3
+opt-level = 1
+[profile.dev.package.mediaa-core]
+opt-level = 2
+[profile.dev.package.mediaa-storage]
+opt-level = 2
+[profile.dev.package.mediaa-render]
+opt-level = 2
 [profile.dev.package.mediaa-platform]
-opt-level = 3
+opt-level = 2
 [profile.dev.package.mediaa-media]
-opt-level = 3
+opt-level = 2

@@ -283,7 +283,6 @@ pub struct Settings {
     pub hotkey_screen: ScreenChoice,
     pub audio_record: AudioRecordSettings,
     pub hotkey_audio: AudioRecordSettings,
-    pub region_audio: AudioRecordSettings,
     pub hotkeys: HotkeySettings,
     pub launch_at_login: bool,
     pub start_in_tray: bool,
@@ -320,7 +319,6 @@ impl Default for Settings {
             hotkey_screen: ScreenChoice::Primary,
             audio_record: AudioRecordSettings::default(),
             hotkey_audio: AudioRecordSettings::default(),
-            region_audio: AudioRecordSettings::default(),
             hotkeys: HotkeySettings::default(),
             launch_at_login: false,
             start_in_tray: false,
@@ -400,11 +398,11 @@ impl Settings {
             .unwrap_or_else(|| self.media_dir.clone())
     }
 
-    pub fn audio_profile(&self, p: RecordProfile) -> &AudioRecordSettings {
+    pub fn audio_profile(&self, p: RecordProfile) -> Option<&AudioRecordSettings> {
         match p {
-            RecordProfile::App => &self.audio_record,
-            RecordProfile::Hotkey => &self.hotkey_audio,
-            RecordProfile::Region => &self.region_audio,
+            RecordProfile::App => Some(&self.audio_record),
+            RecordProfile::Hotkey => Some(&self.hotkey_audio),
+            RecordProfile::Region => None,
         }
     }
 
@@ -711,14 +709,14 @@ mod tests {
         );
         s.hotkey_audio.format = AudioFormat::Flac;
         assert_eq!(
-            s.audio_profile(RecordProfile::Hotkey).format,
+            s.audio_profile(RecordProfile::Hotkey).unwrap().format,
             AudioFormat::Flac
         );
-        assert_eq!(s.audio_profile(RecordProfile::App).format, AudioFormat::Mp3);
         assert_eq!(
-            s.audio_profile(RecordProfile::Region).format,
+            s.audio_profile(RecordProfile::App).unwrap().format,
             AudioFormat::Mp3
         );
+        assert!(s.audio_profile(RecordProfile::Region).is_none());
         let a = AudioRecordSettings::default();
         assert_eq!(
             (a.format, a.kbps, a.system_audio),

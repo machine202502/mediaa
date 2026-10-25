@@ -45,20 +45,54 @@
 
 | Крейт | Что внутри |
 |---|---|
-| `crates/core` | настройки (`settings.rs`), геометрия, аннотации, пейсинг, имена файлов, библиотека и её индекс, WAV, `paths.rs` |
-| `crates/app` | UI: `pages/{capture,record,audio,library,convert,settings,about}.rs`, `theme.rs`, `app.rs`, трей, хоткеи, оверлей выделения, i18n |
-| `crates/media`, `crates/platform` | FFmpeg (статический, vcpkg), захват экрана; `platform/examples/snap.rs` — скриншот своего окна |
+| `crates/core` | чистые модель и правила: настройки, геометрия, `Frame`, форматы, имена, пейсинг, WAV, identity и typed paths |
+| `crates/storage` | SQLite-кэши, индекс библиотеки, watcher, thumbnail atlas, атомарная публикация и запись скриншотов |
+| `crates/render` | аннотации и размещение панелей поверх кадра; шрифты и `tiny-skia` не попадают в platform |
+| `crates/media` | FFmpeg-запись и конвертация, preview/thumbnail, live WebP adapter; внутри `recorder/{request,capture,finalize,recovery}` |
+| `crates/platform` | Windows/X11/macOS захват, audio I/O, clipboard/files, tray/window helpers и single-instance |
+| `crates/webp-pipeline` | независимый budgeted scheduler сегментов WebP и merge/normalize |
+| `crates/app` | тонкий `main.rs`, library facade, UI, команды и `TaskSupervisor`; крупные контроллеры разнесены по файлам |
+
+### Карта для LLM
+
+| Задача | Сначала читать | Тесты | Проверка |
+|---|---|---|---|
+| Startup, окно, второй запуск | `app/src/main.rs`, `app/src/app/{window,actions}.rs`, `platform/src/single_instance.rs` | `platform/src/single_instance.rs`, `app/src/app/tests.rs` | `cargo test -p mediaa-platform --lib`, `cargo test -p mediaa --lib` |
+| Запись и финализация | `media/src/recorder.rs`, `media/src/recorder/{request,capture,finalize}.rs`, `app/src/app/recording.rs` | `media/src/recorder/tests.rs`, `media/tests/pipeline/video.rs` | `cargo test -p mediaa-media --lib`, `cargo test -p mediaa-media --test pipeline` |
+| Recovery после падения | `media/src/recorder/recovery.rs`, `app/src/app/recovery.rs` | `media/src/recorder/tests.rs` | `cargo test -p mediaa-media recorder::tests` |
+| Конвертация | `media/src/convert.rs`, `app/src/pages/convert{,/worker,/controls}.rs` | `media/tests/pipeline/conversion.rs`, `app/src/pages/convert/tests.rs` | `cargo test -p mediaa --lib pages::convert` |
+| Библиотека и кэш | `storage/src/library_index.rs`, `storage/src/thumb_cache.rs`, `app/src/pages/library*` | модульные тесты storage и `pages/library/tests.rs` | `cargo test -p mediaa-storage --lib`, `cargo test -p mediaa --lib pages::library` |
+| WebP scheduler | `webp-pipeline/src/{lib,scheduler,memory}.rs`, `media/src/live_webp.rs` | `webp-pipeline/src/tests.rs`, `media/tests/pipeline/video.rs` | `cargo test -p mediaa-webp-pipeline` |
+| Захват и платформа | `platform/src/{screen,wgc,x11,cursor,cursor_overlay,audio}.rs` | `platform/src/cursor.rs`, `platform/tests/live.rs` | `cargo test -p mediaa-platform --lib` |
+| UI и профили | `app/src/pages/`, `app/src/theme.rs`, `core/src/settings.rs` | соседние `tests.rs` и `pages/library/tests.rs` | `cargo test -p mediaa --lib` |
 
 ---
 
 ## 2. Сборка, запуск, тесты
 
-```bash
-export LIBCLANG_PATH="C:/Program Files/Microsoft Visual Studio/18/Community/VC/Tools/Llvm/x64/bin"
-cargo build --release -p mediaa
-cargo test --release --workspace
-cargo clippy --release --workspace --all-targets
+```powershell
+. C:\shared-data\reps\.old\gifcap2\scripts\windows\env.ps1
+cargo check --workspace --all-targets --profile dev-check
+. C:\shared-data\reps\.old\gifcap2\scripts\windows\env-fast.ps1
+cargo test -p mediaa --lib --profile test-fast
+cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+Для быстрой обратной связи после правок Rust используется
+`cargo check --workspace --all-targets --profile dev-check`: профиль отключает debug-info и
+оптимизацию зависимостей. Обычный dev-профиль оставляет `opt-level=1` зависимостям и
+`opt-level=2` внутренним крейтам, чтобы тесты и запись не становились заметно медленнее.
+
+`test.ps1` и `test-fast.ps1` используют `env-fast.ps1`: в debug/test подключается `rust-lld`
+(замер link приложения — 4,5 с вместо 9,9 с; предупреждения `LNK4217` относятся к bundled
+SQLite и не меняют код возврата). Release-скрипты остаются на штатном linker.
+Release-тесты запускаются только по явному запросу пользователя через `test-release.ps1`.
+Пользовательский артефакт во всех вариантах — один `dist/windows/mediaa.exe`; split-runtime
+и DLL не используются.
+
+`scripts/windows/test.ps1` прогоняет `fmt`, `clippy`, workspace-тесты, Node-тесты и, если
+установлен, `cargo audit --file Cargo.lock --deny unsound --deny yanked`. Установка аудита:
+`cargo install cargo-audit --locked`.
 
 * FFmpeg — статический, через vcpkg (`x64-windows-static-release`), `+crt-static`.
 * В Git Bash нет Python (только заглушка Windows Store). Многострочные правки Rust делать
@@ -74,6 +108,9 @@ kill $(cat /tmp/mediaa.pid)
 
 * `--page=` принимает library, record, audio, convert, settings, about
   (см. `page_from_args` в `app.rs`).
+* `MEDIAA_DEV_LIBRARY` также задаёт отдельный scope single-instance: тестовая копия может работать
+  рядом с пользовательской. Тот же scope значит один экземпляр; для второго независимого теста
+  задайте отдельный `MEDIAA_INSTANCE_ID`.
 
 Пользователь сам запускает **debug**-сборку `target\debug\mediaa.exe` со своей библиотекой
 `C:\Users\wmachine\Documents\MediaA`. Его процессы не трогать.
@@ -375,3 +412,11 @@ kill $(cat /tmp/mediaa.pid)
 * `pacer`: кадр получает слот по активному времени записи, а не по счёту кадров; опоздавший
   кадр оставляет дыру (иначе запись играет быстрее), ранний отбрасывается. Аудиокуски кладутся
   по времени прихода, дыры заполняются тишиной, чтобы дорожки не разошлись с видео.
+* Надёжность записи: старт захвата идёт в фоне и отменяется через `RecState::Starting`;
+  финализатор наблюдается из `App`, а не теряется вместе с `JoinHandle`; аварийно оставленные
+  каталоги `work/` восстанавливаются в библиотеку на следующем запуске. Рабочие каталоги больше
+  не удаляются по возрасту без восстановления.
+* Итоговые медиа, скриншоты, конвертации и preview-прокси пишутся через
+  `mediaa_core::atomic_file::AtomicFile`: временный файл в той же папке синхронизируется и
+  атомарно публикуется без перезаписи существующего результата.
+* Продакшен-запуск — один экземпляр; отдельные dev-scope описаны в разделе запуска UI.

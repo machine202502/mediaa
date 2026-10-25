@@ -133,6 +133,15 @@ fn bitstream_dimensions(chunks: &[Chunk<'_>], source: &Path) -> anyhow::Result<(
     anyhow::bail!("{} has no VP8 or VP8L image chunk", source.display())
 }
 
+fn has_alpha(chunks: &[Chunk<'_>]) -> bool {
+    if chunks.iter().any(|chunk| &chunk.id == b"ALPH") {
+        return true;
+    }
+    chunk(chunks, b"VP8L").is_some_and(|data| {
+        data.len() >= 5 && u32::from_le_bytes([data[1], data[2], data[3], data[4]]) & (1 << 28) != 0
+    })
+}
+
 fn frame_payload(
     chunks: &[Chunk<'_>],
     width: u32,
@@ -166,7 +175,7 @@ pub(crate) fn normalize_animation(path: &Path, duration_us: i64) -> anyhow::Resu
         .unwrap_or(u32::MAX)
         .clamp(1, 0xff_ffff);
     let mut canvas = [0u8; 10];
-    canvas[0] = 0x02;
+    canvas[0] = 0x02 | if has_alpha(&chunks) { 0x10 } else { 0 };
     write_u24(&mut canvas[4..7], width.saturating_sub(1));
     write_u24(&mut canvas[7..10], height.saturating_sub(1));
     let animation = [0u8; 6];
@@ -304,6 +313,22 @@ pub(crate) fn synthetic_still(width: u32, height: u32, frame: u8) -> Vec<u8> {
 }
 
 #[cfg(test)]
+pub(crate) fn synthetic_transparent_still(width: u32, height: u32, frame: u8) -> Vec<u8> {
+    let still = synthetic_still(width, height, frame);
+    let mut alpha = Vec::new();
+    alpha.extend_from_slice(b"ALPH");
+    alpha.extend_from_slice(&2u32.to_le_bytes());
+    alpha.extend_from_slice(&[0, 0]);
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"RIFF");
+    bytes.extend_from_slice(&((still.len() - 8 + alpha.len()) as u32).to_le_bytes());
+    bytes.extend_from_slice(b"WEBP");
+    bytes.extend_from_slice(&alpha);
+    bytes.extend_from_slice(&still[12..]);
+    bytes
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -361,6 +386,18 @@ mod tests {
             1_250
         );
         assert_eq!(&frame.data[16..20], b"VP8 ");
+    }
+
+    #[test]
+    fn normalized_static_webp_keeps_the_alpha_capability_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transparent.webp");
+        std::fs::write(&path, synthetic_transparent_still(9, 10, 7)).unwrap();
+        normalize_animation(&path, 1_000_000).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        let chunks = parse_chunks(&bytes, Path::new("transparent.webp")).unwrap();
+        let canvas = chunk(&chunks, b"VP8X").unwrap();
+        assert_ne!(canvas[0] & 0x10, 0);
     }
 
     #[test]

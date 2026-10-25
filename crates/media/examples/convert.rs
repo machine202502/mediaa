@@ -1,4 +1,5 @@
 use mediaa_core::formats::{AnimFormat, AudioFormat};
+use mediaa_core::paths::{OutputPath, SourcePath};
 use mediaa_media::convert::{self, ConvertSettings, Effort, StillFormat, Target, VideoFormat};
 use std::sync::atomic::AtomicBool;
 
@@ -27,8 +28,8 @@ fn main() -> anyhow::Result<()> {
         }
     }
     convert::convert(
-        input.as_ref(),
-        output.as_ref(),
+        &SourcePath::new(input),
+        &OutputPath::new(&output),
         target,
         &settings,
         &mut |_| {},

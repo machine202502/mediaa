@@ -1,4 +1,4 @@
-use mediaa_core::cursor::CursorImage;
+use crate::cursor_overlay::CursorImage;
 
 #[derive(Debug, Clone)]
 pub struct CursorState {
@@ -18,7 +18,7 @@ pub fn position() -> Option<(i32, i32)> {
 #[cfg(windows)]
 mod imp {
     use super::CursorState;
-    use mediaa_core::cursor::CursorImage;
+    use crate::cursor_overlay::CursorImage;
     use mediaa_core::Frame;
     use std::cell::RefCell;
     use windows_sys::Win32::Graphics::Gdi::{
@@ -170,8 +170,8 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::CursorState;
+    use crate::cursor_overlay::{arrow, CursorImage};
     use device_query::{DeviceQuery, DeviceState};
-    use mediaa_core::cursor::{arrow, CursorImage};
     use std::sync::OnceLock;
 
     pub fn position() -> Option<(i32, i32)> {

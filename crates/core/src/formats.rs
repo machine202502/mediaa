@@ -189,6 +189,19 @@ pub const VIDEO_EXTENSIONS: [&str; 12] = [
     "mp4", "mkv", "mov", "webm", "avi", "m4v", "wmv", "flv", "mpg", "mpeg", "ts", "3gp",
 ];
 pub const AUDIO_EXTENSIONS: [&str; 8] = ["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "wma"];
+pub const MAX_DECODE_PIXELS: u64 = 50_000_000;
+
+pub fn ensure_safe_dimensions(width: u32, height: u32) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        width > 0 && height > 0,
+        "image has invalid dimensions {width}×{height}"
+    );
+    anyhow::ensure!(
+        u64::from(width) * u64::from(height) <= MAX_DECODE_PIXELS,
+        "image dimensions {width}×{height} exceed the supported limit"
+    );
+    Ok(())
+}
 
 pub fn all_media_extensions() -> Vec<&'static str> {
     [
@@ -275,6 +288,12 @@ mod tests {
         assert_eq!(MediaKind::from_extension("Gif"), Some(MediaKind::Animation));
         assert_eq!(MediaKind::from_extension("png"), Some(MediaKind::Image));
         assert_eq!(MediaKind::from_extension("txt"), None);
+    }
+
+    #[test]
+    fn oversized_images_are_rejected_before_decoding_pixels() {
+        assert!(ensure_safe_dimensions(8192, 4320).is_ok());
+        assert!(ensure_safe_dimensions(50_000, 50_000).is_err());
     }
 
     fn vp8x_header(flags: u8) -> Vec<u8> {

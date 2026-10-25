@@ -4,9 +4,11 @@ use cpal::{FromSample, SizedSample};
 use crossbeam_channel::{bounded, Sender};
 use mediaa_core::audio::AudioSink;
 use mediaa_core::source::AudioSource;
+use parking_lot::Mutex;
+use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -26,7 +28,8 @@ pub fn input_devices() -> Vec<String> {
         .input_devices()
         .map(|it| it.map(|d| d.to_string()).collect())
         .unwrap_or_default();
-    names.dedup();
+    let mut seen = HashSet::new();
+    names.retain(|name| seen.insert(name.clone()));
     names
 }
 
@@ -135,10 +138,16 @@ impl AudioSource for CpalSource {
                 drop(stream);
                 log::info!("audio capture \"{name}\" stopped");
             })?;
-        ready_rx
-            .recv()
-            .context("audio thread exited")?
-            .with_context(|| format!("cannot record from \"{}\"", self.name()))?;
+        let ready = match ready_rx.recv_timeout(Duration::from_secs(15)) {
+            Ok(result) => result,
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                anyhow::bail!("audio start timed out")
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("audio thread exited")
+            }
+        };
+        ready.with_context(|| format!("cannot record from \"{}\"", self.name()))?;
         self.stop_tx = Some(stop_tx);
         self.thread = Some(thread);
         Ok(())
@@ -224,19 +233,15 @@ impl AudioOut {
     }
 
     pub fn push(&self, samples: &[f32]) {
-        self.shared
-            .queue
-            .lock()
-            .expect("audio queue")
-            .extend(samples);
+        self.shared.queue.lock().extend(samples);
     }
 
     pub fn queued_secs(&self) -> f64 {
-        self.shared.queue.lock().expect("audio queue").len() as f64 / 2.0 / f64::from(self.rate)
+        self.shared.queue.lock().len() as f64 / 2.0 / f64::from(self.rate)
     }
 
     pub fn clear(&self) {
-        self.shared.queue.lock().expect("audio queue").clear();
+        self.shared.queue.lock().clear();
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -275,7 +280,7 @@ where
         move |out: &mut [T], _| {
             let volume = f32::from_bits(shared.volume.load(Ordering::Relaxed));
             let paused = shared.paused.load(Ordering::Relaxed);
-            let mut queue = shared.queue.lock().expect("audio queue");
+            let mut queue = shared.queue.lock();
             for frame in out.chunks_mut(channels) {
                 let (l, r) = if paused {
                     (0.0, 0.0)

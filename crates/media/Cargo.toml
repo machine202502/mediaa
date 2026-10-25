@@ -9,10 +9,12 @@ build = "build.rs"
 [dependencies]
 chrono.workspace = true
 mediaa-core.workspace = true
+mediaa-storage.workspace = true
 mediaa-webp-pipeline.workspace = true
 anyhow.workspace = true
 log.workspace = true
 crossbeam-channel.workspace = true
+parking_lot.workspace = true
 image.workspace = true
 image-webp = "0.2"
 ez-ffmpeg = { version = "0.19", features = ["static"] }

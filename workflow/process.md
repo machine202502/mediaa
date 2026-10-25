@@ -571,3 +571,66 @@
 | 4 | Добавить ссылку на GitHub | голова | готово | — |
 | 5 | Проверка: снимок, 226 тестов workspace и clippy | голова | готово | `target/about-final.png` |
 | 6 | Коммит и пуш по запросу пользователя | голова | готово: `54f7ac3`, отправлено в `origin/main` | — |
+
+## Партия 23-1 — системный аудит и устранение найденных дефектов (запрос пользователя 2026-10-25)
+
+| Шаг | Что | Исполнитель | Состояние | Лог |
+|---|---|---|---|---|
+| 1 | Защитить quit/close от активной конвертации и потери итогового файла | голова | готово: quit ждёт, запись атомарная | — |
+| 2 | Сделать старт записи асинхронным, с таймаутами и без заморозки UI | голова | готово: `Starting` и отмена | — |
+| 3 | Восстанавливать незавершённые записи после падения и писать результаты атомарно | голова | готово: recovery в библиотеку | — |
+| 4 | Ограничить hover/thumbnail-кэши и добавить очистку текстур | голова | готово | — |
+| 5 | Перепроверять возраст файлов непосредственно перед очисткой | голова | готово: проверка перед каждого файла | — |
+| 6 | Сделать supervisor фоновых задач и единый live-учёт активной работы | голова | готово: disconnect и panic обрабатываются | — |
+| 7 | Добавить single-instance, корректный file URL и устранить дублирование | голова | готово: single-instance, `url`, общий `Effort` | — |
+| 8 | Расширить тесты найденных сценариев и выполнить второй аудит | голова | готово: добавлены recovery, atomic, cancel, cache, cleanup tests | — |
+| 9 | Проверка: fmt, clippy, workspace tests и live-сценарии | голова | готово: 247 Rust, 41 Node, fmt, clippy, UI-снимок; 4 desktop-live пропущены | `target/audit-library.png` |
+| 10 | Установить `cargo-audit`, проверить `Cargo.lock`, обновить исправимые зависимости | голова | готово: 0 vulnerabilities; `tokio 1.53.3`, `clipboard-win 5.4.3` | `Cargo.lock` |
+| 11 | Повторная проверка после dependency audit | голова | готово: fmt, clippy, 250 Rust, 41 Node; audit чист по unsound/yanked | — |
+
+## Партия 23-2 — границы для LLM и устойчивость фоновых задач (запрос пользователя 2026-10-25)
+
+| Шаг | Что | Исполнитель | Состояние | Лог |
+|---|---|---|---|---|
+| 1 | Разделить крупные модули приложения по ответственности | голова | готово: `app/{state,recording,recovery,notices,tasks}`, `pages/library/{cleanup,grid}` | — |
+| 2 | Ввести типизированные команды и события фоновых задач | голова | готово: `ActiveTasks`, `WorkKind`, `RecordingProgress` | — |
+| 3 | Убрать boolean-параметры из публичных API | голова | готово: `StopAction`, `AudioLayout`, `WebpMode`, `WebpSegmentation`, `AutoStart` | — |
+| 4 | Заменить панику poisoned mutex на контролируемый отказ | голова | готово: production mutex/condvar на `parking_lot` | — |
+| 5 | Отделить progress-события от терминальных событий | голова | готово: progress в atomic, канал только события | — |
+| 6 | Добавить быстрый профиль проверки и замерить сборку | голова | готово: правка `app.rs` 1,6 s вместо 5,0 s | — |
+| 7 | Проверка: fmt, clippy, тесты, UI-снимок и аудит | голова | готово: 251 Rust, 41 Node, clippy `-D warnings`, audit 0 blocking | — |
+
+## Партия 23-3 — единый release, быстрый debug и следующие границы (запрос пользователя 2026-10-25)
+
+| Шаг | Что | Исполнитель | Состояние | Лог |
+|---|---|---|---|---|
+| 1 | Разделить `media/recorder.rs` на lifecycle, finalize, recovery и tests | голова | готово: request/capture/finalize/recovery/tests, корень 782 строки | — |
+| 2 | Разделить `app/overlay.rs` и вынести screenshot lifecycle | голова | готово: `overlay/editor.rs`, `app/capture.rs` | — |
+| 3 | Разделить app на library и thin binary | голова | готово: `lib.rs`, thin `main.rs` | — |
+| 4 | Ввести `AppCommand` и провести recording через единый dispatcher | голова | готово: `RecordingCommand`, tray/page/hotkey | — |
+| 5 | Добавить валидированные конструкторы `RecordingRequest` | голова | готово: private fields, builder, validation test | — |
+| 6 | Добавить `test-fast` и отдельный ручной release test script | голова | готово: `test-fast`, `test-release`, `env-fast` | — |
+| 7 | Замерить focused tests, nextest и linker; зафиксировать политику одного release exe | голова | готово: lld 4,5 s против 9,9 s; nextest не установлен; release mono | — |
+| 8 | Проверка: fmt, clippy, debug tests, release по запросу batch, UI и аудит | голова | готово: 252 Rust, 41 Node, clippy, audit; release не запускался по политике | — |
+
+## Партия 23-4 — полный план архитектуры и LLM (запрос пользователя 2026-10-25)
+
+| Шаг | Что | Исполнитель | Состояние | Лог |
+|---|---|---|---|---|
+| 1 | W1.0 Оформить единый план волн, зависимости, зоны файлов и критерии приёмки | голова | готово; план проверен и закрыт итогом исполнения | `workflow/plan-llm-architecture.md` |
+| 2 | W1.1 Типизировать identity, recording/preview limits и связанные константы | голова | готово: `AppIdentity`, `RecordingLimits`, `PreviewLimits`, единый timestamp | — |
+| 3 | W1.2 Разделить `pages/convert.rs` и `pages/record.rs`, вынести тесты | голова | готово: worker/controls/status и отдельные tests | — |
+| 4 | W1.3 Разделить WebP scheduler и integration pipeline tests | голова | готово: scheduler/memory/tests; pipeline audio/video/conversion | — |
+| 5 | W1.4 Проверить первую волну, конфликты, размеры файлов, `fmt`, clippy и targeted tests | голова | готово | — |
+| 6 | W2.1 Ввести единый TaskSupervisor для spawn/completion/cancel/quit | голова | готово; terminal status сохраняется после reap | — |
+| 7 | W2.2 Ввести bounded channel policy и latest-value прогресс | голова | готово; unbounded остался только в тестовом fixture | — |
+| 8 | W2.3 Типизировать ошибки межкрейтовых границ | голова | готово для решений UI: `MediaErrorKind`; контекст реализации остаётся `anyhow` | — |
+| 9 | W2.4 Ввести типизированные source/output/work/cache пути | голова | готово: типы используются в recording, convert и preview-cache | — |
+| 10 | W2.5 Проверить lifecycle, errors, paths и контрактные тесты | голова | готово; добавлены panic/reap, corrupt DB/cache и watcher overflow tests | — |
+| 11 | W3.1 Разделить core на model/storage/render без compatibility-обёрток | голова | готово: `mediaa-core`, `mediaa-storage`, `mediaa-render` | — |
+| 12 | W3.2 Реализовать activation существующего окна | голова | готово: Windows named-event проверен тестом; Unix socket защищён timeout, Unix-ветка не исполнялась в Windows-сеансе | — |
+| 13 | W3.3 Закрыть app facade и оставить thin binary | голова | готово: library + thin `main.rs`; `app.rs` 453 строки | — |
+| 14 | W3.4 Зафиксировать LLM navigation map и команды | голова | готово: задача → файлы → тесты → команда | `workflow/dev-context.md` |
+| 15 | W3.5 Замерить build loop и проверить состав workspace | голова | готово: warm `dev-check` 1,35–4,96 s; один runtime artifact | — |
+| 16 | Финальная проверка: fmt, clippy, Rust/Node tests, audit, UI и single-exe policy | голова | готово: 263 Rust, 4 desktop-live пропущены, 41 Node, clippy `-D warnings`; audit 0 blocking | — |
+| 17 | Release build/tests | голова | не запускалось: запрещено без отдельного запроса | — |

@@ -93,20 +93,9 @@ pub fn human_duration(secs: f64) -> String {
 
 pub fn file_url(path: &Path) -> String {
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let s = abs.to_string_lossy().replace('\\', "/");
-    let mut out = String::from("file://");
-    if !s.starts_with('/') {
-        out.push('/');
-    }
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' | b':' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    url::Url::from_file_path(&abs)
+        .map(|url| url.to_string())
+        .unwrap_or_else(|_| abs.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -165,5 +154,13 @@ mod tests {
         let url = file_url(Path::new("/tmp/my clip #1.mp4"));
         assert!(url.starts_with("file:///"), "{url}");
         assert!(url.ends_with("/my%20clip%20%231.mp4"), "{url}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn unc_file_urls_have_the_network_authority_form() {
+        let url = file_url(Path::new(r"\\server\share\clip 1.mp4"));
+        assert!(url.starts_with("file://server/share/"), "{url}");
+        assert!(url.ends_with("clip%201.mp4"), "{url}");
     }
 }

@@ -71,8 +71,16 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     .checkbox(&mut enabled, t!("settings.launch_at_login"))
                     .changed()
                 {
-                    match mediaa_platform::startup::set_enabled(enabled, app.settings.start_in_tray)
-                    {
+                    let mode = if enabled {
+                        if app.settings.start_in_tray {
+                            mediaa_platform::startup::AutoStart::Tray
+                        } else {
+                            mediaa_platform::startup::AutoStart::Window
+                        }
+                    } else {
+                        mediaa_platform::startup::AutoStart::Disabled
+                    };
+                    match mediaa_platform::startup::configure(mode) {
                         Ok(()) => {
                             app.settings.launch_at_login = enabled;
                             changed.set(true);
@@ -88,7 +96,12 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     .changed()
                 {
                     let update = if app.settings.launch_at_login {
-                        mediaa_platform::startup::set_enabled(true, enabled)
+                        let mode = if enabled {
+                            mediaa_platform::startup::AutoStart::Tray
+                        } else {
+                            mediaa_platform::startup::AutoStart::Window
+                        };
+                        mediaa_platform::startup::configure(mode)
                     } else {
                         Ok(())
                     };

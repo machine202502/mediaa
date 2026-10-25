@@ -1,13 +1,17 @@
-use crate::animation_backends::{self, AnimationEffort, AnimationEncodeRequest, AnimationOrigin};
+use crate::animation_backends::{self, AnimationEncodeRequest, AnimationOrigin, WebpSegmentation};
 use crate::filters;
 use crate::info::{probe, MediaInfo};
 use crate::job;
 use ez_ffmpeg::{FfmpegContext, Input, Output};
 use mediaa_core::formats::{self, AnimFormat, AudioFormat, MediaKind, VideoContainer};
 use mediaa_core::naming;
+use mediaa_core::paths::{MediaDir, OutputPath, SourcePath};
 use mediaa_core::settings::AnimSettings;
+use mediaa_storage::atomic_file::AtomicFile;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+
+pub use crate::filters::Effort;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VideoFormat {
@@ -141,66 +145,6 @@ impl Target {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum Effort {
-    Fast,
-    #[default]
-    Balanced,
-    Max,
-}
-
-impl Effort {
-    pub const ALL: [Effort; 3] = [Effort::Fast, Effort::Balanced, Effort::Max];
-
-    fn x264_preset(self) -> &'static str {
-        match self {
-            Effort::Fast => "veryfast",
-            Effort::Balanced => "medium",
-            Effort::Max => "veryslow",
-        }
-    }
-
-    fn vp9_cpu_used(self) -> &'static str {
-        match self {
-            Effort::Fast => "6",
-            Effort::Balanced => "4",
-            Effort::Max => "1",
-        }
-    }
-
-    fn webp_level(self) -> &'static str {
-        match self {
-            Effort::Fast => "2",
-            Effort::Balanced => "4",
-            Effort::Max => "6",
-        }
-    }
-
-    fn animation_effort(self) -> AnimationEffort {
-        match self {
-            Self::Fast => AnimationEffort::Fast,
-            Self::Balanced => AnimationEffort::Balanced,
-            Self::Max => AnimationEffort::Max,
-        }
-    }
-
-    fn flac_level(self) -> &'static str {
-        match self {
-            Effort::Fast => "2",
-            Effort::Balanced => "5",
-            Effort::Max => "8",
-        }
-    }
-
-    fn png_preset(self) -> u8 {
-        match self {
-            Effort::Fast => 1,
-            Effort::Balanced => 3,
-            Effort::Max => 6,
-        }
-    }
-}
-
 pub const PNG_COLORS: [u16; 5] = [256, 128, 64, 32, 16];
 
 pub const VIDEO_FPS: [u32; 4] = [60, 30, 24, 15];
@@ -236,7 +180,12 @@ impl Default for ConvertSettings {
     }
 }
 
-pub fn output_path(input: &Path, target: Target, title: Option<&str>, out_dir: &Path) -> PathBuf {
+pub fn output_path(
+    input: &SourcePath,
+    target: Target,
+    title: Option<&str>,
+    out_dir: &MediaDir,
+) -> OutputPath {
     let title = title
         .map(str::trim)
         .filter(|t| !t.is_empty())
@@ -244,7 +193,12 @@ pub fn output_path(input: &Path, target: Target, title: Option<&str>, out_dir: &
         .or_else(|| naming::parse_path(input).map(|n| n.title))
         .or_else(|| input.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "output".into());
-    naming::media_path(out_dir, &title, chrono::Local::now(), target.extension())
+    OutputPath::new(naming::media_path(
+        out_dir,
+        &title,
+        chrono::Local::now(),
+        target.extension(),
+    ))
 }
 
 fn url(p: &Path) -> String {
@@ -449,14 +403,25 @@ fn optimize_png(path: &Path, effort: Effort) -> anyhow::Result<()> {
 }
 
 pub fn convert(
-    input: &Path,
-    output: &Path,
+    input: &SourcePath,
+    output: &OutputPath,
     target: Target,
     settings: &ConvertSettings,
     on_progress: &mut dyn FnMut(Option<f32>),
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
-    convert_part(input, output, target, settings, None, on_progress, cancel)
+    let pending = AtomicFile::new(output)?;
+    convert_part(
+        input,
+        pending.path(),
+        target,
+        settings,
+        None,
+        on_progress,
+        cancel,
+    )?;
+    pending.commit()?;
+    Ok(())
 }
 
 fn convert_part(
@@ -479,9 +444,9 @@ fn convert_part(
                 window,
                 format,
                 settings: &settings.anim,
-                effort: settings.effort.animation_effort(),
+                effort: settings.effort,
                 origin: AnimationOrigin::Conversion,
-                segmented_webp: false,
+                segmentation: WebpSegmentation::Direct,
                 scheduling: Default::default(),
                 threads: None,
                 trace_id: None,
@@ -554,7 +519,7 @@ fn convert_part(
 const SAMPLE_US: i64 = 5_000_000;
 
 pub fn estimate_size(
-    input: &Path,
+    input: &SourcePath,
     target: Target,
     settings: &ConvertSettings,
     cancel: &AtomicBool,
@@ -586,7 +551,7 @@ pub fn estimate_size(
     })
 }
 
-pub fn encode_audio_recording(
+pub(crate) fn encode_audio_recording(
     tracks: &[PathBuf],
     output: &Path,
     format: AudioFormat,
@@ -613,7 +578,7 @@ pub fn encode_audio_recording(
     result
 }
 
-pub fn mux_recording(
+pub(crate) fn mux_recording(
     video: &Path,
     audio_tracks: &[PathBuf],
     output: &Path,
@@ -686,13 +651,32 @@ mod tests {
         assert!(StillFormat::Jpeg.has_quality() && !StillFormat::Png.has_quality());
         assert_eq!(VideoFormat::Mkv.muxer(), "matroska");
         assert_eq!(Target::Still(StillFormat::Jpeg).extension(), "jpg");
+        for kind in [
+            MediaKind::Image,
+            MediaKind::Video,
+            MediaKind::Animation,
+            MediaKind::Audio,
+        ] {
+            for target in Target::for_kind(kind) {
+                assert!(
+                    MediaKind::from_extension(target.extension()).is_some(),
+                    "{kind:?}: {} is not a known media extension",
+                    target.extension()
+                );
+            }
+        }
     }
 
     #[test]
     fn output_names() {
         let dir = tempfile::tempdir().unwrap();
         let title = |input: &str, target, name: Option<&str>| {
-            let p = output_path(Path::new(input), target, name, dir.path());
+            let p = output_path(
+                &SourcePath::new(input),
+                target,
+                name,
+                &MediaDir::new(dir.path()),
+            );
             (
                 naming::parse_path(&p).unwrap().title,
                 p.extension().unwrap().to_string_lossy().into_owned(),
@@ -717,5 +701,25 @@ mod tests {
             "holiday",
             "files from elsewhere: their stem"
         );
+    }
+
+    #[test]
+    fn failed_conversion_preserves_an_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("broken.mp4");
+        let output = dir.path().join("result.mp4");
+        std::fs::write(&input, b"not media").unwrap();
+        std::fs::write(&output, b"keep me").unwrap();
+        let error = convert(
+            &SourcePath::new(&input),
+            &OutputPath::new(&output),
+            Target::Video(VideoFormat::Mp4),
+            &ConvertSettings::default(),
+            &mut |_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert!(!error.to_string().is_empty());
+        assert_eq!(std::fs::read(output).unwrap(), b"keep me");
     }
 }

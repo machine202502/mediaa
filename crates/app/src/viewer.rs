@@ -54,16 +54,25 @@ impl Viewer {
             let p = path.to_path_buf();
             let _ = std::thread::Builder::new()
                 .name("viewer-image".into())
-                .spawn(move || match image::open(&p) {
-                    Ok(img) => {
-                        let img = if img.width().max(img.height()) > MAX_TEXTURE {
-                            img.thumbnail(MAX_TEXTURE, MAX_TEXTURE)
-                        } else {
-                            img
-                        };
-                        let _ = tx.send(Frame::from_image(img.to_rgba8()));
+                .spawn(move || {
+                    match image::image_dimensions(&p)
+                        .map_err(anyhow::Error::from)
+                        .and_then(|(width, height)| {
+                            mediaa_core::formats::ensure_safe_dimensions(width, height)?;
+                            Ok(())
+                        })
+                        .and_then(|()| image::open(&p).map_err(anyhow::Error::from))
+                    {
+                        Ok(img) => {
+                            let img = if img.width().max(img.height()) > MAX_TEXTURE {
+                                img.thumbnail(MAX_TEXTURE, MAX_TEXTURE)
+                            } else {
+                                img
+                            };
+                            let _ = tx.send(Frame::from_image(img.to_rgba8()));
+                        }
+                        Err(e) => log::warn!("viewer {}: {e}", p.display()),
                     }
-                    Err(e) => log::warn!("viewer {}: {e}", p.display()),
                 });
             v.image_rx = Some(rx);
         } else {

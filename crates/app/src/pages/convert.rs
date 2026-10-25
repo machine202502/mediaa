@@ -1,15 +1,18 @@
 use super::{activity, header};
+use crate::app::tasks::{TaskId, TaskKind, TaskSupervisor};
 use crate::app::App;
 use crate::{i18n, theme};
 use crossbeam_channel::Receiver;
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
 use mediaa_core::library::{human_duration, human_size};
+use mediaa_core::paths::OutputPath;
 use mediaa_core::settings::{AUDIO_BITRATES, OUTPUT_HEIGHTS};
 use mediaa_core::MediaKind;
 use mediaa_media::convert::{
     self, ConvertSettings, Effort, StillFormat, Target, PNG_COLORS, VIDEO_FPS,
 };
+use mediaa_media::error::{classify_media_error, MediaErrorKind};
 use mediaa_media::info::MediaInfo;
 use rust_i18n::t;
 use std::path::PathBuf;
@@ -18,17 +21,39 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 struct Job {
-    output: PathBuf,
+    output: OutputPath,
     progress: Arc<AtomicI32>,
     started: Instant,
     cancel: Arc<AtomicBool>,
-    done: Receiver<Result<(), String>>,
+    done: Receiver<ConversionTaskResult>,
+    task: TaskId,
 }
+
+enum ConversionTaskResult {
+    Completed,
+    Failed {
+        kind: MediaErrorKind,
+        message: String,
+    },
+    Cancelled,
+}
+
+pub enum ConversionOutcome {
+    Finished(OutputPath),
+    Failed {
+        kind: MediaErrorKind,
+        message: String,
+    },
+    Cancelled,
+}
+
+type ProbeResult = Result<(MediaKind, MediaInfo), String>;
 
 #[derive(Default)]
 pub struct ConvertUi {
     input: Option<PathBuf>,
-    probed: Option<Result<(MediaKind, MediaInfo), String>>,
+    probed: Option<ProbeResult>,
+    probe_rx: Option<Receiver<ProbeResult>>,
     target: Option<Target>,
     settings: ConvertSettings,
     max_height: u32,
@@ -58,20 +83,102 @@ impl Drop for Estimate {
 
 impl ConvertUi {
     pub fn set_input(&mut self, path: PathBuf) {
-        self.probed = Some(match MediaKind::detect(&path) {
-            None => Err(t!("convert.unsupported").into()),
-            Some(kind) => mediaa_media::preview::details(&path, kind)
-                .map(|i| (kind, i))
-                .map_err(|e| format!("{e:#}")),
-        });
-        let targets = self.targets();
-        if self.target.is_some_and(|t| !targets.contains(&t)) {
-            self.target = None;
-        }
         self.estimate = None;
+        self.probe_rx = None;
         self.name.clear();
-        self.input = Some(path);
+        self.input = Some(path.clone());
         self.last = None;
+        match MediaKind::detect(&path) {
+            None => {
+                self.probed = Some(Err(t!("convert.unsupported").into()));
+            }
+            Some(kind) => {
+                self.probed = None;
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                let result = std::thread::Builder::new()
+                    .name("convert-probe".into())
+                    .spawn(move || {
+                        let result = mediaa_media::preview::details(&path, kind)
+                            .map(|info| (kind, info))
+                            .map_err(|error| format!("{error:#}"));
+                        let _ = tx.send(result);
+                    });
+                match result {
+                    Ok(_) => self.probe_rx = Some(rx),
+                    Err(error) => self.probed = Some(Err(format!("probe: {error}"))),
+                }
+            }
+        }
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.job.is_some()
+    }
+
+    pub fn cancel_estimate(&mut self) {
+        self.estimate = None;
+    }
+
+    pub fn poll_probe(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.probe_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.probed = Some(result);
+                self.probe_rx = None;
+                let targets = self.targets();
+                if self.target.is_some_and(|target| !targets.contains(&target)) {
+                    self.target = None;
+                }
+            }
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(50))
+            }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                self.probed = Some(Err(t!("convert.probe_stopped").into()));
+                self.probe_rx = None;
+            }
+        }
+    }
+
+    pub(crate) fn poll_job(
+        &mut self,
+        tasks: &mut TaskSupervisor,
+        ctx: &egui::Context,
+    ) -> Option<ConversionOutcome> {
+        let job = self.job.as_ref()?;
+        let received = match job.done.try_recv() {
+            Ok(result) => result,
+            Err(crossbeam_channel::TryRecvError::Empty) => {
+                ctx.request_repaint_after(Duration::from_millis(100));
+                return None;
+            }
+            Err(crossbeam_channel::TryRecvError::Disconnected) => ConversionTaskResult::Failed {
+                kind: MediaErrorKind::Internal,
+                message: t!("convert.worker_stopped").into(),
+            },
+        };
+        let job = self.job.take().expect("job checked above");
+        let thread_failed = tasks.join(job.task).is_some_and(|exit| exit.panicked);
+        let outcome = match received {
+            ConversionTaskResult::Completed => {
+                self.last = Some(job.output.clone().into_path());
+                ConversionOutcome::Finished(job.output)
+            }
+            ConversionTaskResult::Cancelled => ConversionOutcome::Cancelled,
+            ConversionTaskResult::Failed { kind, message } => {
+                ConversionOutcome::Failed { kind, message }
+            }
+        };
+        if thread_failed {
+            Some(ConversionOutcome::Failed {
+                kind: MediaErrorKind::Internal,
+                message: t!("convert.worker_stopped").into(),
+            })
+        } else {
+            Some(outcome)
+        }
     }
 
     fn effective(&self) -> ConvertSettings {
@@ -92,277 +199,25 @@ impl ConvertUi {
     }
 }
 
-fn start(app: &mut App, ctx: &egui::Context, target: Target) {
-    let Some(input) = app.conv.input.clone() else {
-        return;
-    };
-    let folder = app
-        .conv
-        .folder
-        .clone()
-        .unwrap_or_else(|| app.settings.convert_dir());
-    let output = convert::output_path(&input, target, Some(&app.conv.name), &folder);
-    let settings = app.conv.effective();
-    let progress = Arc::new(AtomicI32::new(-1));
-    let cancel = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = crossbeam_channel::bounded(1);
-    let (p, c, out, ctx2) = (
-        progress.clone(),
-        cancel.clone(),
-        output.clone(),
-        ctx.clone(),
-    );
-    std::thread::Builder::new()
-        .name("convert".into())
-        .spawn(move || {
-            let mut report = |f: Option<f32>| {
-                p.store(f.map_or(-1, |f| (f * 1000.0) as i32), Ordering::Relaxed);
-                ctx2.request_repaint();
-            };
-            let r =
-                convert::convert(&input, &out, target, &settings, &mut report, &c).map_err(|e| {
-                    if mediaa_media::job::is_cancelled(&e) {
-                        String::new()
-                    } else {
-                        format!("{e:#}")
-                    }
-                });
-            let _ = tx.send(r);
-            ctx2.request_repaint();
-        })
-        .expect("spawn convert thread");
-    app.conv.job = Some(Job {
-        output,
-        progress,
-        started: Instant::now(),
-        cancel,
-        done: rx,
-    });
-}
+mod worker;
+use worker::{start, update_estimate};
 
-fn update_estimate(app: &mut App, ctx: &egui::Context, target: Target) {
-    let Some(input) = app.conv.input.clone() else {
-        return;
-    };
-    let key = (input, target, app.conv.effective());
-    let conv = &mut app.conv;
-    if conv.estimate.as_ref().is_none_or(|e| e.key != key) {
-        let previous = conv.estimate.as_ref().and_then(|e| {
-            e.result
-                .as_ref()
-                .and_then(|r| r.as_ref().ok().copied())
-                .or(e.previous)
-        });
-        conv.estimate = Some(Estimate {
-            key,
-            since: Instant::now(),
-            cancel: Arc::default(),
-            rx: None,
-            result: None,
-            previous,
-        });
-    }
-    let busy = conv.job.is_some();
-    let Some(e) = conv.estimate.as_mut() else {
-        return;
-    };
-    if e.result.is_some() {
-        return;
-    }
-    match &e.rx {
-        Some(rx) => {
-            if let Ok(r) = rx.try_recv() {
-                e.result = Some(r);
-            }
-        }
-        None if busy => {}
-        None if e.since.elapsed() < ESTIMATE_DELAY => ctx.request_repaint_after(ESTIMATE_DELAY),
-        None => {
-            let (tx, rx) = crossbeam_channel::bounded(1);
-            let (key, cancel, ctx) = (e.key.clone(), e.cancel.clone(), ctx.clone());
-            std::thread::Builder::new()
-                .name("convert-estimate".into())
-                .spawn(move || {
-                    let (input, target, settings) = key;
-                    let r = convert::estimate_size(&input, target, &settings, &cancel);
-                    if !cancel.load(Ordering::Relaxed) {
-                        let _ = tx.send(r.map_err(|e| format!("{e:#}")));
-                        ctx.request_repaint();
-                    }
-                })
-                .expect("spawn estimate thread");
-            e.rx = Some(rx);
-        }
-    }
-}
-
-fn estimate_row(ui: &mut egui::Ui, estimate: Option<&Estimate>, input: Option<&std::path::Path>) {
-    let Some(e) = estimate else { return };
-    let source = input
-        .and_then(|p| std::fs::metadata(p).ok())
-        .map(|m| m.len());
-    let text = |bytes: u64| {
-        let mut s = format!("≈ {}", human_size(bytes));
-        if let Some(src) = source.filter(|s| *s > 0) {
-            let pct = (bytes as f64 / src as f64 - 1.0) * 100.0;
-            s += &format!(
-                "  ({}{:.0} %)",
-                if pct < 0.0 { "−" } else { "+" },
-                pct.abs()
-            );
-        }
-        s
-    };
-    theme::row(ui, &t!("convert.size"), |ui| {
-        let resp = match &e.result {
-            Some(Ok(bytes)) => ui.label(RichText::new(text(*bytes)).strong()),
-            Some(Err(err)) => ui
-                .label(RichText::new(t!("convert.size_failed")).color(theme::palette(ui).text_weak))
-                .on_hover_text(err),
-            None => {
-                ui.add(egui::Spinner::new().size(12.0));
-                match e.previous {
-                    Some(bytes) => {
-                        ui.label(RichText::new(text(bytes)).color(theme::palette(ui).text_weak))
-                    }
-                    None => ui.label(
-                        RichText::new(t!("convert.size_estimating"))
-                            .color(theme::palette(ui).text_weak),
-                    ),
-                }
-            }
-        };
-        resp.on_hover_text(t!("convert.size_hint"));
-    });
-}
-
-fn effort_row(ui: &mut egui::Ui, effort: &mut Effort) {
-    theme::row(ui, &t!("convert.effort"), |ui| {
-        let opts: Vec<(Effort, String)> = Effort::ALL
-            .iter()
-            .map(|e| {
-                let label = match e {
-                    Effort::Fast => t!("convert.effort_fast"),
-                    Effort::Balanced => t!("convert.effort_balanced"),
-                    Effort::Max => t!("convert.effort_max"),
-                };
-                (*e, label.to_string())
-            })
-            .collect();
-        ui.scope(|ui| theme::segmented(ui, effort, &opts))
-            .response
-            .on_hover_text(t!("convert.effort_hint"));
-    });
-}
-
-fn kbps_combo(ui: &mut egui::Ui, kbps: &mut u32) {
-    egui::ComboBox::from_id_salt("convert-kbps")
-        .selected_text(format!("{kbps} kbit/s"))
-        .show_ui(ui, |ui| {
-            for k in AUDIO_BITRATES {
-                ui.selectable_value(kbps, k, format!("{k} kbit/s"));
-            }
-        });
-}
-
-fn mono_checkbox(ui: &mut egui::Ui, mono: &mut bool) {
-    ui.checkbox(mono, t!("convert.mono"))
-        .on_hover_text(t!("convert.mono_hint"));
-}
-
-fn fps_combo(ui: &mut egui::Ui, max_fps: &mut Option<u32>, source_fps: f64) {
-    let label = |f: Option<u32>| {
-        f.map_or_else(
-            || t!("convert.fps_original").to_string(),
-            |f| format!("{f} fps"),
-        )
-    };
-    egui::ComboBox::from_id_salt("convert-fps")
-        .selected_text(label(*max_fps))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(max_fps, None, label(None));
-            for f in VIDEO_FPS
-                .into_iter()
-                .filter(|f| source_fps <= 0.0 || f64::from(*f) < source_fps - 0.5)
-            {
-                ui.selectable_value(max_fps, Some(f), label(Some(f)));
-            }
-        })
-        .response
-        .on_hover_text(t!("convert.fps_hint"));
-}
-
-fn png_colors_combo(ui: &mut egui::Ui, colors: &mut Option<u16>) {
-    let label = |c: Option<u16>| {
-        c.map_or_else(
-            || t!("convert.colors_all").to_string(),
-            |n| t!("convert.colors_n", n = n).to_string(),
-        )
-    };
-    egui::ComboBox::from_id_salt("convert-colors")
-        .selected_text(label(*colors))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(colors, None, label(None));
-            for n in PNG_COLORS {
-                ui.selectable_value(colors, Some(n), label(Some(n)));
-            }
-        })
-        .response
-        .on_hover_text(t!("convert.colors_hint"));
-}
-
-fn quality_row(ui: &mut egui::Ui, quality: &mut u8) {
-    theme::row(ui, &t!("record.quality"), |ui| {
-        ui.add(egui::Slider::new(quality, 1..=100).suffix("%"));
-    });
-}
-
-fn pick_file(app: &mut App) {
-    let mut dialog = rfd::FileDialog::new()
-        .add_filter(
-            t!("convert.filter_media"),
-            &mediaa_core::formats::all_media_extensions(),
-        )
-        .add_filter(t!("convert.filter_all"), &["*"]);
-    if app.settings.media_dir.is_dir() {
-        dialog = dialog.set_directory(&app.settings.media_dir);
-    }
-    if let Some(path) = dialog.pick_file() {
-        app.conv.set_input(path);
-    }
-}
+mod controls;
+use controls::{
+    effort_row, estimate_row, fps_combo, kbps_combo, mono_checkbox, pick_file, png_colors_combo,
+    quality_row,
+};
 
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
+    app.conv.poll_probe(&ctx);
     header(ui, &t!("convert.title"), "");
     if app.conv.input.is_none() {
         if let Some(p) = std::env::var_os("MEDIAA_DEV_CONVERT") {
             app.conv.set_input(p.into());
-            app.conv.target = app.conv.targets().first().copied();
         }
     }
-
-    if let Some(job) = &app.conv.job {
-        if let Ok(result) = job.done.try_recv() {
-            let output = job.output.clone();
-            app.conv.job = None;
-            match result {
-                Ok(()) => {
-                    app.lib.files_changed(std::slice::from_ref(&output));
-                    let name = output
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    app.success(t!("convert.done", name = name));
-                    app.conv.last = Some(output);
-                }
-                Err(e) if e.is_empty() => app.info(t!("convert.cancelled")),
-                Err(e) => app.error(t!("convert.failed", error = e)),
-            }
-        }
-    }
-    let busy = app.conv.job.is_some();
+    let busy = app.conv.is_busy();
     if !busy {
         if let Some(p) = ctx.input(|i| {
             i.raw
@@ -692,3 +547,6 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests;

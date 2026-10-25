@@ -1,5 +1,57 @@
 use mediaa_core::settings::{AnimSettings, GifDither};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Effort {
+    Fast,
+    #[default]
+    Balanced,
+    Max,
+}
+
+impl Effort {
+    pub const ALL: [Effort; 3] = [Effort::Fast, Effort::Balanced, Effort::Max];
+
+    pub(crate) fn x264_preset(self) -> &'static str {
+        match self {
+            Effort::Fast => "veryfast",
+            Effort::Balanced => "medium",
+            Effort::Max => "veryslow",
+        }
+    }
+
+    pub(crate) fn vp9_cpu_used(self) -> &'static str {
+        match self {
+            Effort::Fast => "6",
+            Effort::Balanced => "4",
+            Effort::Max => "1",
+        }
+    }
+
+    pub(crate) fn webp_level(self) -> &'static str {
+        match self {
+            Effort::Fast => "2",
+            Effort::Balanced => "4",
+            Effort::Max => "6",
+        }
+    }
+
+    pub(crate) fn flac_level(self) -> &'static str {
+        match self {
+            Effort::Fast => "2",
+            Effort::Balanced => "5",
+            Effort::Max => "8",
+        }
+    }
+
+    pub(crate) fn png_preset(self) -> u8 {
+        match self {
+            Effort::Fast => 1,
+            Effort::Balanced => 3,
+            Effort::Max => 6,
+        }
+    }
+}
+
 pub fn crf_for_quality(quality: u8) -> u32 {
     let q = u32::from(quality.clamp(1, 100));
     40 - (q - 1) * 24 / 99
@@ -110,24 +162,21 @@ pub fn scratch_graph(pix_fmt: &str, max_height: Option<u32>) -> String {
 }
 
 pub fn audio_only_mix_graph(n: usize) -> String {
-    match n {
-        0 | 1 => "[0:a]aresample=async=1[a]".to_string(),
-        _ => {
-            let inputs: String = (0..n).map(|i| format!("[{i}:a]")).collect();
-            format!("{inputs}amix=inputs={n}:duration=longest:normalize=0[a]")
-        }
-    }
+    audio_mix_graph_range(n, 0)
 }
 
 pub fn audio_mix_graph(n: usize) -> Option<String> {
+    (n > 0).then(|| audio_mix_graph_range(n, 1))
+}
+
+fn audio_mix_graph_range(n: usize, first: usize) -> String {
     match n {
-        0 => None,
-        1 => Some("[1:a]aresample=async=1[a]".to_string()),
+        0 | 1 => format!("[{first}:a]aresample=async=1[a]"),
         _ => {
-            let inputs: String = (1..=n).map(|i| format!("[{i}:a]")).collect();
-            Some(format!(
-                "{inputs}amix=inputs={n}:duration=longest:normalize=0[a]"
-            ))
+            let inputs: String = (first..first + n)
+                .map(|index| format!("[{index}:a]"))
+                .collect();
+            format!("{inputs}amix=inputs={n}:duration=longest:normalize=0[a]")
         }
     }
 }

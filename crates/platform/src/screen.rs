@@ -279,7 +279,7 @@ fn draw_cursor(frame: &mut Frame, origin: (i32, i32), scale: f32) {
     };
     let x = ((c.x - origin.0) as f32 * k).round() as i32;
     let y = ((c.y - origin.1) as f32 * k).round() as i32;
-    mediaa_core::cursor::draw(frame, &c.image, x, y);
+    crate::cursor_overlay::draw(frame, &c.image, x, y);
 }
 
 pub fn monitor_source(

@@ -2,7 +2,9 @@ use chrono::{DateTime, Local, NaiveDateTime};
 use std::path::{Path, PathBuf};
 
 const STAMP_FORMAT: &str = "%Y-%m-%d_%H-%M-%S";
-const STAMP_LEN: usize = 19;
+const STAMP_EXAMPLE: &str = "0000-00-00_00-00-00";
+const STAMP_LEN: usize = STAMP_EXAMPLE.len();
+const _: () = assert!(STAMP_LEN == 19);
 pub const MAX_TITLE: usize = 120;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,16 +16,20 @@ pub struct MediaName {
 
 impl MediaName {
     pub fn stamp(&self) -> String {
-        let date = self.taken.format(STAMP_FORMAT);
+        let date = date_stamp(self.taken);
         match self.counter {
             Some(n) => format!("{date}-{n}"),
-            None => date.to_string(),
+            None => date,
         }
     }
 
     pub fn stem(&self) -> String {
         format!("{}_{}", self.title, self.stamp())
     }
+}
+
+pub fn date_stamp(taken: NaiveDateTime) -> String {
+    taken.format(STAMP_FORMAT).to_string()
 }
 
 pub fn parse_stem(stem: &str) -> Option<MediaName> {
@@ -134,6 +140,13 @@ mod tests {
 
     fn at() -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 10, 13, 9, 5, 7).unwrap()
+    }
+
+    #[test]
+    fn timestamp_format_matches_the_parsed_length() {
+        let stamp = date_stamp(at().naive_local());
+        assert_eq!(stamp.len(), STAMP_LEN);
+        assert_eq!(stamp, "2026-10-13_09-05-07");
     }
 
     #[test]

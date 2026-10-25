@@ -79,11 +79,11 @@ fn pretty(token: &str) -> String {
 impl Hotkeys {
     pub fn new(ctx: &egui::Context) -> anyhow::Result<(Hotkeys, Receiver<u32>)> {
         let manager = GlobalHotKeyManager::new()?;
-        let (tx, rx) = crossbeam_channel::unbounded();
+        let (tx, rx) = crossbeam_channel::bounded(32);
         let ctx = ctx.clone();
         GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
             if event.state == HotKeyState::Pressed {
-                let _ = tx.send(event.id);
+                let _ = tx.try_send(event.id);
                 ctx.request_repaint();
             }
         }));

@@ -1,4 +1,4 @@
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -26,9 +26,10 @@ impl AudioSink {
         if self.paused.load(Ordering::Relaxed) || samples.is_empty() {
             return;
         }
-        self.samples
-            .fetch_add(samples.len() as u64, Ordering::Relaxed);
-        let _ = self.tx.send(((self.clock)(), samples.to_vec()));
+        if self.tx.try_send(((self.clock)(), samples.to_vec())).is_ok() {
+            self.samples
+                .fetch_add(samples.len() as u64, Ordering::Relaxed);
+        }
     }
 }
 
@@ -65,7 +66,7 @@ impl AudioTrack {
             sample_format: hound::SampleFormat::Float,
         };
         let mut writer = hound::WavWriter::create(path, spec)?;
-        let (tx, rx): (Sender<Chunk>, Receiver<Chunk>) = crossbeam_channel::unbounded();
+        let (tx, rx): (Sender<Chunk>, Receiver<Chunk>) = bounded(1024);
         let ch = u64::from(channels);
         let join = std::thread::Builder::new()
             .name("audio-writer".into())

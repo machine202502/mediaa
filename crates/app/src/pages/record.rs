@@ -1,5 +1,7 @@
 use super::{activity, header, tile};
-use crate::app::{App, RecState};
+use crate::app::command::{AppCommand, RecordingCommand};
+use crate::app::state::RecState;
+use crate::app::App;
 use crate::overlay::Purpose;
 use crate::{i18n, theme};
 use eframe::egui::{self, RichText};
@@ -11,10 +13,11 @@ use mediaa_core::settings::{
 };
 use mediaa_core::Settings;
 use mediaa_core::{AnimFormat, OutputKind};
+use mediaa_media::recorder::StopAction;
 use mediaa_platform::screen::MonitorInfo;
 use rust_i18n::t;
 use std::collections::BTreeSet;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SOURCE_PANEL_H: f32 = 150.0;
 
@@ -42,106 +45,12 @@ pub fn monitor_label(m: &MonitorInfo) -> String {
     }
 }
 
-pub fn live_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
-    let p = theme::palette(ui);
-    match &app.recorder {
-        RecState::Idle => false,
-        RecState::Recording { session, .. } => {
-            let paused = session.is_paused();
-            let elapsed = human_duration(session.elapsed().as_secs_f64());
-            let audio = if session.has_audio() {
-                t!("record.with_audio")
-            } else {
-                t!("record.no_audio")
-            };
-            let detail = match session.output() {
-                OutputKind::Audio(f) => f.label().to_string(),
-                _ => format!(
-                    "{} · {} · {audio}",
-                    session.source_names().join(", "),
-                    t!("record.frames", n = session.frames_captured())
-                ),
-            };
-            theme::card(ui).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icon::RECORD).size(24.0).color(if paused {
-                        p.warning
-                    } else {
-                        p.danger
-                    }));
-                    ui.label(RichText::new(elapsed).size(28.0).strong());
-                    ui.label(
-                        RichText::new(if paused {
-                            t!("record.paused")
-                        } else {
-                            t!("record.recording")
-                        })
-                        .color(p.text_weak),
-                    );
-                });
-                theme::hint(ui, detail);
-                ui.horizontal(|ui| {
-                    let (ic, label) = if paused {
-                        (icon::PLAY, t!("record.resume"))
-                    } else {
-                        (icon::PAUSE, t!("record.pause"))
-                    };
-                    if ui.add(theme::secondary(ic, &label)).clicked() {
-                        app.toggle_pause();
-                    }
-                    if ui
-                        .add(theme::primary(ui, icon::STOP, &t!("record.stop_save")))
-                        .clicked()
-                    {
-                        app.stop_recording(ctx, true);
-                    }
-                    if ui
-                        .add(theme::danger(ui, icon::TRASH, &t!("record.cancel")))
-                        .clicked()
-                    {
-                        app.stop_recording(ctx, false);
-                    }
-                });
-            });
-            ctx.request_repaint_after(Duration::from_millis(250));
-            true
-        }
-        RecState::Saving {
-            progress,
-            started,
-            cancel,
-            ..
-        } => {
-            let (progress, started, cancel) = (*progress, *started, cancel.clone());
-            theme::card(ui).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(t!("record.saving_long")).strong());
-                if let Some(progress) = progress {
-                    ui.add(
-                        egui::ProgressBar::new(progress)
-                            .show_percentage()
-                            .animate(true),
-                    );
-                } else {
-                    activity(ui, "", started.elapsed());
-                }
-                if ui
-                    .add(theme::secondary(icon::X, &t!("record.abort_saving")))
-                    .clicked()
-                {
-                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            });
-            true
-        }
-    }
-}
+pub(super) mod status;
 
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     header(ui, &t!("record.title"), "");
-    if live_status(app, ui, &ctx) {
+    if status::live_status(app, ui, &ctx) {
         return;
     }
 
@@ -583,7 +492,11 @@ pub fn start_bar(app: &mut App, ui: &mut egui::Ui) {
     ui.vertical_centered(|ui| {
         let btn =
             theme::primary(ui, icon::RECORD, &t!("record.start")).min_size(egui::vec2(220.0, 36.0));
-        let mut resp = ui.add_enabled(target.is_ok(), btn);
+        let available = target.is_ok() && !app.recovery_active();
+        let mut resp = ui.add_enabled(available, btn);
+        if app.recovery_active() {
+            resp = resp.on_disabled_hover_text(t!("record.recovery_wait"));
+        }
         let hk = &app.settings.hotkeys;
         if hk.enabled && !hk.start_video.is_empty() {
             resp = resp.on_hover_text(t!("record.hotkey_hint", key = hk.start_video));
@@ -626,123 +539,4 @@ pub fn mic_combo(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::output_kinds;
-    use crate::pages::record::profile_editor;
-    use eframe::egui;
-    use egui_kittest::kittest::{NodeT, Queryable};
-    use mediaa_core::settings::RecordProfile;
-    use mediaa_core::{AnimFormat, OutputKind, Settings, VideoContainer};
-    use rust_i18n::t;
-
-    fn profile_has_audio_every_file(profile: RecordProfile, settings: Settings) -> bool {
-        let mut harness = egui_kittest::Harness::new_ui_state(
-            move |ui: &mut egui::Ui, settings: &mut Settings| {
-                ui.set_width(1100.0);
-                let mut refresh = false;
-                profile_editor(ui, settings, profile, &[], None, &mut refresh);
-            },
-            settings,
-        );
-        harness.run();
-        let label = t!("record.audio_every_file").to_string();
-        harness.query_by_label(&label).is_some()
-    }
-
-    #[test]
-    fn quick_video_offers_only_video_containers() {
-        assert_eq!(
-            output_kinds(RecordProfile::Hotkey),
-            vec![
-                OutputKind::Video(VideoContainer::Mp4),
-                OutputKind::Video(VideoContainer::Mkv),
-            ]
-        );
-        assert_eq!(
-            output_kinds(RecordProfile::Region),
-            OutputKind::ALL.to_vec()
-        );
-    }
-
-    #[test]
-    fn animation_editor_shows_one_frame_rate_and_resolution() {
-        let mut settings = Settings::default();
-        settings.region_record.output = OutputKind::Anim(AnimFormat::Webp);
-        let mut harness = egui_kittest::Harness::new_ui_state(
-            |ui: &mut egui::Ui, settings: &mut Settings| {
-                ui.set_width(1100.0);
-                let mut refresh = false;
-                profile_editor(ui, settings, RecordProfile::Region, &[], None, &mut refresh);
-            },
-            settings,
-        );
-        harness.run();
-        let animation_fps = t!("anim.fps").to_string();
-        let video_fps = t!("record.fps").to_string();
-        let resolution = t!("record.resolution").to_string();
-        assert!(harness.query_by_label(&animation_fps).is_none());
-        assert!(harness.query_by_label(&video_fps).is_some());
-        assert_eq!(harness.get_all_by_label(&resolution).count(), 1);
-    }
-
-    #[test]
-    fn parallel_webp_is_shown_only_for_segmented_webp() {
-        let mut settings = Settings::default();
-        settings.region_record.output = OutputKind::Anim(AnimFormat::Webp);
-        let mut harness = egui_kittest::Harness::new_ui_state(
-            |ui: &mut egui::Ui, settings: &mut Settings| {
-                ui.set_width(1100.0);
-                let mut refresh = false;
-                profile_editor(ui, settings, RecordProfile::Region, &[], None, &mut refresh);
-            },
-            settings,
-        );
-        harness.run();
-        let segmented = t!("record.segmented_webp").to_string();
-        let parallel = t!("record.parallel_webp").to_string();
-        assert!(!harness
-            .get_by_label(&segmented)
-            .accesskit_node()
-            .is_disabled());
-        assert!(!harness
-            .get_by_label(&parallel)
-            .accesskit_node()
-            .is_disabled());
-        assert!(harness.state().region_record.segmented_webp);
-        assert!(harness.state().region_record.parallel_webp);
-
-        harness.state_mut().region_record.segmented_webp = false;
-        harness.run();
-        assert!(!harness
-            .get_by_label(&segmented)
-            .accesskit_node()
-            .is_disabled());
-        assert!(harness
-            .get_by_label(&parallel)
-            .accesskit_node()
-            .is_disabled());
-
-        harness.state_mut().region_record.output = OutputKind::Anim(AnimFormat::Gif);
-        harness.run();
-        assert!(harness.query_by_label(&segmented).is_none());
-        assert!(harness.query_by_label(&parallel).is_none());
-    }
-
-    #[test]
-    fn single_source_profiles_hide_audio_in_every_file() {
-        assert!(profile_has_audio_every_file(
-            RecordProfile::App,
-            Settings::default()
-        ));
-        assert!(!profile_has_audio_every_file(
-            RecordProfile::Hotkey,
-            Settings::default()
-        ));
-        let mut settings = Settings::default();
-        settings.region_record.output = OutputKind::Video(VideoContainer::Mkv);
-        assert!(!profile_has_audio_every_file(
-            RecordProfile::Region,
-            settings
-        ));
-    }
-}
+mod tests;

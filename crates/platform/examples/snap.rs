@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
             mediaa_platform::screen::capture_monitor(m.id)?
         }
     };
-    mediaa_core::screenshot::save(
+    mediaa_storage::screenshot::save(
         &frame,
         mediaa_core::ImageFormat::Png,
         std::path::Path::new(&out),

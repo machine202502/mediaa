@@ -1,33 +1,30 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
-mod app;
-mod hotkeys;
-mod hover_preview;
-mod i18n;
-mod icon;
-mod overlay;
-mod pages;
-mod player;
-mod region_marker;
-mod theme;
-mod thumbs;
-mod tray;
-mod viewer;
-
-rust_i18n::i18n!("locales", fallback = "en");
-
 use eframe::egui;
+use mediaa::app;
+use mediaa::icon;
 use mediaa_core::paths;
-use std::time::Duration;
 
 fn main() -> eframe::Result<()> {
     mediaa_core::logging::init(&paths::logs_dir(), log::LevelFilter::Info);
-    log::info!("MediaA {} starting", env!("CARGO_PKG_VERSION"));
+    log::info!(
+        "{} {} starting",
+        paths::APP_IDENTITY.name,
+        env!("CARGO_PKG_VERSION")
+    );
+    let instance = match mediaa_platform::single_instance::SingleInstance::acquire() {
+        Ok(Some(instance)) => Some(instance),
+        Ok(None) => {
+            mediaa_platform::single_instance::SingleInstance::activate_existing();
+            log::info!("{} is already running", paths::APP_IDENTITY.name);
+            return Ok(());
+        }
+        Err(error) => {
+            log::warn!("single-instance guard unavailable: {error:#}");
+            None
+        }
+    };
     mediaa_media::init();
-    let removed = paths::remove_stale_entries(&paths::work_dir(), Duration::from_secs(24 * 3600));
-    if removed > 0 {
-        log::info!("removed {removed} stale scratch entries");
-    }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let startup = app::StartupAction::from_args(args.clone());
@@ -36,8 +33,8 @@ fn main() -> eframe::Result<()> {
         startup == app::StartupAction::Tray || mediaa_core::Settings::load().start_in_tray;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("MediaA")
-            .with_app_id("mediaa")
+            .with_title(paths::APP_IDENTITY.window_title)
+            .with_app_id(paths::APP_IDENTITY.application_id)
             .with_transparent(true)
             .with_visible(!start_in_tray)
             .with_inner_size([1120.0, 760.0])
@@ -50,8 +47,8 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "MediaA",
+        paths::APP_IDENTITY.window_title,
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, startup, page)))),
+        Box::new(move |cc| Ok(Box::new(app::App::new(cc, startup, page, instance)))),
     )
 }

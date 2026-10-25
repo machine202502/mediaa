@@ -2,58 +2,68 @@ use crate::info::probe;
 use crate::job;
 use ez_ffmpeg::core::context::output::VSyncMethod;
 use ez_ffmpeg::{FfmpegContext, FramePushSource, Input, Output};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use mediaa_core::paths::CachePath;
+use mediaa_storage::atomic_file::AtomicFile;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
 
-const PREVIEW_MAX_HEIGHT: u32 = 1080;
-const PREVIEW_MAX_FPS: u32 = 30;
-static NEXT_TEMP: AtomicU64 = AtomicU64::new(1);
-
-pub fn proxy_path(source: &Path) -> PathBuf {
-    let metadata = std::fs::metadata(source).ok();
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in std::fs::canonicalize(source)
-        .unwrap_or_else(|_| source.to_path_buf())
-        .to_string_lossy()
-        .bytes()
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
-    for byte in metadata
-        .as_ref()
-        .map(|m| m.len())
-        .unwrap_or(0)
-        .to_le_bytes()
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
-    for byte in metadata
-        .and_then(|m| m.modified().ok())
-        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0)
-        .to_le_bytes()
-    {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100_0000_01b3);
-    }
-    source
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join(".cache")
-        .join("previews")
-        .join(format!("{hash:016x}.mp4"))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewLimits {
+    pub max_height: u32,
+    pub max_fps: u32,
 }
 
-pub fn ready_proxy(source: &Path) -> Option<PathBuf> {
+impl Default for PreviewLimits {
+    fn default() -> Self {
+        Self {
+            max_height: 1080,
+            max_fps: 30,
+        }
+    }
+}
+
+pub fn proxy_path(source: &Path) -> CachePath {
+    let metadata = std::fs::metadata(source).ok();
+    let mut hasher = mediaa_core::hash::StableHasher::default();
+    hasher.write(
+        std::fs::canonicalize(source)
+            .unwrap_or_else(|_| source.to_path_buf())
+            .to_string_lossy()
+            .as_bytes(),
+    );
+    hasher.write(
+        &metadata
+            .as_ref()
+            .map(|m| m.len())
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    hasher.write(
+        &metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    let hash = hasher.finish();
+    CachePath::new(
+        source
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(".cache")
+            .join("previews")
+            .join(format!("{hash:016x}.mp4")),
+    )
+}
+
+pub fn ready_proxy(source: &Path) -> Option<CachePath> {
     let path = proxy_path(source);
     path.is_file().then_some(path)
 }
 
-pub fn ensure_proxy(source: &Path, cancel: &AtomicBool) -> anyhow::Result<PathBuf> {
+pub fn ensure_proxy(source: &Path, cancel: &AtomicBool) -> anyhow::Result<CachePath> {
     ensure_proxy_for(source, source, cancel)
 }
 
@@ -61,44 +71,54 @@ pub fn ensure_proxy_for(
     source: &Path,
     media: &Path,
     cancel: &AtomicBool,
-) -> anyhow::Result<PathBuf> {
+) -> anyhow::Result<CachePath> {
+    ensure_proxy_for_with_limits(source, media, cancel, PreviewLimits::default())
+}
+
+pub fn ensure_proxy_for_with_limits(
+    source: &Path,
+    media: &Path,
+    cancel: &AtomicBool,
+    limits: PreviewLimits,
+) -> anyhow::Result<CachePath> {
+    anyhow::ensure!(
+        limits.max_height >= 16 && limits.max_fps > 0,
+        "invalid preview limits"
+    );
     let target = proxy_path(media);
     if target.is_file() {
         return Ok(target);
     }
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let temp = target.with_extension(format!(
-        "{}-{}.tmp.mp4",
-        std::process::id(),
-        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-    ));
+    let pending = AtomicFile::new(target.as_ref())?;
     let result = if mediaa_core::formats::is_webp_path(source) {
-        encode_webp(source, &temp, cancel)
+        encode_webp(source, pending.path(), cancel, limits)
     } else {
-        encode_video(source, &temp, cancel)
+        encode_video(source, pending.path(), cancel, limits)
     };
-    if let Err(error) = result {
-        let _ = std::fs::remove_file(&temp);
-        return Err(error);
+    result?;
+    match pending.commit() {
+        Ok(path) => Ok(CachePath::new(path)),
+        Err(error) if target.is_file() => {
+            log::debug!("preview proxy already completed: {error:#}");
+            Ok(target)
+        }
+        Err(error) => Err(error),
     }
-    if target.exists() {
-        let _ = std::fs::remove_file(&temp);
-        return Ok(target);
-    }
-    std::fs::rename(&temp, &target)?;
-    Ok(target)
 }
 
-fn encode_video(source: &Path, target: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
+fn encode_video(
+    source: &Path,
+    target: &Path,
+    cancel: &AtomicBool,
+    limits: PreviewLimits,
+) -> anyhow::Result<()> {
     let info = probe(source)?;
     let fps = if info.fps > 0.0 {
-        info.fps.min(f64::from(PREVIEW_MAX_FPS)).round().max(1.0) as u32
+        info.fps.min(f64::from(limits.max_fps)).round().max(1.0) as u32
     } else {
-        PREVIEW_MAX_FPS
+        limits.max_fps
     };
-    let graph = preview_graph(fps);
+    let graph = preview_graph(fps, limits.max_height);
     let output = preview_output(target);
     let context = FfmpegContext::builder()
         .input(Input::from(source.to_string_lossy().into_owned()))
@@ -108,16 +128,22 @@ fn encode_video(source: &Path, target: &Path, cancel: &AtomicBool) -> anyhow::Re
     job::run(context, info.duration_us, &mut |_| {}, cancel)
 }
 
-fn encode_webp(source: &Path, target: &Path, cancel: &AtomicBool) -> anyhow::Result<()> {
+fn encode_webp(
+    source: &Path,
+    target: &Path,
+    cancel: &AtomicBool,
+    limits: PreviewLimits,
+) -> anyhow::Result<()> {
     let mut decoder =
         image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(source)?))?;
     let (width, height) = decoder.dimensions();
+    mediaa_core::formats::ensure_safe_dimensions(width, height)?;
     let alpha = decoder.has_alpha();
     let delay = decoder.loop_duration();
     let fps = if delay == 0 {
-        PREVIEW_MAX_FPS
+        limits.max_fps
     } else {
-        (decoder.num_frames() * 1000 / delay as u32).clamp(1, PREVIEW_MAX_FPS)
+        (decoder.num_frames() * 1000 / delay as u32).clamp(1, limits.max_fps)
     };
     let (source, mut frames) = FramePushSource::builder(width, height)
         .pixel_format(if alpha { "rgba" } else { "rgb24" })
@@ -125,7 +151,7 @@ fn encode_webp(source: &Path, target: &Path, cancel: &AtomicBool) -> anyhow::Res
         .build()?;
     let context = FfmpegContext::builder()
         .input(source)
-        .filter_desc(preview_graph(fps))
+        .filter_desc(preview_graph(fps, limits.max_height))
         .output(preview_output(target))
         .build()?;
     let scheduler = context.start()?;
@@ -160,9 +186,9 @@ fn encode_webp(source: &Path, target: &Path, cancel: &AtomicBool) -> anyhow::Res
     scheduler.wait().map_err(Into::into)
 }
 
-fn preview_graph(fps: u32) -> String {
+fn preview_graph(fps: u32, max_height: u32) -> String {
     format!(
-        "[0:v]fps={fps},scale=w=-2:h='min({PREVIEW_MAX_HEIGHT},ih)':flags=fast_bilinear,format=yuv420p[v]"
+        "[0:v]fps={fps},scale=w=-2:h='min({max_height},ih)':flags=fast_bilinear,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p[v]"
     )
 }
 
@@ -195,10 +221,34 @@ mod tests {
     }
 
     #[test]
+    fn odd_sized_animation_gets_a_valid_even_proxy() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("odd.webp");
+        image::RgbaImage::new(301, 201)
+            .save_with_format(&source, image::ImageFormat::WebP)
+            .unwrap();
+        let proxy = ensure_proxy(&source, &AtomicBool::new(false)).unwrap();
+        let info = crate::info::probe(&proxy).unwrap();
+        assert_eq!((info.width % 2, info.height % 2), (0, 0));
+    }
+
+    #[test]
     fn preview_contract_is_video_with_a_rate_cap() {
         assert_eq!(
-            preview_graph(30),
-            "[0:v]fps=30,scale=w=-2:h='min(1080,ih)':flags=fast_bilinear,format=yuv420p[v]"
+            preview_graph(30, PreviewLimits::default().max_height),
+            "[0:v]fps=30,scale=w=-2:h='min(1080,ih)':flags=fast_bilinear,pad=ceil(iw/2)*2:ceil(ih/2)*2,format=yuv420p[v]"
         );
+    }
+
+    #[test]
+    fn preview_limits_default_and_override_are_explicit() {
+        assert_eq!(
+            PreviewLimits::default(),
+            PreviewLimits {
+                max_height: 1080,
+                max_fps: 30,
+            }
+        );
+        assert!(preview_graph(15, 480).contains("min(480,ih)"));
     }
 }
