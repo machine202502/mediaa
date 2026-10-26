@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="meta.title">MediaA — скриншоты, запись экрана и звука, конвертация. Бесплатно.</title>
+  <meta name="description" data-i18n-content="meta.description" content="MediaA — бесплатный инструмент для Windows: скриншоты с аннотациями, запись экрана и звука, конвертация между 17+ форматами. Один файл, без облаков.">
+  <meta name="theme-color" content="#070812">
+  <meta property="og:title" data-i18n-content="og.title" content="MediaA — снимай, записывай, конвертируй">
+  <meta property="og:description" data-i18n-content="og.description" content="Скриншоты, запись экрана и звука, конвертация форматов. Бесплатно, с открытым исходным кодом.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="assets/img/icon-512.png">
+  <link rel="icon" type="image/png" href="assets/img/icon.png">
+  <link rel="apple-touch-icon" href="assets/img/icon-512.png">
+  <link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body>
+  <div class="bg" aria-hidden="true">
+    <canvas id="shader"></canvas>
+    <div class="grain"></div>
+  </div>
+  <div class="shutter-flash" aria-hidden="true"></div>
+
+  <header class="nav" id="nav">
+    <a class="brand" href="#top" aria-label="MediaA">
+      <img class="brand-icon" src="assets/img/icon.png" alt="MediaA" width="34" height="34">
+      <span class="brand-name">MediaA</span>
+    </a>
+    <nav class="nav-links" aria-label="Main navigation">
+      <a href="#capture" data-i18n="nav.capture">Захват</a>
+      <a href="#record" data-i18n="nav.record">Запись</a>
+      <a href="#convert" data-i18n="nav.convert">Конвертация</a>
+      <a href="#why" data-i18n="nav.why">Почему MediaA</a>
+    </nav>
+    <div class="nav-actions">
+      <div class="lang-switch" role="group" aria-label="Language">
+        <button class="lang-btn" type="button" data-lang="en">EN</button>
+        <button class="lang-btn" type="button" data-lang="ru">RU</button>
+      </div>
+      <a class="btn btn-ghost btn-sm" href="https://github.com/machine202502/mediaa" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="hero-shapes" aria-hidden="true">
+        <div class="shape shape-orb"></div>
+        <div class="shape shape-cam">
+          <div class="cam-bloom" aria-hidden="true"></div>
+          <div class="cam3d" aria-hidden="true">
+            <div class="cam-body">
+              <span class="cam-face b-front"></span>
+              <span class="cam-face b-back"></span>
+              <span class="cam-face b-left"></span>
+              <span class="cam-face b-right"></span>
+              <span class="cam-face b-top"></span>
+              <span class="cam-face b-bottom"></span>
+              <span class="cam-face cam-rec"></span>
+            </div>
+            <div class="cam-lens">
+              <span class="cam-face l-front"></span>
+              <span class="cam-face l-back"></span>
+              <span class="cam-face l-left"></span>
+              <span class="cam-face l-right"></span>
+              <span class="cam-face l-top"></span>
+              <span class="cam-face l-bottom"></span>
+            </div>
+            <div class="cam-vf">
+              <span class="cam-face v-front"></span>
+              <span class="cam-face v-back"></span>
+              <span class="cam-face v-left"></span>
+              <span class="cam-face v-right"></span>
+              <span class="cam-face v-top"></span>
+              <span class="cam-face v-bottom"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="hero-inner">
+        <p class="eyebrow reveal" data-i18n="hero.eyebrow">Бесплатно · Открытый исходный код · Windows</p>
+        <h1 class="hero-title">
+          <span class="line reveal" data-delay="80" data-i18n="hero.line1">Снимай. Записывай.</span>
+          <span class="line gradient-text reveal" data-delay="160" data-i18n="hero.line2" data-scramble>Конвертируй.</span>
+        </h1>
+        <p class="hero-sub reveal" data-delay="240" data-i18n="hero.sub">
+          MediaA — один инструмент, который делает скриншоты с аннотациями, пишет экран и звук
+          и мгновенно превращает результат в нужный формат. Без подписок, без аккаунтов и без
+          отправки твоих файлов в облако.
+        </p>
+        <div class="hero-cta reveal" data-delay="320">
+          <a class="btn btn-primary magnetic" href="#capture" data-i18n="hero.cta.primary">Смотреть возможности</a>
+          <a class="btn btn-ghost magnetic" href="https://github.com/machine202502/mediaa" target="_blank" rel="noopener" data-i18n="hero.cta.ghost">Скачать бесплатно ↗</a>
+        </div>
+        <div class="hero-stats reveal" data-delay="400">
+          <div class="stat">
+            <strong data-i18n="hero.stat.free">0 ₽</strong>
+            <span data-i18n="hero.stat.free.label">навсегда</span>
+          </div>
+          <div class="stat">
+            <strong><span data-count="17">0</span><span data-i18n="hero.stat.formats.unit">+</span></strong>
+            <span data-i18n="hero.stat.formats.label">форматов</span>
+          </div>
+          <div class="stat">
+            <strong><span data-count="60">0</span><span data-i18n="hero.stat.fps.unit"> fps</span></strong>
+            <span data-i18n="hero.stat.fps.label">запись</span>
+          </div>
+          <div class="stat">
+            <strong data-i18n="hero.stat.os">Windows</strong>
+            <span data-i18n="hero.stat.os.label">поддерживается</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="hero-visual reveal" data-delay="260">
+        <div class="device tilt">
+          <div class="device-bar">
+            <span class="dot dot-r"></span>
+            <span class="dot dot-y"></span>
+            <span class="dot dot-g"></span>
+            <span class="device-title" data-i18n="hero.device.title">MediaA — Запись</span>
+          </div>
+          <div class="device-screen">
+            <img class="crt-fallback" src="assets/img/screenshot-record.png" width="1180" height="900" alt="Окно записи экрана MediaA" data-i18n-alt="alt.record" loading="lazy">
+            <canvas class="crt-canvas" aria-hidden="true"></canvas>
+            <div class="rec-badge">
+              <span class="rec-dot"></span>
+              <span class="rec-label">REC</span>
+              <span class="rec-time" id="recTime">00:00</span>
+            </div>
+          </div>
+        </div>
+        <div class="float-chip chip-1" data-float="1">
+          <span class="chip-badge" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="12" height="12" rx="2"></rect><path d="M15 10l5-3v10l-5-3"></path></svg>
+          </span>
+          <span class="chip-copy"><b>MP4 · MKV</b><small>60 FPS</small></span>
+        </div>
+        <div class="float-chip chip-2" data-float="2">
+          <span class="chip-badge" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><circle cx="9" cy="10" r="2"></circle><path d="M4 18l5-5 4 4 3-3 4 4"></path></svg>
+          </span>
+          <span class="chip-copy"><b>GIF · WebP</b><small data-i18n="hero.chip2.label">анимация</small></span>
+        </div>
+        <div class="float-chip chip-3" data-float="3">
+          <span class="chip-badge" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"></path></svg>
+          </span>
+          <span class="chip-copy"><b data-i18n="hero.chip3">Микрофон + системный звук</b><small data-i18n="hero.chip3.label">звук</small></span>
+        </div>
+      </div>
+
+      <a class="scroll-hint" href="#capture" aria-label="Scroll down">
+        <span class="mouse"><span class="wheel"></span></span>
+      </a>
+    </section>
+
+    <section class="section pillars" id="capture">
+      <header class="section-head reveal">
+        <p class="kicker" data-i18n="cap.kicker">Три действия — и готово</p>
+        <h2 data-i18n="cap.h2">Вся магия в трёх кнопках</h2>
+        <p class="lede" data-i18n="cap.lede">Никаких таймлайнов на пол-экрана и сотни настроек. Захватил, записал, перевёл в нужный формат.</p>
+      </header>
+
+      <div class="pillar-grid">
+        <article class="pillar reveal" data-tilt>
+          <div class="pillar-shot">
+            <img src="assets/img/screenshot-capture.png" alt="Экран захвата MediaA: скриншоты экрана, области и окон" data-i18n-alt="alt.capture" loading="lazy">
+          </div>
+          <div class="pillar-title">
+            <span class="pillar-num">01</span>
+            <h3 data-i18n="cap.pillar1.h3">Захват</h3>
+          </div>
+          <p data-i18n="cap.pillar1.p">Снимок области, окна или всего экрана. Выделяй рамку, двигай её стрелками и рисуй прямо поверх: стрелки, текст, кисть, фигуры.</p>
+          <ul class="tick-list">
+            <li data-i18n="cap.pillar1.li1">Выбор области как в Lightshot</li>
+            <li data-i18n="cap.pillar1.li2">Аннотации с отменой действий</li>
+            <li data-i18n="cap.pillar1.li3">Несколько мониторов</li>
+            <li data-i18n="cap.pillar1.li4">PNG и WebP</li>
+          </ul>
+        </article>
+
+        <article class="pillar pillar-featured reveal" data-tilt>
+          <div class="pillar-shot">
+            <img src="assets/img/screenshot-record.png" alt="Экран записи MediaA: видео с экрана, области или окон" data-i18n-alt="alt.record2" loading="lazy">
+          </div>
+          <div class="pillar-title">
+            <span class="pillar-num">02</span>
+            <h3 data-i18n="cap.pillar2.h3">Запись</h3>
+          </div>
+          <p data-i18n="cap.pillar2.p">Видео с экрана, области или сразу нескольких окон — каждое в свой файл. Добавь голос и звук системы, поставь паузу и остановись прямо из трея.</p>
+          <ul class="tick-list">
+            <li data-i18n="cap.pillar2.li1">MP4 / MKV или анимация GIF / WebP</li>
+            <li data-i18n="cap.pillar2.li2">Микрофон и системный звук</li>
+            <li data-i18n="cap.pillar2.li3">Пауза и остановка из трея</li>
+            <li data-i18n="cap.pillar2.li4">До 60 кадров в секунду</li>
+          </ul>
+        </article>
+
+        <article class="pillar reveal" data-tilt>
+          <div class="pillar-shot">
+            <img src="assets/img/screenshot-convert.png" alt="Экран конвертации MediaA: смена формата, качества и разрешения" data-i18n-alt="alt.convert" loading="lazy">
+          </div>
+          <div class="pillar-title">
+            <span class="pillar-num">03</span>
+            <h3 data-i18n="cap.pillar3.h3">Конвертация</h3>
+          </div>
+          <p data-i18n="cap.pillar3.p">Переведи что угодно во что угодно: видео в GIF, WebP в MP4, картинку в WebP, звук в MP3. Качество, разрешение и битрейт — под тобой.</p>
+          <ul class="tick-list">
+            <li data-i18n="cap.pillar3.li1">17+ форматов в обе стороны</li>
+            <li data-i18n="cap.pillar3.li2">Убрать звуковую дорожку</li>
+            <li data-i18n="cap.pillar3.li3">Настройка качества и битрейта</li>
+            <li data-i18n="cap.pillar3.li4">Прогресс и отмена</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="section spotlight" id="record">
+      <header class="section-head reveal">
+        <p class="kicker" data-i18n="spot.kicker">Детали, которые цепляют</p>
+        <h2 data-i18n="spot.h2">Запись без лишних движений</h2>
+        <p class="lede" data-i18n="spot.lede">То, что обычно прячут за тремя меню, здесь работает с первого клика.</p>
+      </header>
+
+      <div class="bento">
+        <article class="bento-item bento-wide reveal" data-tilt>
+          <div class="bento-media">
+            <img src="assets/img/screenshot-region.png" alt="Выделение области экрана с рамкой и размерами" data-i18n-alt="alt.region" loading="lazy">
+          </div>
+          <div class="bento-copy">
+            <h3 data-i18n="spot.region.h3">Рамка, которая слушается</h3>
+            <p data-i18n="spot.region.p">Заморозь экран, выдели область и доведи её до пикселя — ручки изменения, подгонка клавишами и размер прямо на рамке.</p>
+          </div>
+        </article>
+
+        <article class="bento-item reveal" data-tilt>
+          <div class="bento-media">
+            <img src="assets/img/screenshot-annotate.png" alt="Палитра аннотаций: кисть, стрелка, прямоугольник, текст" data-i18n-alt="alt.annotate" loading="lazy">
+          </div>
+          <div class="bento-copy">
+            <h3 data-i18n="spot.annotate.h3">Рисуй на лету</h3>
+            <p data-i18n="spot.annotate.p">Кисть, линия, стрелка, прямоугольник, выделение, текст и цвет — всё, чтобы объяснить скриншот без слов.</p>
+          </div>
+        </article>
+
+        <article class="bento-item reveal" data-tilt>
+          <div class="bento-media">
+            <img src="assets/img/screenshot-audio.png" alt="Настройка источников звука: микрофон и системный звук" data-i18n-alt="alt.audio" loading="lazy">
+          </div>
+          <div class="bento-copy">
+            <h3 data-i18n="spot.audio.h3">Голос и система</h3>
+            <p data-i18n="spot.audio.p">Пиши озвучку, звук приложения или оба сразу — MP3, M4A, WAV, FLAC или OGG.</p>
+          </div>
+        </article>
+
+        <article class="bento-item bento-wide reveal" data-tilt>
+          <div class="bento-media">
+            <img src="assets/img/screenshot-settings.png" alt="Настройки MediaA: тема, горячие клавиши, язык" data-i18n-alt="alt.settings" loading="lazy">
+          </div>
+          <div class="bento-copy">
+            <h3 data-i18n="spot.settings.h3">Настрой под себя</h3>
+            <p data-i18n="spot.settings.p">Глобальные горячие клавиши, тёмная и светлая темы, английский и русский — всё запоминается и ждёт тебя при следующем запуске.</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <div class="camera-interlude">
+      <div class="interlude-cam camera-shutter" role="button" tabindex="0" aria-label="Сделать снимок" data-i18n-aria-label="camera.shutter" data-camera-shutter>
+        <div class="cam-bloom" aria-hidden="true"></div>
+      </div>
+    </div>
+
+    <section class="section how" id="convert">
+      <header class="section-head reveal">
+        <p class="kicker" data-i18n="cnv.kicker">Конвертация — тоже магия</p>
+        <h2 data-i18n="cnv.h2">Из одного формата — в любой</h2>
+        <p class="lede" data-i18n="cnv.lede">FFmpeg уже внутри, поэтому ничего ставить не нужно: MediaA знает свои форматы наизусть.</p>
+      </header>
+
+      <div class="how-grid">
+        <ol class="how-steps">
+          <li class="how-step reveal">
+            <span class="step-dot">1</span>
+            <div>
+              <h3 data-i18n="cnv.step1.h3">Выбери файл</h3>
+              <p data-i18n="cnv.step1.p">Видео, анимацию, картинку или звук — из проводника или одним кликом.</p>
+            </div>
+          </li>
+          <li class="how-step reveal" data-delay="100">
+            <span class="step-dot">2</span>
+            <div>
+              <h3 data-i18n="cnv.step2.h3">Задай цель</h3>
+              <p data-i18n="cnv.step2.p">Формат, качество, разрешение, битрейт. Хочешь — убери звук из видео.</p>
+            </div>
+          </li>
+          <li class="how-step reveal" data-delay="200">
+            <span class="step-dot">3</span>
+            <div>
+              <h3 data-i18n="cnv.step3.h3">Нажми «Конвертировать»</h3>
+              <p data-i18n="cnv.step3.p">Следи за прогрессом, отменяй в любой момент и забирай готовый файл.</p>
+            </div>
+          </li>
+        </ol>
+
+        <div class="how-visual reveal" data-delay="150">
+          <div class="convert-card tilt">
+            <div class="convert-io">
+              <div class="convert-pill">MP4</div>
+              <div class="convert-arrow" aria-hidden="true"><span></span><span></span><span></span></div>
+              <div class="convert-pill convert-pill-out">GIF</div>
+            </div>
+            <div class="convert-frames" aria-hidden="true">
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+            <div class="convert-progress"><i style="--p:0%"></i></div>
+            <p class="convert-caption"><span data-wobble>MP4 → GIF ·</span> <span class="convert-percent" id="convertPercent"><span class="wobble-letter" style="--i:11"></span><span class="wobble-letter" style="--i:12">0</span><span class="wobble-letter" style="--i:13">%</span></span></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section why" id="why">
+      <header class="section-head reveal">
+        <p class="kicker" data-i18n="why.kicker">Почему MediaA</p>
+        <h2 data-i18n="why.h2">Инструмент, который уважает тебя</h2>
+      </header>
+
+      <div class="why-grid">
+        <article class="why-item reveal">
+          <span class="why-icon">∞</span>
+          <h3 data-i18n="why.free.h3">Бесплатно навсегда</h3>
+          <p data-i18n="why.free.p">Никаких подписок, водяных знаков и лимитов на запись. Исходный код открыт — загляни и убедись сам.</p>
+        </article>
+        <article class="why-item reveal" data-delay="60">
+          <span class="why-icon">1</span>
+          <h3 data-i18n="why.one.h3">Один файл</h3>
+          <p data-i18n="why.one.p">Один исполняемый файл со встроенным FFmpeg. Ничего не доустанавливай и не настраивай.</p>
+        </article>
+        <article class="why-item reveal" data-delay="120">
+          <span class="why-icon">⌂</span>
+          <h3 data-i18n="why.local.h3">Всё остаётся у тебя</h3>
+          <p data-i18n="why.local.p">Файлы пишутся на твой диск. Никаких облаков, аккаунтов и отправки твоих записей куда-либо.</p>
+        </article>
+        <article class="why-item reveal" data-delay="180">
+          <span class="why-icon">⌘</span>
+          <h3 data-i18n="why.hotkeys.h3">Горячие клавиши</h3>
+          <p data-i18n="why.hotkeys.p">Снимок области и старт записи — в один нажим. Настрой сочетания под свою мышечную память.</p>
+        </article>
+        <article class="why-item reveal" data-delay="240">
+          <span class="why-icon">↻</span>
+          <h3 data-i18n="why.crash.h3">Не боится сбоев</h3>
+          <p data-i18n="why.crash.p">Оборвалась запись из-за выключения? MediaA восстановит её в целости при следующем запуске.</p>
+        </article>
+        <article class="why-item reveal" data-delay="300">
+          <span class="why-icon">◐</span>
+          <h3 data-i18n="why.theme.h3">Тёмная и светлая</h3>
+          <p data-i18n="why.theme.p">Переключай тему под настроение или время суток. Язык подхватывается из системы.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="final-cta">
+      <div class="final-cta-inner reveal">
+        <canvas class="cta-fog" aria-hidden="true"></canvas>
+        <h2><span data-i18n="cta.lead">Начни снимать красиво.</span> <span class="gradient-text cta-free" data-i18n="cta.free" data-wobble>Бесплатно.</span></h2>
+        <p data-i18n="cta.p">Скачай MediaA, выдели область — и через минуту у тебя будет первый скриншот с подписью.</p>
+        <div class="hero-cta">
+          <a class="btn btn-primary magnetic" href="https://github.com/machine202502/mediaa" target="_blank" rel="noopener" data-i18n="cta.primary">Скачать ↗</a>
+          <a class="btn btn-ghost magnetic" href="#top" data-i18n="cta.ghost">Вернуться наверх</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-peek" data-footer-peek aria-hidden="true">
+      <button class="footer-peek-trigger" type="button" tabindex="-1" aria-label="Спрятать камеру" data-i18n-aria-label="camera.hidePeek">
+        <span class="footer-peek-bloom" aria-hidden="true"></span>
+      </button>
+    </div>
+
+    <div class="footer-inner">
+      <a class="brand" href="#top">
+        <img class="brand-icon" src="assets/img/icon.png" alt="MediaA" width="34" height="34">
+        <span class="brand-name">MediaA</span>
+      </a>
+      <p data-i18n="footer.p">Инструмент захвата экрана на Rust для Windows. Скриншоты, запись экрана и звука, конвертация.</p>
+      <div class="footer-links">
+        <a href="https://github.com/machine202502/mediaa" target="_blank" rel="noopener" data-i18n="footer.source">Исходный код</a>
+        <a href="https://github.com/machine202502/mediaa#readme" target="_blank" rel="noopener" data-i18n="footer.build">Сборка из исходников</a>
+      </div>
+      <p class="footer-note" data-i18n="footer.note">MIT © MediaA. Бинарные сборки под GPL из-за FFmpeg/libx264.</p>
+    </div>
+  </footer>
+
+  <script src="assets/js/main.js"></script>
+</body>
+</html>
