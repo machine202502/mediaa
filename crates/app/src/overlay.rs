@@ -112,6 +112,14 @@ pub struct Overlay {
     state: Arc<Mutex<State>>,
 }
 
+pub(crate) fn prewarm(ctx: &egui::Context, monitor: &MonitorInfo) {
+    ctx.show_viewport_deferred(
+        overlay_viewport_id(),
+        overlay_viewport_builder(monitor, false),
+        |_ui, _class| {},
+    );
+}
+
 impl Overlay {
     pub(super) fn set_monitor_frame(&self, index: usize, frame: Frame) {
         let mut state = self.state.lock();
@@ -174,7 +182,7 @@ impl Overlay {
     }
 
     pub fn show(&self, ctx: &egui::Context) -> Option<Outcome> {
-        let (id, builder, focus) = {
+        let (id, builder, focus, revealing) = {
             let mut s = self.state.lock();
             if let Some(outcome) = s.outcome.take() {
                 return Some(outcome);
@@ -188,6 +196,7 @@ impl Overlay {
                 id,
                 builder,
                 s.shown && s.opened.elapsed() < Duration::from_millis(600),
+                !s.shown,
             )
         };
         if focus {
@@ -206,6 +215,10 @@ impl Overlay {
                 ui.ctx().request_repaint_of(egui::ViewportId::ROOT);
             }
         });
+        if revealing {
+            ctx.request_repaint();
+            ctx.request_repaint_of(id);
+        }
         None
     }
 }
@@ -218,6 +231,8 @@ fn overlay_viewport_builder(monitor: &MonitorInfo, shown: bool) -> egui::Viewpor
     egui::ViewportBuilder::default()
         .with_title(WINDOW_TITLE)
         .with_decorations(false)
+        .with_transparent(false)
+        .with_resizable(false)
         .with_visible(shown)
         .with_position([
             monitor.x as f32 / monitor.scale,
@@ -229,7 +244,7 @@ fn overlay_viewport_builder(monitor: &MonitorInfo, shown: bool) -> egui::Viewpor
         ])
         .with_always_on_top()
         .with_taskbar(false)
-        .with_active(true)
+        .with_active(false)
 }
 
 fn upload(ctx: &egui::Context, frame: &Frame) -> egui::TextureHandle {
@@ -384,18 +399,22 @@ impl State {
             return;
         }
         self.frames_drawn += 1;
+        if self.frames_drawn == 1 {
+            mediaa_platform::window::disable_open_animation(WINDOW_TITLE);
+            if !mediaa_core::dev::picker_enabled() {
+                mediaa_platform::window::exclude_from_capture(WINDOW_TITLE);
+            }
+        }
         if self.frames_drawn < 2 {
             ctx.request_repaint();
             return;
-        }
-        mediaa_platform::window::disable_open_animation(WINDOW_TITLE);
-        if !mediaa_core::dev::picker_enabled() {
-            mediaa_platform::window::exclude_from_capture(WINDOW_TITLE);
         }
         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         self.shown = true;
         self.opened = Instant::now();
+        ctx.request_repaint();
+        ctx.request_repaint_of(overlay_viewport_id());
     }
 
     fn interact(&mut self, ui: &mut egui::Ui, map: Mapping, screen: ERect) {
@@ -787,8 +806,16 @@ mod tests {
     fn overlay_viewport_stays_visible_after_monitor_switch() {
         let id = super::overlay_viewport_id();
         assert_eq!(id, super::overlay_viewport_id());
-        let builder = super::overlay_viewport_builder(&monitor(2, 800, 800, false), true);
-        assert_eq!(builder.visible, Some(true));
+        let monitor = monitor(2, 800, 800, false);
+        let hidden = super::overlay_viewport_builder(&monitor, false);
+        assert_eq!(hidden.visible, Some(false));
+        assert_eq!(hidden.active, Some(false));
+        assert_eq!(hidden.transparent, Some(false));
+        assert_eq!(hidden.resizable, Some(false));
+
+        let shown = super::overlay_viewport_builder(&monitor, true);
+        assert_eq!(shown.visible, Some(true));
+        assert_eq!(shown.active, Some(false));
     }
 
     #[test]

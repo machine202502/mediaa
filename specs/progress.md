@@ -52,3 +52,4 @@
 | UI-REGION-2 | 26.10.26 06:20 | Добавить рамку, drag и Shift+Enter; убрать смещение после commit и подложку | готово | [region-text-frame-drag.md](tasks/region-text-frame-drag.md) |
 | UI-REGION-3 | 26.10.26 06:30 | Исправить исчезновение overlay после Tab и зависание region action | готово | [region-tab-monitor-switch.md](tasks/region-tab-monitor-switch.md) |
 | UI-REGION-4 | 26.10.26 06:33 | Добавить UX-тесты repeated Tab и стабильного multi-monitor переключения | готово | [region-tab-monitor-ux-tests.md](tasks/region-tab-monitor-ux-tests.md) |
+| UI-REGION-5 | 26.10.26 06:54 | Убрать артефакты первого показа overlay через opaque pre-show viewport | готово | [region-overlay-smooth-open.md](tasks/region-overlay-smooth-open.md) |

@@ -89,6 +89,16 @@ fn process_screenshot(work: ScreenshotWork) -> ScreenshotDone {
 }
 
 impl App {
+    pub(super) fn prewarm_region_overlay(&self, ctx: &egui::Context) {
+        if self.capture.overlay.is_some() || self.monitors.is_empty() {
+            return;
+        }
+        let index = self
+            .current_monitor_index(ctx)
+            .min(self.monitors.len().saturating_sub(1));
+        overlay::prewarm(ctx, &self.monitors[index]);
+    }
+
     pub(crate) fn image_io_busy(&self) -> bool {
         self.capture.busy()
     }

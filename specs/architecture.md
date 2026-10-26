@@ -238,7 +238,8 @@ Watcher overflow требует reconciliation.
 - `overlay.rs` — screenshot editor. Selection определяет итоговый crop, но annotations хранятся в
   координатах полного кадра и видны во всём editor viewport. Активный text editor имеет рамку,
   перетаскивается за её поля и фиксируется кликом снаружи. Overlay использует один native viewport;
-  `Tab` меняет monitor frame через один capture job без создания нового окна.
+  opaque viewport создаётся скрытым заранее и переиспользуется при открытии; `Tab` меняет monitor
+  frame через один capture job без создания нового окна.
 
 ## 8. Языковые файлы
 

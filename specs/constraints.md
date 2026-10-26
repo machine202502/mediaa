@@ -52,6 +52,10 @@
   ViewportBuilder обязан отражать текущее `shown`: постоянный `visible(false)` скрывает уже
   существующий стабильный viewport после первого показа. При одном мониторе `Tab` является no-op;
   при нескольких мониторах порядок строго следует списку monitors, включая ещё не захваченные.
+- Region overlay создаётся скрытым заранее с постоянным ID и без изменения `active`. При подключении
+  реального UI нужно явно запросить repaint root и overlay viewport; prewarmed viewport не получает
+  неявный initial repaint нового окна. Использовать `with_fullscreen(true)` для этого viewport
+  нельзя: на текущем egui-wgpu он воспроизводимо падает в staging buffer.
 
 ## WebP и FFmpeg
 

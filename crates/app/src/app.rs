@@ -482,6 +482,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.thumbs.poll(&ctx);
+        self.prewarm_region_overlay(&ctx);
         self.handle_overlay(&ctx);
         pages::shell(self, ui);
         if !self.lib.viewer_open() {
