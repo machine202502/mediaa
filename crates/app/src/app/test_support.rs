@@ -1,5 +1,13 @@
 use super::*;
 
+static UI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub(crate) fn ui_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    UI_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[derive(Clone)]
 pub(crate) struct TestCatalog {
     pub monitors: Vec<MonitorInfo>,
@@ -58,7 +66,7 @@ impl App {
             ghosted: false,
             recording: Default::default(),
             capture: Default::default(),
-            clipboard: ClipboardService::new(ctx.clone()),
+            clipboard: ClipboardService::noop(ctx.clone()),
             region_outline: Default::default(),
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),

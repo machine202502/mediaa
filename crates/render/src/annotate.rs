@@ -572,4 +572,24 @@ mod tests {
         assert!(is_red(&out, 25, 10));
         assert!(is_white(&out, 25, 40));
     }
+
+    #[test]
+    fn expanding_the_selection_reveals_previously_outside_annotation() {
+        let full = white(200, 200);
+        let shape = Shape {
+            kind: ShapeKind::Line {
+                from: (20.0, 30.0),
+                to: (90.0, 30.0),
+            },
+            style: RED,
+        };
+        let narrow = render_crop(
+            &full,
+            Rect::new(100, 100, 50, 50),
+            std::slice::from_ref(&shape),
+        );
+        assert!(is_white(&narrow, 25, 25));
+        let expanded = render_crop(&full, Rect::new(0, 0, 200, 200), &[shape]);
+        assert!(is_red(&expanded, 50, 30));
+    }
 }

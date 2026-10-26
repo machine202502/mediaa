@@ -28,6 +28,11 @@ impl App {
         let outcome = match outcome {
             Outcome::CaptureMonitor { index, monitor } => {
                 self.queue_monitor_capture(ctx, CaptureKind::OverlayMonitor { index }, monitor.id);
+                if !self.capture.capture_busy() {
+                    if let Some(overlay) = self.capture.overlay.as_ref() {
+                        overlay.monitor_capture_failed();
+                    }
+                }
                 return;
             }
             outcome => outcome,

@@ -26,6 +26,11 @@ impl App {
                         }
                     }
                 },
+                Purpose::Silent => {
+                    if let Err(error) = event.result {
+                        log::warn!("clipboard action from notice failed: {error}");
+                    }
+                }
             }
         }
     }

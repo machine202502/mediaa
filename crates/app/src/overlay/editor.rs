@@ -5,36 +5,117 @@ impl State {
         let Some(edit) = self.text.as_mut() else {
             return;
         };
-        let ShapeKind::Text { pos, text } = &mut edit.shape.kind else {
-            return;
-        };
-        let font = text_font(
-            ui.ctx(),
-            &edit.shape.style,
-            map.len(edit.shape.style.font_size),
-        );
-        let color = c32(edit.shape.style.color);
         let mut commit = false;
-        egui::Area::new(egui::Id::new("overlay-text"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(map.to_pt(*pos))
-            .show(ui.ctx(), |ui| {
-                let te = egui::TextEdit::singleline(text)
-                    .font(font)
-                    .text_color(color)
-                    .frame(egui::Frame::NONE)
-                    .background_color(Color32::from_black_alpha(40))
-                    .desired_width(f32::INFINITY.min(600.0))
-                    .hint_text(t!("overlay.text_hint"));
-                let resp = ui.add(te);
-                if edit.focus {
-                    resp.request_focus();
-                    edit.focus = false;
-                }
-                if resp.lost_focus() {
-                    commit = true;
-                }
-            });
+        let frame_rect = {
+            let ShapeKind::Text { pos, text } = &mut edit.shape.kind else {
+                return;
+            };
+            let font = text_font(
+                ui.ctx(),
+                &edit.shape.style,
+                map.len(edit.shape.style.font_size),
+            );
+            let color = c32(edit.shape.style.color);
+            let frame_margin = 8.0;
+            let frame_stroke = 1.5;
+            egui::Area::new(egui::Id::new("overlay-text"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(
+                    map.to_pt(*pos)
+                        - egui::vec2(frame_margin + frame_stroke, frame_margin + frame_stroke),
+                )
+                .show(ui.ctx(), |ui| {
+                    let measured = if text.is_empty() {
+                        t!("overlay.text_hint").to_string()
+                    } else {
+                        text.clone()
+                    };
+                    let width = ui
+                        .painter()
+                        .layout_no_wrap(measured, font.clone(), color)
+                        .size()
+                        .x
+                        .clamp(180.0, 600.0);
+                    let frame = egui::Frame::new()
+                        .fill(Color32::TRANSPARENT)
+                        .stroke(Stroke::new(frame_stroke, theme::DARK.accent))
+                        .corner_radius(CornerRadius::same(4))
+                        .inner_margin(egui::Margin::same(frame_margin as i8))
+                        .show(ui, |ui| {
+                            let te = egui::TextEdit::multiline(text)
+                                .font(font)
+                                .text_color(color)
+                                .frame(egui::Frame::NONE)
+                                .desired_width(width)
+                                .desired_rows(1)
+                                .return_key(egui::KeyboardShortcut::new(
+                                    egui::Modifiers::SHIFT,
+                                    egui::Key::Enter,
+                                ))
+                                .hint_text(t!("overlay.text_hint"));
+                            let resp = ui.add(te);
+                            if edit.focus {
+                                resp.request_focus();
+                                edit.focus = false;
+                            }
+                            resp
+                        });
+                    let frame_rect = frame.response.rect;
+                    let text_rect = frame.inner.rect;
+                    let drag_rects = [
+                        ERect::from_min_max(
+                            frame_rect.min,
+                            Pos2::new(frame_rect.max.x, text_rect.min.y),
+                        ),
+                        ERect::from_min_max(
+                            Pos2::new(frame_rect.min.x, text_rect.max.y),
+                            frame_rect.max,
+                        ),
+                        ERect::from_min_max(
+                            Pos2::new(frame_rect.min.x, text_rect.min.y),
+                            Pos2::new(text_rect.min.x, text_rect.max.y),
+                        ),
+                        ERect::from_min_max(
+                            Pos2::new(text_rect.max.x, text_rect.min.y),
+                            Pos2::new(frame_rect.max.x, text_rect.max.y),
+                        ),
+                    ];
+                    let mut dragging = false;
+                    for (index, rect) in drag_rects.into_iter().enumerate() {
+                        if rect.width() <= 0.0 || rect.height() <= 0.0 {
+                            continue;
+                        }
+                        let response = ui
+                            .interact(
+                                rect,
+                                ui.id().with(("text-frame-drag", index)),
+                                Sense::drag(),
+                            )
+                            .on_hover_cursor(CursorIcon::Move);
+                        dragging |= response.dragged();
+                    }
+                    if dragging {
+                        let delta = ui.input(|i| i.pointer.delta()) * map.scale;
+                        pos.0 += delta.x;
+                        pos.1 += delta.y;
+                        ui.ctx().request_repaint();
+                    }
+                    let press = ui.input(|i| i.pointer.press_origin());
+                    if press.is_some_and(|p| frame_rect.contains(p)) {
+                        frame.inner.request_focus();
+                    }
+                    if frame.inner.lost_focus()
+                        && !dragging
+                        && press.is_none_or(|p| !frame_rect.contains(p))
+                    {
+                        commit = true;
+                    }
+                    edit.committed_pos = map.to_px(text_rect.min);
+                    (frame_rect, text_rect)
+                })
+                .inner
+        };
+        (edit.rect, edit.text_rect) = frame_rect;
         if commit {
             self.commit_text();
         }

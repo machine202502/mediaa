@@ -78,6 +78,9 @@ fn consume_copy_shortcut(input: &mut egui::InputState) -> bool {
 struct TextEdit {
     shape: Shape,
     focus: bool,
+    rect: ERect,
+    text_rect: ERect,
+    committed_pos: (f32, f32),
 }
 
 const WINDOW_TITLE: &str = "MediaA area picker";
@@ -96,6 +99,7 @@ struct State {
     shapes: Vec<Shape>,
     drawing: Option<Shape>,
     text: Option<TextEdit>,
+    switching_monitor: bool,
     palette_open: bool,
     tools_size: Option<egui::Vec2>,
     actions_size: Option<egui::Vec2>,
@@ -112,10 +116,15 @@ impl Overlay {
     pub(super) fn set_monitor_frame(&self, index: usize, frame: Frame) {
         let mut state = self.state.lock();
         let Some(shot) = state.shots.get_mut(index) else {
+            state.switching_monitor = false;
             return;
         };
         shot.1 = Some(frame);
         state.activate_monitor(index);
+    }
+
+    pub(super) fn monitor_capture_failed(&self) {
+        self.state.lock().switching_monitor = false;
     }
 
     pub fn new(
@@ -153,6 +162,7 @@ impl Overlay {
                 shapes: Vec::new(),
                 drawing: None,
                 text: None,
+                switching_monitor: false,
                 palette_open: false,
                 tools_size: None,
                 actions_size: None,
@@ -172,22 +182,8 @@ impl Overlay {
             let Some((monitor, _)) = s.shots.get(s.current) else {
                 return Some(Outcome::Cancel);
             };
-            let id = egui::ViewportId::from_hash_of(("mediaa-overlay", s.current, monitor.id));
-            let builder = egui::ViewportBuilder::default()
-                .with_title(WINDOW_TITLE)
-                .with_decorations(false)
-                .with_visible(false)
-                .with_position([
-                    monitor.x as f32 / monitor.scale,
-                    monitor.y as f32 / monitor.scale,
-                ])
-                .with_inner_size([
-                    monitor.width as f32 / monitor.scale,
-                    monitor.height as f32 / monitor.scale,
-                ])
-                .with_always_on_top()
-                .with_taskbar(false)
-                .with_active(true);
+            let id = overlay_viewport_id();
+            let builder = overlay_viewport_builder(monitor, s.shown);
             (
                 id,
                 builder,
@@ -212,6 +208,28 @@ impl Overlay {
         });
         None
     }
+}
+
+fn overlay_viewport_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("mediaa-overlay")
+}
+
+fn overlay_viewport_builder(monitor: &MonitorInfo, shown: bool) -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title(WINDOW_TITLE)
+        .with_decorations(false)
+        .with_visible(shown)
+        .with_position([
+            monitor.x as f32 / monitor.scale,
+            monitor.y as f32 / monitor.scale,
+        ])
+        .with_inner_size([
+            monitor.width as f32 / monitor.scale,
+            monitor.height as f32 / monitor.scale,
+        ])
+        .with_always_on_top()
+        .with_taskbar(false)
+        .with_active(true)
 }
 
 fn upload(ctx: &egui::Context, frame: &Frame) -> egui::TextureHandle {
@@ -270,37 +288,39 @@ impl State {
 
     fn activate_monitor(&mut self, index: usize) {
         self.current = index;
+        self.switching_monitor = false;
         let frame = self.frame();
         self.editor =
             SelectionEditor::new(Rect::new(0, 0, frame.width as i32, frame.height as i32));
         self.shapes.clear();
         self.drawing = None;
         self.text = None;
-        self.frames_drawn = 0;
-        self.shown = false;
-        self.opened = Instant::now();
     }
 
     fn switch_monitor(&mut self) {
-        let count = self.shots.len();
-        for step in 1..count {
-            let next = (self.current + step) % count;
-            if self.shots[next].1.is_some() {
-                self.activate_monitor(next);
-                return;
-            }
+        if self.shots.len() <= 1 || self.switching_monitor {
+            return;
         }
+        let count = self.shots.len();
         let next = (self.current + 1) % count;
         if let Some((monitor, _)) = self.shots.get(next) {
-            self.outcome = Some(Outcome::CaptureMonitor {
-                index: next,
-                monitor: monitor.clone(),
-            });
+            if self.shots[next].1.is_some() {
+                self.activate_monitor(next);
+            } else {
+                self.switching_monitor = true;
+                self.outcome = Some(Outcome::CaptureMonitor {
+                    index: next,
+                    monitor: monitor.clone(),
+                });
+            }
         }
     }
 
     fn commit_text(&mut self) {
-        if let Some(t) = self.text.take() {
+        if let Some(mut t) = self.text.take() {
+            if let ShapeKind::Text { pos, .. } = &mut t.shape.kind {
+                *pos = t.committed_pos;
+            }
             if t.shape.is_meaningful() {
                 self.shapes.push(t.shape);
             }
@@ -381,7 +401,6 @@ impl State {
     fn interact(&mut self, ui: &mut egui::Ui, map: Mapping, screen: ERect) {
         let resp = ui.interact(screen, ui.id().with("overlay-bg"), Sense::click_and_drag());
         let sel = self.editor.usable_selection();
-        let inside = |p: Pos2| sel.is_some_and(|r| r.contains(map.to_point(p)));
         let press = ui.input(|i| i.pointer.press_origin());
 
         match self.tool {
@@ -416,25 +435,31 @@ impl State {
             }
             Some(Tool::Text) => {
                 resp.context_menu(|ui| self.text_menu(ui));
-                if resp.hover_pos().is_some_and(inside) {
+                if resp.hover_pos().is_some() {
                     ui.ctx().set_cursor_icon(CursorIcon::Text);
                 }
                 if resp.clicked() {
-                    if let Some(p) = resp.interact_pointer_pos().filter(|p| inside(*p)) {
-                        self.commit_text();
-                        self.text = Some(TextEdit {
-                            shape: Shape::begin(Tool::Text, map.to_px(p), self.style),
-                            focus: true,
-                        });
+                    if let Some(p) = resp.interact_pointer_pos() {
+                        if self.text.is_some() {
+                            self.commit_text();
+                        } else {
+                            self.text = Some(TextEdit {
+                                shape: Shape::begin(Tool::Text, map.to_px(p), self.style),
+                                focus: true,
+                                rect: ERect::NOTHING,
+                                text_rect: ERect::NOTHING,
+                                committed_pos: map.to_px(p),
+                            });
+                        }
                     }
                 }
             }
             Some(tool) => {
-                if resp.hover_pos().is_some_and(inside) {
+                if resp.hover_pos().is_some() {
                     ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
                 }
                 if resp.drag_started() {
-                    if let Some(origin) = press.filter(|p| inside(*p)) {
+                    if let Some(origin) = press {
                         self.commit_text();
                         self.drawing = Some(Shape::begin(tool, map.to_px(origin), self.style));
                     }
@@ -452,7 +477,7 @@ impl State {
                     }
                 }
                 if resp.clicked() && matches!(tool, Tool::Pen | Tool::Marker) {
-                    if let Some(p) = resp.interact_pointer_pos().filter(|p| inside(*p)) {
+                    if let Some(p) = resp.interact_pointer_pos() {
                         self.shapes
                             .push(Shape::begin(tool, map.to_px(p), self.style));
                     }
@@ -485,9 +510,8 @@ impl State {
             painter.rect_filled(r, CornerRadius::ZERO, dim);
         }
 
-        let clipped = painter.with_clip_rect(s);
         for shape in self.shapes.iter().chain(self.drawing.as_ref()) {
-            paint_shape(&clipped, map, shape);
+            paint_shape(painter, map, shape);
         }
 
         painter.rect_stroke(
@@ -733,12 +757,38 @@ mod tests {
         harness.run_steps(2);
     }
 
+    fn click(harness: &mut egui_kittest::Harness<'_, Option<Overlay>>, pos: egui::Pos2) {
+        harness.hover_at(pos);
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::default(),
+        });
+        harness.run_steps(1);
+        harness.event(egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::default(),
+        });
+        harness.run_steps(1);
+    }
+
     #[test]
     fn semantic_copy_event_is_consumed_once() {
         let mut input = egui::InputState::default();
         input.events.push(egui::Event::Copy);
         assert!(consume_copy_shortcut(&mut input));
         assert!(!consume_copy_shortcut(&mut input));
+    }
+
+    #[test]
+    fn overlay_viewport_stays_visible_after_monitor_switch() {
+        let id = super::overlay_viewport_id();
+        assert_eq!(id, super::overlay_viewport_id());
+        let builder = super::overlay_viewport_builder(&monitor(2, 800, 800, false), true);
+        assert_eq!(builder.visible, Some(true));
     }
 
     #[test]
@@ -784,6 +834,121 @@ mod tests {
     }
 
     #[test]
+    fn annotations_and_text_can_start_outside_the_selection() {
+        let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
+        crate::theme::install(&harness.ctx);
+        harness.run_steps(2);
+        drag(
+            &mut harness,
+            egui::pos2(200.0, 150.0),
+            egui::pos2(500.0, 400.0),
+        );
+
+        harness
+            .get_by_label(egui_phosphor::regular::ARROW_UP_RIGHT)
+            .click();
+        harness.run_steps(1);
+        drag(
+            &mut harness,
+            egui::pos2(20.0, 20.0),
+            egui::pos2(120.0, 80.0),
+        );
+        harness.get_by_label(egui_phosphor::regular::TEXT_T).click();
+        harness.run_steps(1);
+        click(&mut harness, egui::pos2(150.0, 100.0));
+
+        let state = harness.state().as_ref().unwrap().state.lock();
+        let shape = state
+            .shapes
+            .first()
+            .expect("annotation outside the selection");
+        let mediaa_render::annotate::ShapeKind::Arrow { from, to } = shape.kind else {
+            panic!("unexpected shape: {:?}", shape.kind)
+        };
+        assert!(from.0 < 200.0 && to.0 < 200.0);
+        let text = state.text.as_ref().expect("text editor outside selection");
+        let mediaa_render::annotate::ShapeKind::Text { pos, .. } = text.shape.kind else {
+            panic!("unexpected text shape")
+        };
+        assert!(pos.0 < 200.0);
+    }
+
+    #[test]
+    fn active_text_frame_moves_and_outside_click_commits() {
+        let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
+        crate::theme::install(&harness.ctx);
+        harness.run_steps(2);
+        drag(
+            &mut harness,
+            egui::pos2(200.0, 150.0),
+            egui::pos2(500.0, 400.0),
+        );
+        harness.get_by_label(egui_phosphor::regular::TEXT_T).click();
+        harness.run_steps(1);
+        click(&mut harness, egui::pos2(150.0, 100.0));
+        harness.event(egui::Event::Text("Label".into()));
+        harness.run_steps(2);
+
+        let (frame, origin) = {
+            let state = harness.state().as_ref().unwrap().state.lock();
+            let edit = state.text.as_ref().expect("active text editor");
+            let mediaa_render::annotate::ShapeKind::Text { pos, text } = &edit.shape.kind else {
+                panic!("unexpected text shape")
+            };
+            assert_eq!(text, "Label");
+            assert!(edit.rect.is_positive());
+            assert!(edit.text_rect.is_positive());
+            (edit.rect, *pos)
+        };
+        let from = frame.left_top() + egui::vec2(3.0, 3.0);
+        let to = from + egui::vec2(60.0, 35.0);
+        drag(&mut harness, from, to);
+
+        {
+            let state = harness.state().as_ref().unwrap().state.lock();
+            let edit = state
+                .text
+                .as_ref()
+                .expect("text stays selected while dragging");
+            let mediaa_render::annotate::ShapeKind::Text { pos, .. } = &edit.shape.kind else {
+                panic!("unexpected text shape")
+            };
+            let moved = (pos.0 - origin.0, pos.1 - origin.1);
+            assert!(moved.0 > 40.0 && moved.0 < 70.0, "{origin:?} -> {pos:?}");
+            assert!(moved.1 > 20.0 && moved.1 < 45.0, "{origin:?} -> {pos:?}");
+        }
+
+        harness.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Enter);
+        harness.run_steps(2);
+        harness.event(egui::Event::Text("!".into()));
+        harness.run_steps(2);
+        let expected_commit = {
+            let state = harness.state().as_ref().unwrap().state.lock();
+            let edit = state.text.as_ref().expect("text remains active after drag");
+            let mediaa_render::annotate::ShapeKind::Text { text, .. } = &edit.shape.kind else {
+                panic!("unexpected text shape")
+            };
+            assert_eq!(text, "Label\n!");
+            edit.committed_pos
+        };
+
+        click(&mut harness, egui::pos2(700.0, 500.0));
+        harness.run_steps(2);
+        let state = harness.state().as_ref().unwrap().state.lock();
+        assert!(state.text.is_none(), "outside click finalizes text");
+        let text = state
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.kind {
+                mediaa_render::annotate::ShapeKind::Text { pos, text } => Some((*pos, text)),
+                _ => None,
+            })
+            .expect("committed text annotation");
+        assert_eq!(text.0, expected_commit);
+        assert_eq!(text.1, "Label\n!");
+    }
+
+    #[test]
     fn region_editor_cancel_and_monitor_switch_follow_keyboard_shortcuts() {
         let mut cancel = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
         cancel.run_steps(2);
@@ -806,9 +971,129 @@ mod tests {
         switch.run_steps(2);
         switch.key_press(egui::Key::Tab);
         switch.run_steps(2);
+        let overlay_state = switch.state().as_ref().unwrap().state.clone();
+        {
+            let mut state = overlay_state.lock();
+            assert!(matches!(
+                state.outcome,
+                Some(Outcome::CaptureMonitor { index: 1, .. })
+            ));
+            assert!(state.switching_monitor);
+            state.outcome = None;
+        }
+        switch.key_press(egui::Key::Tab);
+        switch.run_steps(2);
+        {
+            let state = overlay_state.lock();
+            assert!(state.outcome.is_none());
+            assert!(state.switching_monitor);
+        }
+
+        Overlay {
+            state: overlay_state.clone(),
+        }
+        .monitor_capture_failed();
+        switch.key_press(egui::Key::Tab);
+        switch.run_steps(2);
+        {
+            let mut state = overlay_state.lock();
+            assert!(matches!(
+                state.outcome,
+                Some(Outcome::CaptureMonitor { index: 1, .. })
+            ));
+            state.outcome = None;
+        }
+
+        Overlay {
+            state: overlay_state.clone(),
+        }
+        .set_monitor_frame(1, Frame::filled(800, 600, [28, 48, 76, 255]));
+        switch.run_steps(2);
+        let state = overlay_state.lock();
+        assert_eq!(state.current, 1);
+        assert!(!state.switching_monitor);
+        assert!(state.shown, "monitor switch reuses the visible overlay");
+    }
+
+    #[test]
+    fn repeated_tab_on_single_monitor_keeps_region_action_available() {
+        let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
+        crate::theme::install(&harness.ctx);
+        harness.run_steps(2);
+        for _ in 0..5 {
+            harness.key_press(egui::Key::Tab);
+            harness.run_steps(1);
+        }
+        {
+            let state = harness.state().as_ref().unwrap().state.lock();
+            assert_eq!(state.current, 0);
+            assert!(!state.switching_monitor);
+            assert!(state.outcome.is_none());
+            assert!(state.shown);
+        }
+
+        drag(
+            &mut harness,
+            egui::pos2(100.0, 80.0),
+            egui::pos2(360.0, 280.0),
+        );
+        let copy = rust_i18n::t!("overlay.copy").to_string();
+        harness.get_by_label_contains(&copy).click();
+        harness.run_steps(2);
         assert!(matches!(
-            switch.state().as_ref().unwrap().state.lock().outcome,
-            Some(Outcome::CaptureMonitor { index: 1, .. })
+            harness.state().as_ref().unwrap().state.lock().outcome,
+            Some(Outcome::Image { .. })
         ));
+    }
+
+    #[test]
+    fn tab_cycles_three_monitor_sources_without_losing_the_overlay() {
+        let mut harness = overlay_harness(
+            vec![
+                monitor(1, 0, 800, true),
+                monitor(2, 800, 960, false),
+                monitor(3, 1760, 1280, false),
+            ],
+            Purpose::Screenshot,
+        );
+        crate::theme::install(&harness.ctx);
+        harness.run_steps(2);
+        let state = harness.state().as_ref().unwrap().state.clone();
+
+        for (index, width, height) in [(1, 320, 200), (2, 640, 400)] {
+            harness.key_press(egui::Key::Tab);
+            harness.run_steps(2);
+            {
+                let mut current = state.lock();
+                assert!(matches!(
+                    current.outcome,
+                    Some(Outcome::CaptureMonitor { index: captured, .. }) if captured == index
+                ));
+                assert!(current.switching_monitor);
+                current.outcome = None;
+            }
+            Overlay {
+                state: state.clone(),
+            }
+            .set_monitor_frame(
+                index,
+                Frame::filled(width, height, [index as u8, 80, 160, 255]),
+            );
+            harness.run_steps(2);
+            let current = state.lock();
+            assert_eq!(current.current, index);
+            assert_eq!(current.frame().width, width);
+            assert!(!current.switching_monitor);
+            assert!(current.shown);
+        }
+
+        for expected in [0, 1, 2] {
+            harness.key_press(egui::Key::Tab);
+            harness.run_steps(2);
+            let current = state.lock();
+            assert_eq!(current.current, expected);
+            assert!(current.outcome.is_none());
+            assert!(current.shown);
+        }
     }
 }

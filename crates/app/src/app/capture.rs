@@ -237,6 +237,13 @@ impl App {
             return;
         };
         if outcome.timed_out {
+            if matches!(outcome.kind, CaptureKind::OverlayMonitor { .. }) {
+                if let Some(overlay) = self.capture.overlay.as_ref() {
+                    overlay.monitor_capture_failed();
+                }
+                self.error(t!("err.capture_timeout"));
+                return;
+            }
             self.restore_after_capture(ctx);
             self.show_window(ctx);
             self.error(t!("err.capture_timeout"));
@@ -310,6 +317,9 @@ impl App {
                 self.error(t!("err.window_capture_failed", error = error));
             }
             (CaptureKind::OverlayMonitor { .. }, Err(error)) => {
+                if let Some(overlay) = self.capture.overlay.as_ref() {
+                    overlay.monitor_capture_failed();
+                }
                 self.error(t!("err.capture_failed_detail", error = error));
             }
         }

@@ -47,3 +47,8 @@
 | SPEC-1 | 26.10.26 05:24 | Заменить `workflow` на `specs` и синхронизировать правила, архитектуру, ограничения и task context | готово | [documentation-restructure.md](tasks/documentation-restructure.md) |
 | SPEC-2 | 26.10.26 05:29 | Удалить дубли правил из `CLAUDE.md` и оставить его точкой входа к `specs/` | готово | [claude-deduplication.md](tasks/claude-deduplication.md) |
 | REL-2 | 26.10.26 05:30 | Проверить документацию и UI, создать коммит и выполнить push | готово | [repository-maintenance.md](tasks/repository-maintenance.md) |
+| UI-NOTICE-1 | 26.10.26 05:38 | Добавить анимацию уведомлений, гарантированный auto-hide, silent actions и выравнивание header | готово | [notification-polish.md](tasks/notification-polish.md) |
+| UI-REGION-1 | 26.10.26 05:53 | Разрешить annotations и text вне selection и показывать их без clip во время редактирования | готово | [region-annotations-outside-selection.md](tasks/region-annotations-outside-selection.md) |
+| UI-REGION-2 | 26.10.26 06:20 | Добавить рамку, drag и Shift+Enter; убрать смещение после commit и подложку | готово | [region-text-frame-drag.md](tasks/region-text-frame-drag.md) |
+| UI-REGION-3 | 26.10.26 06:30 | Исправить исчезновение overlay после Tab и зависание region action | готово | [region-tab-monitor-switch.md](tasks/region-tab-monitor-switch.md) |
+| UI-REGION-4 | 26.10.26 06:33 | Добавить UX-тесты repeated Tab и стабильного multi-monitor переключения | готово | [region-tab-monitor-ux-tests.md](tasks/region-tab-monitor-ux-tests.md) |

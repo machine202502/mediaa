@@ -1,4 +1,5 @@
 use super::notices::NoticeAction;
+use super::test_support::TestCatalog;
 use super::{
     close_request, completion_sound_after_action, notice_summary, page_from_args,
     recording_completion_sound, recovery_links, tray_click_stops_recording, tray_state_for_phase,
@@ -7,8 +8,10 @@ use super::{
 use crate::features::recording::RecordingPhase;
 use eframe::egui;
 use egui_kittest::kittest::Queryable;
+use egui_phosphor::regular as phosphor;
 use mediaa_core::settings::{AnimSettings, AnimationQuality};
-use mediaa_core::{AnimFormat, OutputKind, VideoContainer};
+use mediaa_core::{AnimFormat, OutputKind, Settings, VideoContainer};
+use std::time::{Duration, Instant};
 
 fn parse(args: &[&str]) -> StartupAction {
     StartupAction::from_args(args.iter().map(|s| s.to_string()))
@@ -135,7 +138,7 @@ fn toast_text_stays_on_one_short_line() {
 }
 
 #[test]
-fn persistent_notice_is_not_evicted_by_new_transient_toasts() {
+fn important_notice_is_not_evicted_by_new_transient_toasts() {
     let mut notices = Notices::default();
     notices.push(
         NoticeLevel::Warning,
@@ -188,7 +191,7 @@ fn notice_expands_to_the_full_context_and_keeps_its_id() {
         notices,
     );
     crate::theme::install(&harness.ctx);
-    harness.run();
+    harness.run_steps(20);
     let log_label = format!("{} webp-1234-0001", rust_i18n::t!("notice.log_id"));
     let copy_label = rust_i18n::t!("notice.copy").to_string();
     assert!(harness.query_by_label(summary).is_some());
@@ -197,6 +200,8 @@ fn notice_expands_to_the_full_context_and_keeps_its_id() {
         .query_by_label("Полный технический контекст без сокращений")
         .is_none());
     if let Ok(path) = std::env::var("MEDIAA_NOTICE_SNAPSHOT") {
+        std::thread::sleep(Duration::from_millis(200));
+        harness.step();
         harness
             .render()
             .unwrap()
@@ -211,7 +216,7 @@ fn notice_expands_to_the_full_context_and_keeps_its_id() {
             expanded,
         );
         crate::theme::install(&preview.ctx);
-        preview.run();
+        preview.run_steps(20);
         preview
             .render()
             .unwrap()
@@ -219,23 +224,143 @@ fn notice_expands_to_the_full_context_and_keeps_its_id() {
             .unwrap();
     }
     harness.get_by_label("▾").click();
-    harness.run();
+    harness.run_steps(20);
     assert!(harness
         .query_by_label("Полный технический контекст без сокращений")
         .is_some());
     assert!(harness.query_by_label(&log_label).is_some());
     harness.get_by_label(&copy_label).click();
-    harness.run();
+    harness.run_steps(20);
     assert_eq!(
         observed.lock().unwrap().clone(),
         Some(NoticeAction::CopyLog("webp-1234-0001".into()))
     );
     harness.get_by_label("▴").click();
-    harness.run();
+    harness.run_steps(20);
     assert!(harness
         .query_by_label("Полный технический контекст без сокращений")
         .is_none());
     assert_eq!(harness.state().items[0].id, 1);
+}
+
+#[test]
+fn expanded_notice_expires_with_a_fade() {
+    let mut notices = Notices::default();
+    notices.push(
+        NoticeLevel::Info,
+        "Transient".into(),
+        "Expanded detail".into(),
+        None,
+        Vec::new(),
+        false,
+    );
+    notices.items[0].expanded = true;
+    notices.items[0].expires_at = Instant::now();
+    let mut harness = egui_kittest::Harness::new_ui_state(
+        |ui: &mut egui::Ui, notices: &mut Notices| {
+            notices.show(ui.ctx());
+        },
+        notices,
+    );
+    crate::theme::install(&harness.ctx);
+    harness.step();
+    assert!(harness.state().items[0].closing_at.is_some());
+    std::thread::sleep(Duration::from_millis(180));
+    harness.step();
+    assert!(harness.state().items.is_empty());
+}
+
+#[test]
+fn notice_icon_and_title_are_vertically_centred() {
+    let mut notices = Notices::default();
+    notices.push(
+        NoticeLevel::Success,
+        "Copied".into(),
+        "Detail".into(),
+        None,
+        Vec::new(),
+        false,
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    let mut harness = egui_kittest::Harness::new_ui_state(
+        |ui: &mut egui::Ui, notices: &mut Notices| {
+            notices.show(ui.ctx());
+        },
+        notices,
+    );
+    crate::theme::install(&harness.ctx);
+    harness.run_steps(20);
+    let icon = harness.get_by_label(phosphor::CHECK_CIRCLE).rect();
+    let title = harness.get_by_label("Copied").rect();
+    assert!(
+        (icon.center().y - title.center().y).abs() <= 1.0,
+        "icon={icon:?} title={title:?}"
+    );
+}
+
+fn test_app(ctx: &egui::Context) -> super::App {
+    super::App::new_for_test(
+        ctx,
+        Page::Screenshot,
+        Settings::default(),
+        TestCatalog {
+            monitors: Vec::new(),
+            windows: Vec::new(),
+            microphones: Vec::new(),
+            default_microphone: None,
+            monitor_capture: None,
+            window_capture: None,
+        },
+    )
+}
+
+#[test]
+fn notice_copy_action_does_not_create_another_notice() {
+    let ctx = egui::Context::default();
+    let _ui_guard = super::test_support::ui_test_guard();
+    let mut app = test_app(&ctx);
+    app.notices.push(
+        NoticeLevel::Success,
+        "Copied".into(),
+        "Detail".into(),
+        None,
+        Vec::new(),
+        false,
+    );
+    let before = app.notices.items.len();
+    app.handle_notice_action(&ctx, NoticeAction::CopyLog("notice-0001".into()));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while app.clipboard.is_busy() && Instant::now() < deadline {
+        app.poll_clipboard(&ctx);
+        std::thread::yield_now();
+    }
+    app.poll_clipboard(&ctx);
+    assert_eq!(app.notices.items.len(), before);
+}
+
+#[test]
+fn silent_desktop_error_does_not_create_a_notice() {
+    let ctx = egui::Context::default();
+    let _ui_guard = super::test_support::ui_test_guard();
+    let mut app = test_app(&ctx);
+    app.notices.push(
+        NoticeLevel::Error,
+        "Source".into(),
+        "Detail".into(),
+        None,
+        Vec::new(),
+        false,
+    );
+    let before = app.notices.items.len();
+    app.desktop_events_tx
+        .send(super::state::DesktopEvent {
+            action: super::state::DesktopAction::Reveal("missing.mkv".into()),
+            result: Err("reveal failed".into()),
+            notify_errors: false,
+        })
+        .unwrap();
+    app.poll_desktop();
+    assert_eq!(app.notices.items.len(), before);
 }
 
 #[test]

@@ -3,18 +3,22 @@ use super::*;
 
 impl App {
     pub fn open_path(&mut self, ctx: &egui::Context, path: &std::path::Path) {
-        self.spawn_desktop(ctx, DesktopAction::Open(path.to_path_buf()));
+        self.spawn_desktop(ctx, DesktopAction::Open(path.to_path_buf()), true);
     }
 
     pub(crate) fn reveal_path(&mut self, ctx: &egui::Context, path: PathBuf) {
-        self.spawn_desktop(ctx, DesktopAction::Reveal(path));
+        self.spawn_desktop(ctx, DesktopAction::Reveal(path), true);
+    }
+
+    pub(super) fn reveal_path_from_notice(&mut self, ctx: &egui::Context, path: PathBuf) {
+        self.spawn_desktop(ctx, DesktopAction::Reveal(path), false);
     }
 
     pub(crate) fn rename_media(&mut self, ctx: &egui::Context, path: PathBuf, title: String) {
-        self.spawn_desktop(ctx, DesktopAction::Rename { path, title });
+        self.spawn_desktop(ctx, DesktopAction::Rename { path, title }, true);
     }
 
-    fn spawn_desktop(&mut self, ctx: &egui::Context, action: DesktopAction) {
+    fn spawn_desktop(&mut self, ctx: &egui::Context, action: DesktopAction, notify_errors: bool) {
         let task_name = match &action {
             DesktopAction::Open(_) | DesktopAction::Reveal(_) => "external-open",
             DesktopAction::Rename { .. } => "rename-media",
@@ -27,6 +31,7 @@ impl App {
             let _ = events.send(DesktopEvent {
                 action: worker_action,
                 result,
+                notify_errors,
             });
             worker_ctx.request_repaint();
         }) {
@@ -40,7 +45,11 @@ impl App {
             match event.action {
                 DesktopAction::Open(_) | DesktopAction::Reveal(_) => {
                     if let Err(error) = event.result {
-                        self.error(error);
+                        if event.notify_errors {
+                            self.error(error);
+                        } else {
+                            log::warn!("desktop action from notice failed: {error}");
+                        }
                     }
                 }
                 DesktopAction::Rename { path, .. } => match event.result {
@@ -54,7 +63,8 @@ impl App {
                         ));
                     }
                     Ok(_) => {}
-                    Err(error) => self.error(error),
+                    Err(error) if event.notify_errors => self.error(error),
+                    Err(error) => log::warn!("desktop action from notice failed: {error}"),
                 },
             }
         }

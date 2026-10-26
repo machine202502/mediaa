@@ -232,9 +232,13 @@ Watcher overflow требует reconciliation.
 
 - `jobs.rs` — one-shot `Job<T>` с owned handle и однократным poll.
 - `latest_worker.rs` — bounded replacement worker для устаревающих запросов.
+- `app/notices.rs` — уведомления, fade lifecycle, auto-hide, hover pause и silent actions.
 - `tray.rs`, `hotkeys.rs` — desktop adapters.
 - `theme.rs`, `icon.rs`, `i18n.rs` — presentation and localization.
-- `overlay.rs` — screenshot editor.
+- `overlay.rs` — screenshot editor. Selection определяет итоговый crop, но annotations хранятся в
+  координатах полного кадра и видны во всём editor viewport. Активный text editor имеет рамку,
+  перетаскивается за её поля и фиксируется кликом снаружи. Overlay использует один native viewport;
+  `Tab` меняет monitor frame через один capture job без создания нового окна.
 
 ## 8. Языковые файлы
 

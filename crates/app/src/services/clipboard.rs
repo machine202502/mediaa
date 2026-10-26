@@ -13,6 +13,7 @@ const CLIPBOARD_OPERATION_TIMEOUT: Duration = Duration::from_secs(25);
 pub(crate) enum Purpose {
     Toast(String),
     Recording { success: String, sound: bool },
+    Silent,
 }
 
 pub(crate) struct Event {
@@ -114,6 +115,11 @@ pub(crate) struct ClipboardService {
 impl ClipboardService {
     pub(crate) fn new(context: eframe::egui::Context) -> Self {
         Self::with_runner_mode(context, run, true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn noop(ctx: eframe::egui::Context) -> Self {
+        Self::with_runner(ctx, |_| Ok(()))
     }
 
     #[cfg(test)]

@@ -57,4 +57,5 @@ pub(crate) enum DesktopAction {
 pub(crate) struct DesktopEvent {
     pub action: DesktopAction,
     pub result: Result<Option<PathBuf>, String>,
+    pub notify_errors: bool,
 }

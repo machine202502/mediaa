@@ -15,7 +15,6 @@ use rust_i18n::t;
 use std::path::PathBuf;
 
 static RECORDING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-static UI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn recording_guard() -> std::sync::MutexGuard<'static, ()> {
     RECORDING_TEST_LOCK
@@ -221,9 +220,7 @@ fn harness_view(
     theme: egui::Theme,
 ) -> Harness<'static, UiState> {
     let locale = settings.language.as_deref().unwrap_or("en");
-    let ui_guard = UI_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let ui_guard = super::test_support::ui_test_guard();
     rust_i18n::set_locale(locale);
     Harness::builder()
         .with_size(size)
