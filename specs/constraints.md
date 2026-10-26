@@ -46,6 +46,8 @@
   editing, и клик, завершивший текущий text, не должен сразу открывать следующий editor. Рамка не
   добавляет подложку, а commit использует фактический rendered origin текста, чтобы shape не
   смещалась после применения. `Shift+Enter` добавляет новую строку и не завершает editing.
+- Selection size badge нельзя размещать поверх активного text frame. Нужно выбирать другую позицию
+  вокруг selection или внутри свободного угла, сохраняя badge в границах display.
 - `Tab` в region editor не должен создавать новый native overlay viewport или запускать второй
   monitor capture. Пока кадр следующего монитора не готов, повторный `Tab` игнорируется. Ошибка или
   timeout capture обязаны снять switching state, иначе скрытый `Overlay` блокирует tray/UI actions.

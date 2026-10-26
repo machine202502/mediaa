@@ -565,13 +565,17 @@ impl State {
             FontId::proportional(13.0),
             Color32::WHITE,
         );
-        let pos = Pos2::new(
-            s.min.x,
-            (s.min.y - galley.size().y - 10.0).max(screen.min.y + 4.0),
+        let bg = place_size_badge(
+            s,
+            screen,
+            galley.size() + egui::vec2(12.0, 6.0),
+            self.text
+                .as_ref()
+                .map(|edit| edit.rect)
+                .filter(|rect| rect.is_positive()),
         );
-        let bg = ERect::from_min_size(pos, galley.size() + egui::vec2(12.0, 6.0));
         painter.rect_filled(bg, CornerRadius::same(6), Color32::from_black_alpha(210));
-        painter.galley(pos + egui::vec2(6.0, 3.0), galley, Color32::WHITE);
+        painter.galley(bg.min + egui::vec2(6.0, 3.0), galley, Color32::WHITE);
     }
 
     fn hint(&self, painter: &egui::Painter, screen: ERect) {
@@ -591,6 +595,58 @@ impl State {
 }
 
 mod editor;
+
+fn place_size_badge(
+    selection: ERect,
+    screen: ERect,
+    size: egui::Vec2,
+    avoid: Option<ERect>,
+) -> ERect {
+    let gap = 10.0;
+    let inset = 4.0;
+    let positions = [
+        Pos2::new(selection.left(), selection.top() - size.y - gap),
+        Pos2::new(selection.right() - size.x, selection.top() - size.y - gap),
+        Pos2::new(selection.left(), selection.bottom() + gap),
+        Pos2::new(selection.right() - size.x, selection.bottom() + gap),
+        selection.left_top() + egui::vec2(inset, inset),
+        Pos2::new(selection.right() - size.x - inset, selection.top() + inset),
+        Pos2::new(
+            selection.left() + inset,
+            selection.bottom() - size.y - inset,
+        ),
+        Pos2::new(
+            selection.right() - size.x - inset,
+            selection.bottom() - size.y - inset,
+        ),
+    ];
+    positions
+        .into_iter()
+        .enumerate()
+        .map(|(priority, pos)| {
+            let pos = Pos2::new(
+                pos.x.clamp(screen.left(), screen.right() - size.x),
+                pos.y.clamp(screen.top(), screen.bottom() - size.y),
+            );
+            (priority, ERect::from_min_size(pos, size))
+        })
+        .min_by(|(priority_a, a), (priority_b, b)| {
+            let overlap = |rect: ERect| {
+                avoid.map_or(0.0, |avoid| {
+                    let w =
+                        (rect.right().min(avoid.right()) - rect.left().max(avoid.left())).max(0.0);
+                    let h =
+                        (rect.bottom().min(avoid.bottom()) - rect.top().max(avoid.top())).max(0.0);
+                    w * h
+                })
+            };
+            overlap(*a)
+                .total_cmp(&overlap(*b))
+                .then_with(|| priority_a.cmp(priority_b))
+        })
+        .map(|(_, badge)| badge)
+        .expect("badge positions are never empty")
+}
 
 fn dark_bar(
     ctx: &egui::Context,
@@ -803,6 +859,21 @@ mod tests {
     }
 
     #[test]
+    fn size_badge_avoids_active_text_frame() {
+        let selection =
+            egui::Rect::from_min_max(egui::pos2(200.0, 150.0), egui::pos2(500.0, 400.0));
+        let screen = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(800.0, 600.0));
+        let text = egui::Rect::from_min_max(egui::pos2(180.0, 90.0), egui::pos2(390.0, 180.0));
+        let badge = super::place_size_badge(selection, screen, egui::vec2(72.0, 24.0), Some(text));
+        let overlap = egui::Rect::from_min_max(badge.min.max(text.min), badge.max.min(text.max));
+        assert!(
+            overlap.width() <= 0.0 || overlap.height() <= 0.0,
+            "badge {badge:?} overlaps text {text:?}"
+        );
+        assert!(screen.contains_rect(badge));
+    }
+
+    #[test]
     fn overlay_viewport_stays_visible_after_monitor_switch() {
         let id = super::overlay_viewport_id();
         assert_eq!(id, super::overlay_viewport_id());
@@ -959,6 +1030,9 @@ mod tests {
             edit.committed_pos
         };
 
+        #[cfg(windows)]
+        harness.snapshot("region-editor-active-text");
+
         click(&mut harness, egui::pos2(700.0, 500.0));
         harness.run_steps(2);
         let state = harness.state().as_ref().unwrap().state.lock();
@@ -973,6 +1047,54 @@ mod tests {
             .expect("committed text annotation");
         assert_eq!(text.0, expected_commit);
         assert_eq!(text.1, "Label\n!");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ui_regression_snapshot_region_text_menu() {
+        let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
+        crate::theme::install(&harness.ctx);
+        harness.run_steps(2);
+        drag(
+            &mut harness,
+            egui::pos2(120.0, 100.0),
+            egui::pos2(520.0, 360.0),
+        );
+        harness
+            .get_by_label(egui_phosphor::regular::TEXT_T)
+            .click_secondary();
+        harness.run_steps(2);
+        harness.snapshot("region-editor-text-menu");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ui_regression_snapshot_region_palette() {
+        let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
+        crate::theme::install(&harness.ctx);
+        harness.run_steps(2);
+        drag(
+            &mut harness,
+            egui::pos2(120.0, 100.0),
+            egui::pos2(520.0, 360.0),
+        );
+        harness.state().as_ref().unwrap().state.lock().palette_open = true;
+        harness.run_steps(2);
+        harness.snapshot("region-editor-palette");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ui_regression_snapshot_region_edge_selection() {
+        let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
+        crate::theme::install(&harness.ctx);
+        harness.run_steps(2);
+        drag(
+            &mut harness,
+            egui::pos2(520.0, 390.0),
+            egui::pos2(790.0, 590.0),
+        );
+        harness.snapshot("region-editor-edge-selection");
     }
 
     #[test]

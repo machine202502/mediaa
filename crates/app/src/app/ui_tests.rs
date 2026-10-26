@@ -542,6 +542,44 @@ fn ui_regression_snapshot_library_page() {
 
 #[cfg(windows)]
 #[test]
+fn ui_regression_snapshot_library_populated() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, color) in [
+        (
+            "Screenshot_with_a_deliberately_long_title_2026-01-02_10-00-00.png",
+            [40, 90, 180, 255],
+        ),
+        ("Design_review_2026-01-01_10-00-00.png", [180, 70, 50, 255]),
+        (
+            "Recording_thumbnail_2026-01-01_09-00-00.png",
+            [40, 150, 90, 255],
+        ),
+    ] {
+        image::RgbaImage::from_pixel(320, 200, image::Rgba(color))
+            .save(dir.path().join(name))
+            .unwrap();
+    }
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut library = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    library
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .lib
+        .set_test_entries(dir.path());
+    library.run_steps(4);
+    library.snapshot("library-populated-wide");
+}
+
+#[cfg(windows)]
+#[test]
 fn ui_regression_snapshot_convert_page() {
     let mut convert = harness(Page::Convert);
     convert.snapshot("convert-empty-wide");
@@ -549,9 +587,90 @@ fn ui_regression_snapshot_convert_page() {
 
 #[cfg(windows)]
 #[test]
+fn ui_regression_snapshot_convert_selected() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("Picture_2026-01-01_10-00-00.png");
+    image::RgbaImage::from_pixel(320, 200, image::Rgba([20, 40, 80, 255]))
+        .save(&input)
+        .unwrap();
+    let mut convert = harness(Page::Convert);
+    convert
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .conversion
+        .set_input(input);
+    for _ in 0..100 {
+        convert.run_steps(1);
+        if convert
+            .query_by_label(Target::Still(StillFormat::Jpeg).label())
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    convert.snapshot("convert-selected-wide");
+}
+
+#[cfg(windows)]
+#[test]
 fn ui_regression_snapshot_settings_page() {
     let mut settings = harness(Page::Settings);
     settings.snapshot("settings-wide");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_capture_minimum() {
+    let mut harness = harness_with(
+        Page::Screenshot,
+        settings(),
+        catalog(),
+        egui::vec2(520.0, 480.0),
+    );
+    harness.run_steps(2);
+    harness.snapshot("capture-page-minimum");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_library_minimum() {
+    let mut harness = harness_with(
+        Page::Library,
+        settings(),
+        catalog(),
+        egui::vec2(520.0, 480.0),
+    );
+    harness.run_steps(2);
+    harness.snapshot("library-page-minimum");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_convert_minimum() {
+    let mut harness = harness_with(
+        Page::Convert,
+        settings(),
+        catalog(),
+        egui::vec2(520.0, 480.0),
+    );
+    harness.run_steps(2);
+    harness.snapshot("convert-page-minimum");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_settings_minimum() {
+    let mut harness = harness_with(
+        Page::Settings,
+        settings(),
+        catalog(),
+        egui::vec2(520.0, 480.0),
+    );
+    harness.run_steps(2);
+    harness.snapshot("settings-page-minimum");
 }
 
 #[test]
@@ -877,6 +996,25 @@ fn settings_controls_change_application_state() {
         settings.after_completion,
         mediaa_core::settings::AfterCompletionAction::CopyFile
     );
+}
+
+#[test]
+fn advanced_settings_toggles_update_application_state() {
+    let mut harness = harness(Page::Settings);
+    harness.run_steps(2);
+    for label in [
+        t!("settings.start_in_tray"),
+        t!("settings.stop_recording_on_left_click"),
+        t!("settings.highlight_recording_region"),
+    ] {
+        harness.get_by_label(&label).click();
+        harness.run_steps(1);
+    }
+
+    let settings = &harness.state().app.as_ref().unwrap().settings;
+    assert!(settings.start_in_tray);
+    assert!(!settings.stop_recording_on_left_click);
+    assert!(!settings.highlight_recording_region);
 }
 
 #[test]
