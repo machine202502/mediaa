@@ -6,7 +6,7 @@ use egui_kittest::kittest::{NodeT, Queryable};
 use mediaa_core::settings::RecordProfile;
 use mediaa_core::{AnimFormat, OutputKind, Settings, VideoContainer};
 use rust_i18n::t;
-use std::time::Instant;
+use std::time::Duration;
 
 fn profile_has_audio_every_file(profile: RecordProfile, settings: Settings) -> bool {
     let mut harness = egui_kittest::Harness::new_ui_state(
@@ -122,10 +122,10 @@ fn single_source_profiles_hide_audio_in_every_file() {
 #[test]
 fn starting_recording_has_a_working_cancel_action() {
     let mut harness = egui_kittest::Harness::new_ui_state(
-        |ui: &mut egui::Ui, state: &mut (Instant, bool)| {
+        |ui: &mut egui::Ui, state: &mut (Duration, bool)| {
             state.1 |= starting_card(ui, state.0);
         },
-        (Instant::now(), false),
+        (Duration::from_secs(1), false),
     );
     harness.run_steps(2);
     assert!(harness.query_by_label(&t!("record.starting")).is_some());

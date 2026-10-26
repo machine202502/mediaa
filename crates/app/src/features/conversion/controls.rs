@@ -122,17 +122,20 @@ pub(super) fn quality_row(ui: &mut egui::Ui, quality: &mut u8) {
     });
 }
 
-pub(super) fn pick_file(app: &mut App) {
+pub(super) fn pick_file_dialog(
+    controller: &mut super::ConversionController,
+    convert_dir: &std::path::Path,
+) {
     let mut dialog = rfd::FileDialog::new()
         .add_filter(
             t!("convert.filter_media"),
             &mediaa_core::formats::all_media_extensions(),
         )
         .add_filter(t!("convert.filter_all"), &["*"]);
-    if app.settings.media_dir.is_dir() {
-        dialog = dialog.set_directory(&app.settings.media_dir);
+    if convert_dir.is_dir() {
+        dialog = dialog.set_directory(convert_dir);
     }
     if let Some(path) = dialog.pick_file() {
-        app.conv.set_input(path);
+        controller.set_input(path);
     }
 }

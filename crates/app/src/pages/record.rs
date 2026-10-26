@@ -1,42 +1,22 @@
 use super::{activity, header, tile};
-use crate::app::command::{AppCommand, RecordingCommand};
-use crate::app::state::RecState;
-use crate::app::App;
-use crate::overlay::Purpose;
+use crate::features::recording::TargetKind;
 use crate::{i18n, theme};
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
-use mediaa_core::geometry::Rect;
 use mediaa_core::library::human_duration;
 use mediaa_core::limits::{FPS, GIF_COLORS, VIDEO_QUALITY};
 use mediaa_core::settings::{
-    AnimSettings, GifDither, MicChoice, RecordProfile, ANIM_HEIGHTS, OUTPUT_HEIGHTS,
+    AnimSettings, AnimationQuality, GifDither, MicChoice, RecordProfile, ANIM_HEIGHTS,
+    OUTPUT_HEIGHTS,
 };
 use mediaa_core::Settings;
 use mediaa_core::{AnimFormat, OutputKind};
 use mediaa_media::recorder::StopAction;
-use mediaa_platform::screen::{MonitorId, MonitorInfo, WindowId};
+use mediaa_platform::screen::{MonitorInfo, WindowInfo};
 use rust_i18n::t;
-use std::collections::BTreeSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 const SOURCE_PANEL_H: f32 = 150.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TargetKind {
-    #[default]
-    Screen,
-    Region,
-    Windows,
-}
-
-#[derive(Default)]
-pub struct RecordUi {
-    pub target: TargetKind,
-    pub monitors: BTreeSet<MonitorId>,
-    pub region: Option<(MonitorInfo, Rect)>,
-    pub windows: BTreeSet<WindowId>,
-}
 
 pub fn monitor_label(m: &MonitorInfo) -> String {
     if m.primary {
@@ -48,15 +28,31 @@ pub fn monitor_label(m: &MonitorInfo) -> String {
 
 pub(super) mod status;
 
-pub fn ui(app: &mut App, ui: &mut egui::Ui) {
+pub enum RecordUiAction {
+    SettingsChanged,
+    RefreshCatalogs,
+    SelectRegion,
+    RecordingCommand(status::RecordingUiCommand),
+}
+
+pub fn ui(
+    recording: &mut crate::features::recording::RecordingController,
+    settings: &mut Settings,
+    monitors: &[MonitorInfo],
+    windows: &[WindowInfo],
+    microphones: &[String],
+    ui: &mut egui::Ui,
+) -> Vec<RecordUiAction> {
+    let mut actions = Vec::new();
     let ctx = ui.ctx().clone();
     header(ui, &t!("record.title"), "");
-    if status::live_status(app, ui, &ctx) {
-        return;
+    if let Some(command) = status::live_status(recording, ui, &ctx) {
+        actions.push(RecordUiAction::RecordingCommand(command));
+        return actions;
     }
 
     let w = super::tile_width(ui, 3);
-    let target = app.rec.target;
+    let target = recording.ui.target;
     ui.horizontal_wrapped(|ui| {
         if tile(
             ui,
@@ -68,8 +64,8 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         )
         .clicked()
         {
-            app.rec.target = TargetKind::Region;
-            app.start_region_screenshot(&ctx, Purpose::RecordRegion);
+            recording.ui.target = TargetKind::Region;
+            actions.push(RecordUiAction::SelectRegion);
         }
         if tile(
             ui,
@@ -81,8 +77,8 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         )
         .clicked()
         {
-            app.rec.target = TargetKind::Screen;
-            app.refresh_catalogs(ui.ctx());
+            recording.ui.target = TargetKind::Screen;
+            actions.push(RecordUiAction::RefreshCatalogs);
         }
         if tile(
             ui,
@@ -94,8 +90,8 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         )
         .clicked()
         {
-            app.rec.target = TargetKind::Windows;
-            app.refresh_catalogs(ui.ctx());
+            recording.ui.target = TargetKind::Windows;
+            actions.push(RecordUiAction::RefreshCatalogs);
         }
     });
     ui.add_space(4.0);
@@ -103,25 +99,28 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.set_height(SOURCE_PANEL_H);
-        source_details(app, ui);
+        if source_details(recording, monitors, windows, ui) {
+            actions.push(RecordUiAction::RefreshCatalogs);
+        }
     });
     ui.add_space(4.0);
 
-    let sources_h = source_height(app);
+    let sources_h = source_height(recording, monitors);
     let mut refresh_mics = false;
     if profile_editor(
         ui,
-        &mut app.settings,
+        settings,
         RecordProfile::App,
-        &app.mic_devices,
+        microphones,
         sources_h,
         &mut refresh_mics,
     ) {
-        app.settings_changed();
+        actions.push(RecordUiAction::SettingsChanged);
     }
     if refresh_mics {
-        app.refresh_catalogs(ui.ctx());
+        actions.push(RecordUiAction::RefreshCatalogs);
     }
+    actions
 }
 
 pub fn profile_editor(
@@ -246,7 +245,7 @@ pub fn profile_editor(
             }
             OutputKind::Anim(fmt) => {
                 theme::section(ui, icon::GIF, &t!("record.animation"));
-                mark(anim_options(ui, anim, Some(fmt), sources_h, false));
+                mark(quality_options(ui, anim, Some(fmt)));
                 if fmt == AnimFormat::Webp {
                     theme::row(ui, "", |ui| {
                         mark(
@@ -278,16 +277,18 @@ fn output_kinds(profile: RecordProfile) -> Vec<OutputKind> {
         .collect()
 }
 
-fn source_height(app: &App) -> Option<u32> {
-    match app.rec.target {
-        TargetKind::Screen => app
-            .monitors
+fn source_height(
+    recording: &crate::features::recording::RecordingController,
+    monitors: &[MonitorInfo],
+) -> Option<u32> {
+    match recording.ui.target {
+        TargetKind::Screen => monitors
             .iter()
-            .filter(|m| app.rec.monitors.contains(&m.id))
+            .filter(|m| recording.ui.monitors.contains(&m.id))
             .map(|m| m.height)
             .min()
-            .or_else(|| app.monitors.first().map(|m| m.height)),
-        TargetKind::Region => app.rec.region.as_ref().map(|(_, r)| r.h.max(0) as u32),
+            .or_else(|| monitors.first().map(|m| m.height)),
+        TargetKind::Region => recording.ui.region.as_ref().map(|(_, r)| r.h.max(0) as u32),
         TargetKind::Windows => None,
     }
 }
@@ -358,8 +359,14 @@ pub fn resolution_picker(
     changed
 }
 
-fn source_details(app: &mut App, ui: &mut egui::Ui) {
-    match app.rec.target {
+fn source_details(
+    recording: &mut crate::features::recording::RecordingController,
+    monitors: &[MonitorInfo],
+    windows: &[mediaa_platform::screen::WindowInfo],
+    ui: &mut egui::Ui,
+) -> bool {
+    let mut refresh = false;
+    match recording.ui.target {
         TargetKind::Screen => {
             ui.horizontal(|ui| {
                 theme::section(ui, icon::MONITOR, &t!("record.displays_title"));
@@ -367,30 +374,30 @@ fn source_details(app: &mut App, ui: &mut egui::Ui) {
                     if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh"))
                         .clicked()
                     {
-                        app.refresh_catalogs(ui.ctx());
+                        refresh = true;
                     }
                 });
             });
-            let primary = app.monitors.first().map(|m| m.id);
-            for m in &app.monitors {
-                let ticked = app.rec.monitors.contains(&m.id)
-                    || (app.rec.monitors.is_empty() && Some(m.id) == primary);
+            let primary = monitors.first().map(|m| m.id);
+            for m in monitors {
+                let ticked = recording.ui.monitors.contains(&m.id)
+                    || (recording.ui.monitors.is_empty() && Some(m.id) == primary);
                 let mut on = ticked;
                 if ui.checkbox(&mut on, monitor_label(m)).changed() {
-                    if app.rec.monitors.is_empty() {
-                        app.rec.monitors.extend(primary);
+                    if recording.ui.monitors.is_empty() {
+                        recording.ui.monitors.extend(primary);
                     }
                     if on {
-                        app.rec.monitors.insert(m.id);
+                        recording.ui.monitors.insert(m.id);
                     } else {
-                        app.rec.monitors.remove(&m.id);
+                        recording.ui.monitors.remove(&m.id);
                     }
                 }
             }
         }
         TargetKind::Region => {
             theme::section(ui, icon::SELECTION, &t!("record.area"));
-            match &app.rec.region {
+            match &recording.ui.region {
                 Some((m, r)) => ui.label(t!(
                     "record.area_value",
                     w = r.w,
@@ -411,7 +418,7 @@ fn source_details(app: &mut App, ui: &mut egui::Ui) {
                     if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh"))
                         .clicked()
                     {
-                        app.refresh_catalogs(ui.ctx());
+                        refresh = true;
                     }
                 });
             });
@@ -420,8 +427,8 @@ fn source_details(app: &mut App, ui: &mut egui::Ui) {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
-                    for w in &app.windows {
-                        let mut on = app.rec.windows.contains(&w.id);
+                    for w in windows {
+                        let mut on = recording.ui.windows.contains(&w.id);
                         if ui
                             .checkbox(
                                 &mut on,
@@ -430,15 +437,16 @@ fn source_details(app: &mut App, ui: &mut egui::Ui) {
                             .changed()
                         {
                             if on {
-                                app.rec.windows.insert(w.id);
+                                recording.ui.windows.insert(w.id);
                             } else {
-                                app.rec.windows.remove(&w.id);
+                                recording.ui.windows.remove(&w.id);
                             }
                         }
                     }
                 });
         }
     }
+    refresh
 }
 
 pub fn anim_options(
@@ -465,22 +473,54 @@ pub fn anim_options(
             );
         });
     }
+    changed |= quality_controls(
+        ui,
+        &mut a.gif_colors,
+        &mut a.gif_dither,
+        &mut a.webp_quality,
+        fmt,
+    );
+    changed
+}
+
+fn quality_options(
+    ui: &mut egui::Ui,
+    quality: &mut AnimationQuality,
+    fmt: Option<AnimFormat>,
+) -> bool {
+    quality_controls(
+        ui,
+        &mut quality.gif_colors,
+        &mut quality.gif_dither,
+        &mut quality.webp_quality,
+        fmt,
+    )
+}
+
+fn quality_controls(
+    ui: &mut egui::Ui,
+    gif_colors: &mut u32,
+    gif_dither: &mut GifDither,
+    webp_quality: &mut u8,
+    fmt: Option<AnimFormat>,
+) -> bool {
+    let mut changed = false;
     if fmt != Some(AnimFormat::Webp) {
         theme::row(ui, &t!("anim.colors"), |ui| {
             changed |= ui
                 .add(egui::Slider::new(
-                    &mut a.gif_colors,
+                    gif_colors,
                     GIF_COLORS.min..=GIF_COLORS.max,
                 ))
                 .changed();
         });
         theme::row(ui, &t!("anim.dither"), |ui| {
             egui::ComboBox::from_id_salt(("dither", fmt.is_some()))
-                .selected_text(i18n::dither(a.gif_dither))
+                .selected_text(i18n::dither(*gif_dither))
                 .show_ui(ui, |ui| {
                     for d in GifDither::ALL {
                         changed |= ui
-                            .selectable_value(&mut a.gif_dither, d, i18n::dither(d))
+                            .selectable_value(gif_dither, d, i18n::dither(d))
                             .changed();
                     }
                 });
@@ -490,7 +530,7 @@ pub fn anim_options(
         theme::row(ui, &t!("anim.webp_quality"), |ui| {
             changed |= ui
                 .add(egui::Slider::new(
-                    &mut a.webp_quality,
+                    webp_quality,
                     VIDEO_QUALITY.min as u8..=VIDEO_QUALITY.max as u8,
                 ))
                 .changed();
@@ -499,23 +539,27 @@ pub fn anim_options(
     changed
 }
 
-pub fn start_bar(app: &mut App, ui: &mut egui::Ui) {
-    let ctx = ui.ctx().clone();
-    let target = app.record_target_from_ui();
+pub fn start_bar(
+    settings: &Settings,
+    recovery_active: bool,
+    target: &Result<(), String>,
+    ui: &mut egui::Ui,
+) -> bool {
+    let mut start = false;
     ui.vertical_centered(|ui| {
         let btn =
             theme::primary(ui, icon::RECORD, &t!("record.start")).min_size(egui::vec2(220.0, 36.0));
-        let available = target.is_ok() && !app.recovery_active();
+        let available = target.is_ok() && !recovery_active;
         let mut resp = ui.add_enabled(available, btn);
-        if app.recovery_active() {
+        if recovery_active {
             resp = resp.on_disabled_hover_text(t!("record.recovery_wait"));
         }
-        let hk = &app.settings.hotkeys;
+        let hk = &settings.hotkeys;
         if hk.enabled && !hk.start_video.is_empty() {
             resp = resp.on_hover_text(t!("record.hotkey_hint", key = hk.start_video));
         }
         if resp.clicked() {
-            app.start_recording_from_ui(&ctx);
+            start = true;
         }
         if let Err(why) = &target {
             if !why.is_empty() {
@@ -523,6 +567,7 @@ pub fn start_bar(app: &mut App, ui: &mut egui::Ui) {
             }
         }
     });
+    start
 }
 
 pub fn mic_combo(

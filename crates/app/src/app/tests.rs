@@ -1,15 +1,14 @@
 use super::notices::NoticeAction;
 use super::{
     close_request, completion_sound_after_action, notice_summary, page_from_args,
-    recording_animation_settings, recording_completion_sound, recording_tray_state, recovery_links,
-    tray_click_stops_recording, CloseRequest, NoticeLevel, Notices, Page, RecState, StartupAction,
-    StopSource,
+    recording_completion_sound, recovery_links, tray_click_stops_recording, tray_state_for_phase,
+    CloseRequest, NoticeLevel, Notices, Page, StartupAction, StopSource,
 };
-use crate::app::tasks::{TaskKind, TaskSupervisor};
+use crate::features::recording::RecordingPhase;
 use eframe::egui;
 use egui_kittest::kittest::Queryable;
-use mediaa_core::{AnimFormat, OutputKind, Settings, VideoContainer};
-use mediaa_media::recorder::RecordingProgress;
+use mediaa_core::settings::{AnimSettings, AnimationQuality};
+use mediaa_core::{AnimFormat, OutputKind, VideoContainer};
 
 fn parse(args: &[&str]) -> StartupAction {
     StartupAction::from_args(args.iter().map(|s| s.to_string()))
@@ -33,17 +32,15 @@ fn tray_click_stops_recording_only_when_enabled_and_recording() {
 }
 
 #[test]
-fn animation_recording_uses_the_visible_shared_settings() {
-    let animation = Settings::default().region_anim;
-    let webp = OutputKind::Anim(AnimFormat::Webp);
-    let animation = recording_animation_settings(webp, 60, Some(1080), &animation);
+fn animation_recording_combines_profile_timing_and_persisted_quality() {
+    let quality = AnimationQuality {
+        gif_colors: 64,
+        webp_quality: 91,
+        ..AnimationQuality::default()
+    };
+    let animation = AnimSettings::for_recording(60, Some(1080), &quality);
     assert_eq!((animation.fps, animation.max_height), (60, 1080));
-    let mkv = OutputKind::Video(VideoContainer::Mkv);
-    let animation = Settings::default().region_anim;
-    assert_eq!(
-        recording_animation_settings(mkv, 60, Some(1080), &animation),
-        animation
-    );
+    assert_eq!((animation.gif_colors, animation.webp_quality), (64, 91));
 }
 
 #[test]
@@ -70,42 +67,19 @@ fn completion_sound_requires_a_successful_completion_action() {
 #[test]
 fn tray_stays_in_processing_state_until_saving_finishes() {
     assert_eq!(
-        recording_tray_state(&RecState::Idle),
+        tray_state_for_phase(RecordingPhase::Idle),
         crate::tray::TrayState::Idle
     );
-    let (_tx, events) = crossbeam_channel::unbounded();
-    let saving = RecState::Saving {
-        events,
-        progress_state: RecordingProgress::default(),
-        progress: None,
-        started: std::time::Instant::now(),
-        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        sound_on_completion: false,
-        task: None,
-    };
     assert_eq!(
-        recording_tray_state(&saving),
+        tray_state_for_phase(RecordingPhase::Saving),
         crate::tray::TrayState::Saving
     );
 }
 
 #[test]
 fn starting_recording_is_busy_and_has_its_own_tray_state() {
-    let (_tx, rx) = crossbeam_channel::bounded(1);
-    let mut tasks = TaskSupervisor::default();
-    let task = tasks
-        .spawn(TaskKind::RecordingStart, "starting-test", None, || {})
-        .unwrap();
-    let starting = RecState::Starting {
-        rx,
-        task,
-        started: std::time::Instant::now(),
-        page: Page::Record,
-        cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-    assert!(!starting.is_idle());
     assert_eq!(
-        recording_tray_state(&starting),
+        tray_state_for_phase(RecordingPhase::Starting),
         crate::tray::TrayState::Starting
     );
 }

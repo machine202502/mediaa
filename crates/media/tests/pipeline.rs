@@ -1,7 +1,7 @@
 use mediaa_core::audio::AudioSink;
 use mediaa_core::formats::{AnimFormat, MediaKind, OutputKind, VideoContainer};
 use mediaa_core::paths::{MediaDir, WorkDir};
-use mediaa_core::settings::AnimSettings;
+use mediaa_core::settings::{AnimSettings, WebpMode};
 use mediaa_core::source::{AudioSource, FrameSource, SourceFactory};
 use mediaa_core::{naming, Frame};
 use mediaa_media::animation_backends::{
@@ -10,7 +10,7 @@ use mediaa_media::animation_backends::{
 use mediaa_media::convert::{self, ConvertSettings, Effort, Target};
 use mediaa_media::info::probe;
 use mediaa_media::recorder::{
-    AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction, WebpMode,
+    AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction,
 };
 use mediaa_webp_pipeline::PipelineTuning;
 use std::path::{Path, PathBuf};

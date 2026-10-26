@@ -1,7 +1,6 @@
-use crate::app::tasks::{TaskId, TaskKind, TaskSupervisor};
-use crate::player::Player;
+use super::player::Player;
+use crate::jobs::Job;
 use crate::theme;
-use crossbeam_channel::Receiver;
 use eframe::egui::{self, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
@@ -26,12 +25,8 @@ pub struct Viewer {
     name: String,
     kind: MediaKind,
     texture: Option<egui::TextureHandle>,
-    image_rx: Option<Receiver<Frame>>,
-    image_task: Option<TaskId>,
-    image_cancel: Arc<AtomicBool>,
-    audio_rx: Option<Receiver<Result<AudioOut, String>>>,
-    audio_task: Option<TaskId>,
-    audio_cancel: Arc<AtomicBool>,
+    image_job: Option<Job<Option<Frame>>>,
+    audio_job: Option<Job<Result<AudioOut, String>>>,
     zoom: f32,
     pan: Vec2,
     player: Option<Player>,
@@ -42,26 +37,16 @@ impl Viewer {
         &self.path
     }
 
-    pub fn cancel_pending(&mut self, tasks: &mut TaskSupervisor) {
-        self.image_cancel.store(true, Ordering::Relaxed);
-        self.audio_cancel.store(true, Ordering::Relaxed);
-        self.image_rx = None;
-        self.audio_rx = None;
-        if let Some(task) = self.image_task.take() {
-            tasks.detach(task);
+    pub fn cancel_pending(&mut self) {
+        if let Some(job) = self.image_job.take() {
+            job.cancel();
         }
-        if let Some(task) = self.audio_task.take() {
-            tasks.detach(task);
+        if let Some(job) = self.audio_job.take() {
+            job.cancel();
         }
     }
 
-    pub fn open(
-        path: &Path,
-        kind: MediaKind,
-        duration: Option<f64>,
-        audio: bool,
-        tasks: &mut TaskSupervisor,
-    ) -> Viewer {
+    pub fn open(path: &Path, kind: MediaKind, duration: Option<f64>, audio: bool) -> Viewer {
         let name = path
             .file_name()
             .unwrap_or_default()
@@ -72,25 +57,19 @@ impl Viewer {
             name,
             kind,
             texture: None,
-            image_rx: None,
-            image_task: None,
-            image_cancel: Arc::new(AtomicBool::new(false)),
-            audio_rx: None,
-            audio_task: None,
-            audio_cancel: Arc::new(AtomicBool::new(false)),
+            image_job: None,
+            audio_job: None,
             zoom: 1.0,
             pan: Vec2::ZERO,
             player: None,
         };
         if kind == MediaKind::Image {
-            let (tx, rx) = crossbeam_channel::bounded(1);
             let p = path.to_path_buf();
-            let cancel = v.image_cancel.clone();
+            let cancel = Arc::new(AtomicBool::new(false));
             let worker_cancel = cancel.clone();
-            match tasks.spawn(
-                TaskKind::ViewerImage,
+            match Job::spawn(
                 "viewer-image",
-                Some(cancel),
+                cancel,
                 move || match image::image_dimensions(&p)
                     .map_err(anyhow::Error::from)
                     .and_then(|(width, height)| {
@@ -105,17 +84,16 @@ impl Viewer {
                         } else {
                             img
                         };
-                        if !worker_cancel.load(Ordering::Relaxed) {
-                            let _ = tx.send(Frame::from_image(img.to_rgba8()));
-                        }
+                        (!worker_cancel.load(Ordering::Relaxed))
+                            .then(|| Frame::from_image(img.to_rgba8()))
                     }
-                    Err(e) => log::warn!("viewer {}: {e}", p.display()),
+                    Err(e) => {
+                        log::warn!("viewer {}: {e}", p.display());
+                        None
+                    }
                 },
             ) {
-                Ok(task) => {
-                    v.image_rx = Some(rx);
-                    v.image_task = Some(task);
-                }
+                Ok(job) => v.image_job = Some(job),
                 Err(error) => log::warn!("viewer image worker: {error}"),
             }
         } else {
@@ -130,24 +108,15 @@ impl Viewer {
             }
             v.player = Some(player);
             if audio {
-                let (tx, rx) = crossbeam_channel::bounded(1);
-                let cancel = v.audio_cancel.clone();
+                let cancel = Arc::new(AtomicBool::new(false));
                 let worker_cancel = cancel.clone();
-                match tasks.spawn(
-                    TaskKind::ViewerAudio,
-                    "viewer-audio-open",
-                    Some(cancel),
-                    move || {
-                        let result = AudioOut::open().map_err(|error| format!("{error:#}"));
-                        if !worker_cancel.load(Ordering::Relaxed) {
-                            let _ = tx.send(result);
-                        }
-                    },
-                ) {
-                    Ok(task) => {
-                        v.audio_rx = Some(rx);
-                        v.audio_task = Some(task);
+                match Job::spawn("viewer-audio-open", cancel, move || {
+                    if worker_cancel.load(Ordering::Relaxed) {
+                        return Err("cancelled".into());
                     }
+                    AudioOut::open().map_err(|error| format!("{error:#}"))
+                }) {
+                    Ok(job) => v.audio_job = Some(job),
                     Err(error) => log::warn!("viewer audio worker: {error}"),
                 }
             }
@@ -155,58 +124,48 @@ impl Viewer {
         v
     }
 
-    pub fn show(
-        &mut self,
-        ctx: &egui::Context,
-        tasks: &mut TaskSupervisor,
-    ) -> Option<ViewerAction> {
-        if let Some(rx) = &self.image_rx {
-            match rx.try_recv() {
-                Ok(frame) => {
+    pub fn show(&mut self, ctx: &egui::Context) -> Option<ViewerAction> {
+        if let Some(job) = self.image_job.as_mut() {
+            match job.poll() {
+                Some(Ok(Some(frame))) => {
                     self.texture = Some(upload(ctx, None, &frame));
-                    self.image_rx = None;
+                    self.image_job = None;
                 }
-                Err(crossbeam_channel::TryRecvError::Empty) => {
+                Some(Ok(None)) => {
+                    self.image_job = None;
+                }
+                Some(Err(error)) => {
+                    log::warn!("viewer image worker stopped: {error:#}");
+                    self.image_job = None;
+                }
+                None => {
                     ctx.request_repaint_after(Duration::from_millis(50));
-                }
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    self.image_rx = None;
-                }
-            }
-            if self.image_rx.is_none() {
-                if let Some(task) = self.image_task.take() {
-                    tasks.finish(task);
                 }
             }
         }
-        if let Some(rx) = &self.audio_rx {
-            match rx.try_recv() {
-                Ok(Ok(audio)) => {
+        if let Some(job) = self.audio_job.as_mut() {
+            match job.poll() {
+                Some(Ok(Ok(audio))) => {
                     if let Some(player) = self.player.as_mut() {
                         player.attach_audio(audio);
                     }
-                    self.audio_rx = None;
+                    self.audio_job = None;
                 }
-                Ok(Err(error)) => {
+                Some(Ok(Err(error))) => {
                     log::warn!("audio output: {error}");
-                    self.audio_rx = None;
+                    self.audio_job = None;
                     if let Some(player) = self.player.as_mut() {
                         player.audio_unavailable();
                     }
                 }
-                Err(crossbeam_channel::TryRecvError::Empty) => {}
-                Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    log::warn!("audio output worker stopped");
-                    self.audio_rx = None;
+                Some(Err(error)) => {
+                    log::warn!("audio output worker stopped: {error:#}");
+                    self.audio_job = None;
                     if let Some(player) = self.player.as_mut() {
                         player.audio_unavailable();
                     }
                 }
-            }
-            if self.audio_rx.is_none() {
-                if let Some(task) = self.audio_task.take() {
-                    tasks.finish(task);
-                }
+                None => {}
             }
         }
         if let Some(p) = self.player.as_mut() {
@@ -437,8 +396,7 @@ impl Viewer {
 
 impl Drop for Viewer {
     fn drop(&mut self) {
-        self.image_cancel.store(true, Ordering::Relaxed);
-        self.audio_cancel.store(true, Ordering::Relaxed);
+        self.cancel_pending();
     }
 }
 
@@ -599,23 +557,15 @@ fn player_controls(p: &mut Player, ui: &mut egui::Ui, open: &mut bool) {
 #[cfg(test)]
 mod tests {
     use super::{frac_to_zoom, zoom_to_frac, Viewer, MAX_ZOOM, MIN_ZOOM};
-    use crate::app::tasks::TaskSupervisor;
     use mediaa_core::MediaKind;
     use std::path::Path;
 
     #[test]
-    fn closing_a_viewer_detaches_pending_lookup() {
-        let mut tasks = TaskSupervisor::default();
-        let mut viewer = Viewer::open(
-            Path::new("missing.png"),
-            MediaKind::Image,
-            None,
-            false,
-            &mut tasks,
-        );
-        assert_eq!(tasks.active_count(), 1);
-        viewer.cancel_pending(&mut tasks);
-        assert_eq!(tasks.active_count(), 0);
+    fn closing_a_viewer_cancels_its_owned_lookup() {
+        let mut viewer = Viewer::open(Path::new("missing.png"), MediaKind::Image, None, false);
+        assert!(viewer.image_job.is_some());
+        viewer.cancel_pending();
+        assert!(viewer.image_job.is_none());
     }
 
     #[test]

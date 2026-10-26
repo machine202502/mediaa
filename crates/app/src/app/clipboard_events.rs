@@ -1,5 +1,5 @@
 use super::*;
-use crate::clipboard_service::Purpose;
+use crate::services::clipboard::Purpose;
 
 impl App {
     pub(super) fn poll_clipboard(&mut self, ctx: &egui::Context) {

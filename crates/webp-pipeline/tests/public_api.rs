@@ -48,7 +48,7 @@ fn public_api_runs_independently_and_merges_segments() {
     };
     let config = PipelineConfig::new(1_000_000, 10, 640, 480, 80).with_tuning(&tuning);
     let mut progress = Vec::new();
-    let report = run(
+    run(
         &config,
         &TestBackend,
         &output,
@@ -56,9 +56,6 @@ fn public_api_runs_independently_and_merges_segments() {
         &AtomicBool::new(false),
     )
     .unwrap();
-    assert_eq!((report.planned_segments, report.completed_segments), (2, 2));
-    assert_eq!(report.attempts, 1);
-    assert!(report.peak_reserved_bytes > 0);
     assert!(output.is_file());
     assert_eq!(progress.last(), Some(&Some(1.0)));
 }

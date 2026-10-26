@@ -126,6 +126,13 @@ pub struct RecordSettings {
     pub parallel_webp: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebpMode {
+    Direct,
+    Segmented,
+    SegmentedParallel,
+}
+
 impl Default for RecordSettings {
     fn default() -> Self {
         Self {
@@ -181,6 +188,16 @@ impl RecordSettings {
             && self.record_audio
             && (self.microphone != MicChoice::Off || self.system_audio)
     }
+
+    pub fn webp_mode(&self) -> WebpMode {
+        if !self.segmented_webp {
+            WebpMode::Direct
+        } else if self.parallel_webp {
+            WebpMode::SegmentedParallel
+        } else {
+            WebpMode::Segmented
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -191,6 +208,25 @@ pub struct AnimSettings {
     pub gif_colors: u32,
     pub gif_dither: GifDither,
     pub webp_quality: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AnimationQuality {
+    pub gif_colors: u32,
+    pub gif_dither: GifDither,
+    pub webp_quality: u8,
+}
+
+impl Default for AnimationQuality {
+    fn default() -> Self {
+        let animation = AnimSettings::default();
+        Self {
+            gif_colors: animation.gif_colors,
+            gif_dither: animation.gif_dither,
+            webp_quality: animation.webp_quality,
+        }
+    }
 }
 
 impl Default for AnimSettings {
@@ -206,6 +242,16 @@ impl Default for AnimSettings {
 }
 
 impl AnimSettings {
+    pub fn for_recording(fps: u32, max_height: Option<u32>, quality: &AnimationQuality) -> Self {
+        Self {
+            fps: FPS.clamp(fps),
+            max_height: max_height.unwrap_or(0),
+            gif_colors: quality.gif_colors,
+            gif_dither: quality.gif_dither,
+            webp_quality: quality.webp_quality,
+        }
+    }
+
     pub fn height_limit(&self) -> Option<u32> {
         (self.max_height > 0).then_some(self.max_height)
     }
@@ -276,11 +322,11 @@ pub struct Settings {
     pub convert_dir: Option<PathBuf>,
     pub screenshot: ScreenshotSettings,
     pub record: RecordSettings,
-    pub anim: AnimSettings,
+    pub anim: AnimationQuality,
     pub hotkey_record: RecordSettings,
-    pub hotkey_anim: AnimSettings,
+    pub hotkey_anim: AnimationQuality,
     pub region_record: RecordSettings,
-    pub region_anim: AnimSettings,
+    pub region_anim: AnimationQuality,
     pub hotkey_screen: ScreenChoice,
     pub audio_record: AudioRecordSettings,
     pub hotkey_audio: AudioRecordSettings,
@@ -304,19 +350,19 @@ impl Default for Settings {
             convert_dir: None,
             screenshot: ScreenshotSettings::default(),
             record: RecordSettings::default(),
-            anim: AnimSettings::default(),
+            anim: AnimationQuality::default(),
             hotkey_record: RecordSettings {
                 output: OutputKind::Video(VideoContainer::Mkv),
                 ..RecordSettings::default()
             },
-            hotkey_anim: AnimSettings::default(),
+            hotkey_anim: AnimationQuality::default(),
             region_record: RecordSettings {
                 output: OutputKind::Anim(AnimFormat::Webp),
                 fps: AnimSettings::default().fps,
                 output_height: AnimSettings::default().max_height,
                 ..RecordSettings::default()
             },
-            region_anim: AnimSettings::default(),
+            region_anim: AnimationQuality::default(),
             hotkey_screen: ScreenChoice::Primary,
             audio_record: AudioRecordSettings::default(),
             hotkey_audio: AudioRecordSettings::default(),
@@ -362,10 +408,6 @@ impl Settings {
         Self::load_from(&paths::settings_file())
     }
 
-    pub fn save(&self) -> anyhow::Result<()> {
-        self.save_to(&paths::settings_file())
-    }
-
     pub fn sanitized(mut self) -> Settings {
         for r in [
             &mut self.record,
@@ -375,10 +417,9 @@ impl Settings {
             r.fps = FPS.clamp(r.fps);
             r.video_quality = VIDEO_QUALITY.clamp(u32::from(r.video_quality)) as u8;
         }
-        for a in [&mut self.anim, &mut self.hotkey_anim, &mut self.region_anim] {
-            a.fps = FPS.clamp(a.fps);
-            a.gif_colors = GIF_COLORS.clamp(a.gif_colors);
-            a.webp_quality = VIDEO_QUALITY.clamp(u32::from(a.webp_quality)) as u8;
+        for quality in [&mut self.anim, &mut self.hotkey_anim, &mut self.region_anim] {
+            quality.gif_colors = GIF_COLORS.clamp(quality.gif_colors);
+            quality.webp_quality = VIDEO_QUALITY.clamp(u32::from(quality.webp_quality)) as u8;
         }
         for audio in [&mut self.audio_record, &mut self.hotkey_audio] {
             audio.kbps = AUDIO_KBPS.clamp(audio.kbps);
@@ -407,7 +448,7 @@ impl Settings {
         }
     }
 
-    pub fn profile(&self, p: RecordProfile) -> (&RecordSettings, &AnimSettings) {
+    pub fn profile(&self, p: RecordProfile) -> (&RecordSettings, &AnimationQuality) {
         match p {
             RecordProfile::App => (&self.record, &self.anim),
             RecordProfile::Hotkey => (&self.hotkey_record, &self.hotkey_anim),
@@ -415,7 +456,10 @@ impl Settings {
         }
     }
 
-    pub fn profile_mut(&mut self, p: RecordProfile) -> (&mut RecordSettings, &mut AnimSettings) {
+    pub fn profile_mut(
+        &mut self,
+        p: RecordProfile,
+    ) -> (&mut RecordSettings, &mut AnimationQuality) {
         match p {
             RecordProfile::App => (&mut self.record, &mut self.anim),
             RecordProfile::Hotkey => (&mut self.hotkey_record, &mut self.hotkey_anim),
@@ -439,7 +483,7 @@ mod tests {
         s.language = Some("ru".into());
         s.record.output = OutputKind::Anim(AnimFormat::Webp);
         s.record.microphone = MicChoice::Device("USB Mic".into());
-        s.anim.max_height = 360;
+        s.record.output_height = 360;
         s.tray_left_click = TrayClickAction::OpenWindow;
         s.stop_recording_on_left_click = false;
         s.after_completion = AfterCompletionAction::CopyFile;
@@ -471,7 +515,7 @@ mod tests {
             s.record.video_quality,
             RecordSettings::default().video_quality
         );
-        assert_eq!(s.anim, AnimSettings::default());
+        assert_eq!(s.anim, AnimationQuality::default());
     }
 
     #[test]
@@ -671,12 +715,8 @@ mod tests {
             (15, 480)
         );
         assert_eq!(
-            (
-                s.region_anim.fps,
-                s.region_anim.max_height,
-                s.region_anim.webp_quality
-            ),
-            (15, 480, 80)
+            s.region_anim.webp_quality,
+            AnimationQuality::default().webp_quality
         );
         assert_eq!(s.hotkey_screen, ScreenChoice::Primary);
         let h = &s.hotkeys;
@@ -689,6 +729,18 @@ mod tests {
         ]
         .iter()
         .all(|k| k.is_empty()));
+    }
+
+    #[test]
+    fn webp_mode_preserves_the_disabled_parallel_preference() {
+        let mut record = RecordSettings::default();
+        assert_eq!(record.webp_mode(), WebpMode::SegmentedParallel);
+        record.segmented_webp = false;
+        assert_eq!(record.webp_mode(), WebpMode::Direct);
+        record.segmented_webp = true;
+        assert_eq!(record.webp_mode(), WebpMode::SegmentedParallel);
+        record.parallel_webp = false;
+        assert_eq!(record.webp_mode(), WebpMode::Segmented);
     }
 
     #[test]
@@ -723,6 +775,21 @@ mod tests {
             (a.format, a.kbps, a.system_audio),
             (AudioFormat::Mp3, 256, true)
         );
+    }
+
+    #[test]
+    fn persisted_animation_quality_does_not_duplicate_profile_timing() {
+        let text = toml::to_string(&Settings::default()).unwrap();
+        let document: toml::Value = toml::from_str(&text).unwrap();
+        let animation = document
+            .get("anim")
+            .and_then(toml::Value::as_table)
+            .unwrap();
+        assert!(animation.contains_key("gif_colors"));
+        assert!(animation.contains_key("gif_dither"));
+        assert!(animation.contains_key("webp_quality"));
+        assert!(!animation.contains_key("fps"));
+        assert!(!animation.contains_key("max_height"));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::error::{invalid_input, MediaErrorKind};
 use mediaa_core::formats::{AnimFormat, OutputKind};
 use mediaa_core::limits::{AUDIO_KBPS, DEFAULT_VIDEO_AUDIO_KBPS, FPS, VIDEO_QUALITY};
 use mediaa_core::paths::{MediaDir, WorkDir};
-use mediaa_core::settings::AnimSettings;
+use mediaa_core::settings::{AnimSettings, WebpMode};
 use mediaa_core::source::{AudioSource, SourceFactory};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -179,13 +179,6 @@ impl RecordingRequestBuilder {
 pub enum AudioLayout {
     FirstFileOnly,
     EveryFile,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebpMode {
-    Direct,
-    Segmented,
-    SegmentedParallel,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,18 +1,31 @@
 use super::{header, tile};
-use crate::app::App;
-use crate::overlay::Purpose;
 use crate::{i18n, theme};
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
 use mediaa_core::settings::AfterCapture;
 use mediaa_core::ImageFormat;
+use mediaa_core::Settings;
+use mediaa_platform::screen::{MonitorInfo, WindowId, WindowInfo};
 use rust_i18n::t;
 
-pub fn ui(app: &mut App, ui: &mut egui::Ui) {
-    let ctx = ui.ctx().clone();
+pub enum CaptureUiAction {
+    SettingsChanged,
+    RefreshCatalogs,
+    StartRegion,
+    StartFullscreen(Option<MonitorInfo>),
+    StartWindow(WindowId),
+}
+
+pub fn ui(
+    settings: &mut Settings,
+    monitors: &[MonitorInfo],
+    windows: &[WindowInfo],
+    ui: &mut egui::Ui,
+) -> Vec<CaptureUiAction> {
+    let mut actions = Vec::new();
     header(ui, &t!("shot.title"), "");
 
-    let hk = app.settings.hotkeys.clone();
+    let hk = settings.hotkeys.clone();
     let key_hint = |key: &str| {
         if hk.enabled && !key.is_empty() {
             key.to_string()
@@ -32,7 +45,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         )
         .clicked()
         {
-            app.start_region_screenshot(&ctx, Purpose::Screenshot);
+            actions.push(CaptureUiAction::StartRegion);
         }
         if tile(
             ui,
@@ -44,7 +57,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         )
         .clicked()
         {
-            app.start_fullscreen_screenshot(&ctx, None);
+            actions.push(CaptureUiAction::StartFullscreen(None));
         }
     });
     ui.add_space(4.0);
@@ -57,7 +70,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         "shot-row",
         |ui| {
             theme::section(ui, icon::GEAR, &t!("shot.after"));
-            let s = &mut app.settings.screenshot;
+            let s = &mut settings.screenshot;
             theme::row(ui, &t!("shot.action"), |ui| {
                 egui::ComboBox::from_id_salt("after-capture")
                     .selected_text(i18n::after_capture(s.after_capture))
@@ -91,7 +104,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                             .clicked();
                 });
             });
-            for m in &app.monitors {
+            for m in monitors {
                 let label = super::record::monitor_label(m);
                 if ui
                     .add(
@@ -106,13 +119,13 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         },
     );
     if changed {
-        app.settings_changed();
+        actions.push(CaptureUiAction::SettingsChanged);
     }
     if refresh_monitors {
-        app.refresh_catalogs(ui.ctx());
+        actions.push(CaptureUiAction::RefreshCatalogs);
     }
     if let Some(m) = shot_monitor {
-        app.start_fullscreen_screenshot(&ctx, Some(m));
+        actions.push(CaptureUiAction::StartFullscreen(Some(m)));
     }
     ui.add_space(4.0);
 
@@ -122,11 +135,11 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             theme::section(ui, icon::APP_WINDOW, &t!("shot.windows"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh")).clicked() {
-                    app.refresh_catalogs(ui.ctx());
+                    actions.push(CaptureUiAction::RefreshCatalogs);
                 }
             });
         });
-        if app.windows.is_empty() {
+        if windows.is_empty() {
             theme::hint(ui, t!("shot.no_windows"));
         }
         let mut capture = None;
@@ -136,7 +149,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             .id_salt("shot-windows")
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                for w in &app.windows {
+                for w in windows {
                     ui.horizontal(|ui| {
                         if theme::icon_button(ui, icon::CAMERA, &t!("shot.capture_window"))
                             .clicked()
@@ -148,7 +161,8 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         if let Some(id) = capture {
-            app.start_window_screenshot(&ctx, id);
+            actions.push(CaptureUiAction::StartWindow(id));
         }
     });
+    actions
 }

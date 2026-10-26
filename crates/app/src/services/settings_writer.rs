@@ -27,7 +27,7 @@ pub(crate) struct SettingsWriter {
 }
 
 impl SettingsWriter {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn create() -> Self {
         Self::start(paths::settings_file())
     }
 

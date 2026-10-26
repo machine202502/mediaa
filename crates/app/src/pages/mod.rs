@@ -1,19 +1,19 @@
 pub mod about;
 pub mod audio;
 pub mod capture;
-pub mod convert;
-pub mod library;
 pub mod record;
 pub mod settings;
 
 use crate::app::command::{AppCommand, RecordingCommand};
-use crate::app::state::{Page, RecState};
+use crate::app::state::Page;
 use crate::app::App;
+use crate::features::library;
+use crate::overlay;
 use crate::{i18n, theme};
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke};
 use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
-use mediaa_core::settings::ThemePreference;
+use mediaa_core::settings::{RecordProfile, ThemePreference};
 use mediaa_media::recorder::StopAction;
 use rust_i18n::t;
 use std::time::Duration;
@@ -86,7 +86,7 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    if matches!(app.page, Page::Record | Page::RecordAudio) && app.recorder.is_idle() {
+    if matches!(app.page, Page::Record | Page::RecordAudio) && app.recording.is_idle() {
         egui::Panel::bottom("record-start")
             .resizable(false)
             .frame(
@@ -96,9 +96,14 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
             )
             .show(ui, |ui| {
                 if app.page == Page::Record {
-                    record::start_bar(app, ui)
+                    let target = app.record_target_from_ui().map(|_| ());
+                    if record::start_bar(&app.settings, app.recovery_active(), &target, ui) {
+                        app.start_recording_from_ui(ui.ctx());
+                    }
                 } else {
-                    audio::start_bar(app, ui)
+                    if audio::start_bar(&app.settings, app.recovery_active(), ui) {
+                        app.start_audio_recording(ui.ctx(), RecordProfile::App);
+                    }
                 }
             });
     }
@@ -113,11 +118,104 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| match app.page {
-                    Page::Screenshot => capture::ui(app, ui),
-                    Page::Record => record::ui(app, ui),
-                    Page::RecordAudio => audio::ui(app, ui),
-                    Page::Library => library::ui(app, ui),
-                    Page::Convert => convert::ui(app, ui),
+                    Page::Screenshot => {
+                        let actions =
+                            capture::ui(&mut app.settings, &app.monitors, &app.windows, ui);
+                        for action in actions {
+                            match action {
+                                capture::CaptureUiAction::SettingsChanged => app.settings_changed(),
+                                capture::CaptureUiAction::RefreshCatalogs => {
+                                    app.refresh_catalogs(ui.ctx())
+                                }
+                                capture::CaptureUiAction::StartRegion => app
+                                    .start_region_screenshot(
+                                        ui.ctx(),
+                                        overlay::Purpose::Screenshot,
+                                    ),
+                                capture::CaptureUiAction::StartFullscreen(monitor) => {
+                                    app.start_fullscreen_screenshot(ui.ctx(), monitor)
+                                }
+                                capture::CaptureUiAction::StartWindow(id) => {
+                                    app.start_window_screenshot(ui.ctx(), id)
+                                }
+                            }
+                        }
+                    }
+                    Page::Record => {
+                        let actions = record::ui(
+                            &mut app.recording,
+                            &mut app.settings,
+                            &app.monitors,
+                            &app.windows,
+                            &app.mic_devices,
+                            ui,
+                        );
+                        for action in actions {
+                            match action {
+                                record::RecordUiAction::SettingsChanged => app.settings_changed(),
+                                record::RecordUiAction::RefreshCatalogs => {
+                                    app.refresh_catalogs(ui.ctx())
+                                }
+                                record::RecordUiAction::SelectRegion => app
+                                    .start_region_screenshot(
+                                        ui.ctx(),
+                                        overlay::Purpose::RecordRegion,
+                                    ),
+                                record::RecordUiAction::RecordingCommand(command) => {
+                                    let command = match command {
+                                        record::status::RecordingUiCommand::TogglePause => {
+                                            RecordingCommand::TogglePause
+                                        }
+                                        record::status::RecordingUiCommand::Stop(action) => {
+                                            RecordingCommand::Stop {
+                                                action,
+                                                source: crate::features::recording::StopSource::Ui,
+                                            }
+                                        }
+                                    };
+                                    app.dispatch_command(ui.ctx(), AppCommand::Recording(command));
+                                }
+                            }
+                        }
+                    }
+                    Page::RecordAudio => {
+                        let actions =
+                            audio::ui(&mut app.recording, &mut app.settings, &app.mic_devices, ui);
+                        for action in actions {
+                            match action {
+                                audio::AudioUiAction::SettingsChanged => app.settings_changed(),
+                                audio::AudioUiAction::RefreshCatalogs => {
+                                    app.refresh_catalogs(ui.ctx())
+                                }
+                                audio::AudioUiAction::RecordingCommand(command) => {
+                                    let command = match command {
+                                        record::status::RecordingUiCommand::TogglePause => {
+                                            RecordingCommand::TogglePause
+                                        }
+                                        record::status::RecordingUiCommand::Stop(action) => {
+                                            RecordingCommand::Stop {
+                                                action,
+                                                source: crate::features::recording::StopSource::Ui,
+                                            }
+                                        }
+                                    };
+                                    app.dispatch_command(ui.ctx(), AppCommand::Recording(command));
+                                }
+                            }
+                        }
+                    }
+                    Page::Library => {
+                        library::dialogs(app, ui.ctx());
+                        let actions = app.lib.ui(&app.settings, &mut app.thumbs, ui);
+                        for action in actions {
+                            library::apply_action(app, ui.ctx(), action);
+                        }
+                    }
+                    Page::Convert => {
+                        if let Some(action) = app.conversion.ui(ui, &app.settings.convert_dir()) {
+                            app.apply_conversion_ui_action(ui.ctx(), action);
+                        }
+                    }
                     Page::Settings => settings::ui(app, ui),
                     Page::About => about::ui(app, ui),
                 });
@@ -213,7 +311,7 @@ fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)]) {
             } else {
                 (Color32::TRANSPARENT, p.text)
             };
-            let recording = page == app.recording_page() && !app.recorder.is_idle();
+            let recording = page == app.recording_page() && !app.recording.is_idle();
             let text = if recording {
                 format!("{ic}  {label}    ")
             } else {
@@ -238,51 +336,53 @@ fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)]) {
 
 fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
     let p = theme::palette(ui);
-    let (label, paused) = match &app.recorder {
-        RecState::Starting { started, .. } => (
+    let recording = &app.recording;
+    let (label, paused) = if let Some(elapsed) = recording.starting_elapsed() {
+        (
             format!(
                 "{} {}",
                 t!("record.starting"),
-                human_duration(started.elapsed().as_secs_f64())
+                human_duration(elapsed.as_secs_f64())
             ),
             false,
-        ),
-        RecState::Recording { session, .. } => (
+        )
+    } else if let Some(elapsed) = recording.recording_elapsed() {
+        (
             format!(
                 "{} {}",
-                if session.is_paused() {
+                if recording.is_paused() {
                     t!("record.paused")
                 } else {
                     t!("record.recording")
                 },
-                human_duration(session.elapsed().as_secs_f64())
+                human_duration(elapsed.as_secs_f64())
             ),
-            session.is_paused(),
-        ),
-        RecState::Saving {
-            progress: Some(progress),
-            ..
-        } => (
+            recording.is_paused(),
+        )
+    } else if let Some(progress) = recording.progress() {
+        (
             format!("{} {:.0}%", t!("record.saving"), progress * 100.0),
             false,
-        ),
-        RecState::Saving { started, .. } => (
+        )
+    } else if let Some(started) = recording.saving_started() {
+        (
             format!(
                 "{} {}",
                 t!("record.saving"),
                 human_duration(started.elapsed().as_secs_f64())
             ),
             false,
-        ),
-        _ => return,
+        )
+    } else {
+        return;
     };
-    if matches!(app.recorder, RecState::Recording { .. }) {
+    if recording.is_recording() {
         if theme::icon_button(ui, icon::X, &t!("record.cancel")).clicked() {
             app.dispatch_command(
                 ctx,
                 AppCommand::Recording(RecordingCommand::Stop {
                     action: StopAction::Discard,
-                    source: crate::app::state::StopSource::Ui,
+                    source: crate::features::recording::StopSource::Ui,
                 }),
             );
         }
@@ -291,7 +391,7 @@ fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 ctx,
                 AppCommand::Recording(RecordingCommand::Stop {
                     action: StopAction::Save,
-                    source: crate::app::state::StopSource::Ui,
+                    source: crate::features::recording::StopSource::Ui,
                 }),
             );
         }

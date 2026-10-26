@@ -112,8 +112,8 @@ pub(crate) struct ClipboardService {
 }
 
 impl ClipboardService {
-    pub(crate) fn new(ctx: eframe::egui::Context) -> Self {
-        Self::with_runner_mode(ctx, run, true)
+    pub(crate) fn new(context: eframe::egui::Context) -> Self {
+        Self::with_runner_mode(context, run, true)
     }
 
     #[cfg(test)]

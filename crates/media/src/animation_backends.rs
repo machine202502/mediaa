@@ -169,7 +169,7 @@ impl AnimationEncoder for SegmentedWebpEncoder {
             base_start_us,
         };
         match mediaa_webp_pipeline::run(&config, &backend, request.output, on_progress, cancel) {
-            Ok(_) => Ok(()),
+            Ok(()) => Ok(()),
             Err(error) if error.is_cancelled() => Err(job::Cancelled.into()),
             Err(error) => Err(error.source),
         }

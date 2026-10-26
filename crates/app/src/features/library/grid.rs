@@ -19,10 +19,10 @@ pub(super) fn cover_uv(tex: egui::Vec2, target: egui::Vec2) -> Rect {
 
 pub(super) const TOOLBAR_ONE_LINE: f32 = 1380.0;
 
-pub(super) fn kind_filter(app: &mut App, ui: &mut egui::Ui) {
+pub(super) fn kind_filter(controller: &mut LibraryController, ui: &mut egui::Ui) {
     theme::segmented(
         ui,
-        &mut app.lib.query.kind,
+        &mut controller.query.kind,
         &[
             (KindFilter::All, t!("lib.all").into()),
             (KindFilter::Only(MediaKind::Image), t!("lib.images").into()),
@@ -36,14 +36,21 @@ pub(super) fn kind_filter(app: &mut App, ui: &mut egui::Ui) {
     );
 }
 
-pub(super) fn toolbar_tools(app: &mut App, ui: &mut egui::Ui, total: usize, view_w: f32) {
+pub(super) fn toolbar_tools(
+    controller: &mut LibraryController,
+    settings: &Settings,
+    ui: &mut egui::Ui,
+    total: usize,
+    view_w: f32,
+) -> Vec<LibraryAction> {
+    let mut actions = Vec::new();
     ui.add(
-        egui::TextEdit::singleline(&mut app.lib.query.search)
+        egui::TextEdit::singleline(&mut controller.query.search)
             .hint_text(format!("{}  {}", icon::MAGNIFYING_GLASS, t!("lib.search")))
             .desired_width((view_w - 260.0).clamp(120.0, 220.0)),
     )
     .on_hover_text(t!("lib.search_help"));
-    let sort = &mut app.lib.query.sort;
+    let sort = &mut controller.query.sort;
     egui::ComboBox::from_id_salt("lib-sort")
         .width(150.0)
         .selected_text(sort_label(*sort))
@@ -53,25 +60,30 @@ pub(super) fn toolbar_tools(app: &mut App, ui: &mut egui::Ui, total: usize, view
             }
         });
     if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh")).clicked() {
-        app.lib.refresh(&app.settings, &mut app.tasks);
+        controller.refresh(settings);
     }
     if theme::icon_button(ui, icon::FOLDER_OPEN, &t!("lib.open_folder")).clicked() {
-        let dir = library_dir(&app.settings);
+        let dir = library_dir(settings);
         let _ = std::fs::create_dir_all(&dir);
-        app.open_path(ui.ctx(), &dir);
+        actions.push(LibraryAction::Open(dir));
     }
-    cleanup_button(app, ui, CleanupOlder::Week);
-    cleanup_button(app, ui, CleanupOlder::Month);
+    actions.extend(cleanup_button(controller, ui, CleanupOlder::Week));
+    actions.extend(cleanup_button(controller, ui, CleanupOlder::Month));
     theme::hint(ui, t!("lib.count", n = total));
+    actions
 }
 
-pub(super) fn cleanup_button(app: &mut App, ui: &mut egui::Ui, older: CleanupOlder) {
-    if app.lib.cleanup_active() {
+pub(super) fn cleanup_button(
+    controller: &mut LibraryController,
+    ui: &mut egui::Ui,
+    older: CleanupOlder,
+) -> Option<LibraryAction> {
+    if controller.cleanup_active() {
         ui.add_enabled(false, theme::secondary(icon::CALENDAR_X, &older.label()))
             .on_hover_text(t!("lib.cleanup_running"));
-        return;
+        return None;
     }
-    let plan = app.lib.cleanup_plan(older);
+    let plan = controller.cleanup_plan(older);
     let count = plan.items.len();
     let tooltip = if count == 0 {
         t!("lib.cleanup_empty")
@@ -87,7 +99,9 @@ pub(super) fn cleanup_button(app: &mut App, ui: &mut egui::Ui, older: CleanupOld
         theme::secondary(icon::CALENDAR_X, &older.label()),
     );
     if button.on_hover_text(tooltip).clicked() {
-        app.lib.ask_cleanup(older);
+        Some(LibraryAction::AskCleanup(plan))
+    } else {
+        None
     }
 }
 
@@ -99,13 +113,14 @@ pub(super) fn grid_columns(avail: f32) -> (usize, f32) {
     (cols, tile_w)
 }
 
-pub(super) fn tile(
-    app: &mut App,
+pub(super) fn library_tile(
+    controller: &mut LibraryController,
+    thumbs: &mut Thumbnails,
     ui: &mut egui::Ui,
     e: &LibraryEntry,
     width: f32,
     previewing: &mut bool,
-) -> Option<Action> {
+) -> Option<LibraryAction> {
     let width = width - 2.0 * TILE_BORDER;
     let p = theme::palette(ui);
     let mut action = None;
@@ -116,17 +131,17 @@ pub(super) fn tile(
         egui::vec2(width, width * MEDIA_ASPECT + 70.0),
     );
     let data = if ui.is_rect_visible(tile_rect) {
-        app.thumbs.get(e, e.details.is_none())
+        thumbs.get(e, e.details.is_none())
     } else {
         Default::default()
     };
     let info: Option<Details> = e.details.or_else(|| data.info.as_ref().map(details_of));
     if e.details.is_none() {
         if let Some(d) = info {
-            app.lib.set_details(&e.path, d);
+            controller.set_details(&e.path, d);
         }
     }
-    let hovered = app.lib.hovered.as_ref() == Some(&e.path);
+    let hovered = controller.hovered.as_ref() == Some(&e.path);
     let shown = egui::Frame::new()
         .fill(p.card)
         .stroke(Stroke::new(TILE_BORDER, p.border))
@@ -156,9 +171,9 @@ pub(super) fn tile(
                 let mut timeline = None;
                 let mut playing_at = None;
                 let mut loading = false;
-                if playable && active && !app.lib.cleanup_active() {
+                if playable && active && !controller.cleanup_active() {
                     *previewing = true;
-                    let pv = app.lib.previews.play(
+                    let pv = controller.previews.play(
                         ui.ctx(),
                         &e.path,
                         info.and_then(|i| i.duration_secs),
@@ -274,8 +289,8 @@ pub(super) fn tile(
                     painter.circle_filled(egui::pos2(x, y), 6.0, Color32::WHITE);
                     painter.circle_stroke(egui::pos2(x, y), 6.0, Stroke::new(1.5, p.accent));
                 }
-                if resp.double_clicked() && !app.lib.cleanup_active() {
-                    action = Some(Action::View(e.path.clone(), e.kind, info));
+                if resp.double_clicked() && !controller.cleanup_active() {
+                    action = Some(LibraryAction::View(e.path.clone(), e.kind, info));
                 }
 
                 egui::Frame::new()
@@ -292,7 +307,7 @@ pub(super) fn tile(
                         };
                         name_resp =
                             Some(ui.add(egui::Label::new(label).truncate().sense(Sense::click())));
-                        if !app.lib.cleanup_active() {
+                        if !controller.cleanup_active() {
                             if let Some(a) = tools_strip(ui, &tools(e)) {
                                 action = Some(a);
                             }
@@ -305,14 +320,14 @@ pub(super) fn tile(
         .chain(name_resp)
         .reduce(|a, b| a.union(b))
     {
-        if !app.lib.cleanup_active() {
+        if !controller.cleanup_active() {
             if let Some(a) = tools_menu(egui::Popup::context_menu(&target), &tools(e)) {
                 action = Some(a);
             }
         }
     }
     if shown.response.contains_pointer() {
-        app.lib.hover_next = Some(e.path.clone());
+        controller.hover_next = Some(e.path.clone());
     }
     action
 }

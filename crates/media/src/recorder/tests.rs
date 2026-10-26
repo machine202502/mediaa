@@ -1,13 +1,14 @@
 use super::{
-    animation_path, concat_chunks, encode_with_linear_fallback, join_with_timeout, linked_title,
-    preserve_recordings, recover_incomplete_sessions, wait_for_source, AnimationPath, AudioLayout,
+    concat_chunks, encode_with_linear_fallback, join_with_timeout, linked_title,
+    preserve_recordings, recover_incomplete_sessions, wait_for_source, AudioLayout,
     RecordingLimits, RecordingRequest, RecordingSession, RecordingStartCancelled, SourceReady,
-    SourceReadyResult, TimedJoin, WebpMode,
+    SourceReadyResult, TimedJoin,
 };
+use crate::animation_backends::WebpSegmentation;
 use chrono::{Local, TimeZone};
 use ez_ffmpeg::{FfmpegContext, Input, Output};
-use mediaa_core::formats::{AnimFormat, OutputKind, VideoContainer};
-use mediaa_core::settings::AnimSettings;
+use mediaa_core::formats::{OutputKind, VideoContainer};
+use mediaa_core::settings::{AnimSettings, WebpMode};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -22,6 +23,17 @@ fn capture_join_timeout_returns_without_waiting_for_a_stuck_worker() {
     let outcome = join_with_timeout(worker, Duration::from_millis(20));
     assert!(matches!(outcome, TimedJoin::TimedOut));
     assert!(started.elapsed() < Duration::from_millis(400));
+}
+
+#[test]
+fn capture_join_distinguishes_values_and_panics() {
+    let finished = std::thread::spawn(|| 7);
+    let outcome = join_with_timeout(finished, Duration::from_millis(100));
+    assert!(matches!(outcome, TimedJoin::Finished(7)));
+
+    let panicked = std::thread::spawn(|| -> usize { panic!("capture panic") });
+    let outcome = join_with_timeout(panicked, Duration::from_millis(100));
+    assert!(matches!(outcome, TimedJoin::Panicked));
 }
 
 #[test]
@@ -132,45 +144,14 @@ fn recording_limits_can_be_overridden_and_are_validated() {
 }
 
 #[test]
-fn live_webp_is_the_only_chunked_recording_path() {
-    let webp = OutputKind::Anim(AnimFormat::Webp);
-    assert_eq!(
-        animation_path(webp, WebpMode::SegmentedParallel),
-        AnimationPath::Live
-    );
-    assert_eq!(
-        animation_path(webp, WebpMode::Segmented),
-        AnimationPath::Segmented
-    );
-    assert_eq!(
-        animation_path(webp, WebpMode::Direct),
-        AnimationPath::Linear
-    );
-    assert_eq!(
-        animation_path(
-            OutputKind::Anim(AnimFormat::Gif),
-            WebpMode::SegmentedParallel
-        ),
-        AnimationPath::Linear
-    );
-    assert_eq!(
-        animation_path(
-            OutputKind::Video(VideoContainer::Mkv),
-            WebpMode::SegmentedParallel
-        ),
-        AnimationPath::Linear
-    );
-}
-
-#[test]
-fn segmented_failure_retries_only_the_linear_encoder() {
+fn segmented_failure_retries_only_the_direct_encoder() {
     let mut calls = Vec::new();
     let mut warnings = Vec::new();
     encode_with_linear_fallback(
-        AnimationPath::Segmented,
-        &mut |path| {
-            calls.push(path);
-            if path == AnimationPath::Segmented {
+        WebpMode::Segmented,
+        &mut |segmentation| {
+            calls.push(segmentation);
+            if segmentation == WebpSegmentation::Segmented {
                 anyhow::bail!("out of memory")
             }
             Ok(())
@@ -178,7 +159,10 @@ fn segmented_failure_retries_only_the_linear_encoder() {
         &mut |warning| warnings.push(warning),
     )
     .unwrap();
-    assert_eq!(calls, [AnimationPath::Segmented, AnimationPath::Linear]);
+    assert_eq!(
+        calls,
+        [WebpSegmentation::Segmented, WebpSegmentation::Direct]
+    );
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("out of memory"));
 }
@@ -187,28 +171,28 @@ fn segmented_failure_retries_only_the_linear_encoder() {
 fn cancel_and_linear_paths_do_not_retry() {
     let mut cancelled_calls = Vec::new();
     let error = encode_with_linear_fallback(
-        AnimationPath::Live,
-        &mut |path| {
-            cancelled_calls.push(path);
+        WebpMode::SegmentedParallel,
+        &mut |segmentation| {
+            cancelled_calls.push(segmentation);
             Err(crate::job::Cancelled.into())
         },
         &mut |_| panic!("cancelled encoding must not warn"),
     )
     .unwrap_err();
     assert!(crate::job::is_cancelled(&error));
-    assert_eq!(cancelled_calls, [AnimationPath::Segmented]);
+    assert_eq!(cancelled_calls, [WebpSegmentation::Segmented]);
 
     let mut linear_calls = Vec::new();
     encode_with_linear_fallback(
-        AnimationPath::Linear,
-        &mut |path| {
-            linear_calls.push(path);
+        WebpMode::Direct,
+        &mut |segmentation| {
+            linear_calls.push(segmentation);
             Ok(())
         },
         &mut |_| panic!("linear encoding has no fallback"),
     )
     .unwrap();
-    assert_eq!(linear_calls, [AnimationPath::Linear]);
+    assert_eq!(linear_calls, [WebpSegmentation::Direct]);
 }
 
 #[test]

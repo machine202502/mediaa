@@ -70,3 +70,18 @@
 
 `HitList` кэшируется до изменения версии индекса, query или limit. Обновление details обязано
 менять версию индекса, иначе UI покажет старые metadata.
+
+- На локальном NTFS 50k synthetic entries: scan p50 157 ms, apply_scan 54 ms; watcher burst
+  вызывает overflow и последующий full rescan. Периодический rescan остаётся страховкой для
+  возможной silent event loss, но apply_scan на UI нужно отдельно оптимизировать.
+- В сетке 288 WebP-конфигураций dynamic reservation не обнаружил aggregate-only превышений
+  поверх `worker_limit`, но per-segment бюджет остановил 82 конфигурации с oversized segment
+  после повторного округления. Бюджетный guard нельзя удалять; CAS-reservation требует
+  отдельной замены через preflight-расчёт.
+- Permanent WebP normalize/validate и panic не должны повторяться: повтор не меняет причину
+  отказа. Budget exhaustion остаётся retryable и может восстановиться меньшим сегментом.
+  FFmpeg Internal/OOM нельзя классифицировать по тексту; без typed signal он остаётся unknown.
+
+## Владение фоновой работой
+
+`Job<T>` проверяет `JoinHandle::is_finished` и делает `join` только завершившегося потока. Terminal result читает владелец операции; после перехода нет общего registry с `TaskId`, completed history или отдельной моделью занятости. `Saving` записи удерживает finalizer handle до фактического terminal event и не должен переходить в `Idle` раньше cleanup.

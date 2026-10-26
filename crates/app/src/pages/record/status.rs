@@ -1,36 +1,47 @@
 use super::*;
+use crate::features::recording::{RecordingInfo, RecordingView};
 
-pub(crate) fn live_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) -> bool {
+pub(crate) enum RecordingUiCommand {
+    TogglePause,
+    Stop(StopAction),
+}
+
+pub(crate) fn live_status(
+    recording: &mut crate::features::recording::RecordingController,
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+) -> Option<RecordingUiCommand> {
     let p = theme::palette(ui);
-    match &app.recorder {
-        RecState::Idle => false,
-        RecState::Starting { started, .. } => {
-            if starting_card(ui, *started) {
-                app.dispatch_command(
-                    ctx,
-                    AppCommand::Recording(RecordingCommand::Stop {
-                        action: StopAction::Discard,
-                        source: crate::app::state::StopSource::Ui,
-                    }),
-                );
+    match recording.view() {
+        RecordingView::Idle => None,
+        RecordingView::Starting(elapsed) => {
+            if starting_card(ui, elapsed) {
+                return Some(RecordingUiCommand::Stop(StopAction::Discard));
             }
             ctx.request_repaint_after(Duration::from_millis(100));
-            true
+            None
         }
-        RecState::Recording { session, .. } => {
-            let paused = session.is_paused();
-            let elapsed = human_duration(session.elapsed().as_secs_f64());
-            let audio = if session.has_audio() {
+        RecordingView::Recording(RecordingInfo {
+            output,
+            paused,
+            elapsed,
+            has_audio,
+            sources,
+            frames,
+        }) => {
+            let mut command = None;
+            let elapsed = human_duration(elapsed.as_secs_f64());
+            let audio = if has_audio {
                 t!("record.with_audio")
             } else {
                 t!("record.no_audio")
             };
-            let detail = match session.output() {
+            let detail = match output {
                 OutputKind::Audio(f) => f.label().to_string(),
                 _ => format!(
                     "{} · {} · {audio}",
-                    session.source_names().join(", "),
-                    t!("record.frames", n = session.frames_captured())
+                    sources.join(", "),
+                    t!("record.frames", n = frames)
                 ),
             };
             theme::card(ui).show(ui, |ui| {
@@ -59,47 +70,26 @@ pub(crate) fn live_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context)
                         (icon::PAUSE, t!("record.pause"))
                     };
                     if ui.add(theme::secondary(ic, &label)).clicked() {
-                        app.dispatch_command(
-                            ctx,
-                            AppCommand::Recording(RecordingCommand::TogglePause),
-                        );
+                        command = Some(RecordingUiCommand::TogglePause);
                     }
                     if ui
                         .add(theme::primary(ui, icon::STOP, &t!("record.stop_save")))
                         .clicked()
                     {
-                        app.dispatch_command(
-                            ctx,
-                            AppCommand::Recording(RecordingCommand::Stop {
-                                action: StopAction::Save,
-                                source: crate::app::state::StopSource::Ui,
-                            }),
-                        );
+                        command = Some(RecordingUiCommand::Stop(StopAction::Save));
                     }
                     if ui
                         .add(theme::danger(ui, icon::TRASH, &t!("record.cancel")))
                         .clicked()
                     {
-                        app.dispatch_command(
-                            ctx,
-                            AppCommand::Recording(RecordingCommand::Stop {
-                                action: StopAction::Discard,
-                                source: crate::app::state::StopSource::Ui,
-                            }),
-                        );
+                        command = Some(RecordingUiCommand::Stop(StopAction::Discard));
                     }
                 });
             });
             ctx.request_repaint_after(Duration::from_millis(250));
-            true
+            command
         }
-        RecState::Saving {
-            progress,
-            started,
-            cancel,
-            ..
-        } => {
-            let (progress, started, cancel) = (*progress, *started, cancel.clone());
+        RecordingView::Saving { progress, elapsed } => {
             theme::card(ui).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.label(RichText::new(t!("record.saving_long")).strong());
@@ -110,26 +100,26 @@ pub(crate) fn live_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context)
                             .animate(true),
                     );
                 } else {
-                    activity(ui, "", started.elapsed());
+                    activity(ui, "", elapsed);
                 }
                 if ui
                     .add(theme::secondary(icon::X, &t!("record.abort_saving")))
                     .clicked()
                 {
-                    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    recording.cancel_finalize();
                 }
             });
-            true
+            None
         }
     }
 }
 
-pub(crate) fn starting_card(ui: &mut egui::Ui, started: Instant) -> bool {
+pub(crate) fn starting_card(ui: &mut egui::Ui, elapsed: Duration) -> bool {
     let mut cancel = false;
     theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
-            activity(ui, &t!("record.starting"), started.elapsed());
+            activity(ui, &t!("record.starting"), elapsed);
             cancel = ui
                 .add(theme::secondary(icon::X, &t!("common.cancel")))
                 .clicked();

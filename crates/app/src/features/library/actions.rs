@@ -1,76 +1,64 @@
 use super::*;
-use crate::app::state::CopyImageJob;
-use crate::app::tasks::TaskKind;
-use crate::clipboard_service::Purpose;
+use crate::services::clipboard::Purpose;
 
-pub(super) fn run(app: &mut App, ctx: &egui::Context, action: Action) {
+pub(crate) fn run_action(app: &mut App, ctx: &egui::Context, action: LibraryAction) {
     let res: anyhow::Result<Option<String>> = match action {
-        Action::Open(p) => {
+        LibraryAction::Open(p) => {
             app.open_path(ctx, &p);
             Ok(None)
         }
-        Action::View(p, kind, info) => {
+        LibraryAction::View(p, kind, info) => {
             app.lib.previews.stop();
             if let Some(mut viewer) = app.lib.viewer.take() {
-                viewer.cancel_pending(&mut app.tasks);
+                viewer.cancel_pending();
             }
             app.lib.viewer = Some(Viewer::open(
                 &p,
                 kind,
                 info.and_then(|d| d.duration_secs),
                 info.is_some_and(|d| d.audio),
-                &mut app.tasks,
             ));
             Ok(None)
         }
-        Action::Reveal(p) => {
+        LibraryAction::Reveal(p) => {
             app.reveal_path(ctx, p);
             Ok(None)
         }
-        Action::CopyFile(p) => app
+        LibraryAction::CopyFile(p) => app
             .clipboard
             .handle()
             .copy_files(vec![p], Purpose::Toast(t!("lib.copied_file").into_owned()))
             .map(|_| None),
-        Action::CopyImage(p) => {
+        LibraryAction::CopyImage(p) => {
             if app.image_io_busy() {
                 app.warning(t!("toast.finish_current"));
                 return;
             }
-            let (tx, rx) = crossbeam_channel::bounded(1);
             let ctx2 = ctx.clone();
             let success = t!("lib.copied_image").into_owned();
             let clipboard = app.clipboard.handle();
-            match app.tasks.spawn(
-                TaskKind::LibraryCopyImage,
-                "library-copy-image",
-                None,
-                move || {
-                    let result = image::image_dimensions(&p)
-                        .map_err(anyhow::Error::from)
-                        .and_then(|(width, height)| {
-                            mediaa_core::formats::ensure_safe_dimensions(width, height)?;
-                            image::open(&p).map_err(anyhow::Error::from)
-                        })
-                        .and_then(|image| {
-                            clipboard
-                                .copy_image_wait(mediaa_core::Frame::from_image(image.to_rgba8()))
-                                .map_err(anyhow::Error::msg)
-                        })
-                        .map(|()| success)
-                        .map_err(|error| format!("{error:#}"));
-                    let _ = tx.send(result);
-                    ctx2.request_repaint();
-                },
-            ) {
-                Ok(task) => {
-                    app.copy_image_job = Some(CopyImageJob { rx, task });
-                    Ok(None)
-                }
+            match app.capture.start_copy_image(move || {
+                let result = image::image_dimensions(&p)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|(width, height)| {
+                        mediaa_core::formats::ensure_safe_dimensions(width, height)?;
+                        image::open(&p).map_err(anyhow::Error::from)
+                    })
+                    .and_then(|image| {
+                        clipboard
+                            .copy_image_wait(mediaa_core::Frame::from_image(image.to_rgba8()))
+                            .map_err(anyhow::Error::msg)
+                    })
+                    .map(|()| success)
+                    .map_err(|error| format!("{error:#}"));
+                ctx2.request_repaint();
+                result
+            }) {
+                Ok(()) => Ok(None),
                 Err(error) => Err(error),
             }
         }
-        Action::CopyPath(p) => app
+        LibraryAction::CopyPath(p) => app
             .clipboard
             .handle()
             .copy_text(
@@ -78,21 +66,25 @@ pub(super) fn run(app: &mut App, ctx: &egui::Context, action: Action) {
                 Purpose::Toast(t!("lib.copied_path").into_owned()),
             )
             .map(|_| None),
-        Action::CopyLink(url) => app
+        LibraryAction::CopyLink(url) => app
             .clipboard
             .handle()
             .copy_text(url, Purpose::Toast(t!("lib.copied_link").into_owned()))
             .map(|_| None),
-        Action::Convert(p) => {
+        LibraryAction::Convert(p) => {
             app.open_in_convert(p);
             Ok(None)
         }
-        Action::AskDelete(p) => {
+        LibraryAction::AskDelete(p) => {
             app.lib.confirm_delete = Some(p);
             Ok(None)
         }
-        Action::AskRename(p, title) => {
+        LibraryAction::AskRename(p, title) => {
             app.lib.renaming = Some((p, title));
+            Ok(None)
+        }
+        LibraryAction::AskCleanup(plan) => {
+            app.lib.confirm_cleanup = Some(plan);
             Ok(None)
         }
     };
@@ -139,7 +131,7 @@ pub(super) fn delete_dialog(app: &mut App, ctx: &egui::Context) {
     match decision {
         Some(true) => {
             app.lib.confirm_delete = None;
-            if let Err(error) = app.lib.start_delete(path, &mut app.tasks) {
+            if let Err(error) = app.lib.start_delete(path) {
                 app.error(format!("{error:#}"));
             }
         }
@@ -155,7 +147,7 @@ pub(super) fn cleanup_dialog(app: &mut App, ctx: &egui::Context) {
     match cleanup_modal(ctx, &plan) {
         Some(true) => {
             app.lib.confirm_cleanup = None;
-            if let Err(error) = app.lib.start_cleanup(&plan, &mut app.tasks) {
+            if let Err(error) = app.lib.start_cleanup(&plan) {
                 app.error(format!("{error:#}"));
             }
         }

@@ -7,30 +7,28 @@ mod notices;
 mod recording;
 mod recovery;
 pub(crate) mod state;
-pub(crate) mod tasks;
 mod window;
 
-use crate::clipboard_service::ClipboardService;
+use crate::features;
+use crate::features::library::thumbs::Thumbnails;
+use crate::features::recording::{RecordTarget, StopSource};
 use crate::hotkeys::{HotkeyAction, Hotkeys};
-use crate::overlay::{self, Outcome, Overlay};
-use crate::settings_writer::SettingsWriter;
-use crate::thumbs::Thumbnails;
+use crate::overlay::{self, Outcome};
+use crate::services::clipboard::ClipboardService;
+use crate::services::settings_writer::SettingsWriter;
 use crate::tray::{Tray, TrayCommand, TrayState};
 use crate::{pages, theme};
 use command::{AppCommand, RecordingCommand};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
-use mediaa_core::geometry::Rect;
-use mediaa_core::limits::FPS;
 use mediaa_core::settings::{
-    AfterCapture, AfterCompletionAction, AnimSettings, RecordProfile, ScreenChoice, TrayClickAction,
+    AfterCapture, AfterCompletionAction, RecordProfile, ScreenChoice, TrayClickAction,
 };
 use mediaa_core::source::{AudioSource, SourceFactory};
 use mediaa_core::{library, naming, paths, Frame, ImageFormat, OutputKind, Settings};
 use mediaa_media::recorder::{
-    recover_incomplete_sessions, AudioLayout, RecordingRequest, RecordingSession,
-    RecordingStartCancelled, RecoveryReport, SessionEvent, SessionFailure, SessionNotice,
-    StopAction, WebpMode,
+    recover_incomplete_sessions, AudioLayout, RecordingRequest, RecoveryReport, SessionEvent,
+    SessionFailure, SessionNotice, StopAction,
 };
 use mediaa_platform::audio::{CpalSource, CpalTarget};
 use mediaa_platform::files;
@@ -41,15 +39,10 @@ use mediaa_storage::screenshot;
 use notices::{notice_summary, NoticeLevel, Notices};
 use raw_window_handle::HasWindowHandle;
 use rust_i18n::t;
-use state::{
-    CaptureJob, CatalogEvent, CatalogJob, CopyImageJob, DesktopEvent, Page, Pending, RecState,
-    RecordTarget, RecordingStartFailure, ScreenshotJob, StopSource,
-};
+use state::{CatalogEvent, CatalogJob, DesktopEvent, Page, Pending};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tasks::{ActiveTasks, TaskId, TaskKind, TaskSupervisor, WorkKind};
 
 const HIDE_DELAY: Duration = Duration::from_millis(300);
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
@@ -81,25 +74,20 @@ pub struct App {
     catalog_job: Option<CatalogJob>,
     desktop_events: Receiver<DesktopEvent>,
     desktop_events_tx: Sender<DesktopEvent>,
-    overlay: Option<Overlay>,
+    desktop_jobs: Vec<crate::jobs::Job<()>>,
     pending: Option<(Instant, Pending)>,
     hidden_by_us: bool,
     ghosted: bool,
-    pub rec: pages::record::RecordUi,
-    pub recorder: RecState,
-    screenshot_job: Option<ScreenshotJob>,
-    capture_job: Option<CaptureJob>,
-    pub(crate) copy_image_job: Option<CopyImageJob>,
+    pub(crate) recording: features::recording::RecordingController,
+    pub(crate) capture: features::capture::CaptureController,
     pub(crate) clipboard: ClipboardService,
-    recording_region: Option<(MonitorInfo, Rect)>,
     region_outline: mediaa_platform::outline::RegionOutline,
-    pub lib: pages::library::LibraryUi,
+    pub lib: features::library::LibraryController,
     pub thumbs: Thumbnails,
-    pub conv: pages::convert::ConvertUi,
+    pub(crate) conversion: features::conversion::ConversionController,
     quit_when_idle: bool,
-    pub(crate) tasks: TaskSupervisor,
-    recovery_rx: Option<Receiver<RecoveryReport>>,
-    recovery_task: Option<TaskId>,
+    recovery_job: Option<crate::jobs::Job<RecoveryReport>>,
+    housekeeping_jobs: Vec<crate::jobs::Job<()>>,
     _instance: Option<SingleInstance>,
     native_window: Option<NativeWindow>,
     startup: StartupAction,
@@ -178,7 +166,7 @@ impl App {
         let mut app = Self {
             settings,
             settings_dirty: None,
-            settings_writer: SettingsWriter::new(),
+            settings_writer: SettingsWriter::create(),
             page: Page::Screenshot,
             last_capture_page: Page::Screenshot,
             last_main_page: Page::Screenshot,
@@ -195,25 +183,20 @@ impl App {
             catalog_job: None,
             desktop_events,
             desktop_events_tx,
-            overlay: None,
+            desktop_jobs: Vec::new(),
             pending: None,
             hidden_by_us: false,
             ghosted: false,
-            rec: Default::default(),
-            recorder: RecState::Idle,
-            screenshot_job: None,
-            capture_job: None,
-            copy_image_job: None,
+            recording: Default::default(),
+            capture: Default::default(),
             clipboard,
-            recording_region: None,
             region_outline: Default::default(),
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
-            conv: Default::default(),
+            conversion: Default::default(),
             quit_when_idle: false,
-            tasks: TaskSupervisor::default(),
-            recovery_rx: None,
-            recovery_task: None,
+            recovery_job: None,
+            housekeeping_jobs: Vec::new(),
             _instance: instance,
             native_window: cc
                 .window_handle()
@@ -249,7 +232,7 @@ impl App {
             }
         }
         app.refresh_catalogs(ctx);
-        app.lib.refresh(&app.settings, &mut app.tasks);
+        app.lib.refresh(&app.settings);
         app.start_recovery();
         if let Some(error) = tray_problem {
             app.warning(t!("toast.tray_unavailable", error = error));
@@ -276,27 +259,20 @@ impl App {
             }
         }
         let stale_previews = previews;
-        if let Err(error) =
-            app.tasks
-                .spawn(TaskKind::Housekeeping, "startup-cleanup", None, move || {
-                    for dir in output_dirs {
-                        paths::remove_stale_temporary_files(&dir, Duration::from_secs(3600));
-                    }
-                    paths::remove_stale_entries(
-                        &stale_previews,
-                        Duration::from_secs(30 * 24 * 3600),
-                    );
-                })
-        {
-            log::warn!("startup cleanup: {error}");
+        match crate::jobs::Job::spawn("startup-cleanup", Arc::default(), move || {
+            for dir in output_dirs {
+                paths::remove_stale_temporary_files(&dir, Duration::from_secs(3600));
+            }
+            paths::remove_stale_entries(&stale_previews, Duration::from_secs(30 * 24 * 3600));
+        }) {
+            Ok(job) => app.housekeeping_jobs.push(job),
+            Err(error) => log::warn!("startup cleanup: {error}"),
         }
-        if let Err(error) = app
-            .tasks
-            .spawn(TaskKind::Housekeeping, "font-warmup", None, || {
-                let _ = mediaa_render::annotate::fonts().len();
-            })
-        {
-            log::warn!("font warmup: {error}");
+        match crate::jobs::Job::spawn("font-warmup", Arc::default(), || {
+            let _ = mediaa_render::annotate::fonts().len();
+        }) {
+            Ok(job) => app.housekeeping_jobs.push(job),
+            Err(error) => log::warn!("font warmup: {error}"),
         }
         app
     }
@@ -327,34 +303,35 @@ impl App {
         }
         let (tx, rx) = crossbeam_channel::bounded(3);
         let ctx = ctx.clone();
-        match self.tasks.spawn_with_deadline(
-            TaskKind::Catalog,
-            "catalog-load",
-            None,
-            Some(CATALOG_TIMEOUT),
-            move || {
-                let monitors = screen::monitors().map_err(|error| format!("{error:#}"));
-                let _ = tx.send(CatalogEvent::Monitors(monitors));
-                ctx.request_repaint();
-                let windows = screen::windows().map_err(|error| format!("{error:#}"));
-                let _ = tx.send(CatalogEvent::Windows(windows));
-                ctx.request_repaint();
-                let _ = tx.send(CatalogEvent::Microphones {
-                    devices: mediaa_platform::audio::input_devices(),
-                    default: mediaa_platform::audio::default_input_device(),
-                });
-                ctx.request_repaint();
-            },
-        ) {
-            Ok(task) => self.catalog_job = Some(CatalogJob { rx, task }),
+        match crate::jobs::Job::spawn("catalog-load", Arc::default(), move || {
+            let monitors = screen::monitors().map_err(|error| format!("{error:#}"));
+            let _ = tx.send(CatalogEvent::Monitors(monitors));
+            ctx.request_repaint();
+            let windows = screen::windows().map_err(|error| format!("{error:#}"));
+            let _ = tx.send(CatalogEvent::Windows(windows));
+            ctx.request_repaint();
+            let _ = tx.send(CatalogEvent::Microphones {
+                devices: mediaa_platform::audio::input_devices(),
+                default: mediaa_platform::audio::default_input_device(),
+            });
+            ctx.request_repaint();
+        }) {
+            Ok(job) => {
+                self.catalog_job = Some(CatalogJob {
+                    rx,
+                    job,
+                    started: Instant::now(),
+                })
+            }
             Err(error) => log::warn!("catalog load thread: {error}"),
         }
     }
 
     fn poll_catalogs(&mut self, ctx: &egui::Context) {
-        let Some(rx) = self.catalog_job.as_ref().map(|job| job.rx.clone()) else {
+        let Some(rx) = self.catalog_job.as_ref().map(|catalog| catalog.rx.clone()) else {
             return;
         };
+        let mut disconnected = false;
         loop {
             match rx.try_recv() {
                 Ok(CatalogEvent::Monitors(Ok(monitors))) => self.monitors = monitors,
@@ -373,10 +350,11 @@ impl App {
                     if self
                         .catalog_job
                         .as_ref()
-                        .is_some_and(|job| self.tasks.overdue(job.task))
+                        .is_some_and(|job| job.started.elapsed() >= CATALOG_TIMEOUT)
                     {
-                        let job = self.catalog_job.take().expect("catalog job checked");
-                        self.tasks.detach(job.task);
+                        if let Some(job) = self.catalog_job.take() {
+                            job.job.cancel();
+                        }
                         self.error(t!("err.catalog_timeout"));
                         break;
                     }
@@ -384,16 +362,22 @@ impl App {
                     break;
                 }
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                    let job = self.catalog_job.take().expect("catalog job checked");
-                    self.tasks.finish(job.task);
+                    disconnected = true;
                     break;
+                }
+            }
+        }
+        if disconnected {
+            if let Some(mut job) = self.catalog_job.take() {
+                if job.job.poll().is_some_and(|result| result.is_err()) {
+                    log::warn!("catalog worker stopped");
                 }
             }
         }
     }
 
     pub fn recovery_active(&self) -> bool {
-        self.recovery_rx.is_some()
+        self.recovery_job.is_some()
     }
 
     pub fn reapply_hotkeys(&mut self) {
@@ -447,14 +431,17 @@ impl eframe::App for App {
         {
             self.show_window(ctx);
         }
-        for exit in self.tasks.reap_finished() {
-            if exit.panicked {
-                log::error!("background task {:?} panicked", exit.kind);
-            } else if exit.timed_out {
-                log::warn!("background task {:?} exceeded its deadline", exit.kind);
+        self.housekeeping_jobs.retain_mut(|job| {
+            if let Some(result) = job.poll() {
+                if let Err(error) = result {
+                    log::warn!("background housekeeping stopped: {error:#}");
+                }
+                false
+            } else {
+                true
             }
-        }
-        pages::library::poll_cleanup(self, ctx);
+        });
+        features::library::poll_cleanup(self, ctx);
         self.update_tray();
         self.show_recording_region(ctx);
 
@@ -504,8 +491,8 @@ impl eframe::App for App {
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
         if self.settings.highlight_recording_region
-            && matches!(self.recorder, RecState::Recording { .. })
-            && self.recording_region.is_some()
+            && self.recording.is_recording()
+            && self.recording.region().is_some()
         {
             [0.0; 4]
         } else {
@@ -552,20 +539,7 @@ fn tray_click_stops_recording(enabled: bool, recording: bool) -> bool {
     enabled && recording
 }
 
-fn recording_animation_settings(
-    output: OutputKind,
-    fps: u32,
-    max_height: Option<u32>,
-    animation: &AnimSettings,
-) -> AnimSettings {
-    let mut animation = animation.clone();
-    if matches!(output, OutputKind::Anim(_)) {
-        animation.fps = FPS.clamp(fps);
-        animation.max_height = max_height.unwrap_or(0);
-    }
-    animation
-}
-
+#[cfg(test)]
 fn recording_completion_sound(_output: OutputKind, source: StopSource) -> bool {
     matches!(source, StopSource::Tray | StopSource::Hotkey)
 }
@@ -574,13 +548,17 @@ fn completion_sound_after_action(requested: bool, action_succeeded: bool) -> boo
     requested && action_succeeded
 }
 
-fn recording_tray_state(recorder: &RecState) -> TrayState {
-    match recorder {
-        RecState::Idle => TrayState::Idle,
-        RecState::Starting { .. } => TrayState::Starting,
-        RecState::Recording { session, .. } if session.is_paused() => TrayState::Paused,
-        RecState::Recording { .. } => TrayState::Recording,
-        RecState::Saving { .. } => TrayState::Saving,
+fn recording_tray_state(recording: &features::recording::RecordingController) -> TrayState {
+    tray_state_for_phase(recording.phase())
+}
+
+fn tray_state_for_phase(phase: features::recording::RecordingPhase) -> TrayState {
+    match phase {
+        features::recording::RecordingPhase::Idle => TrayState::Idle,
+        features::recording::RecordingPhase::Starting => TrayState::Starting,
+        features::recording::RecordingPhase::Recording { paused: true } => TrayState::Paused,
+        features::recording::RecordingPhase::Recording { paused: false } => TrayState::Recording,
+        features::recording::RecordingPhase::Saving => TrayState::Saving,
     }
 }
 

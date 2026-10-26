@@ -1,4 +1,4 @@
-use super::state::{RecordTarget, StopSource};
+use crate::features::recording::{RecordTarget, StopSource};
 use mediaa_core::settings::RecordProfile;
 use mediaa_media::recorder::StopAction;
 

@@ -4,7 +4,7 @@ impl App {
     fn show_recovery(&mut self, recovery: RecoveryReport) {
         if !recovery.files.is_empty() {
             self.lib.files_changed(&recovery.files);
-            let library = pages::library::library_dir(&self.settings);
+            let library = features::library::library_dir(&self.settings);
             let mut detail = t!(
                 "toast.recovered",
                 count = recovery.files.len(),
@@ -36,7 +36,7 @@ impl App {
     }
 
     pub(super) fn start_recovery(&mut self) {
-        if self.recovery_rx.is_some() {
+        if self.recovery_job.is_some() {
             return;
         }
         let work = paths::work_dir();
@@ -48,41 +48,28 @@ impl App {
         if !has_session {
             return;
         }
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        let media = pages::library::library_dir(&self.settings);
-        match self
-            .tasks
-            .spawn(TaskKind::Recovery, "recording-recovery", None, move || {
-                let _ = tx.send(recover_incomplete_sessions(&work, &media));
-            }) {
-            Ok(task) => {
-                self.recovery_rx = Some(rx);
-                self.recovery_task = Some(task);
-            }
+        let media = features::library::library_dir(&self.settings);
+        match crate::jobs::Job::spawn("recording-recovery", std::sync::Arc::default(), move || {
+            recover_incomplete_sessions(&work, &media)
+        }) {
+            Ok(job) => self.recovery_job = Some(job),
             Err(error) => self.error(t!("toast.recovery_failed_detail", error = error)),
         }
     }
 
     pub(super) fn poll_recovery(&mut self, ctx: &egui::Context) {
-        let Some(rx) = &self.recovery_rx else {
+        let Some(job) = self.recovery_job.as_mut() else {
             return;
         };
-        match rx.try_recv() {
-            Ok(recovery) => {
-                self.recovery_rx = None;
-                if let Some(task) = self.recovery_task.take() {
-                    self.tasks.finish(task);
-                }
+        match job.poll() {
+            Some(Ok(recovery)) => {
+                self.recovery_job = None;
                 self.show_recovery(recovery);
             }
-            Err(crossbeam_channel::TryRecvError::Empty) => {
-                ctx.request_repaint_after(Duration::from_millis(100))
-            }
-            Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                self.recovery_rx = None;
-                if let Some(task) = self.recovery_task.take() {
-                    self.tasks.finish(task);
-                }
+            None => ctx.request_repaint_after(Duration::from_millis(100)),
+            Some(Err(error)) => {
+                self.recovery_job = None;
+                log::warn!("recording recovery stopped: {error:#}");
                 self.error(t!("toast.recovery_failed"));
             }
         }

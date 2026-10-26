@@ -1,8 +1,8 @@
 use mediaa_core::formats::{AnimFormat, OutputKind, VideoContainer};
-use mediaa_core::settings::AnimSettings;
+use mediaa_core::settings::{AnimSettings, WebpMode};
 use mediaa_core::source::{FrameSource, SourceFactory};
 use mediaa_media::recorder::{
-    AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction, WebpMode,
+    AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction,
 };
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;

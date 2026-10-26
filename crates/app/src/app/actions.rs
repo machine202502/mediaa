@@ -1,4 +1,5 @@
 use super::*;
+use crate::features::capture::CaptureKind;
 
 impl App {
     pub(super) fn run_startup_action(&mut self, ctx: &egui::Context) {
@@ -21,21 +22,17 @@ impl App {
     }
 
     pub(super) fn handle_overlay(&mut self, ctx: &egui::Context) {
-        let Some(outcome) = self.overlay.as_ref().and_then(|o| o.show(ctx)) else {
+        let Some(outcome) = self.capture.overlay.as_ref().and_then(|o| o.show(ctx)) else {
             return;
         };
         let outcome = match outcome {
             Outcome::CaptureMonitor { index, monitor } => {
-                self.queue_monitor_capture(
-                    ctx,
-                    state::CaptureKind::OverlayMonitor { index },
-                    monitor.id,
-                );
+                self.queue_monitor_capture(ctx, CaptureKind::OverlayMonitor { index }, monitor.id);
                 return;
             }
             outcome => outcome,
         };
-        self.overlay = None;
+        self.capture.overlay = None;
         if std::mem::take(&mut self.ghosted) {
             if let Some(w) = self.native_window {
                 w.set_ghost(false);
@@ -62,8 +59,8 @@ impl App {
                 },
             ),
             Outcome::SelectedRegion { monitor, rect } => {
-                self.rec.target = pages::record::TargetKind::Region;
-                self.rec.region = Some((monitor, rect));
+                self.recording.ui.target = crate::features::recording::TargetKind::Region;
+                self.recording.ui.region = Some((monitor, rect));
                 self.page = Page::Record;
                 self.last_capture_page = Page::Record;
             }
@@ -81,11 +78,11 @@ impl App {
     }
 
     pub(super) fn poll_conversion(&mut self, ctx: &egui::Context) {
-        let Some(outcome) = self.conv.poll_job(&mut self.tasks, ctx) else {
+        let Some(outcome) = self.conversion.poll_job(ctx) else {
             return;
         };
         match outcome {
-            pages::convert::ConversionOutcome::Finished(output) => {
+            features::conversion::ConversionOutcome::Finished(output) => {
                 let name = output
                     .file_name()
                     .unwrap_or_default()
@@ -94,42 +91,47 @@ impl App {
                 self.lib.files_changed(&[output.into_path()]);
                 self.success(t!("convert.done", name = name));
             }
-            pages::convert::ConversionOutcome::Failed { kind, message } => {
+            features::conversion::ConversionOutcome::Failed { kind, message } => {
                 self.error_with_kind(kind, t!("convert.failed", error = message));
             }
-            pages::convert::ConversionOutcome::Cancelled => {
+            features::conversion::ConversionOutcome::Cancelled => {
                 self.info(t!("convert.cancelled"));
             }
         }
     }
 
-    pub(super) fn active_tasks(&self) -> ActiveTasks {
-        ActiveTasks::new()
-            .add(WorkKind::Recording, !self.recorder.is_idle())
-            .add(WorkKind::Conversion, self.conv.is_busy())
-            .add(WorkKind::Recovery, self.recovery_rx.is_some())
-            .add(WorkKind::LibraryCleanup, self.lib.cleanup_active())
-            .add(
-                WorkKind::ImageIo,
-                self.screenshot_job.is_some()
-                    || self.capture_job.is_some()
-                    || self.copy_image_job.is_some(),
-            )
-            .add(WorkKind::Clipboard, self.clipboard.is_busy())
+    pub(crate) fn apply_conversion_ui_action(
+        &mut self,
+        ctx: &egui::Context,
+        action: features::conversion::ConversionUiAction,
+    ) {
+        match action {
+            features::conversion::ConversionUiAction::Open(path) => self.open_path(ctx, &path),
+            features::conversion::ConversionUiAction::Reveal(path) => self.reveal_path(ctx, path),
+            features::conversion::ConversionUiAction::Error(error) => self.error(error),
+        }
     }
 
     pub(super) fn has_active_work(&self) -> bool {
-        self.active_tasks().any() || self.tasks.active_count() > 0
+        !self.recording.is_idle() || self.has_other_active_work()
     }
 
-    pub fn record_target_from_ui(&self) -> Result<RecordTarget, String> {
-        use pages::record::TargetKind;
-        match self.rec.target {
+    fn has_other_active_work(&self) -> bool {
+        self.conversion.is_busy()
+            || self.recovery_job.is_some()
+            || self.lib.cleanup_active()
+            || self.capture.busy()
+            || self.clipboard.is_busy()
+    }
+
+    pub(crate) fn record_target_from_ui(&self) -> Result<RecordTarget, String> {
+        use crate::features::recording::TargetKind;
+        match self.recording.ui.target {
             TargetKind::Screen => {
                 let mut ms: Vec<_> = self
                     .monitors
                     .iter()
-                    .filter(|m| self.rec.monitors.contains(&m.id))
+                    .filter(|m| self.recording.ui.monitors.contains(&m.id))
                     .cloned()
                     .collect();
                 if ms.is_empty() {
@@ -142,7 +144,8 @@ impl App {
                 }
             }
             TargetKind::Region => self
-                .rec
+                .recording
+                .ui
                 .region
                 .clone()
                 .map(|(m, r)| RecordTarget::Region(m, r))
@@ -151,7 +154,7 @@ impl App {
                 let ws: Vec<_> = self
                     .windows
                     .iter()
-                    .filter(|w| self.rec.windows.contains(&w.id))
+                    .filter(|w| self.recording.ui.windows.contains(&w.id))
                     .cloned()
                     .collect();
                 if ws.is_empty() {
@@ -233,7 +236,7 @@ impl App {
         for cmd in cmds {
             match cmd {
                 TrayCommand::PrimaryClick => {
-                    let recording = matches!(self.recorder, RecState::Recording { .. });
+                    let recording = self.recording.is_recording();
                     if tray_click_stops_recording(
                         self.settings.stop_recording_on_left_click,
                         recording,
@@ -303,18 +306,15 @@ impl App {
                     self.start_region_screenshot(ctx, overlay::Purpose::Area)
                 }
                 HotkeyAction::FullscreenScreenshot => self.start_fullscreen_screenshot(ctx, None),
-                HotkeyAction::StartVideo if self.recorder.is_idle() => {
+                HotkeyAction::StartVideo if self.recording.is_idle() => {
                     self.start_hotkey_recording(ctx)
                 }
-                HotkeyAction::StartAudio if self.recorder.is_idle() => {
+                HotkeyAction::StartAudio if self.recording.is_idle() => {
                     self.start_audio_recording(ctx, RecordProfile::Hotkey)
                 }
                 HotkeyAction::StartVideo | HotkeyAction::StartAudio => {}
                 HotkeyAction::StopRecording => {
-                    if matches!(
-                        self.recorder,
-                        RecState::Recording { .. } | RecState::Starting { .. }
-                    ) {
+                    if self.recording.is_recording() || self.recording.is_starting() {
                         self.dispatch_command(
                             ctx,
                             AppCommand::Recording(RecordingCommand::Stop {
@@ -330,31 +330,10 @@ impl App {
 
     pub fn quit(&mut self, ctx: &egui::Context) {
         self.quit_when_idle = true;
-        self.conv.cancel_estimate();
-        self.tasks.cancel_kind(TaskKind::RecordingStart);
-        if let Some(job) = self.screenshot_job.take() {
-            self.tasks.detach(job.task);
-        }
-        if let Some(job) = self.copy_image_job.take() {
-            self.tasks.detach(job.task);
-        }
-        for kind in [
-            TaskKind::Catalog,
-            TaskKind::Housekeeping,
-            TaskKind::LibraryLoad,
-            TaskKind::LibraryScan,
-            TaskKind::ViewerImage,
-            TaskKind::ViewerAudio,
-            TaskKind::ConversionProbe,
-            TaskKind::ConversionEstimate,
-            TaskKind::ExternalOpen,
-            TaskKind::RenameMedia,
-        ] {
-            self.tasks.detach_kind(kind);
-        }
-        if let RecState::Starting { cancel, .. } = &self.recorder {
-            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        } else if matches!(self.recorder, RecState::Recording { .. }) {
+        self.conversion.cancel_estimate();
+        self.recording.cancel_start();
+        self.recording.cancel_finalize();
+        if self.recording.is_recording() {
             self.dispatch_command(
                 ctx,
                 AppCommand::Recording(RecordingCommand::Stop {
@@ -368,12 +347,11 @@ impl App {
     }
 
     pub(super) fn update_tray(&mut self) {
-        let state =
-            if self.recorder.is_idle() && self.active_tasks().any_except(WorkKind::Recording) {
-                TrayState::Saving
-            } else {
-                recording_tray_state(&self.recorder)
-            };
+        let state = if self.recording.is_idle() && self.has_other_active_work() {
+            TrayState::Saving
+        } else {
+            recording_tray_state(&self.recording)
+        };
         if let Some(t) = self.tray.as_mut() {
             t.set_state(state);
         }
@@ -384,18 +362,20 @@ impl App {
             self.region_outline.hide();
             return;
         }
-        let (Some((monitor, rect)), RecState::Recording { session, .. }) =
-            (&self.recording_region, &self.recorder)
-        else {
+        let Some((monitor, rect)) = self.recording.region() else {
             self.region_outline.hide();
             return;
         };
+        if !self.recording.is_recording() {
+            self.region_outline.hide();
+            return;
+        }
         let blink_on = ((ctx.input(|i| i.time) * 2.0) as u64).is_multiple_of(2);
         crate::region_marker::show(
             ctx,
             monitor,
             *rect,
-            session.is_paused(),
+            self.recording.is_paused(),
             blink_on,
             self.settings.recording_region_outline_width,
             &mut self.region_outline,
@@ -404,11 +384,11 @@ impl App {
     }
 
     pub fn open_in_convert(&mut self, path: PathBuf) {
-        if self.conv.is_busy() {
+        if self.conversion.is_busy() {
             self.warning(t!("convert.busy"));
             return;
         }
-        self.conv.set_input(path);
+        self.conversion.set_input(path);
         self.page = Page::Convert;
     }
 }

@@ -1,5 +1,5 @@
 use super::{recovery_links, App};
-use crate::clipboard_service::Purpose;
+use crate::services::clipboard::Purpose;
 use crate::theme;
 use eframe::egui;
 use egui_phosphor::regular as icon;

@@ -91,7 +91,7 @@ pub(crate) fn cleanup_items(
         .collect()
 }
 
-pub(crate) fn cleanup_plan(
+pub(crate) fn plan_cleanup(
     entries: &[LibraryEntry],
     older: CleanupOlder,
     now: SystemTime,

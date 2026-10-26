@@ -1,6 +1,6 @@
 use super::{
-    cleanup_modal, cleanup_old_selected, cleanup_plan, cleanup_selected, cover_uv, grid_columns,
-    tools, CleanupItem, CleanupOlder, CleanupPlan, LibraryUi, GAP, MAIN_TOOLS, MIN_TILE,
+    cleanup_modal, cleanup_old_selected, cleanup_selected, cover_uv, grid_columns, plan_cleanup,
+    tools, CleanupItem, CleanupOlder, CleanupPlan, LibraryController, GAP, MAIN_TOOLS, MIN_TILE,
 };
 use eframe::egui::vec2;
 use mediaa_core::library::LibraryEntry;
@@ -10,21 +10,21 @@ use std::time::{Duration, SystemTime};
 
 #[test]
 fn a_running_scan_is_not_duplicated_by_manual_refresh() {
-    use crate::app::tasks::TaskSupervisor;
+    use crate::jobs::Job;
     use mediaa_core::Settings;
     let dir = tempfile::tempdir().unwrap();
-    let (_sender, receiver) = crossbeam_channel::bounded(1);
-    let mut ui = LibraryUi {
+    let scan_job = Job::spawn("library-test-scan", Arc::default(), Vec::new).unwrap();
+    let mut ui = LibraryController {
         index: Some(LibraryIndex::load(dir.path())),
-        scan: Some(receiver),
-        ..LibraryUi::default()
+        scan_job: Some(scan_job),
+        ..LibraryController::default()
     };
     let settings = Settings {
         media_dir: dir.path().to_path_buf(),
         ..Settings::default()
     };
-    ui.refresh(&settings, &mut TaskSupervisor::default());
-    assert!(ui.scan.is_some());
+    ui.refresh(&settings);
+    assert!(ui.scan_job.is_some());
 }
 
 fn entry(path: std::path::PathBuf, modified: SystemTime) -> LibraryEntry {
@@ -50,9 +50,9 @@ fn unchanged_library_views_reuse_the_same_entry_snapshot() {
     let path = dir.path().join("Recording_2026-01-01_10-00-00.mkv");
     let mut index = LibraryIndex::load(dir.path());
     index.apply_scan(vec![entry(path.clone(), SystemTime::UNIX_EPOCH)]);
-    let mut ui = LibraryUi {
+    let mut ui = LibraryController {
         index: Some(index),
-        ..LibraryUi::default()
+        ..LibraryController::default()
     };
     let first = ui.hits().unwrap();
     let second = ui.hits().unwrap();
@@ -74,7 +74,7 @@ fn unchanged_library_views_reuse_the_same_entry_snapshot() {
 
 #[test]
 fn more_button_opens_the_menu_and_its_items_act() {
-    use super::{tools_strip, Action};
+    use super::{tools_strip, LibraryAction};
     use egui_kittest::kittest::Queryable;
     use mediaa_core::library::LibraryEntry;
     let e = LibraryEntry {
@@ -89,7 +89,7 @@ fn more_button_opens_the_menu_and_its_items_act() {
     };
     let list = tools(&e);
     let mut harness = egui_kittest::Harness::new_ui_state(
-        |ui, chosen: &mut Option<Action>| {
+        |ui, chosen: &mut Option<LibraryAction>| {
             ui.set_width(300.0);
             if let Some(a) = tools_strip(ui, &list) {
                 *chosen = Some(a);
@@ -111,7 +111,7 @@ fn more_button_opens_the_menu_and_its_items_act() {
     harness.get_by_label(&rename).click();
     harness.run();
     assert!(
-        matches!(harness.state(), Some(Action::AskRename(_, t)) if t == "A"),
+        matches!(harness.state(), Some(LibraryAction::AskRename(_, t)) if t == "A"),
         "the item's action is returned"
     );
     assert!(
@@ -120,7 +120,7 @@ fn more_button_opens_the_menu_and_its_items_act() {
     );
     harness.get_by_label(&rust_i18n::t!("lib.reveal")).click();
     harness.run();
-    assert!(matches!(harness.state(), Some(Action::Reveal(_))));
+    assert!(matches!(harness.state(), Some(LibraryAction::Reveal(_))));
 }
 
 #[test]
@@ -222,8 +222,8 @@ fn cleanup_thresholds_use_strict_seven_and_thirty_day_boundaries() {
         entry("month.png".into(), days(30)),
         entry("older-month.png".into(), days(31)),
     ];
-    let week = cleanup_plan(&entries, CleanupOlder::Week, now);
-    let month = cleanup_plan(&entries, CleanupOlder::Month, now);
+    let week = plan_cleanup(&entries, CleanupOlder::Week, now);
+    let month = plan_cleanup(&entries, CleanupOlder::Month, now);
     assert_eq!(
         week.items
             .iter()
@@ -282,24 +282,23 @@ fn cleanup_rechecks_the_file_age_before_moving_it() {
 #[test]
 fn bulk_cleanup_reports_back_without_blocking_the_library_ui() {
     let ctx = eframe::egui::Context::default();
-    let mut library = LibraryUi::default();
+    let mut library = LibraryController::default();
     let plan = CleanupPlan {
         older: CleanupOlder::Week,
         items: Vec::new(),
     };
-    let mut tasks = crate::app::tasks::TaskSupervisor::default();
-    library.start_cleanup(&plan, &mut tasks).unwrap();
+    library.start_cleanup(&plan).unwrap();
     assert!(library.cleanup_active());
     let result = (0..100)
         .find_map(|_| {
-            let result = library.poll_cleanup(&mut tasks, &ctx);
+            let result = library.poll_cleanup(&ctx);
             if result.is_none() {
                 std::thread::sleep(Duration::from_millis(5));
             }
             result
         })
         .expect("cleanup should finish");
-    assert!(result.1.removed.is_empty());
+    assert!(result.0.removed.is_empty());
     assert!(!library.cleanup_active());
 }
 
@@ -353,7 +352,7 @@ fn cleanup_removes_the_library_index_rows() {
     let mut index = LibraryIndex::load(dir.path());
     index.apply_scan(mediaa_storage::library_index::scan_dir(dir.path()));
     assert_eq!(index.len(), 1);
-    let plan = cleanup_plan(index.entries(), CleanupOlder::Month, SystemTime::now());
+    let plan = plan_cleanup(index.entries(), CleanupOlder::Month, SystemTime::now());
     let report = cleanup_selected(&plan.items, |path| {
         std::fs::remove_file(path)?;
         Ok(())
@@ -374,7 +373,7 @@ fn cleanup_modal_shows_the_scope_and_can_be_cancelled() {
     if let Ok(locale) = std::env::var("MEDIAA_LIBRARY_MODAL_LOCALE") {
         rust_i18n::set_locale(&locale);
     }
-    let plan = cleanup_plan(
+    let plan = plan_cleanup(
         &[entry(
             "old.webp".into(),
             SystemTime::now()

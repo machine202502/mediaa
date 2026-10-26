@@ -1,5 +1,5 @@
 use super::test_support::TestCatalog;
-use super::{App, Page, Pending, RecState};
+use super::{App, Page, Pending};
 use crate::tray::TrayCommand;
 use eframe::egui;
 use egui_kittest::kittest::{NodeT, Queryable};
@@ -9,13 +9,10 @@ use mediaa_core::settings::{AfterCapture, MicChoice, ScreenChoice, ThemePreferen
 use mediaa_core::source::{FrameSource, SourceFactory};
 use mediaa_core::{AnimFormat, Frame, ImageFormat, OutputKind, Settings, VideoContainer};
 use mediaa_media::convert::{StillFormat, Target};
-use mediaa_media::recorder::{
-    RecordingProgress, RecordingRequest, RecordingSession, SessionEvent, SessionNotice,
-};
+use mediaa_media::recorder::{RecordingRequest, RecordingSession, SessionEvent, SessionNotice};
 use mediaa_platform::screen::{MonitorId, MonitorInfo, WindowId, WindowInfo};
 use rust_i18n::t;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 static RECORDING_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static UI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -174,7 +171,7 @@ fn test_recording(label: &str, dir: &std::path::Path) -> RecordingSession {
 fn finish_recording(app: &mut App, ctx: &egui::Context) {
     for _ in 0..500 {
         app.poll_recorder(ctx);
-        if app.recorder.is_idle() {
+        if app.recording.is_idle() {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -249,13 +246,13 @@ fn run_pending(app: &mut App, ctx: &egui::Context) {
 
 fn finish_capture_jobs(app: &mut App, ctx: &egui::Context) {
     for _ in 0..200 {
-        if app.capture_job.is_some() {
+        if app.capture.capture_busy() {
             app.poll_capture(ctx);
         }
-        if app.screenshot_job.is_some() {
+        if app.capture.screenshot_busy() {
             app.poll_screenshot(ctx);
         }
-        if app.capture_job.is_none() && app.screenshot_job.is_none() {
+        if !app.capture.capture_busy() && !app.capture.screenshot_busy() {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
@@ -279,7 +276,7 @@ fn record_page_shows_and_selects_mocked_displays() {
     harness.get_by_label(&secondary).click();
     harness.run();
 
-    let selected = &harness.state().app.as_ref().unwrap().rec.monitors;
+    let selected = &harness.state().app.as_ref().unwrap().recording.ui.monitors;
     assert!(selected.contains(&MonitorId::new(1)));
     assert!(selected.contains(&MonitorId::new(2)));
     assert!(matches!(
@@ -315,7 +312,8 @@ fn record_page_switches_to_mocked_windows_and_selects_one() {
         .app
         .as_ref()
         .unwrap()
-        .rec
+        .recording
+        .ui
         .windows
         .contains(&WindowId::new(7)));
     assert!(!harness
@@ -659,13 +657,13 @@ fn region_screenshot_opens_the_editor_with_mocked_frame() {
     run_pending(app, &ctx);
     for _ in 0..200 {
         app.poll_capture(&ctx);
-        if app.overlay.is_some() {
+        if app.capture.overlay.is_some() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    assert!(app.overlay.is_some());
-    assert!(app.screenshot_job.is_none());
+    assert!(app.capture.overlay.is_some());
+    assert!(!app.capture.screenshot_busy());
 }
 
 #[test]
@@ -691,7 +689,7 @@ fn several_mocked_windows_can_be_selected_for_recording() {
     harness.run();
 
     let app = harness.state().app.as_ref().unwrap();
-    assert_eq!(app.rec.windows.len(), 2);
+    assert_eq!(app.recording.ui.windows.len(), 2);
     let target = app.record_target_from_ui().unwrap();
     assert!(matches!(target, super::RecordTarget::Windows(ref windows) if windows.len() == 2));
 }
@@ -730,17 +728,14 @@ fn stop_from_window_saves_a_synthetic_recording() {
     let session = test_recording("Window stop", dir.path());
     let events = session.events();
     let app = harness.state_mut().app.as_mut().unwrap();
-    app.recorder = RecState::Recording {
-        session: Box::new(session),
-        events,
-    };
+    app.recording.test_recording(session, events);
     std::thread::sleep(std::time::Duration::from_millis(120));
     harness.run_steps(2);
     harness.get_by_label(&t!("record.stop_save")).click();
     harness.run_steps(2);
     assert!(matches!(
-        harness.state().app.as_ref().unwrap().recorder,
-        RecState::Saving { .. }
+        harness.state().app.as_ref().unwrap().recording.view(),
+        crate::features::recording::RecordingView::Saving { .. }
     ));
     let ctx = harness.ctx.clone();
     finish_recording(harness.state_mut().app.as_mut().unwrap(), &ctx);
@@ -763,20 +758,11 @@ fn stop_from_tray_uses_the_same_save_flow() {
     let ctx = harness.ctx.clone();
     let app = harness.state_mut().app.as_mut().unwrap();
     app.tray_rx = Some(tray_rx);
-    app.recorder = RecState::Recording {
-        session: Box::new(session),
-        events,
-    };
+    app.recording.test_recording(session, events);
     std::thread::sleep(std::time::Duration::from_millis(120));
     tray_tx.send(TrayCommand::StopAndSave).unwrap();
     app.handle_tray(&ctx);
-    assert!(matches!(
-        app.recorder,
-        RecState::Saving {
-            sound_on_completion: true,
-            ..
-        }
-    ));
+    assert!(matches!(app.recording.saving_sound(), Some(true)));
     finish_recording(app, &ctx);
     assert_eq!(
         std::fs::read_dir(dir.path().join("out")).unwrap().count(),
@@ -794,10 +780,7 @@ fn active_recording_supports_pause_resume_and_save() {
     let session = test_recording("Pause resume", dir.path());
     let events = session.events();
     let app = harness.state_mut().app.as_mut().unwrap();
-    app.recorder = RecState::Recording {
-        session: Box::new(session),
-        events,
-    };
+    app.recording.test_recording(session, events);
     std::thread::sleep(std::time::Duration::from_millis(120));
     harness.run_steps(1);
     harness
@@ -806,20 +789,14 @@ fn active_recording_supports_pause_resume_and_save() {
         .expect("pause button")
         .click();
     harness.run_steps(3);
-    assert!(matches!(
-        harness.state().app.as_ref().unwrap().recorder,
-        RecState::Recording { ref session, .. } if session.is_paused()
-    ));
+    assert!(harness.state().app.as_ref().unwrap().recording.is_paused());
     harness
         .get_all_by_label_contains(&t!("record.resume"))
         .last()
         .expect("resume button")
         .click();
     harness.run_steps(3);
-    assert!(matches!(
-        harness.state().app.as_ref().unwrap().recorder,
-        RecState::Recording { ref session, .. } if !session.is_paused()
-    ));
+    assert!(!harness.state().app.as_ref().unwrap().recording.is_paused());
     harness.get_by_label(&t!("record.stop_save")).click();
     harness.run_steps(1);
     let ctx = harness.ctx.clone();
@@ -840,10 +817,7 @@ fn active_recording_can_be_cancelled_without_publishing_output() {
     let session = test_recording("Cancel recording", dir.path());
     let events = session.events();
     let app = harness.state_mut().app.as_mut().unwrap();
-    app.recorder = RecState::Recording {
-        session: Box::new(session),
-        events,
-    };
+    app.recording.test_recording(session, events);
     std::thread::sleep(std::time::Duration::from_millis(120));
     harness.run_steps(1);
     harness.get_by_label(&t!("record.cancel")).click();
@@ -862,15 +836,7 @@ fn webp_fallback_notice_exposes_trace_and_reason() {
     let (events_tx, events) = crossbeam_channel::bounded(2);
     let ctx = harness.ctx.clone();
     let app = harness.state_mut().app.as_mut().unwrap();
-    app.recorder = RecState::Saving {
-        events,
-        progress_state: RecordingProgress::default(),
-        progress: None,
-        started: std::time::Instant::now(),
-        cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        sound_on_completion: false,
-        task: None,
-    };
+    app.recording.test_saving(events);
     events_tx
         .send(SessionEvent::Notice(SessionNotice::WebpFallback {
             trace_id: "webp-ui-failure".into(),
@@ -958,7 +924,7 @@ fn library_filter_and_delete_work_through_the_ui() {
     let ctx = harness.ctx.clone();
     let app = harness.state_mut().app.as_mut().unwrap();
     for _ in 0..200 {
-        crate::pages::library::poll_cleanup(app, &ctx);
+        crate::features::library::poll_cleanup(app, &ctx);
         if !app.lib.cleanup_active() {
             break;
         }
@@ -989,7 +955,7 @@ fn convert_page_starts_and_finishes_a_selected_target() {
         .app
         .as_mut()
         .unwrap()
-        .conv
+        .conversion
         .set_input(input);
 
     let jpeg = Target::Still(StillFormat::Jpeg).label();
@@ -1008,18 +974,18 @@ fn convert_page_starts_and_finishes_a_selected_target() {
         .expect("convert start button")
         .click();
     harness.run_steps(1);
-    assert!(harness.state().app.as_ref().unwrap().conv.is_busy());
+    assert!(harness.state().app.as_ref().unwrap().conversion.is_busy());
 
     let ctx = harness.ctx.clone();
     let app = harness.state_mut().app.as_mut().unwrap();
     for _ in 0..500 {
         app.poll_conversion(&ctx);
-        if !app.conv.is_busy() {
+        if !app.conversion.is_busy() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
-    assert!(!app.conv.is_busy());
+    assert!(!app.conversion.is_busy());
     assert_eq!(
         std::fs::read_dir(dir.path())
             .unwrap()

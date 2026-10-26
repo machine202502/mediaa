@@ -1,27 +1,40 @@
 use super::header;
-use crate::app::App;
 use crate::theme;
 use eframe::egui;
 use egui_phosphor::regular as icon;
 use mediaa_core::formats::AudioFormat;
-use mediaa_core::settings::{AudioRecordSettings, MicChoice, RecordProfile, AUDIO_BITRATES};
+use mediaa_core::settings::{AudioRecordSettings, MicChoice, AUDIO_BITRATES};
+use mediaa_core::Settings;
 use rust_i18n::t;
 
-pub fn ui(app: &mut App, ui: &mut egui::Ui) {
+pub enum AudioUiAction {
+    SettingsChanged,
+    RefreshCatalogs,
+    RecordingCommand(super::record::status::RecordingUiCommand),
+}
+
+pub fn ui(
+    recording: &mut crate::features::recording::RecordingController,
+    settings: &mut Settings,
+    microphones: &[String],
+    ui: &mut egui::Ui,
+) -> Vec<AudioUiAction> {
+    let mut actions = Vec::new();
     let ctx = ui.ctx().clone();
     header(ui, &t!("audio.title"), "");
-    if super::record::status::live_status(app, ui, &ctx) {
-        return;
+    if let Some(command) = super::record::status::live_status(recording, ui, &ctx) {
+        actions.push(AudioUiAction::RecordingCommand(command));
+        return actions;
     }
 
-    let mics = app.mic_devices.clone();
-    let (changed, refresh_mics) = audio_editor(ui, &mut app.settings.audio_record, &mics, "page");
+    let (changed, refresh_mics) = audio_editor(ui, &mut settings.audio_record, microphones, "page");
     if changed {
-        app.settings_changed();
+        actions.push(AudioUiAction::SettingsChanged);
     }
     if refresh_mics {
-        app.refresh_catalogs(ui.ctx());
+        actions.push(AudioUiAction::RefreshCatalogs);
     }
+    actions
 }
 
 pub fn audio_editor(
@@ -94,27 +107,28 @@ pub fn audio_editor(
     (changed.get(), refresh_mics)
 }
 
-pub fn start_bar(app: &mut App, ui: &mut egui::Ui) {
-    let ctx = ui.ctx().clone();
-    let a = &app.settings.audio_record;
+pub fn start_bar(settings: &Settings, recovery_active: bool, ui: &mut egui::Ui) -> bool {
+    let mut start = false;
+    let a = &settings.audio_record;
     let has_source = a.microphone != MicChoice::Off
         || (a.system_audio && mediaa_platform::audio::system_audio_supported());
-    let available = has_source && !app.recovery_active();
+    let available = has_source && !recovery_active;
     ui.vertical_centered(|ui| {
         let btn = theme::primary(ui, icon::MICROPHONE, &t!("audio.start"))
             .min_size(egui::vec2(220.0, 36.0));
         let mut resp = ui.add_enabled(available, btn);
-        let hk = &app.settings.hotkeys;
+        let hk = &settings.hotkeys;
         if hk.enabled && !hk.start_audio.is_empty() {
             resp = resp.on_hover_text(t!("record.hotkey_hint", key = hk.start_audio));
         }
-        if app.recovery_active() {
+        if recovery_active {
             resp = resp.on_disabled_hover_text(t!("record.recovery_wait"));
         } else if !has_source {
             resp = resp.on_disabled_hover_text(t!("audio.no_source"));
         }
         if resp.clicked() {
-            app.start_audio_recording(&ctx, RecordProfile::App);
+            start = true;
         }
     });
+    start
 }

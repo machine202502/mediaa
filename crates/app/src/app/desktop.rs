@@ -15,16 +15,14 @@ impl App {
     }
 
     fn spawn_desktop(&mut self, ctx: &egui::Context, action: DesktopAction) {
-        let (task_kind, task_name) = match &action {
-            DesktopAction::Open(_) | DesktopAction::Reveal(_) => {
-                (TaskKind::ExternalOpen, "external-open")
-            }
-            DesktopAction::Rename { .. } => (TaskKind::RenameMedia, "rename-media"),
+        let task_name = match &action {
+            DesktopAction::Open(_) | DesktopAction::Reveal(_) => "external-open",
+            DesktopAction::Rename { .. } => "rename-media",
         };
         let worker_action = action.clone();
         let events = self.desktop_events_tx.clone();
         let worker_ctx = ctx.clone();
-        if let Err(error) = self.tasks.spawn(task_kind, task_name, None, move || {
+        match crate::jobs::Job::spawn(task_name, std::sync::Arc::default(), move || {
             let result = execute(&worker_action);
             let _ = events.send(DesktopEvent {
                 action: worker_action,
@@ -32,7 +30,8 @@ impl App {
             });
             worker_ctx.request_repaint();
         }) {
-            self.error(format!("{error:#}"));
+            Ok(job) => self.desktop_jobs.push(job),
+            Err(error) => self.error(format!("{error:#}")),
         }
     }
 
@@ -59,6 +58,16 @@ impl App {
                 },
             }
         }
+        self.desktop_jobs.retain_mut(|job| {
+            if let Some(result) = job.poll() {
+                if let Err(error) = result {
+                    log::warn!("desktop worker stopped: {error:#}");
+                }
+                false
+            } else {
+                true
+            }
+        });
     }
 }
 

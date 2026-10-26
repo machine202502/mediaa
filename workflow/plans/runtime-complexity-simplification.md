@@ -98,6 +98,124 @@ disconnect, panic, deadline и detach обрабатываются в неско
 - отдельные настройки конвертации сохраняют собственные FPS и высоту;
 - старые поля не мигрировать и не создавать compatibility shims.
 
+## Дополнительные подтверждённые кандидаты
+
+Эти решения не входят в уже согласованную первую пятёрку. Они рекомендуются после отдельного
+подтверждения, потому что также уменьшают реальную стоимость изменений без удаления необходимой
+защиты.
+
+### 6. Удалить отчётность и дублирующий API WebP-планировщика
+
+`RunReport`, `Degradation` и `SegmentPlan.estimated_bytes` не используются production-кодом.
+`SegmentWebpEncoder` отбрасывает успешный `RunReport`, а `PipelineError.report` никто не читает.
+Подробные данные проверяются только собственными тестами планировщика. Параллельно
+`PipelineTuning` и `PipelineConfig` повторяют семь полей, а несколько builder-методов имеют
+потребителей только в тестах и benchmark.
+
+Решение:
+
+- вернуть из `run` только успех или типизированную ошибку;
+- оставить в ошибке источник и признак отмены, а статистику попыток и деградаций писать в лог;
+- удалить `RunReport`, `Degradation`, `estimated_bytes` и публичный `plan`, если после удаления
+  у него не останется внешнего потребителя;
+- хранить scheduling-параметры одним вложенным `SchedulePolicy` в `PipelineConfig`, вместо
+  копирования полей туда и обратно;
+- удалить builder-методы, существующие только ради тестовых комбинаций.
+
+Проверка: тесты планирования, budget-pressure, постоянной ошибки, отмены, merge и публичного API
+должны проверять результат и побочные файлы, а не внутреннюю статистику.
+
+### 7. Оставить один тип WebP-маршрута
+
+Один и тот же выбор сейчас представлен четырьмя способами:
+
+- `segmented_webp` и `parallel_webp` в `RecordSettings`;
+- `WebpMode::{Direct, Segmented, SegmentedParallel}` в `RecordingRequest`;
+- `AnimationPath::{Linear, Segmented, Live}` в recorder;
+- `WebpSegmentation::{Direct, Segmented}` в encoder request.
+
+Между ними существуют ручные преобразования. Сохранённые boolean-поля допускают невозможную
+комбинацию `segment=false, parallel=true`, хотя UI блокирует параллельный переключатель.
+
+Решение:
+
+- использовать один persisted enum `WebpPipelineMode::{Direct, Segmented, Live}`;
+- передавать его без преобразования через request и recorder;
+- оставить в animation backend только `Direct | Segmented`, если это требуется интерфейсу
+  кодировщика;
+- при формате, отличном от WebP, нормализовать режим в `Direct` в builder настроек.
+
+Проверка: UI-тесты трёх режимов, roundtrip настроек, direct/live/failed-live/segmented-failure
+pipeline tests и сохранение текущего fallback.
+
+### 8. Централизовать policy фоновых задач
+
+Сейчас quit-поведение зависит от трёх независимых моделей:
+
+- 19 вариантов `TaskKind`;
+- ручного списка `Disposable` variants в `App::quit`;
+- `ActiveTasks`/`WorkKind` bitset для quit и tray.
+
+Новый `TaskKind` нужно не забыть добавить в ручной detach-list, иначе он неверно удержит выход.
+`WorkKind::Clipboard` также переводит tray в `Saving`, хотя файл не сохраняется.
+
+Решение:
+
+- при регистрации задачи хранить `TaskPolicy::{Required, Disposable}`;
+- заменить ручной список в `App::quit` на `detach_disposable()`;
+- вычислять quit/tray processing state из policy и состояния non-task сервисов;
+- удалить `ActiveTasks`, когда recording/conversion/recovery/cleanup/image jobs будут либо в
+  `TaskSupervisor`, либо представлены явным `ServiceBusy`.
+
+Проверка: таблица `TaskKind → policy`, тесты quit с каждой disposable/required категорией,
+clipboard не показывает tray `Saving`, recording/conversion не теряются при выходе.
+
+### 9. Удалить публичные API без production-потребителя
+
+`ensure_proxy_for_with_limits` и `PreviewLimits` используются только тестами, хотя пользователь
+не настраивает preview resolution или FPS. `Settings::save()` также не вызывается в проекте:
+production сохраняет настройки через `SettingsWriter::save_to`.
+
+Решение:
+
+- оставить preview 1080p/30 fps локальными константами и удалить test-only публичный API;
+- удалить `Settings::save()`, оставив `load_from`/`save_to` и production writer;
+- не добавлять compatibility aliases.
+
+Проверка: `rg` по workspace, тесты preview graph и roundtrip settings, полный Clippy.
+
+### 10. Унифицировать фоновые removal jobs библиотеки
+
+Одиночное удаление и очистка по возрасту почти полностью дублируют создание job:
+проверку занятости, подготовку preview/viewer, spawn, channel, task id и terminal polling.
+Одиночное удаление дополнительно создаёт фиктивный `CleanupPlan { older: Week }`, а сообщение
+об успехе хранится отдельно в `cleanup_success`.
+
+Решение:
+
+- ввести один `RemovalJob { plan, mode, success }`;
+- одним методом запускать `Aged` или `Selected` removal;
+- возвращать `RemovalOutcome { plan, report, success }` через тот же channel;
+- удалить `cleanup_success` как отдельное скрытое состояние;
+- сохранить разные правила проверки: повторная проверка возраста для bulk cleanup, точечная
+  обработка для одиночного удаления.
+
+Проверка: существующие partial-failure, stale-age, trash/proxy, modal и UI delete tests.
+
+## Гипотезы, требующие измерения
+
+Подробные измерения записаны в
+[library-performance-research.md](library-performance-research.md).
+
+- **Полный rescan каждые 60 секунд.** Локальный тест 1k/10k не нашёл потерянных watcher paths;
+  overflow сам запрашивает rescan. На 10k применение полного snapshot занимает 5–11 ms, на
+  50k — 29–69 ms. Локально безусловный интервал не дал практической пользы и может пропускать
+  кадр на очень большой библиотеке. Решение отложено до network-share проверки.
+- **Собственный thumbnail atlas.** Гипотеза отклонена. На 500 thumbnail-файлов atlas занял
+  21 файл / 8,7 MB и 1,8 s записи; отдельные JPEG — 500 файлов / 73,6 MB и 332 s. Random access
+  у отдельных файлов быстрее, но общий выигрыш atlas достаточен для сохранения текущей модели.
+  Упрощать atlas до файлов не следует.
+
 ## Затронутые области
 
 | Область | Основные файлы |
@@ -107,16 +225,24 @@ disconnect, panic, deadline и detach обрабатываются в неско
 | Capture lifecycle | `crates/media/src/recorder.rs`, `recorder/{capture,tests}.rs` |
 | Фоновые задачи | `crates/app/src/app/{tasks,state,actions}.rs`, convert и library controllers |
 | Профили записи | `crates/core/src/settings.rs`, `crates/app/src/app.rs`, `pages/{record,convert,settings}.rs` |
+| WebP options API | `crates/webp-pipeline/src/lib.rs`, `crates/media/src/animation_backends.rs` |
+| WebP route | `crates/core/src/settings.rs`, `media/src/recorder{,/request}.rs`, UI record/profile controllers |
+| Task policy | `crates/app/src/app/{tasks,actions,state}.rs` и контроллеры one-shot операций |
+| Dead/test-only API | `crates/media/src/preview_cache.rs`, `crates/core/src/settings.rs` |
+| Library removal | `crates/app/src/pages/library.rs` и `library/actions.rs` |
 | Документация | `README.md`, `workflow/stones.md`, `workflow/practices.md` только при появлении устойчивого знания |
 
 ## Порядок работ
 
-1. Удалить `MemoryBudget` и упростить отчёт WebP.
+1. Удалить `MemoryBudget`, `RunReport` и дублирующий WebP options API.
 2. Ввести явную policy повторов WebP и проверить fallback-каскад.
 3. Перевести capture на терминальное событие и удалить join-watchdog.
-4. Ввести `BackgroundJob<T>` и мигрировать one-shot операции.
-5. Разделить persisted-настройки анимации и транзиентный encoder config.
-6. Обновить документацию и удалить ставшие неактуальными тесты и поля.
+4. Ввести `BackgroundJob<T>` и централизовать `TaskPolicy`.
+5. Заменить WebP-route на один persisted enum.
+6. Разделить persisted-настройки анимации и транзиентный encoder config.
+7. Удалить `PreviewLimits`-only API и неиспользуемый `Settings::save`.
+8. Унифицировать library removal jobs.
+9. Обновить документацию и удалить ставшие неактуальными тесты и поля.
 
 Каждый этап должен оставлять проект в рабочем состоянии. Следующий этап начинается после
 успешной целевой проверки предыдущего.
@@ -126,11 +252,15 @@ disconnect, panic, deadline и detach обрабатываются в неско
 - `cargo test -p mediaa-webp-pipeline`;
 - тест постоянной ошибки backend: одна попытка и немедленный внешний fallback;
 - тест resource exhaustion: полная деградация и успешное завершение;
+- отсутствие production-потребителей у удаляемых WebP report/options API;
 - Windows Job Object stress WebP при 256, 512 и 768 МБ с контролем peak working set;
 - тесты capture: ready, success, error, panic, timeout и detach без второго потока;
 - тесты `BackgroundJob<T>`: result, panic, cancel, deadline, drop и повторное завершение;
+- exhaustive-тест policy для каждого `TaskKind` и quit/tray сценарии;
+- roundtrip и UI tests всех трёх WebP routes;
 - тесты профилей: roundtrip settings и точное формирование `RecordingRequest` для WebP, GIF и
   видео;
+- UI tests single delete, bulk cleanup, partial failure и proxy cleanup;
 - целевые тесты изменённых app-контроллеров;
 - итоговая проверка `cargo test --workspace`;
 - итоговая проверка `cargo clippy --workspace --all-targets -- -D warnings`;
@@ -145,6 +275,12 @@ disconnect, panic, deadline и detach обрабатываются в неско
   terminal event. Поэтому миграция выполняется небольшими группами с отдельными тестами.
 - Capture-канал должен оставаться ограниченным и вычитываться при остановке, иначе завершение
   потока может заблокироваться на отправке результата.
+- Ошибочная `TaskPolicy` может либо не дать приложению закрыться, либо потерять обязательную
+  операцию. Policy задаётся явно при регистрации и покрывается exhaustive-тестом.
+- Замена двух WebP boolean на enum меняет сериализованные настройки. Поскольку выпусков нет,
+  migration не создаётся.
+- Удаление `PreviewLimits` фиксирует текущий preview 1080p/30 fps. Другого пользовательского
+  требования к этим значениям нет.
 - Удаление полей настроек сделает соответствующие старые значения неиспользуемыми. Это
   соответствует правилу проекта об отсутствии обратной совместимости.
 - Расчётный WebP-бюджет не заменяет измерение реального процесса; безопасность подтверждается
@@ -152,8 +288,8 @@ disconnect, panic, deadline и detach обрабатываются в неско
 
 ## Вне рамок
 
-- изменение периодического полного rescan библиотеки до отдельного замера;
-- переработка thumbnail atlas;
+- изменение периодического полного rescan до сетевого замера;
+- переработка thumbnail atlas: сравнение выполнено, текущая модель остаётся;
 - изменение таймаутов audio, native capture и сохранения настроек;
 - изменение форматов результата, fallback-каскада или пользовательской компоновки;
 - release-сборка без отдельного запроса.

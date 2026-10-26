@@ -12,7 +12,7 @@ use mediaa_core::limits::FPS as FPS_LIMIT;
 use mediaa_core::naming;
 use mediaa_core::pacer::{SessionClock, SlotTracker};
 use mediaa_core::paths::{MediaDir, WorkDir};
-use mediaa_core::settings::AnimSettings;
+use mediaa_core::settings::{AnimSettings, WebpMode};
 use mediaa_core::source::{AudioSource, SourceFactory};
 use mediaa_webp_pipeline::{PipelineTuning, DEFAULT_MAX_WORKERS};
 use parking_lot::{Condvar, Mutex};
@@ -101,24 +101,6 @@ struct RecordedVideo {
     files: Vec<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AnimationPath {
-    Live,
-    Segmented,
-    Linear,
-}
-
-fn animation_path(output: OutputKind, mode: WebpMode) -> AnimationPath {
-    if !matches!(output, OutputKind::Anim(AnimFormat::Webp)) {
-        return AnimationPath::Linear;
-    }
-    match mode {
-        WebpMode::Direct => AnimationPath::Linear,
-        WebpMode::Segmented => AnimationPath::Segmented,
-        WebpMode::SegmentedParallel => AnimationPath::Live,
-    }
-}
-
 fn new_webp_trace_id() -> String {
     format!(
         "webp-{}-{:04}",
@@ -128,21 +110,24 @@ fn new_webp_trace_id() -> String {
 }
 
 fn encode_with_linear_fallback(
-    requested: AnimationPath,
-    encode: &mut dyn FnMut(AnimationPath) -> anyhow::Result<()>,
+    requested: WebpMode,
+    encode: &mut dyn FnMut(WebpSegmentation) -> anyhow::Result<()>,
     warn: &mut dyn FnMut(String),
 ) -> anyhow::Result<()> {
     match requested {
-        AnimationPath::Live | AnimationPath::Segmented => match encode(AnimationPath::Segmented) {
-            Err(error) if !crate::job::is_cancelled(&error) => {
-                let warning =
-                    format!("segmented WebP failed; falling back to linear encoding: {error:#}");
-                warn(warning);
-                encode(AnimationPath::Linear)
+        WebpMode::Segmented | WebpMode::SegmentedParallel => {
+            match encode(WebpSegmentation::Segmented) {
+                Err(error) if !crate::job::is_cancelled(&error) => {
+                    let warning = format!(
+                        "segmented WebP failed; falling back to linear encoding: {error:#}"
+                    );
+                    warn(warning);
+                    encode(WebpSegmentation::Direct)
+                }
+                result => result,
             }
-            result => result,
-        },
-        AnimationPath::Linear => encode(AnimationPath::Linear),
+        }
+        WebpMode::Direct => encode(WebpSegmentation::Direct),
     }
 }
 
@@ -171,23 +156,20 @@ enum TimedJoin<T> {
     Finished(T),
     Panicked,
     TimedOut,
-    Unavailable,
 }
 
 fn join_with_timeout<T: Send + 'static>(handle: JoinHandle<T>, timeout: Duration) -> TimedJoin<T> {
-    let (sender, receiver) = crossbeam_channel::bounded(1);
-    let spawned = std::thread::Builder::new()
-        .name("join-watchdog".into())
-        .spawn(move || {
-            let _ = sender.send(handle.join().ok());
-        });
-    if spawned.is_err() {
-        return TimedJoin::Unavailable;
+    let deadline = Instant::now() + timeout;
+    while !handle.is_finished() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return TimedJoin::TimedOut;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
     }
-    match receiver.recv_timeout(timeout) {
-        Ok(Some(value)) => TimedJoin::Finished(value),
-        Ok(None) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => TimedJoin::Panicked,
-        Err(crossbeam_channel::RecvTimeoutError::Timeout) => TimedJoin::TimedOut,
+    match handle.join() {
+        Ok(value) => TimedJoin::Finished(value),
+        Err(_) => TimedJoin::Panicked,
     }
 }
 
@@ -200,7 +182,6 @@ fn reap_capture(
         TimedJoin::Finished(Err(error)) => Err((false, format!("{error:#}"))),
         TimedJoin::Panicked => Err((false, "capture thread panicked".into())),
         TimedJoin::TimedOut => Err((true, "capture thread did not stop".into())),
-        TimedJoin::Unavailable => Err((true, "capture thread could not be joined".into())),
     }
 }
 
@@ -302,12 +283,12 @@ impl RecordingSession {
             }
         }
 
-        let animation_path = animation_path(req.output, req.webp_mode);
-        let live_enabled = animation_path == AnimationPath::Live;
+        let live_enabled = matches!(req.output, OutputKind::Anim(AnimFormat::Webp))
+            && req.webp_mode == WebpMode::SegmentedParallel;
         let webp_trace =
             matches!(req.output, OutputKind::Anim(AnimFormat::Webp)).then(new_webp_trace_id);
         if let Some(trace) = &webp_trace {
-            log::info!("[{trace}] stage=requested path={animation_path:?}");
+            log::info!("[{trace}] stage=requested mode={:?}", req.webp_mode);
         }
         let mut live_lists = Vec::new();
         let mut live_sizes = Vec::new();
@@ -607,9 +588,6 @@ impl RecordingSession {
                     "capture \"{}\" did not stop within {:?}",
                     c.name, self.capture_stop_timeout
                 )),
-                TimedJoin::Unavailable => {
-                    failures.push(format!("capture \"{}\" could not be joined", c.name));
-                }
             }
         }
         for a in &mut self.audio {
@@ -713,10 +691,9 @@ impl RecordingSession {
                 keep_work_dir,
             });
         }
-        let requested_path = animation_path(self.output, self.webp_mode);
         let trace = self.webp_trace.as_deref();
         if let Some(trace) = trace {
-            log::info!("[{trace}] stage=finalize path={requested_path:?}");
+            log::info!("[{trace}] stage=finalize mode={:?}", self.webp_mode);
         }
         if live.as_ref().is_some_and(|result| result.timed_out) {
             let recovery_files =
@@ -727,7 +704,8 @@ impl RecordingSession {
                 keep_work_dir: true,
             });
         }
-        let live_requested = requested_path == AnimationPath::Live;
+        let live_requested = matches!(self.output, OutputKind::Anim(AnimFormat::Webp))
+            && self.webp_mode == WebpMode::SegmentedParallel;
         let mut webp_fallback = false;
         let mut webp_fallback_detail = Vec::new();
         let mut live_success = live.as_ref().is_some_and(|result| {
@@ -880,7 +858,7 @@ impl RecordingSession {
                         },
                         ..PipelineTuning::default()
                     };
-                    let request = |_segmented_webp| AnimationEncodeRequest {
+                    let request = |segmentation| AnimationEncodeRequest {
                         input: scratch,
                         output: pending.path(),
                         window: None,
@@ -888,21 +866,17 @@ impl RecordingSession {
                         settings: &self.anim,
                         effort: Effort::Balanced,
                         origin: AnimationOrigin::Recording,
-                        segmentation: if self.webp_mode == WebpMode::Direct {
-                            WebpSegmentation::Direct
-                        } else {
-                            WebpSegmentation::Segmented
-                        },
+                        segmentation,
                         scheduling: scheduling.clone(),
                         threads: None,
                         trace_id: trace,
                     };
-                    let mut encode = |path: AnimationPath| {
+                    let mut encode = |segmentation: WebpSegmentation| {
                         if let Some(trace) = trace {
-                            log::info!("[{trace}] stage={path:?}");
+                            log::info!("[{trace}] stage={segmentation:?}");
                         }
                         animation_backends::encode(
-                            &request(path == AnimationPath::Segmented),
+                            &request(segmentation),
                             &mut animation_progress,
                             cancel,
                         )
@@ -915,7 +889,7 @@ impl RecordingSession {
                         webp_fallback_detail.push(warning);
                         webp_fallback = true;
                     };
-                    encode_with_linear_fallback(requested_path, &mut encode, &mut warn)
+                    encode_with_linear_fallback(self.webp_mode, &mut encode, &mut warn)
                 }
             }
             .and_then(|()| pending.commit().map(|_| ()));

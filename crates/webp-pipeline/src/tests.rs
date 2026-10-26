@@ -40,12 +40,26 @@ impl SegmentBackend for FailingBackend {
     }
 }
 
-struct InvalidBackend;
+struct InvalidBackend {
+    calls: AtomicUsize,
+}
 
 impl SegmentBackend for InvalidBackend {
     fn encode(&self, segment: &Segment, _cancel: &AtomicBool) -> anyhow::Result<()> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
         std::fs::write(&segment.path, b"not webp")?;
         Ok(())
+    }
+}
+
+struct PanicBackend {
+    calls: AtomicUsize,
+}
+
+impl SegmentBackend for PanicBackend {
+    fn encode(&self, _segment: &Segment, _cancel: &AtomicBool) -> anyhow::Result<()> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        panic!("encoder panic")
     }
 }
 
@@ -62,10 +76,13 @@ impl SegmentBackend for StaticBackend {
 }
 
 fn config() -> PipelineConfig {
-    PipelineConfig::new(1_000_000, 10, 640, 480, 80)
-        .with_memory_bytes(256 * 1024 * 1024)
-        .with_workers(4)
-        .with_segment_frames(1, Some(10))
+    let tuning = PipelineTuning {
+        memory_bytes: 256 * 1024 * 1024,
+        max_workers: 4,
+        max_segment_frames: Some(10),
+        ..PipelineTuning::default()
+    };
+    PipelineConfig::new(1_000_000, 10, 640, 480, 80).with_tuning(&tuning)
 }
 
 #[test]
@@ -82,8 +99,30 @@ fn budget_blocks_reservations_over_the_limit() {
     let first = budget.reserve(60).unwrap();
     assert!(budget.reserve(41).is_none());
     drop(first);
-    assert_eq!(budget.peak(), 60);
     assert!(budget.reserve(80).is_some());
+}
+
+#[test]
+fn budget_stops_a_rounded_segment_that_exceeds_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("result.webp");
+    let tuning = PipelineTuning {
+        memory_bytes: 512 * 1024 * 1024,
+        max_workers: 1,
+        max_attempts: 1,
+        ..PipelineTuning::default()
+    };
+    let config = PipelineConfig::new(3_000_000, 60, 3840, 2160, 100).with_tuning(&tuning);
+    let error = run(
+        &config,
+        &ValidBackend,
+        &output,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap_err();
+    assert!(format!("{:#}", error.source).contains("memory budget exhausted"));
+    assert!(!output.exists());
 }
 
 #[test]
@@ -108,21 +147,24 @@ fn failed_segment_is_split_and_retried() {
     );
     assert!(schedule.completed.len() >= 2);
     assert!(backend.calls.load(Ordering::Relaxed) >= 3);
-    assert_eq!(schedule.degradations.len(), 1);
+    assert!(schedule.attempts >= 2);
     assert!(progress.windows(2).all(|pair| pair[0] <= pair[1]));
 }
 
 #[test]
-fn successful_run_merges_parts_and_reports_usage() {
+fn successful_run_merges_parts_and_tracks_progress() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("result.webp");
     let cancel = AtomicBool::new(false);
-    let config = PipelineConfig::new(1_000_000, 10, 640, 480, 80)
-        .with_memory_bytes(256 * 1024 * 1024)
-        .with_workers(2)
-        .with_segment_frames(1, Some(5));
+    let tuning = PipelineTuning {
+        memory_bytes: 256 * 1024 * 1024,
+        max_workers: 2,
+        max_segment_frames: Some(5),
+        ..PipelineTuning::default()
+    };
+    let config = PipelineConfig::new(1_000_000, 10, 640, 480, 80).with_tuning(&tuning);
     let mut progress = Vec::new();
-    let report = run(
+    run(
         &config,
         &ValidBackend,
         &output,
@@ -130,9 +172,6 @@ fn successful_run_merges_parts_and_reports_usage() {
         &cancel,
     )
     .unwrap();
-    assert_eq!((report.planned_segments, report.completed_segments), (2, 2));
-    assert_eq!(report.attempts, 1);
-    assert!(report.peak_reserved_bytes > 0);
     assert_eq!(progress.last(), Some(&Some(1.0)));
     webp_parts::validate_animation(&output).unwrap();
 }
@@ -142,27 +181,30 @@ fn still_segments_are_normalized_and_merged() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("result.webp");
     let cancel = AtomicBool::new(false);
-    let config = PipelineConfig::new(1_000_000, 10, 9, 10, 80)
-        .with_memory_bytes(64 * 1024 * 1024)
-        .with_workers(2)
-        .with_segment_frames(1, Some(5));
-    let report = run(&config, &StaticBackend, &output, &mut |_| {}, &cancel).unwrap();
-    assert_eq!((report.planned_segments, report.completed_segments), (2, 2));
+    let tuning = PipelineTuning {
+        memory_bytes: 64 * 1024 * 1024,
+        max_workers: 2,
+        max_segment_frames: Some(5),
+        ..PipelineTuning::default()
+    };
+    let config = PipelineConfig::new(1_000_000, 10, 9, 10, 80).with_tuning(&tuning);
+    run(&config, &StaticBackend, &output, &mut |_| {}, &cancel).unwrap();
     webp_parts::validate_animation(&output).unwrap();
 }
 
 #[test]
-fn permanent_failure_returns_progress_report() {
+fn permanent_failure_returns_typed_pipeline_error() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("result.webp");
     let cancel = AtomicBool::new(false);
-    let config = PipelineConfig::new(1_000_000, 10, 640, 480, 80)
-        .with_attempts(3)
-        .with_retry_backoff(Duration::from_millis(1));
+    let tuning = PipelineTuning {
+        max_attempts: 3,
+        retry_backoff: Duration::from_millis(1),
+        ..PipelineTuning::default()
+    };
+    let config = PipelineConfig::new(1_000_000, 10, 640, 480, 80).with_tuning(&tuning);
     let error = run(&config, &FailingBackend, &output, &mut |_| {}, &cancel).unwrap_err();
-    assert_eq!(error.report.attempts, 3);
-    assert_eq!(error.report.degradations.len(), 3);
-    assert_eq!(error.report.completed_segments, 0);
+    assert!(format!("{:#}", error.source).contains("after 3 attempts"));
     assert!(!output.exists());
 }
 
@@ -171,12 +213,67 @@ fn invalid_segment_output_is_rejected_before_merge() {
     let dir = tempfile::tempdir().unwrap();
     let output = dir.path().join("result.webp");
     let cancel = AtomicBool::new(false);
-    let config = PipelineConfig::new(1_000_000, 10, 640, 480, 80)
-        .with_attempts(1)
-        .with_retry_backoff(Duration::from_millis(1));
-    let error = run(&config, &InvalidBackend, &output, &mut |_| {}, &cancel).unwrap_err();
+    let tuning = PipelineTuning {
+        max_attempts: 6,
+        retry_backoff: Duration::from_millis(1),
+        ..PipelineTuning::default()
+    };
+    let config = PipelineConfig::new(1_000_000, 10, 640, 480, 80).with_tuning(&tuning);
+    let backend = InvalidBackend {
+        calls: AtomicUsize::new(0),
+    };
+    let error = run(&config, &backend, &output, &mut |_| {}, &cancel).unwrap_err();
     assert!(format!("{:#}", error.source).contains("not a WebP"));
+    assert_eq!(backend.calls.load(Ordering::Relaxed), 1);
     assert!(!output.exists());
+}
+
+#[test]
+fn a_panicking_segment_stops_without_retrying() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("result.webp");
+    let tuning = PipelineTuning {
+        max_attempts: 6,
+        retry_backoff: Duration::from_millis(1),
+        ..PipelineTuning::default()
+    };
+    let config = PipelineConfig::new(1_000_000, 10, 640, 480, 80).with_tuning(&tuning);
+    let backend = PanicBackend {
+        calls: AtomicUsize::new(0),
+    };
+    let error = run(
+        &config,
+        &backend,
+        &output,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap_err();
+    assert!(format!("{:#}", error.source).contains("worker panicked"));
+    assert_eq!(backend.calls.load(Ordering::Relaxed), 1);
+    assert!(!output.exists());
+}
+
+#[test]
+fn a_known_resource_failure_may_degrade_and_recover() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("result.webp");
+    let tuning = PipelineTuning {
+        memory_bytes: 512 * 1024 * 1024,
+        max_workers: 1,
+        max_attempts: 6,
+        ..PipelineTuning::default()
+    };
+    let config = PipelineConfig::new(3_000_000, 60, 3840, 2160, 100).with_tuning(&tuning);
+    run(
+        &config,
+        &ValidBackend,
+        &output,
+        &mut |_| {},
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    webp_parts::validate_animation(&output).unwrap();
 }
 
 #[test]

@@ -1,7 +1,8 @@
+use mediaa_core::settings::WebpMode;
 use mediaa_core::source::{FrameSource, SourceFactory};
 use mediaa_core::{OutputKind, Rect, VideoContainer};
 use mediaa_media::recorder::{
-    AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction, WebpMode,
+    AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction,
 };
 use mediaa_platform::screen::{self, MonitorSource};
 use std::sync::atomic::AtomicBool;

@@ -10,8 +10,6 @@ pub(super) struct Schedule {
     pub(super) max_frames: usize,
     next_id: usize,
     pub(super) attempts: usize,
-    pub(super) peak_reserved_bytes: u64,
-    pub(super) degradations: Vec<Degradation>,
 }
 
 impl Schedule {
@@ -42,17 +40,7 @@ impl Schedule {
             max_frames,
             next_id,
             attempts: 0,
-            peak_reserved_bytes: 0,
-            degradations: Vec::new(),
         }
-    }
-
-    pub(super) fn worker_limit(&self) -> usize {
-        worker_limit(
-            &self.config,
-            self.max_frames,
-            self.pending.len().max(self.completed.len()),
-        )
     }
 
     fn frames(&self, segment: &Segment) -> usize {
@@ -104,7 +92,7 @@ impl Schedule {
             let _ = work_tx.send(segment.clone());
         }
         drop(work_tx);
-        let budget = MemoryBudget::new(self.config.memory_bytes);
+        let budget = MemoryBudget::new(self.config.tuning.memory_bytes);
         let stop = AtomicBool::new(false);
         let workers = self.workers.clamp(1, self.pending.len().max(1));
         std::thread::scope(|scope| {
@@ -122,7 +110,7 @@ impl Schedule {
                             * u128::from(self.config.fps))
                         .div_ceil(1_000_000))
                         .max(1);
-                        let bytes = self.config.fixed_encoder_bytes.saturating_add(
+                        let bytes = self.config.tuning.fixed_encoder_bytes.saturating_add(
                             self.frame_cost
                                 .saturating_mul(frames.min(u128::from(u64::MAX)) as u64),
                         );
@@ -130,18 +118,30 @@ impl Schedule {
                             stop.store(true, Ordering::Relaxed);
                             let _ = result_tx.send((
                                 segment,
-                                Err(anyhow::anyhow!("WebP memory budget exhausted")),
+                                Err(anyhow::Error::new(SegmentFailure::retryable(
+                                    anyhow::anyhow!("WebP memory budget exhausted"),
+                                ))),
                             ));
                             break;
                         };
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             backend.encode(&segment, stop)
                         }))
-                        .unwrap_or_else(|_| Err(anyhow::anyhow!("WebP segment worker panicked")))
-                        .and_then(|()| {
-                            webp_parts::normalize_animation(&segment.path, segment.len_us)
+                        .unwrap_or_else(|_| {
+                            Err(anyhow::Error::new(SegmentFailure::permanent(
+                                anyhow::anyhow!("WebP segment worker panicked"),
+                            )))
                         })
-                        .and_then(|()| webp_parts::validate_animation(&segment.path));
+                        .and_then(|()| {
+                            webp_parts::normalize_animation(&segment.path, segment.len_us).map_err(
+                                |error| anyhow::Error::new(SegmentFailure::permanent(error)),
+                            )
+                        })
+                        .and_then(|()| {
+                            webp_parts::validate_animation(&segment.path).map_err(|error| {
+                                anyhow::Error::new(SegmentFailure::permanent(error))
+                            })
+                        });
                         if result.is_err() {
                             stop.store(true, Ordering::Relaxed);
                         }
@@ -183,7 +183,6 @@ impl Schedule {
                 }
             }
             stop.store(true, Ordering::Relaxed);
-            round.peak_reserved = budget.peak();
             round
         })
     }
@@ -195,14 +194,13 @@ impl Schedule {
         backend: &dyn SegmentBackend,
     ) -> anyhow::Result<()> {
         let mut last_error = None;
-        for attempt in 0..self.config.max_attempts {
+        for attempt in 0..self.config.tuning.max_attempts {
             if self.pending.is_empty() {
                 return Ok(());
             }
             self.attempts += 1;
             let completed_us = self.completed.iter().map(|segment| segment.len_us).sum();
             let round = self.round(completed_us, on_progress, cancel, backend);
-            self.peak_reserved_bytes = self.peak_reserved_bytes.max(round.peak_reserved);
             let completed_ids: Vec<_> = round.completed.iter().map(|segment| segment.id).collect();
             self.pending
                 .retain(|segment| !completed_ids.contains(&segment.id));
@@ -218,18 +216,19 @@ impl Schedule {
             {
                 return Err(Cancelled.into());
             }
+            if round.failure.as_ref().is_some_and(|error| {
+                error
+                    .downcast_ref::<SegmentFailure>()
+                    .is_some_and(|failure| failure.kind() == SegmentFailureKind::Permanent)
+            }) {
+                return Err(round.failure.expect("permanent failure checked"));
+            }
             let error = round
                 .failure
                 .unwrap_or_else(|| anyhow::anyhow!("WebP segment workers stopped"));
             self.workers = (self.workers / 2).max(1);
             self.max_frames = (self.max_frames / 2).max(1);
             self.split_pending();
-            self.degradations.push(Degradation {
-                attempt: attempt + 1,
-                workers: self.workers,
-                max_frames: self.max_frames,
-                error: format!("{error:#}"),
-            });
             let trace = self
                 .config
                 .trace_id
@@ -242,7 +241,7 @@ impl Schedule {
                 self.max_frames
             );
             last_error = Some(error);
-            std::thread::sleep(self.config.retry_backoff * (attempt as u32 + 1));
+            std::thread::sleep(self.config.tuning.retry_backoff * (attempt as u32 + 1));
         }
         let trace = self
             .config
@@ -252,7 +251,7 @@ impl Schedule {
         Err(last_error.unwrap_or_else(|| anyhow::anyhow!("WebP segment schedule stopped"))).context(
             format!(
                 "[{trace}] WebP encoding failed after {} attempts",
-                self.config.max_attempts
+                self.config.tuning.max_attempts
             ),
         )
     }
@@ -262,5 +261,4 @@ impl Schedule {
 struct Round {
     completed: Vec<Segment>,
     failure: Option<anyhow::Error>,
-    peak_reserved: u64,
 }
