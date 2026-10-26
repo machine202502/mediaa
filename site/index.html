@@ -3,16 +3,34 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title data-i18n="meta.title">MediaA — скриншоты, запись экрана и звука, конвертация. Бесплатно.</title>
   <meta name="description" data-i18n-content="meta.description" content="MediaA — бесплатный инструмент для Windows: скриншоты с аннотациями, запись экрана и звука, конвертация между 17+ форматами. Один файл, без облаков.">
   <meta name="theme-color" content="#070812">
   <meta property="og:title" data-i18n-content="og.title" content="MediaA — снимай, записывай, конвертируй">
   <meta property="og:description" data-i18n-content="og.description" content="Скриншоты, запись экрана и звука, конвертация форматов. Бесплатно, с открытым исходным кодом.">
   <meta property="og:type" content="website">
-  <meta property="og:image" content="assets/img/icon-512.png">
+  <meta property="og:url" content="https://machine202502.github.io/mediaa/">
+  <meta property="og:image" content="https://machine202502.github.io/mediaa/assets/img/icon-512.png">
+  <meta property="og:image:width" content="512">
+  <meta property="og:image:height" content="512">
+  <meta property="og:site_name" content="MediaA">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" data-i18n-content="og.title" content="MediaA — снимай, записывай, конвертируй">
+  <meta name="twitter:description" data-i18n-content="og.description" content="Скриншоты, запись экрана и звука, конвертация форматов. Бесплатно, с открытым исходным кодом.">
+  <meta name="twitter:image" content="https://machine202502.github.io/mediaa/assets/img/icon-512.png">
+  <link rel="canonical" href="https://machine202502.github.io/mediaa/">
   <link rel="icon" type="image/png" href="assets/img/icon.png">
   <link rel="apple-touch-icon" href="assets/img/icon-512.png">
+  <link rel="preload" as="image" href="assets/img/screenshot-record.webp" type="image/webp" fetchpriority="high">
   <link rel="stylesheet" href="assets/css/style.css">
+  <noscript>
+    <style>
+      .reveal { opacity: 1; transform: none; filter: none; }
+      .hero-intro { animation: none; }
+      .cta-fog { display: none; }
+    </style>
+  </noscript>
 </head>
 <body>
   <div class="bg" aria-hidden="true">
@@ -23,19 +41,19 @@
 
   <header class="nav" id="nav">
     <a class="brand" href="#top" aria-label="MediaA">
-      <img class="brand-icon" src="assets/img/icon.png" alt="MediaA" width="34" height="34">
+      <img class="brand-icon" src="assets/img/icon.png" alt="" width="34" height="34" aria-hidden="true">
       <span class="brand-name">MediaA</span>
     </a>
-    <nav class="nav-links" aria-label="Main navigation">
+    <nav class="nav-links" aria-label="Основная навигация" data-i18n-aria-label="nav.main">
       <a href="#capture" data-i18n="nav.capture">Захват</a>
       <a href="#record" data-i18n="nav.record">Запись</a>
       <a href="#convert" data-i18n="nav.convert">Конвертация</a>
       <a href="#why" data-i18n="nav.why">Почему MediaA</a>
     </nav>
     <div class="nav-actions">
-      <div class="lang-switch" role="group" aria-label="Language">
-        <button class="lang-btn" type="button" data-lang="en">EN</button>
-        <button class="lang-btn" type="button" data-lang="ru">RU</button>
+      <div class="lang-switch" role="group" aria-label="Язык" data-i18n-aria-label="language.label">
+        <button class="lang-btn" type="button" data-lang="en" aria-pressed="false">EN</button>
+        <button class="lang-btn" type="button" data-lang="ru" aria-pressed="false">RU</button>
       </div>
       <a class="btn btn-ghost btn-sm" href="https://github.com/machine202502/mediaa" target="_blank" rel="noopener">GitHub ↗</a>
     </div>
@@ -78,21 +96,21 @@
       </div>
 
       <div class="hero-inner">
-        <p class="eyebrow reveal" data-i18n="hero.eyebrow">Бесплатно · Открытый исходный код · Windows</p>
+        <p class="eyebrow hero-intro" data-delay="0" data-i18n="hero.eyebrow">Бесплатно · Открытый исходный код · Windows</p>
         <h1 class="hero-title">
-          <span class="line reveal" data-delay="80" data-i18n="hero.line1">Снимай. Записывай.</span>
-          <span class="line gradient-text reveal" data-delay="160" data-i18n="hero.line2" data-scramble>Конвертируй.</span>
+          <span class="line hero-intro" data-delay="80" data-i18n="hero.line1">Снимай. Записывай.</span>
+          <span class="line gradient-text hero-intro" data-delay="160" data-i18n="hero.line2" data-scramble>Конвертируй.</span>
         </h1>
-        <p class="hero-sub reveal" data-delay="240" data-i18n="hero.sub">
+        <p class="hero-sub hero-intro" data-delay="240" data-i18n="hero.sub">
           MediaA — один инструмент, который делает скриншоты с аннотациями, пишет экран и звук
           и мгновенно превращает результат в нужный формат. Без подписок, без аккаунтов и без
           отправки твоих файлов в облако.
         </p>
-        <div class="hero-cta reveal" data-delay="320">
+        <div class="hero-cta hero-intro" data-delay="320">
           <a class="btn btn-primary magnetic" href="#capture" data-i18n="hero.cta.primary">Смотреть возможности</a>
           <a class="btn btn-ghost magnetic" href="https://github.com/machine202502/mediaa" target="_blank" rel="noopener" data-i18n="hero.cta.ghost">Скачать бесплатно ↗</a>
         </div>
-        <div class="hero-stats reveal" data-delay="400">
+        <div class="hero-stats hero-intro" data-delay="400">
           <div class="stat">
             <strong data-i18n="hero.stat.free">0 ₽</strong>
             <span data-i18n="hero.stat.free.label">навсегда</span>
@@ -112,7 +130,7 @@
         </div>
       </div>
 
-      <div class="hero-visual reveal" data-delay="260">
+      <div class="hero-visual">
         <div class="device tilt">
           <div class="device-bar">
             <span class="dot dot-r"></span>
@@ -121,7 +139,10 @@
             <span class="device-title" data-i18n="hero.device.title">MediaA — Запись</span>
           </div>
           <div class="device-screen">
-            <img class="crt-fallback" src="assets/img/screenshot-record.png" width="1180" height="900" alt="Окно записи экрана MediaA" data-i18n-alt="alt.record" loading="lazy">
+            <picture class="media-picture">
+              <source srcset="assets/img/screenshot-record.webp" type="image/webp">
+              <img class="crt-fallback" src="assets/img/screenshot-record.png" width="1180" height="900" alt="Окно записи экрана MediaA" data-i18n-alt="alt.record" loading="eager" fetchpriority="high" decoding="async">
+            </picture>
             <canvas class="crt-canvas" aria-hidden="true"></canvas>
             <div class="rec-badge">
               <span class="rec-dot"></span>
@@ -150,7 +171,7 @@
         </div>
       </div>
 
-      <a class="scroll-hint" href="#capture" aria-label="Scroll down">
+      <a class="scroll-hint" href="#capture" aria-label="Прокрутить вниз" data-i18n-aria-label="scroll.down">
         <span class="mouse"><span class="wheel"></span></span>
       </a>
     </section>
@@ -165,7 +186,10 @@
       <div class="pillar-grid">
         <article class="pillar reveal" data-tilt>
           <div class="pillar-shot">
-            <img src="assets/img/screenshot-capture.png" alt="Экран захвата MediaA: скриншоты экрана, области и окон" data-i18n-alt="alt.capture" loading="lazy">
+            <picture class="media-picture">
+              <source srcset="assets/img/screenshot-capture.webp" type="image/webp">
+              <img src="assets/img/screenshot-capture.png" width="1180" height="900" alt="Экран захвата MediaA: скриншоты экрана, области и окон" data-i18n-alt="alt.capture" loading="lazy" fetchpriority="low" decoding="async">
+            </picture>
           </div>
           <div class="pillar-title">
             <span class="pillar-num">01</span>
@@ -182,7 +206,10 @@
 
         <article class="pillar pillar-featured reveal" data-tilt>
           <div class="pillar-shot">
-            <img src="assets/img/screenshot-record.png" alt="Экран записи MediaA: видео с экрана, области или окон" data-i18n-alt="alt.record2" loading="lazy">
+            <picture class="media-picture">
+              <source srcset="assets/img/screenshot-record.webp" type="image/webp">
+              <img src="assets/img/screenshot-record.png" width="1180" height="900" alt="Экран записи MediaA: видео с экрана, области или окон" data-i18n-alt="alt.record2" loading="lazy" fetchpriority="low" decoding="async">
+            </picture>
           </div>
           <div class="pillar-title">
             <span class="pillar-num">02</span>
@@ -199,7 +226,10 @@
 
         <article class="pillar reveal" data-tilt>
           <div class="pillar-shot">
-            <img src="assets/img/screenshot-convert.png" alt="Экран конвертации MediaA: смена формата, качества и разрешения" data-i18n-alt="alt.convert" loading="lazy">
+            <picture class="media-picture">
+              <source srcset="assets/img/screenshot-convert.webp" type="image/webp">
+              <img src="assets/img/screenshot-convert.png" width="1180" height="900" alt="Экран конвертации MediaA: смена формата, качества и разрешения" data-i18n-alt="alt.convert" loading="lazy" fetchpriority="low" decoding="async">
+            </picture>
           </div>
           <div class="pillar-title">
             <span class="pillar-num">03</span>
@@ -226,7 +256,10 @@
       <div class="bento">
         <article class="bento-item bento-wide reveal" data-tilt>
           <div class="bento-media">
-            <img src="assets/img/screenshot-region.png" alt="Выделение области экрана с рамкой и размерами" data-i18n-alt="alt.region" loading="lazy">
+            <picture class="media-picture">
+              <source srcset="assets/img/screenshot-region.webp" type="image/webp">
+              <img src="assets/img/screenshot-region.png" width="800" height="600" alt="Выделение области экрана с рамкой и размерами" data-i18n-alt="alt.region" loading="lazy" fetchpriority="low" decoding="async">
+            </picture>
           </div>
           <div class="bento-copy">
             <h3 data-i18n="spot.region.h3">Рамка, которая слушается</h3>
@@ -236,7 +269,10 @@
 
         <article class="bento-item reveal" data-tilt>
           <div class="bento-media">
-            <img src="assets/img/screenshot-annotate.png" alt="Палитра аннотаций: кисть, стрелка, прямоугольник, текст" data-i18n-alt="alt.annotate" loading="lazy">
+            <picture class="media-picture">
+              <source srcset="assets/img/screenshot-annotate.webp" type="image/webp">
+              <img src="assets/img/screenshot-annotate.png" width="800" height="600" alt="Палитра аннотаций: кисть, стрелка, прямоугольник, текст" data-i18n-alt="alt.annotate" loading="lazy" fetchpriority="low" decoding="async">
+            </picture>
           </div>
           <div class="bento-copy">
             <h3 data-i18n="spot.annotate.h3">Рисуй на лету</h3>
@@ -246,7 +282,10 @@
 
         <article class="bento-item reveal" data-tilt>
           <div class="bento-media">
-            <img src="assets/img/screenshot-audio.png" alt="Настройка источников звука: микрофон и системный звук" data-i18n-alt="alt.audio" loading="lazy">
+            <picture class="media-picture">
+              <source srcset="assets/img/screenshot-audio.webp" type="image/webp">
+              <img src="assets/img/screenshot-audio.png" width="1180" height="900" alt="Настройка источников звука: микрофон и системный звук" data-i18n-alt="alt.audio" loading="lazy" fetchpriority="low" decoding="async">
+            </picture>
           </div>
           <div class="bento-copy">
             <h3 data-i18n="spot.audio.h3">Голос и система</h3>
@@ -256,7 +295,10 @@
 
         <article class="bento-item bento-wide reveal" data-tilt>
           <div class="bento-media">
-            <img src="assets/img/screenshot-settings.png" alt="Настройки MediaA: тема, горячие клавиши, язык" data-i18n-alt="alt.settings" loading="lazy">
+            <picture class="media-picture">
+              <source srcset="assets/img/screenshot-settings.webp" type="image/webp">
+              <img src="assets/img/screenshot-settings.png" width="1180" height="900" alt="Настройки MediaA: тема, горячие клавиши, язык" data-i18n-alt="alt.settings" loading="lazy" fetchpriority="low" decoding="async">
+            </picture>
           </div>
           <div class="bento-copy">
             <h3 data-i18n="spot.settings.h3">Настрой под себя</h3>
@@ -383,7 +425,7 @@
 
     <div class="footer-inner">
       <a class="brand" href="#top">
-        <img class="brand-icon" src="assets/img/icon.png" alt="MediaA" width="34" height="34">
+        <img class="brand-icon" src="assets/img/icon.png" alt="" width="34" height="34" aria-hidden="true">
         <span class="brand-name">MediaA</span>
       </a>
       <p data-i18n="footer.p">Инструмент захвата экрана на Rust для Windows. Скриншоты, запись экрана и звука, конвертация.</p>

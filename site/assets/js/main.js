@@ -4,6 +4,62 @@
   var prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   var shaderMix = 0;
 
+  function getWebGLContext(canvas, options) {
+    try {
+      return canvas.getContext("webgl", options) || canvas.getContext("experimental-webgl", options);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function createProgramAsync(gl, vertexSource, fragmentSource, onReady) {
+    function compile(type, source) {
+      var shader = gl.createShader(type);
+      gl.shaderSource(shader, source);
+      gl.compileShader(shader);
+      return shader;
+    }
+
+    var vertex = compile(gl.VERTEX_SHADER, vertexSource);
+    var fragment = compile(gl.FRAGMENT_SHADER, fragmentSource);
+    var program = gl.createProgram();
+    gl.attachShader(program, vertex);
+    gl.attachShader(program, fragment);
+    gl.linkProgram(program);
+    var parallel = gl.getExtension("KHR_parallel_shader_compile");
+
+    function check() {
+      if (parallel && !gl.getProgramParameter(program, parallel.COMPLETION_STATUS_KHR)) {
+        requestAnimationFrame(check);
+        return;
+      }
+      var ready = gl.getProgramParameter(program, gl.LINK_STATUS);
+      gl.deleteShader(vertex);
+      gl.deleteShader(fragment);
+      if (!ready) gl.deleteProgram(program);
+      onReady(ready ? program : null);
+    }
+
+    if (parallel) requestAnimationFrame(check);
+    else check();
+  }
+
+  function preferredDpr(maxDpr) {
+    var cores = navigator.hardwareConcurrency || 8;
+    var memory = navigator.deviceMemory || 8;
+    var mobile = window.matchMedia("(max-width: 720px)").matches;
+    var cap = mobile || cores <= 4 || memory <= 4 ? Math.min(maxDpr, 1.1) : maxDpr;
+    return Math.max(1, Math.min(window.devicePixelRatio || 1, cap));
+  }
+
+  function scheduleIdle(callback, timeout) {
+    if (typeof window.requestIdleCallback === "function") {
+      window.requestIdleCallback(callback, { timeout: timeout || 1200 });
+    } else {
+      window.setTimeout(callback, 80);
+    }
+  }
+
   /* ---------- translations ---------- */
   var I18N = {
     en: {
@@ -15,6 +71,9 @@
       "nav.record": "Record",
       "nav.convert": "Convert",
       "nav.why": "Why MediaA",
+      "nav.main": "Main navigation",
+      "language.label": "Language",
+      "scroll.down": "Scroll down",
       "hero.eyebrow": "Free · Open source · Windows",
       "hero.line1": "Snap. Record.",
       "hero.line2": "Convert.",
@@ -117,6 +176,9 @@
       "nav.record": "Запись",
       "nav.convert": "Конвертация",
       "nav.why": "Почему MediaA",
+      "nav.main": "Основная навигация",
+      "language.label": "Язык",
+      "scroll.down": "Прокрутить вниз",
       "hero.eyebrow": "Бесплатно · Открытый исходный код · Windows",
       "hero.line1": "Снимай. Записывай.",
       "hero.line2": "Конвертируй.",
@@ -322,16 +384,30 @@
       applyWobble(el);
     });
     document.querySelectorAll(".lang-btn").forEach(function (btn) {
-      btn.classList.toggle("active", btn.getAttribute("data-lang") === lang);
+      var active = btn.getAttribute("data-lang") === lang;
+      btn.classList.toggle("active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
     });
 
     try {
       localStorage.setItem("mediaa-lang", lang);
     } catch (e) {}
 
-    document.querySelectorAll("[data-scramble].in").forEach(function (el) {
+    document.querySelectorAll("[data-scramble].in, .hero-title [data-scramble]").forEach(function (el) {
       scrambleTo(el, t(el.getAttribute("data-i18n")));
     });
+  }
+
+  function initHeroIntro() {
+    document.querySelectorAll(".hero-intro").forEach(function (el) {
+      var delay = parseInt(el.getAttribute("data-delay") || "0", 10);
+      el.style.setProperty("--delay", delay);
+    });
+    var title = document.querySelector(".hero-title [data-scramble]");
+    if (!title || prefersReduced) return;
+    window.setTimeout(function () {
+      scrambleTo(title, t(title.getAttribute("data-i18n")));
+    }, 180);
   }
 
   /* ---------- WebGL aurora background ---------- */
@@ -339,7 +415,7 @@
     var canvas = document.getElementById("shader");
     if (!canvas) return;
 
-    var gl = canvas.getContext("webgl", { alpha: false, antialias: false, powerPreference: "high-performance" });
+    var gl = getWebGLContext(canvas, { alpha: false, antialias: false, powerPreference: "high-performance" });
     if (!gl) return;
 
     var vertex = [
@@ -410,27 +486,9 @@
       "}"
     ].join("\n");
 
-    function compile(type, src) {
-      var sh = gl.createShader(type);
-      gl.shaderSource(sh, src);
-      gl.compileShader(sh);
-      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-        gl.deleteShader(sh);
-        return null;
-      }
-      return sh;
-    }
-
-    var vs = compile(gl.VERTEX_SHADER, vertex);
-    var fs = compile(gl.FRAGMENT_SHADER, fragment);
-    if (!vs || !fs) return;
-
-    var prog = gl.createProgram();
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return;
-    gl.useProgram(prog);
+    createProgramAsync(gl, vertex, fragment, function (prog) {
+      if (!prog) return;
+      gl.useProgram(prog);
 
     var buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -444,7 +502,7 @@
     var uMix = gl.getUniformLocation(prog, "u_mix");
     var uScroll = gl.getUniformLocation(prog, "u_scroll");
     function resize() {
-      var dpr = Math.min(window.devicePixelRatio || 1, 2);
+      var dpr = preferredDpr(1.35);
       var w = Math.floor(canvas.clientWidth * dpr);
       var h = Math.floor(canvas.clientHeight * dpr);
       if (canvas.width !== w || canvas.height !== h) {
@@ -455,17 +513,37 @@
     }
     resize();
     window.addEventListener("resize", resize);
+    var contextLost = false;
+    canvas.addEventListener("webglcontextlost", function (event) {
+      event.preventDefault();
+      contextLost = true;
+      canvas.classList.remove("on");
+    });
 
-    var start = performance.now();
-    function frame(now) {
+    if (prefersReduced) {
       gl.uniform2f(uRes, canvas.width, canvas.height);
-      gl.uniform1f(uTime, (now - start) / 1000);
+      gl.uniform1f(uTime, 0);
       gl.uniform1f(uMix, shaderMix);
       gl.uniform1f(uScroll, window.scrollY / Math.max(1, window.innerHeight));
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      return;
+    }
+
+    var start = performance.now();
+    var lastDraw = -Infinity;
+    function frame(now) {
+      if (!contextLost && !document.hidden && now - lastDraw >= 32) {
+        gl.uniform2f(uRes, canvas.width, canvas.height);
+        gl.uniform1f(uTime, (now - start) / 1000);
+        gl.uniform1f(uMix, shaderMix);
+        gl.uniform1f(uScroll, window.scrollY / Math.max(1, window.innerHeight));
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+        lastDraw = now;
+      }
       requestAnimationFrame(frame);
     }
-    requestAnimationFrame(frame);
+      requestAnimationFrame(frame);
+    });
   }
 
   /* ---------- CRT shader for the hero screenshot ---------- */
@@ -474,7 +552,7 @@
     var canvas = document.querySelector(".crt-canvas");
     if (!img || !canvas) return;
 
-    var gl = canvas.getContext("webgl", { antialias: false, alpha: false });
+    var gl = getWebGLContext(canvas, { antialias: false, alpha: false });
     if (!gl) return;
 
     var vertex = [
@@ -546,27 +624,9 @@
       "}"
     ].join("\n");
 
-    function compile(type, src) {
-      var sh = gl.createShader(type);
-      gl.shaderSource(sh, src);
-      gl.compileShader(sh);
-      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-        gl.deleteShader(sh);
-        return null;
-      }
-      return sh;
-    }
-
-    var vs = compile(gl.VERTEX_SHADER, vertex);
-    var fs = compile(gl.FRAGMENT_SHADER, fragment);
-    if (!vs || !fs) return;
-
-    var prog = gl.createProgram();
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return;
-    gl.useProgram(prog);
+    createProgramAsync(gl, vertex, fragment, function (prog) {
+      if (!prog) return;
+      gl.useProgram(prog);
 
     var buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -579,9 +639,11 @@
     var uTime = gl.getUniformLocation(prog, "u_time");
     var ready = false;
     var started = 0;
+    var visible = !("IntersectionObserver" in window);
+    var rafId = 0;
 
     function resize() {
-      var dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      var dpr = preferredDpr(1.35);
       var w = Math.max(2, Math.round(img.clientWidth * dpr));
       var h = Math.max(2, Math.round(w * (img.naturalHeight || 900) / (img.naturalWidth || 1180)));
       if (canvas.width !== w || canvas.height !== h) {
@@ -596,11 +658,41 @@
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
-    function frame(now) {
-      if (!ready) return;
-      draw((now - started) / 1000);
-      requestAnimationFrame(frame);
+    function stop() {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
     }
+
+    function frame(now) {
+      rafId = 0;
+      if (!ready || !visible || document.hidden) return;
+      draw((now - started) / 1000);
+      rafId = requestAnimationFrame(frame);
+    }
+
+    function kick() {
+      if (!ready || prefersReduced || !visible || document.hidden || rafId) return;
+      rafId = requestAnimationFrame(frame);
+    }
+
+    if ("IntersectionObserver" in window) {
+      new IntersectionObserver(function (entries) {
+        visible = entries[0].isIntersecting;
+        if (visible) kick();
+        else stop();
+      }, { threshold: 0.01 }).observe(canvas);
+    }
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) stop();
+      else kick();
+    });
+    canvas.addEventListener("webglcontextlost", function (event) {
+      event.preventDefault();
+      ready = false;
+      stop();
+      canvas.classList.remove("on");
+      img.classList.remove("crt-off");
+    });
 
     function start() {
       try {
@@ -622,7 +714,7 @@
         if (prefersReduced) {
           draw(1.0);
         } else {
-          requestAnimationFrame(frame);
+          kick();
         }
       } catch (e) {
         canvas.classList.remove("on");
@@ -635,13 +727,20 @@
     } else {
       img.addEventListener("load", start, { once: true });
     }
+    });
   }
 
   /* ---------- shader fog for final CTA ---------- */
   function initCtaFog() {
     var canvas = document.querySelector(".cta-fog");
     if (!canvas) return;
-    var gl = canvas.getContext("webgl", { alpha: true, antialias: false, premultipliedAlpha: false });
+
+    var started = false;
+    function startFog() {
+      if (started) return;
+      started = true;
+
+    var gl = getWebGLContext(canvas, { alpha: true, antialias: false, premultipliedAlpha: false });
     if (!gl) return;
 
     var vertex = [
@@ -683,27 +782,9 @@
       "}"
     ].join("\n");
 
-    function compile(type, src) {
-      var sh = gl.createShader(type);
-      gl.shaderSource(sh, src);
-      gl.compileShader(sh);
-      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-        gl.deleteShader(sh);
-        return null;
-      }
-      return sh;
-    }
-
-    var vs = compile(gl.VERTEX_SHADER, vertex);
-    var fs = compile(gl.FRAGMENT_SHADER, fragment);
-    if (!vs || !fs) return;
-
-    var prog = gl.createProgram();
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return;
-    gl.useProgram(prog);
+    createProgramAsync(gl, vertex, fragment, function (prog) {
+      if (!prog) return;
+      gl.useProgram(prog);
 
     var buf = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, buf);
@@ -715,7 +796,7 @@
     var uTime = gl.getUniformLocation(prog, "u_time");
 
     function resize() {
-      var dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+      var dpr = preferredDpr(1.25);
       var w = Math.max(2, Math.round(canvas.clientWidth * dpr));
       var h = Math.max(2, Math.round(canvas.clientHeight * dpr));
       if (canvas.width !== w || canvas.height !== h) {
@@ -727,6 +808,24 @@
     resize();
     window.addEventListener("resize", resize);
     gl.clearColor(0, 0, 0, 0);
+    var visible = false;
+    var rafId = 0;
+
+    function stop() {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+
+    function kick() {
+      if (prefersReduced || !visible || document.hidden || rafId) return;
+      rafId = requestAnimationFrame(frame);
+    }
+
+    canvas.addEventListener("webglcontextlost", function (event) {
+      event.preventDefault();
+      visible = false;
+      stop();
+    });
 
     function draw(t) {
       gl.clear(gl.COLOR_BUFFER_BIT);
@@ -735,10 +834,11 @@
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
-    var visible = false;
     if ("IntersectionObserver" in window) {
       new IntersectionObserver(function (entries) {
         visible = entries[0].isIntersecting;
+        if (visible) kick();
+        else stop();
       }, { threshold: 0 }).observe(canvas);
     } else {
       visible = true;
@@ -749,11 +849,33 @@
       return;
     }
     var start = performance.now();
+    var lastDraw = -Infinity;
     function frame(now) {
-      if (visible && !document.hidden) draw((now - start) / 1000);
-      requestAnimationFrame(frame);
+      rafId = 0;
+      if (visible && !document.hidden && now - lastDraw >= 32) {
+        draw((now - start) / 1000);
+        lastDraw = now;
+      }
+      if (visible && !document.hidden) rafId = requestAnimationFrame(frame);
     }
-    requestAnimationFrame(frame);
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) stop();
+      else kick();
+    });
+    kick();
+    });
+    }
+
+    if ("IntersectionObserver" in window) {
+      var lazyObserver = new IntersectionObserver(function (entries) {
+        if (!entries[0].isIntersecting) return;
+        lazyObserver.disconnect();
+        startFog();
+      }, { rootMargin: "300px 0px" });
+      lazyObserver.observe(canvas);
+    } else {
+      startFog();
+    }
   }
 
   /* ---------- interlude camera ---------- */
@@ -778,14 +900,34 @@
       pointer.active = false;
     });
 
-    var visible = false;
+    var visible = !("IntersectionObserver" in window);
+    var rafId = 0;
+
+    function stop() {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
+    }
+
+    function kick() {
+      if (prefersReduced || !visible || document.hidden || rafId) return;
+      rafId = requestAnimationFrame(frame);
+    }
+
     if ("IntersectionObserver" in window) {
       new IntersectionObserver(function (entries) {
         visible = entries[0].isIntersecting;
+        if (visible) kick();
+        else stop();
       }, { threshold: 0 }).observe(mount);
-    } else {
-      visible = true;
     }
+    document.addEventListener("visibilitychange", function () {
+      if (document.hidden) {
+        pointer.active = false;
+        stop();
+      } else {
+        kick();
+      }
+    });
 
     if (prefersReduced) {
       cam.style.transform = "rotateY(-8deg) rotateX(4deg)";
@@ -820,6 +962,7 @@
     });
 
     function frame(now) {
+      rafId = 0;
       if (visible && !document.hidden) {
         var r = mount.getBoundingClientRect();
         var cx = r.left + r.width / 2;
@@ -867,9 +1010,9 @@
         }
         cam.style.transform = "translate3d(" + flourishX.toFixed(2) + "px," + (bob + flourishY).toFixed(2) + "px,0) rotateY(" + (yaw + swayYaw + flourishYaw).toFixed(2) + "deg) rotateX(" + (pitch + swayPitch + flourishPitch).toFixed(2) + "deg) rotateZ(" + flourishTilt.toFixed(2) + "deg) scale(" + flourishScale.toFixed(3) + ")";
       }
-      requestAnimationFrame(frame);
+      if (visible && !document.hidden) rafId = requestAnimationFrame(frame);
     }
-    requestAnimationFrame(frame);
+    kick();
   }
 
   function initCameraShutters() {
@@ -1074,6 +1217,8 @@
     var activeStart = 0;
     var yaw = 0;
     var pitch = 0;
+    var kickCam = function () {};
+    var stopCam = function () {};
     var pointer = { x: window.innerWidth / 2, y: window.innerHeight / 2, active: false };
 
     function isInPeekZone() {
@@ -1095,6 +1240,7 @@
       mount.setAttribute("aria-hidden", "false");
       trigger.tabIndex = 0;
       if (prefersReduced) cam.style.transform = "rotateY(" + yaw + "deg) rotateX(-3deg)";
+      else kickCam();
     }
 
     function hide(cooldown) {
@@ -1104,6 +1250,7 @@
       mount.setAttribute("aria-hidden", "true");
       trigger.tabIndex = -1;
       mount.classList.add("is-retreating");
+      stopCam();
       window.setTimeout(function () {
         visible = false;
         retreating = false;
@@ -1136,8 +1283,10 @@
     document.addEventListener("visibilitychange", function () {
       if (document.hidden) {
         if (visible) hide(0);
+        stopCam();
       } else {
         updatePresence();
+        if (visible) kickCam();
       }
     });
 
@@ -1162,7 +1311,9 @@
     }, 500);
 
     if (!prefersReduced) {
+      var camRaf = 0;
       function frame(now) {
+        camRaf = 0;
         if (visible && !document.hidden) {
           var rect = trigger.getBoundingClientRect();
           var cx = rect.left + rect.width / 2;
@@ -1181,9 +1332,16 @@
           var bob = Math.sin(t * 0.88) * 3 + Math.sin(t * 1.71) * 1.2;
           cam.style.transform = "rotateY(" + (yaw + scanYaw).toFixed(2) + "deg) rotateX(" + (pitch + scanPitch).toFixed(2) + "deg) translateY(" + bob.toFixed(2) + "px)";
         }
-        requestAnimationFrame(frame);
+        if (visible && !document.hidden) camRaf = requestAnimationFrame(frame);
       }
-      requestAnimationFrame(frame);
+      kickCam = function () {
+        if (!visible || document.hidden || camRaf) return;
+        camRaf = requestAnimationFrame(frame);
+      };
+      stopCam = function () {
+        if (camRaf) cancelAnimationFrame(camRaf);
+        camRaf = 0;
+      };
     }
 
     updatePresence();
@@ -1228,6 +1386,12 @@
   function initCounters() {
     var counters = document.querySelectorAll("[data-count]");
     if (!counters.length) return;
+    if (!("IntersectionObserver" in window)) {
+      counters.forEach(function (el) {
+        el.textContent = el.getAttribute("data-count");
+      });
+      return;
+    }
     var io = new IntersectionObserver(function (entries) {
       entries.forEach(function (entry) {
         if (!entry.isIntersecting) return;
@@ -1258,6 +1422,7 @@
     if (!el || prefersReduced) return;
     var seconds = 0;
     setInterval(function () {
+      if (document.hidden) return;
       seconds++;
       var m = Math.floor(seconds / 60);
       var s = seconds % 60;
@@ -1329,10 +1494,15 @@
     var items = document.querySelectorAll("[data-tilt]");
     items.forEach(function (el) {
       var media = el.querySelector(".pillar-shot, .bento-media");
-      el.addEventListener("pointermove", function (e) {
-        var r = el.getBoundingClientRect();
-        var px = (e.clientX - r.left) / r.width - 0.5;
-        var py = (e.clientY - r.top) / r.height - 0.5;
+      var frameId = 0;
+      var pending = null;
+
+      function render() {
+        frameId = 0;
+        if (!pending) return;
+        var px = pending.x;
+        var py = pending.y;
+        pending = null;
         var rx = -py * 2.4;
         var ry = px * 2.4;
         el.style.transform = "perspective(900px) rotateX(" + rx.toFixed(2) + "deg) rotateY(" + ry.toFixed(2) + "deg) translateY(-2px)";
@@ -1341,8 +1511,20 @@
           media.style.setProperty("--mask-shift", (ry * 4).toFixed(2) + "%");
           media.style.setProperty("--light-o", "1");
         }
+      }
+
+      el.addEventListener("pointermove", function (e) {
+        var r = el.getBoundingClientRect();
+        pending = {
+          x: (e.clientX - r.left) / r.width - 0.5,
+          y: (e.clientY - r.top) / r.height - 0.5
+        };
+        if (!frameId) frameId = requestAnimationFrame(render);
       });
       el.addEventListener("pointerleave", function () {
+        pending = null;
+        if (frameId) cancelAnimationFrame(frameId);
+        frameId = 0;
         el.style.transform = "";
         if (media) media.style.setProperty("--light-o", "0");
       });
@@ -1353,13 +1535,28 @@
   function initMagnetic() {
     if (prefersReduced || !window.matchMedia("(hover: hover)").matches) return;
     document.querySelectorAll(".magnetic").forEach(function (btn) {
+      var frameId = 0;
+      var pending = null;
+
+      function render() {
+        frameId = 0;
+        if (!pending) return;
+        btn.style.transform = "translate(" + pending.x * 0.18 + "px," + pending.y * 0.24 + "px)";
+        pending = null;
+      }
+
       btn.addEventListener("pointermove", function (e) {
         var r = btn.getBoundingClientRect();
-        var x = e.clientX - r.left - r.width / 2;
-        var y = e.clientY - r.top - r.height / 2;
-        btn.style.transform = "translate(" + x * 0.18 + "px," + y * 0.24 + "px)";
+        pending = {
+          x: e.clientX - r.left - r.width / 2,
+          y: e.clientY - r.top - r.height / 2
+        };
+        if (!frameId) frameId = requestAnimationFrame(render);
       });
       btn.addEventListener("pointerleave", function () {
+        pending = null;
+        if (frameId) cancelAnimationFrame(frameId);
+        frameId = 0;
         btn.style.transform = "";
       });
     });
@@ -1397,14 +1594,24 @@
       "--g4": ["#7dd3fc", "#c4b5fd"],
       "--cyan": ["#22d3ee", "#a855f7"]
     };
-    function update() {
+    var frameId = 0;
+    var lastP = -1;
+
+    function render() {
+      frameId = 0;
       var max = document.documentElement.scrollHeight - window.innerHeight;
       var raw = max > 0 ? Math.min(Math.max(window.scrollY / max, 0), 1) : 0;
       var p = raw * 0.3;
+      if (Math.abs(p - lastP) < 0.0005) return;
+      lastP = p;
       Object.keys(pairs).forEach(function (key) {
         root.style.setProperty(key, lerpColor(pairs[key][0], pairs[key][1], p));
       });
       shaderMix = p;
+    }
+
+    function update() {
+      if (!frameId) frameId = requestAnimationFrame(render);
     }
     window.addEventListener("scroll", update, { passive: true });
     window.addEventListener("resize", update);
@@ -1413,12 +1620,7 @@
 
   /* ---------- run ---------- */
   setLang(detectLang());
-  initShader();
-  initCrt();
-  initCtaFog();
-  initInterludeCamera();
-  initCameraShutters();
-  initFooterPeekCamera();
+  initHeroIntro();
   initNav();
   initReveal();
   initCounters();
@@ -1428,4 +1630,19 @@
   initMagnetic();
   initLanguageSwitcher();
   initPaletteShift();
+  initCameraShutters();
+  initCtaFog();
+
+  requestAnimationFrame(function () {
+    requestAnimationFrame(function () {
+      scheduleIdle(initShader, 900);
+      window.setTimeout(function () {
+        scheduleIdle(initCrt, 1400);
+      }, 120);
+      window.setTimeout(function () {
+        initInterludeCamera();
+        window.setTimeout(initFooterPeekCamera, 80);
+      }, 180);
+    });
+  });
 })();

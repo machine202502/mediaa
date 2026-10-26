@@ -55,3 +55,4 @@
 | UI-REGION-5 | 26.10.26 06:54 | Убрать артефакты первого показа overlay через opaque pre-show viewport | готово | [region-overlay-smooth-open.md](tasks/region-overlay-smooth-open.md) |
 | UX-AUDIT-1 | 26.10.26 07:00 | Закрыть приоритетные пробелы UX-тестов dynamic overlay, populated pages и responsive layout | готово | [ux-coverage-gaps.md](tasks/ux-coverage-gaps.md) |
 | UI-REGION-6 | 26.10.26 07:18 | Не допускать перекрытия selection size badge и активного text frame | готово | [region-size-badge-collision.md](tasks/region-size-badge-collision.md) |
+| SITE-1 | 26.10.26 07:24 | Создать маркетинговый сайт MediaA и Pages-деплой через GitHub Actions | готово | [site-marketing.md](tasks/site-marketing.md) |

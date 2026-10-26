@@ -2,5 +2,6 @@
   "chat.useAgentSkills": true,
   "chat.agentSkillsLocations": {
     ".claude/skills": false
-  }
+  },
+  "liveServer.settings.port": 5501
 }
