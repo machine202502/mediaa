@@ -65,13 +65,16 @@ pipeline as a library), [xcap](https://crates.io/crates/xcap), [windows-capture]
 
 ## Workflow
 
-Assistants follow [CLAUDE.md](CLAUDE.md). Complex designs go to `workflow/plans/`, and
-implementation is tracked one task at a time in
-[workflow/tasks.md](workflow/tasks.md).
+Assistants follow [CLAUDE.md](CLAUDE.md). Project knowledge lives in `specs/`:
 
-Long-term project memory is split into [rules](workflow/rules.md),
-[practices](workflow/practices.md) and [stones](workflow/stones.md). The current user's explicit
-instruction takes priority; stale or conflicting memory must be corrected.
+- [principles](specs/principles.md) — decision principles;
+- [rules](specs/rules.md) — mandatory user and operating rules;
+- [architecture](specs/architecture.md) — current crate and module responsibilities;
+- [constraints](specs/constraints.md) — important technical and product constraints;
+- [progress](specs/progress.md) — tasks with links to `specs/tasks/*.md`.
+
+Implementation is tracked one task at a time. The current user's explicit instruction takes priority;
+stale or conflicting project knowledge must be corrected.
 
 Project audit skills:
 

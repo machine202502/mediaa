@@ -1,6 +1,7 @@
 # MediaA
 
-Read [CLAUDE.md](CLAUDE.md) before acting. Apply the project memory in
-[workflow/rules.md](workflow/rules.md), [workflow/practices.md](workflow/practices.md) and
-[workflow/stones.md](workflow/stones.md). Track work in
-[workflow/tasks.md](workflow/tasks.md), one task at a time.
+Read [CLAUDE.md](CLAUDE.md) before acting. Apply [specs/principles.md](specs/principles.md),
+[specs/rules.md](specs/rules.md), [specs/architecture.md](specs/architecture.md) and
+[specs/constraints.md](specs/constraints.md). Track work in
+[specs/progress.md](specs/progress.md), one task at a time, and read the linked
+`specs/tasks/*.md` context before starting.
