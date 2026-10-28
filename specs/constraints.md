@@ -133,6 +133,54 @@
 - SQLite остаётся: snapshot/JSON не доказал эквивалентность query, incremental update и recovery.
 - Потеря перестраиваемого cache допустима, но потеря пользовательского результата — нет.
 
+## Изоляция Windows от песочниц агентов
+
+Песочницы LLM-агентов на Windows меняют права на рабочем каталоге и не снимают их после работы.
+Подтверждено для OpenAI Codex (`CodexSandboxService`, группы `CodexSandboxUsers`,
+`CodexSandboxOnline/Offline`). Другие песочницы, AppContainer и инструменты, которые ставят
+метку Low integrity, дают тот же эффект. Остановка процесса или удаление песочницы права не
+возвращает: они записаны в файловую систему.
+
+Главный механизм — метка целостности Low на корне репозитория (`Mandatory Label\Low Mandatory
+Level:(OI)(CI)(NW)`). Она наследуется на все файлы, включая exe в `target`. Windows запускает
+процесс с уровнем не выше метки его exe, поэтому всё, что запускается из рабочего дерева,
+работает на Low и не может писать в каталоги уровня Medium: `%TEMP%`, `%LOCALAPPDATA%`,
+`Documents`. Писать внутрь дерева при этом можно: там та же метка Low.
+
+Признаки (отказ в доступе только у процессов, запущенных из дерева):
+- сборка: LNK1104 на `%TEMP%\lnk{GUID}.tmp` у `lib.exe`, `UnauthorizedAccessException` на
+  `%TEMP%\MSBuildTemp<GUID>` у MSBuild, код 2 без сообщения у `cl.exe`. Падают build-скрипты
+  `cc`/`cmake`: `build-script-build.exe` лежит в `target`;
+- запуск: exe из `target` не пишет в `Documents` и `%LOCALAPPDATA%`; SQLite не создаёт WAL
+  (на экране код 14);
+- та же сборка с `CARGO_TARGET_DIR` вне репозитория или копия exe вне дерева работают.
+
+Ловушка диагностики: перенаправление `TEMP` внутрь `target` «чинит» сборку, потому что там тоже
+Low, и маскирует причину. Обходы (`TEMP` в дереве, запуск копии exe снаружи, отключение
+debug info) не добавлять, пока не проверена метка.
+
+Диагностика:
+
+```powershell
+icacls <repo>                          # ищем "Mandatory Label\Low" и чужие SID/группы
+icacls <repo>\target\debug\build\<crate>-*\build-script-build.exe   # (I)…Low…(NW)
+```
+
+Исправление (снимает и DACL-записи песочницы, и метку). Сначала сохранить текущие права:
+
+```powershell
+icacls <repo> /save <вне-repo>\acl-backup.txt /C /Q
+icacls <repo> /reset /T /C /Q
+icacls <repo> /setintegritylevel "(OI)(CI)M" /C /Q
+```
+
+`/reset` метку не трогает, нужна вторая команда. После неё проверить, что exe в `target` показывает
+`Medium`. Песочница поставит метку снова, если её опять запустить в этом каталоге. Подробности
+расследования 28.10.26 — в [windows-build.md](tasks/windows-build.md).
+
+`scripts/windows/run.ps1` запускает копию exe из `%LOCALAPPDATA%\mediaa\dev-run`. Этот обход
+появился из-за той же метки. Пока метка снята, он не обязателен.
+
 ## Сборка и проверки
 
 - FFmpeg статически связывается через vcpkg; команды требуют окружения из Windows scripts.
@@ -141,6 +189,8 @@
   `.cargo/config.toml` задаёт `CMAKE_GENERATOR = Visual Studio 18 2026` и
   `CMAKE_TOOLCHAIN_FILE = cmake/static-crt.cmake`. Без toolchain-файла генератор VS не применяет
   `/MT`, и кэш CMake ищет удалённый файл. Так собиралась `feature/agent-temp`.
+- Отказ в доступе к `%TEMP%` у `lib.exe`, MSBuild или `cl.exe` во время сборки сначала проверять
+  на метку Low (раздел «Изоляция Windows от песочниц агентов»).
 - Windows snapshot baselines не являются доказательством поведения Linux/macOS.
 - Live tests реального desktop/capture пропускаются без display session.
 - Documentation-only изменение не требует повторного Rust suite.

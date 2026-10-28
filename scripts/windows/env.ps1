@@ -36,9 +36,6 @@ if (-not $env:VULKAN_SDK -or -not (Test-Path "$env:VULKAN_SDK\Lib\vulkan-1.lib")
 $env:VCPKG_ROOT = Find-Vcpkg
 $env:LIBCLANG_PATH = Find-LibClang
 $env:FFMPEG_DIR = "$Root\vcpkg_installed\$Triplet"
-$env:TMP = "$Root\target\tmp"
-$env:TEMP = $env:TMP
-New-Item -ItemType Directory -Force $env:TMP | Out-Null
 
 if (-not (Test-Path "$env:FFMPEG_DIR\lib\avcodec.lib")) {
     Write-Host "== vcpkg: building static FFmpeg ($Triplet) =="
