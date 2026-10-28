@@ -39,7 +39,7 @@ impl Stage {
     fn chosen(self, options: &AnalysisOptions) -> bool {
         match self {
             Stage::Transcribe => true,
-            Stage::Diarize => options.diarize,
+            Stage::Diarize => false,
             Stage::Index => options.index,
             Stage::Topics => options.topics,
             Stage::Details => options.details,
@@ -98,7 +98,9 @@ fn stages(from: Stage, options: &AnalysisOptions) -> Vec<Stage> {
 
 fn stage_input(stage: Stage, path: &Path, options: &AnalysisOptions) -> Value {
     match stage {
-        Stage::Diarize => json!({ "path": path, "speakers": options.speakers }),
+        Stage::Transcribe => {
+            json!({ "path": path, "diarize": options.diarize, "speakers": options.speakers })
+        }
         _ => json!({ "path": path }),
     }
 }
@@ -381,7 +383,11 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
         let mut settings = settings(ModelChoices::default());
-        settings.models.diarization = Some(ModelSource::new("c", "dia"));
+        settings.models.speech_recognition = Some({
+            let mut source = ModelSource::new("c", "dia");
+            source.diarize = true;
+            source
+        });
         let fake = FakeEngine::new();
         fake.chat_answers(&[DIGEST, SECTIONS]);
         fake.script_turns(vec![mediaa_core::transcript::Turn {
@@ -391,7 +397,16 @@ mod tests {
         }]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
         let sched = opened(&ai, engine, &settings);
-        let task = start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
+        let task = start(
+            &sched,
+            &ai,
+            &media,
+            AnalysisOptions {
+                diarize: true,
+                ..AnalysisOptions::default()
+            },
+        )
+        .unwrap();
         drain(&sched);
         let queue = sched.store();
 
@@ -405,7 +420,7 @@ mod tests {
             .collect();
         assert_eq!(
             stages,
-            ["transcribe", "diarize", "index", "topics"],
+            ["transcribe", "index", "topics"],
             "the dependencies hold the order"
         );
         let tree = queue.subtree(task).unwrap();
@@ -424,7 +439,7 @@ mod tests {
             assert!(kinds.contains(&kind), "{kind} is in the tree: {kinds:?}");
         }
         assert!(!fake.transcribes().is_empty());
-        assert!(!fake.diarizes().is_empty());
+        assert!(fake.diarizes().is_empty());
         assert!(fake.embeddings_count() > 0);
         assert!(!fake.chats().is_empty());
 
@@ -483,10 +498,7 @@ mod tests {
         let ai = tmp.path().join(".ai");
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
-        let models = ModelChoices {
-            diarization: Some(ModelSource::new("c", "fails/model")),
-            ..ModelChoices::default()
-        };
+        let models = ModelChoices::default();
         let settings = settings(models);
         let fake = FakeEngine::new();
         fake.chat_answers(&[DIGEST, SECTIONS]);
@@ -501,17 +513,7 @@ mod tests {
             children.iter().all(|t| t.status == TaskStatus::Done),
             "{children:?}"
         );
-        let diarize = children
-            .iter()
-            .find(|t| t.kind == crate::diarize::KIND)
-            .unwrap();
-        assert!(
-            diarize.result.as_ref().unwrap()["warning"]
-                .as_str()
-                .is_some(),
-            "{:?}",
-            diarize.result
-        );
+        assert!(children.iter().all(|t| t.kind != crate::diarize::KIND));
         let ready = readiness(&ai, &id(&media)).unwrap();
         assert!(ready.replies && ready.index && ready.topics);
         assert!(!ready.speakers, "the replies stay without speakers");
@@ -524,7 +526,11 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
         let mut settings = settings(ModelChoices::default());
-        settings.models.diarization = Some(ModelSource::new("c", "dia"));
+        settings.models.speech_recognition = Some({
+            let mut source = ModelSource::new("c", "dia");
+            source.diarize = true;
+            source
+        });
         let fake = FakeEngine::new();
         fake.script_turns(vec![mediaa_core::transcript::Turn {
             start: 0.0,
@@ -535,7 +541,16 @@ mod tests {
         let engine: Arc<dyn Engine> = Arc::new(fake);
         let sched = opened(&ai, engine, &settings);
         let queue = sched.store();
-        start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
+        start(
+            &sched,
+            &ai,
+            &media,
+            AnalysisOptions {
+                diarize: true,
+                ..AnalysisOptions::default()
+            },
+        )
+        .unwrap();
         drain(&sched);
         let t = Transcript::open(&ai, &id(&media)).unwrap();
         let replies = t.dialog().unwrap();
@@ -909,7 +924,7 @@ mod tests {
         let back: AgentSettings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.analysis, AnalysisOptions::default());
         assert!(
-            back.analysis.diarize
+            !back.analysis.diarize
                 && back.analysis.index
                 && back.analysis.topics
                 && back.analysis.details
@@ -917,10 +932,7 @@ mod tests {
         assert_eq!(back.analysis.speakers, None);
         let old: AgentSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(old.analysis, AnalysisOptions::default());
-        let models = ModelChoices {
-            diarization: None,
-            ..ModelChoices::default()
-        };
+        let models = ModelChoices::default();
         let resolved = AnalysisOptions::default().resolved(&models);
         assert!(
             !resolved.diarize && resolved.speakers.is_none(),
@@ -1017,7 +1029,6 @@ mod tests {
         for kind in [
             "analysis",
             "transcribe",
-            "diarize",
             "index",
             "topics",
             "topics-plan",

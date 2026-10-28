@@ -249,7 +249,7 @@ impl Engine for ScopedEngine {
         &self,
         request: &TranscribeRequest,
         cancel: &AtomicBool,
-    ) -> Result<Vec<mediaa_core::transcript::Phrase>, EngineError> {
+    ) -> Result<mediaa_engine::SpeechBody, EngineError> {
         let started = Instant::now();
         let result = self.scope.engine.transcribe(request, cancel);
         let model = model_of(&request.source);
@@ -367,6 +367,9 @@ mod tests {
                     from: 0.0,
                     to: 1.0,
                     language: None,
+                    word_times: false,
+                    speakers: false,
+                    voiceprint: false,
                 },
                 &cancel,
             )

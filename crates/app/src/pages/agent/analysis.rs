@@ -1715,7 +1715,7 @@ mod tests {
     #[test]
     fn the_options_keep_their_dependencies() {
         let mut draft = Draft::new(&AnalysisOptions::default(), true);
-        assert!(draft.diarize && draft.index && draft.topics && draft.details);
+        assert!(!draft.diarize && draft.index && draft.topics && draft.details);
         draft.index = false;
         draft.normalize();
         assert!(!draft.topics && !draft.details && !draft.can_topics() && !draft.can_details());
@@ -1728,17 +1728,12 @@ mod tests {
         draft.topics = true;
         assert!(draft.can_details());
         let draft = Draft::new(&AnalysisOptions::default(), false);
-        assert!(draft.diarize && !draft.can_diarize());
-        assert!(draft.options().diarize, "saved as chosen");
-        let no_model = mediaa_core::agent::ModelChoices {
-            diarization: None,
-            ..Default::default()
-        };
-        assert!(
-            !draft.options().resolved(&no_model).diarize,
-            "but not run without a model"
-        );
+        assert!(!draft.diarize && !draft.can_diarize());
+        assert!(!draft.options().diarize);
+        let no_model = mediaa_core::agent::ModelChoices::default();
+        assert!(!draft.options().resolved(&no_model).diarize);
         let mut draft = Draft::new(&AnalysisOptions::default(), true);
+        draft.diarize = true;
         draft.speakers = " 3 ".into();
         assert_eq!(draft.options().speakers, Some(3));
         draft.speakers = "abc".into();

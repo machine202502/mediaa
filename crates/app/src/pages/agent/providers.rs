@@ -4,73 +4,76 @@ use crate::jobs::Job;
 use crate::theme;
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
-use mediaa_core::agent::{Connection, ConnectionKind, OutputFormat, WebEngine, WebSettings};
+use mediaa_core::agent::{Connection, ConnectionKind, WebEngine, WebSettings};
 use rust_i18n::t;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 enum CheckState {
     Running(Job<Result<String, String>>),
     Done(Result<String, String>),
 }
 
-#[derive(Default)]
 pub struct ProvidersUi {
     checks: HashMap<String, CheckState>,
-    shown_keys: Vec<String>,
     web_check: Option<CheckState>,
+    add_kind: ConnectionKind,
+}
+
+impl Default for ProvidersUi {
+    fn default() -> Self {
+        Self {
+            checks: HashMap::new(),
+            web_check: None,
+            add_kind: ConnectionKind::OpenRouter,
+        }
+    }
 }
 
 fn kind_label(kind: ConnectionKind) -> String {
     match kind {
         ConnectionKind::OpenRouter => t!("agent.kind_openrouter").into(),
-        ConnectionKind::OpenAi => t!("agent.kind_openai_api").into(),
         ConnectionKind::DeepSeek => t!("agent.kind_deepseek").into(),
         ConnectionKind::HuggingFace => t!("agent.kind_huggingface").into(),
         ConnectionKind::Ollama => t!("agent.kind_ollama").into(),
         ConnectionKind::OpenAiCompatible => t!("agent.kind_openai").into(),
-        ConnectionKind::Command => t!("agent.kind_command").into(),
+        ConnectionKind::Transcription => t!("agent.kind_transcription").into(),
     }
 }
 
-fn format_label(format: OutputFormat) -> String {
-    match format {
-        OutputFormat::WhisperJson => "Whisper JSON".into(),
-        OutputFormat::OpenAiJson => "OpenAI JSON".into(),
-        OutputFormat::Srt => "SRT".into(),
-        OutputFormat::Vtt => "VTT".into(),
-        OutputFormat::Rttm => "RTTM".into(),
-        OutputFormat::Vectors => t!("agent.output_vectors").into(),
-    }
-}
+const ADD_KINDS: [ConnectionKind; 6] = [
+    ConnectionKind::OpenRouter,
+    ConnectionKind::DeepSeek,
+    ConnectionKind::HuggingFace,
+    ConnectionKind::Ollama,
+    ConnectionKind::OpenAiCompatible,
+    ConnectionKind::Transcription,
+];
 
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     header(ui, &t!("agent.providers_title"), "");
     let mut changed = false;
     let mut remove = None;
-    ui.horizontal_wrapped(|ui| {
-        for kind in [
-            ConnectionKind::OpenRouter,
-            ConnectionKind::OpenAi,
-            ConnectionKind::DeepSeek,
-            ConnectionKind::HuggingFace,
-            ConnectionKind::Ollama,
-            ConnectionKind::OpenAiCompatible,
-            ConnectionKind::Command,
-        ] {
-            if ui.button(kind_label(kind)).clicked() {
-                let mut connection = Connection::new(kind, &kind_label(kind));
-                if kind == ConnectionKind::Command {
-                    connection.command = Some(mediaa_core::agent::CommandSpec {
-                        program: PathBuf::from("whisper-cli"),
-                        args: vec!["-m".into(), "{model}".into(), "-f".into(), "{input}".into()],
-                        output: OutputFormat::WhisperJson,
-                        whole_file: false,
-                    });
+    ui.horizontal(|ui| {
+        let mut picked = app.agent.providers.add_kind;
+        egui::ComboBox::from_id_salt("add-provider")
+            .selected_text(kind_label(picked))
+            .show_ui(ui, |ui| {
+                for kind in ADD_KINDS {
+                    if ui
+                        .selectable_label(picked == kind, kind_label(kind))
+                        .clicked()
+                    {
+                        picked = kind;
+                    }
                 }
-                app.settings.agent.connections.push(connection);
-                changed = true;
-            }
+            });
+        if picked != app.agent.providers.add_kind {
+            app.agent.providers.add_kind = picked;
+        }
+        if ui.button(icon::PLUS).clicked() {
+            let connection = Connection::new(picked, &kind_label(picked));
+            app.settings.agent.connections.push(connection);
+            changed = true;
         }
     });
     let ids: Vec<String> = app
@@ -127,80 +130,24 @@ fn fields(
     id: &str,
 ) -> bool {
     let mut changed = false;
-    if connection.kind != ConnectionKind::Command {
-        if matches!(
-            connection.kind,
-            ConnectionKind::Ollama | ConnectionKind::OpenAiCompatible
-        ) {
-            theme::row(ui, &t!("agent.base_url"), |ui| {
-                changed |= ui.text_edit_singleline(&mut connection.base_url).changed();
-            });
-        }
-        theme::row(ui, &t!("agent.api_key"), |ui| {
-            let shown = state.shown_keys.iter().any(|item| item == id);
-            let mut edit = egui::TextEdit::singleline(&mut connection.api_key);
-            if !shown {
-                edit = edit.password(true);
-            }
-            changed |= ui.add(edit).changed();
-            if ui
-                .button(if shown {
-                    t!("agent.hide_key")
-                } else {
-                    t!("agent.show_key")
-                })
-                .clicked()
-            {
-                if shown {
-                    state.shown_keys.retain(|item| item != id);
-                } else {
-                    state.shown_keys.push(id.to_string());
-                }
-            }
+    if connection.kind != ConnectionKind::OpenRouter
+        && connection.kind != ConnectionKind::DeepSeek
+        && connection.kind != ConnectionKind::HuggingFace
+    {
+        theme::row(ui, &t!("agent.base_url"), |ui| {
+            changed |= ui.text_edit_singleline(&mut connection.base_url).changed();
         });
-        theme::row(ui, &t!("agent.proxy"), |ui| {
-            changed |= ui.text_edit_singleline(&mut connection.proxy).changed();
-        });
-        if connection.kind == ConnectionKind::Ollama {
-            ollama(ui, connection, state, id);
-        }
-    } else if let Some(command) = connection.command.as_mut() {
-        theme::row(ui, &t!("agent.command_program"), |ui| {
-            let mut program = command.program.display().to_string();
-            if ui.text_edit_singleline(&mut program).changed() {
-                command.program = PathBuf::from(program);
-                changed = true;
-            }
-        });
-        theme::row(ui, &t!("agent.command_args"), |ui| {
-            let mut args = command.args.join("\n");
-            if ui.text_edit_multiline(&mut args).changed() {
-                command.args = args.lines().map(str::to_string).collect();
-                changed = true;
-            }
-        });
-        theme::row(ui, &t!("agent.command_output"), |ui| {
-            for format in [
-                OutputFormat::WhisperJson,
-                OutputFormat::OpenAiJson,
-                OutputFormat::Srt,
-                OutputFormat::Vtt,
-                OutputFormat::Rttm,
-                OutputFormat::Vectors,
-            ] {
-                if ui
-                    .selectable_label(command.output == format, format_label(format))
-                    .clicked()
-                {
-                    command.output = format;
-                    changed = true;
-                }
-            }
-        });
+    }
+    theme::row(ui, &t!("agent.api_key"), |ui| {
         changed |= ui
-            .checkbox(&mut command.whole_file, t!("agent.command_whole"))
+            .add(egui::TextEdit::singleline(&mut connection.api_key).password(true))
             .changed();
-        theme::hint(ui, t!("agent.command_placeholders"));
+    });
+    theme::row(ui, &t!("agent.proxy"), |ui| {
+        changed |= ui.text_edit_singleline(&mut connection.proxy).changed();
+    });
+    if connection.kind == ConnectionKind::Ollama {
+        ollama(ui, connection, state, id);
     }
     changed
 }
@@ -262,7 +209,9 @@ fn web(ui: &mut egui::Ui, web: &mut WebSettings, state: &mut ProvidersUi) -> boo
         });
         if matches!(web.engine, WebEngine::Brave | WebEngine::Tavily) {
             theme::row(ui, &t!("agent.api_key"), |ui| {
-                changed |= ui.text_edit_singleline(&mut web.api_key).changed();
+                changed |= ui
+                    .add(egui::TextEdit::singleline(&mut web.api_key).password(true))
+                    .changed();
             });
         }
         if let Some(CheckState::Running(job)) = state.web_check.as_mut() {

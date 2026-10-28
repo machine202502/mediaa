@@ -1,5 +1,5 @@
-pub mod command;
 pub mod engine;
+pub mod genai_chat;
 pub mod ollama;
 pub mod openai;
 pub mod presets;

@@ -1,22 +1,20 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 pub const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
-pub const OPENAI_URL: &str = "https://api.openai.com/v1";
 pub const DEEPSEEK_URL: &str = "https://api.deepseek.com";
 pub const HUGGING_FACE_ROUTER_URL: &str = "https://router.huggingface.co/v1";
 pub const OLLAMA_URL: &str = "http://localhost:11434";
+pub const TRANSCRIPTION_URL: &str = "http://localhost:8293";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionKind {
     OpenRouter,
-    OpenAi,
     DeepSeek,
     HuggingFace,
     Ollama,
     OpenAiCompatible,
-    Command,
+    Transcription,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,28 +27,18 @@ pub enum Capability {
     VoiceEmbedding,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutputFormat {
-    WhisperJson,
-    OpenAiJson,
-    Srt,
-    Vtt,
-    Rttm,
-    Vectors,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommandSpec {
-    pub program: PathBuf,
-    pub args: Vec<String>,
-    pub output: OutputFormat,
-    #[serde(default)]
-    pub whole_file: bool,
-}
-
 fn default_context() -> u32 {
     32_768
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningDepth {
+    Low,
+    #[default]
+    Medium,
+    High,
+    XHigh,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,12 +52,6 @@ pub struct Connection {
     pub api_key: String,
     #[serde(default)]
     pub proxy: String,
-    #[serde(default = "default_context")]
-    pub context: u32,
-    #[serde(default)]
-    pub command: Option<CommandSpec>,
-    #[serde(default)]
-    pub program: String,
 }
 
 impl Connection {
@@ -84,27 +66,24 @@ impl Connection {
             base_url: match kind {
                 ConnectionKind::Ollama => OLLAMA_URL.into(),
                 ConnectionKind::OpenAiCompatible => "http://localhost:1234/v1".into(),
+                ConnectionKind::Transcription => TRANSCRIPTION_URL.into(),
                 _ => String::new(),
             },
             api_key: String::new(),
             proxy: String::new(),
-            context: default_context(),
-            command: None,
-            program: String::new(),
         }
     }
 
     pub fn api_url(&self) -> String {
         match self.kind {
             ConnectionKind::OpenRouter => OPENROUTER_URL.into(),
-            ConnectionKind::OpenAi => OPENAI_URL.into(),
             ConnectionKind::DeepSeek => DEEPSEEK_URL.into(),
             ConnectionKind::HuggingFace => HUGGING_FACE_ROUTER_URL.into(),
             ConnectionKind::Ollama => format!("{}/v1", trim_url(&self.base_url, OLLAMA_URL)),
             ConnectionKind::OpenAiCompatible => {
                 trim_url(&self.base_url, "http://localhost:1234/v1")
             }
-            ConnectionKind::Command => String::new(),
+            ConnectionKind::Transcription => trim_url(&self.base_url, TRANSCRIPTION_URL),
         }
     }
 
@@ -122,13 +101,6 @@ impl Connection {
     pub fn capabilities(&self) -> Vec<Capability> {
         match self.kind {
             ConnectionKind::OpenRouter => vec![Capability::Chat, Capability::Embeddings],
-            ConnectionKind::OpenAi => {
-                vec![
-                    Capability::Chat,
-                    Capability::Embeddings,
-                    Capability::Transcription,
-                ]
-            }
             ConnectionKind::DeepSeek | ConnectionKind::HuggingFace => vec![Capability::Chat],
             ConnectionKind::Ollama => vec![Capability::Chat, Capability::Embeddings],
             ConnectionKind::OpenAiCompatible => vec![
@@ -137,17 +109,7 @@ impl Connection {
                 Capability::Rerank,
                 Capability::Transcription,
             ],
-            ConnectionKind::Command => match self.command.as_ref().map(|spec| spec.output) {
-                Some(OutputFormat::Rttm) => vec![Capability::Diarization],
-                Some(OutputFormat::Vectors) => vec![Capability::VoiceEmbedding],
-                Some(
-                    OutputFormat::WhisperJson
-                    | OutputFormat::OpenAiJson
-                    | OutputFormat::Srt
-                    | OutputFormat::Vtt,
-                ) => vec![Capability::Transcription],
-                None => Vec::new(),
-            },
+            ConnectionKind::Transcription => vec![Capability::Transcription],
         }
     }
 
@@ -169,6 +131,18 @@ fn trim_url(value: &str, fallback: &str) -> String {
 pub struct ModelSource {
     pub connection: String,
     pub model: String,
+    #[serde(default = "default_context")]
+    pub context: u32,
+    #[serde(default)]
+    pub thinking: bool,
+    #[serde(default)]
+    pub thinking_depth: ReasoningDepth,
+    #[serde(default)]
+    pub diarize: bool,
+    #[serde(default)]
+    pub word_times: bool,
+    #[serde(default)]
+    pub voiceprint: bool,
 }
 
 impl ModelSource {
@@ -176,16 +150,17 @@ impl ModelSource {
         ModelSource {
             connection: connection.into(),
             model: model.into(),
+            context: default_context(),
+            thinking: false,
+            thinking_depth: ReasoningDepth::Medium,
+            diarize: false,
+            word_times: false,
+            voiceprint: false,
         }
     }
 
     pub fn key(&self) -> String {
         format!("{}/{}", self.connection, self.model)
-    }
-
-    pub fn supports_thinking(&self) -> bool {
-        let name = self.model.to_lowercase();
-        name.contains("qwen3") || name.contains("deepseek") || name.contains("reason")
     }
 }
 
@@ -196,19 +171,15 @@ pub enum ModelRole {
     Agent,
     Titles,
     SpeechRecognition,
-    Diarization,
-    VoiceEmbedding,
 }
 
 impl ModelRole {
-    pub const ALL: [ModelRole; 7] = [
+    pub const ALL: [ModelRole; 5] = [
         ModelRole::Embedding,
         ModelRole::Reranker,
         ModelRole::Agent,
         ModelRole::Titles,
         ModelRole::SpeechRecognition,
-        ModelRole::Diarization,
-        ModelRole::VoiceEmbedding,
     ];
 
     pub fn required(self) -> bool {
@@ -227,8 +198,6 @@ impl ModelRole {
             ModelRole::Reranker => Capability::Rerank,
             ModelRole::Agent | ModelRole::Titles => Capability::Chat,
             ModelRole::SpeechRecognition => Capability::Transcription,
-            ModelRole::Diarization => Capability::Diarization,
-            ModelRole::VoiceEmbedding => Capability::VoiceEmbedding,
         }
     }
 }
@@ -241,8 +210,6 @@ pub struct ModelChoices {
     pub agent: Option<ModelSource>,
     pub titles: Option<ModelSource>,
     pub speech_recognition: Option<ModelSource>,
-    pub diarization: Option<ModelSource>,
-    pub voice_embedding: Option<ModelSource>,
 }
 
 impl ModelChoices {
@@ -253,8 +220,6 @@ impl ModelChoices {
             ModelRole::Agent => &self.agent,
             ModelRole::Titles => &self.titles,
             ModelRole::SpeechRecognition => &self.speech_recognition,
-            ModelRole::Diarization => &self.diarization,
-            ModelRole::VoiceEmbedding => &self.voice_embedding,
         }
     }
 
@@ -265,8 +230,6 @@ impl ModelChoices {
             ModelRole::Agent => &mut self.agent,
             ModelRole::Titles => &mut self.titles,
             ModelRole::SpeechRecognition => &mut self.speech_recognition,
-            ModelRole::Diarization => &mut self.diarization,
-            ModelRole::VoiceEmbedding => &mut self.voice_embedding,
         }
     }
 }
@@ -348,7 +311,7 @@ pub struct AnalysisOptions {
 impl Default for AnalysisOptions {
     fn default() -> Self {
         AnalysisOptions {
-            diarize: true,
+            diarize: false,
             speakers: None,
             index: true,
             topics: true,
@@ -359,7 +322,11 @@ impl Default for AnalysisOptions {
 
 impl AnalysisOptions {
     pub fn resolved(mut self, models: &ModelChoices) -> AnalysisOptions {
-        if models.diarization.is_none() {
+        let allowed = models
+            .speech_recognition
+            .as_ref()
+            .is_some_and(|source| source.diarize);
+        if !allowed {
             self.diarize = false;
         }
         self.enforced()
@@ -385,10 +352,8 @@ pub struct AgentSettings {
     pub connections: Vec<Connection>,
     pub models: ModelChoices,
     pub budget: Budget,
-    pub agent_context: u32,
     pub web: WebSettings,
     pub analysis: AnalysisOptions,
-    pub thinking: Vec<ModelSource>,
     #[serde(default = "answers_checked")]
     pub verify_answers: bool,
     #[serde(skip)]
@@ -438,10 +403,8 @@ impl Default for AgentSettings {
             connections: Vec::new(),
             models: ModelChoices::default(),
             budget: Budget::default(),
-            agent_context: 8192,
             web: WebSettings::default(),
             analysis: AnalysisOptions::default(),
-            thinking: Vec::new(),
             verify_answers: true,
             ui_language: None,
         }
@@ -453,17 +416,6 @@ impl AgentSettings {
         match self.ui_language.as_deref() {
             Some("ru") => "Russian",
             _ => "English",
-        }
-    }
-
-    pub fn thinking_on(&self, model: &ModelSource) -> bool {
-        model.supports_thinking() && self.thinking.contains(model)
-    }
-
-    pub fn set_thinking(&mut self, model: &ModelSource, on: bool) {
-        self.thinking.retain(|m| m != model);
-        if on {
-            self.thinking.push(model.clone());
         }
     }
 
@@ -520,23 +472,21 @@ mod tests {
     }
 
     #[test]
-    fn thinking_is_off_until_turned_on_per_model() {
-        let mut settings = AgentSettings::default();
-        let qwen = ModelSource::new("c1", "qwen3");
-        let other = ModelSource::new("c1", "gemma-3");
-        let reasoner = ModelSource::new("c2", "deepseek-reasoner");
-        assert!(qwen.supports_thinking() && reasoner.supports_thinking());
-        assert!(!other.supports_thinking());
-        settings.set_thinking(&qwen, true);
-        settings.set_thinking(&other, true);
-        assert!(settings.thinking_on(&qwen));
-        assert!(!settings.thinking_on(&other));
-        settings.set_thinking(&qwen, true);
-        assert_eq!(settings.thinking.iter().filter(|m| **m == qwen).count(), 1);
+    fn thinking_is_stored_on_the_model() {
+        let mut source = ModelSource::new("c1", "gemma");
+        assert!(!source.thinking);
+        assert_eq!(source.thinking_depth, ReasoningDepth::Medium);
+        source.thinking = true;
+        source.thinking_depth = ReasoningDepth::High;
+        let settings = AgentSettings {
+            models: ModelChoices {
+                agent: Some(source.clone()),
+                ..ModelChoices::default()
+            },
+            ..AgentSettings::default()
+        };
         let back: AgentSettings = toml::from_str(&toml::to_string(&settings).unwrap()).unwrap();
-        assert_eq!(back, settings);
-        settings.set_thinking(&qwen, false);
-        assert!(!settings.thinking_on(&qwen));
+        assert_eq!(back.models.agent, Some(source));
     }
 
     #[test]
@@ -568,21 +518,13 @@ mod tests {
     }
 
     #[test]
-    fn command_capabilities_follow_the_output_format() {
-        let mut connection = Connection::new(ConnectionKind::Command, "Whisper");
-        connection.command = Some(CommandSpec {
-            program: "whisper-cli".into(),
-            args: vec!["-f".into(), "{input}".into()],
-            output: OutputFormat::WhisperJson,
-            whole_file: false,
-        });
-        assert!(connection.supports(Capability::Transcription));
-        connection.command.as_mut().unwrap().output = OutputFormat::Rttm;
-        assert!(connection.supports(Capability::Diarization));
-        connection.command.as_mut().unwrap().output = OutputFormat::Vectors;
-        assert!(connection.supports(Capability::VoiceEmbedding));
+    fn speech_is_a_separate_connection() {
+        assert!(Connection::new(ConnectionKind::OpenAiCompatible, "Custom")
+            .supports(Capability::Transcription));
+        assert!(Connection::new(ConnectionKind::Transcription, "Speech")
+            .supports(Capability::Transcription));
         assert!(
-            Connection::new(ConnectionKind::OpenAi, "OpenAI").supports(Capability::Transcription)
+            !Connection::new(ConnectionKind::Transcription, "Speech").supports(Capability::Chat)
         );
         assert!(
             !Connection::new(ConnectionKind::DeepSeek, "DeepSeek").supports(Capability::Embeddings)

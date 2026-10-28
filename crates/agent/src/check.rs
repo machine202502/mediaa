@@ -60,7 +60,7 @@ mod tests {
 
     #[test]
     fn every_role_is_checked_through_the_engine() {
-        let connection = Connection::new(ConnectionKind::OpenAi, "OpenAI");
+        let connection = Connection::new(ConnectionKind::OpenAiCompatible, "Custom");
         let source = ModelSource::new(connection.id.clone(), "gpt");
         let agent = AgentSettings {
             connections: vec![connection],
@@ -70,8 +70,6 @@ mod tests {
                 agent: Some(ModelSource::new("gone", "x")),
                 titles: Some(source.clone()),
                 speech_recognition: None,
-                diarization: None,
-                voice_embedding: None,
             },
             ..AgentSettings::default()
         };
@@ -101,11 +99,6 @@ mod tests {
             last(ModelRole::SpeechRecognition),
             Status::Failed(text) if text.contains("no model")
         ));
-        assert_eq!(last(ModelRole::Diarization), Status::Ready(Ready::NotUsed));
-        assert_eq!(
-            last(ModelRole::VoiceEmbedding),
-            Status::Ready(Ready::NotUsed)
-        );
         assert_eq!(
             seen.lock()
                 .unwrap()

@@ -19,11 +19,17 @@ pub const OVERLAP_SECONDS: f64 = 2.0;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Input {
     pub path: PathBuf,
+    #[serde(default)]
+    pub diarize: bool,
+    #[serde(default)]
+    pub speakers: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 struct Cursor {
     t: f64,
+    #[serde(default)]
+    chunks: Vec<crate::diarize::Chunk>,
 }
 
 pub struct Transcribe {
@@ -164,23 +170,51 @@ impl Stage for Transcribe {
             .speech_recognition
             .clone()
             .ok_or_else(|| anyhow::anyhow!("the speech recognition model is not chosen"))?;
+        let ask_speakers = input.diarize && source.diarize;
+        let (window, overlap) = if ask_speakers {
+            (
+                crate::diarize::CHUNK_SECONDS,
+                crate::diarize::OVERLAP_SECONDS,
+            )
+        } else {
+            (self.window_seconds, self.overlap_seconds)
+        };
+        let voiceprint = ask_speakers
+            && source.voiceprint
+            && settings
+                .connection(&source.connection)
+                .is_some_and(|connection| {
+                    connection.kind == mediaa_core::agent::ConnectionKind::Transcription
+                });
         if cancel.load(Ordering::Relaxed) {
             return Ok(Work::Stopped);
         }
-        let Some((start, end)) = window_at(
-            cursor.t,
-            duration,
-            self.window_seconds,
-            self.overlap_seconds,
-        ) else {
+        let finish = |transcript: &mut Transcript, cursor: &Cursor| -> anyhow::Result<Work> {
             let phrases = transcript.phrases()?;
-            log::info!("{}: {} phrases", input.path.display(), phrases.len());
-            let replies = transcript::replies(&phrases, &[]);
+            let linked = if ask_speakers {
+                crate::diarize::link(
+                    &cursor.chunks,
+                    crate::diarize::LINK_THRESHOLD,
+                    crate::diarize::LINK_MIN_SECONDS,
+                    input.speakers,
+                )
+            } else {
+                crate::diarize::Diarization::default()
+            };
+            let replies = transcript::replies(&phrases, &linked.turns);
             transcript.set_replies(&replies)?;
-            transcript.remove_meta("diarized")?;
-            return Ok(Work::Done(
+            if ask_speakers {
+                transcript.set_meta("diarized", "1")?;
+            } else {
+                transcript.remove_meta("diarized")?;
+            }
+            Ok(Work::Done(
                 json!({ "file_id": id, "replies": replies.len() }),
-            ));
+            ))
+        };
+        let Some((start, end)) = window_at(cursor.t, duration, window, overlap) else {
+            log::info!("{}: done", input.path.display());
+            return finish(&mut transcript, &cursor);
         };
         let samples = decode_window(&input.path, start, end, cancel)?;
         if cancel.load(Ordering::Relaxed) {
@@ -197,11 +231,14 @@ impl Stage for Transcribe {
         let engine = scope.engine();
         let recognized = engine.transcribe(
             &mediaa_engine::TranscribeRequest {
-                source,
+                source: source.clone(),
                 path: wav.clone(),
                 from: start,
                 to: end,
                 language: settings.ui_language.clone(),
+                word_times: source.word_times,
+                speakers: ask_speakers,
+                voiceprint,
             },
             cancel,
         );
@@ -210,16 +247,45 @@ impl Stage for Transcribe {
         if cancel.load(Ordering::Relaxed) {
             return Ok(Work::Stopped);
         }
-        let phrases = keep_words(recognized, start, self.overlap_seconds);
-        transcript.put_phrases(owned_from(start, self.overlap_seconds), &phrases)?;
-        let Some(next) = next_start(start, end, duration, self.overlap_seconds) else {
-            let phrases = transcript.phrases()?;
-            let replies = transcript::replies(&phrases, &[]);
-            transcript.set_replies(&replies)?;
-            transcript.remove_meta("diarized")?;
-            return Ok(Work::Done(
-                json!({ "file_id": id, "replies": replies.len() }),
-            ));
+        let phrases = if source.word_times {
+            keep_words(recognized.phrases, start, overlap)
+        } else {
+            recognized.phrases
+        };
+        let from = if source.word_times {
+            owned_from(start, overlap)
+        } else {
+            start
+        };
+        transcript.put_phrases(from, &phrases)?;
+        if ask_speakers {
+            let mut voices = Vec::new();
+            let count = recognized
+                .turns
+                .iter()
+                .map(|turn| turn.speaker)
+                .max()
+                .map(|speaker| speaker as usize + 1)
+                .unwrap_or(0);
+            for index in 0..count {
+                let embedding = recognized.voices.get(index).cloned().unwrap_or_default();
+                let seconds = recognized
+                    .turns
+                    .iter()
+                    .filter(|turn| turn.speaker as usize == index)
+                    .map(|turn| (turn.end - turn.start).max(0.0))
+                    .sum();
+                voices.push(crate::diarize::ChunkVoice { embedding, seconds });
+            }
+            cursor.chunks.push(crate::diarize::Chunk {
+                start,
+                end,
+                turns: recognized.turns,
+                voices,
+            });
+        }
+        let Some(next) = next_start(start, end, duration, overlap) else {
+            return finish(&mut transcript, &cursor);
         };
         cursor.t = next;
         let progress = if duration > 0.0 {

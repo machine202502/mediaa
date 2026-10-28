@@ -1,6 +1,6 @@
 use crate::engine::{
     apply_embed_prefix, phrases_from_words, shift_phrases, ChatAnswer, ChatRequest,
-    EmbeddingsRequest, EngineError, RerankRequest, RerankResult, ToolCall, ToolChoice,
+    EmbeddingsRequest, EngineError, RerankRequest, RerankResult, SpeechBody, ToolCall, ToolChoice,
     TranscribeRequest, Usage,
 };
 use crate::presets::{self, Reasoning};
@@ -147,9 +147,15 @@ fn chat_body(connection: &Connection, request: &ChatRequest) -> Value {
         "stream_options": {"include_usage": true},
     });
     if request.thinking.is_some() {
+        let word = match request.source.thinking_depth {
+            mediaa_core::agent::ReasoningDepth::Low => "low",
+            mediaa_core::agent::ReasoningDepth::Medium => "medium",
+            mediaa_core::agent::ReasoningDepth::High => "high",
+            mediaa_core::agent::ReasoningDepth::XHigh => "xhigh",
+        };
         match presets::reasoning(connection.kind) {
-            Reasoning::OpenRouter => body["reasoning"] = json!({"effort": "medium"}),
-            Reasoning::Effort => body["reasoning_effort"] = json!("medium"),
+            Reasoning::OpenRouter => body["reasoning"] = json!({"effort": word}),
+            Reasoning::Effort => body["reasoning_effort"] = json!(word),
             Reasoning::None => {}
         }
     }
@@ -340,24 +346,28 @@ pub fn multipart_body(fields: &[(&str, &str)], file_name: &str, wav: &[u8]) -> (
     (format!("multipart/form-data; boundary={boundary}"), body)
 }
 
-pub fn transcribe(
+fn post_audio(
     agent: &ureq::Agent,
     connection: &Connection,
     request: &TranscribeRequest,
     wav: &[u8],
-) -> Result<Vec<mediaa_core::transcript::Phrase>, EngineError> {
-    let url = format!("{}/audio/transcriptions", connection.api_url());
-    let mut fields = vec![
-        ("model", request.source.model.as_str()),
-        ("response_format", "verbose_json"),
-        ("timestamp_granularities[]", "word"),
-    ];
+    url: &str,
+    format: Option<&str>,
+    word_times: bool,
+) -> Result<Value, EngineError> {
+    let mut fields = vec![("model", request.source.model.as_str())];
+    if let Some(format) = format {
+        fields.push(("response_format", format));
+    }
+    if word_times {
+        fields.push(("timestamp_granularities[]", "word"));
+    }
     let language = request.language.clone().unwrap_or_default();
     if !language.is_empty() {
         fields.push(("language", language.as_str()));
     }
     let (content_type, body) = multipart_body(&fields, "window.wav", wav);
-    let mut call = agent.post(&url).content_type(&content_type);
+    let mut call = agent.post(url).content_type(&content_type);
     if let Some(token) = bearer(connection) {
         call = call.header("Authorization", &token);
     }
@@ -368,14 +378,197 @@ pub fn transcribe(
     if !(200..300).contains(&status) {
         let mut response = response;
         let text = read_limited(&mut response, 4000);
-        return Err(status_error(connection, &url, status, &text));
+        return Err(status_error(connection, url, status, &text));
     }
-    let parsed: Value = response
+    response
         .into_body()
         .read_json()
-        .map_err(|error| EngineError::internal(format!("{url}: {error}")))?;
-    let words = words_of(&parsed);
-    Ok(shift_phrases(phrases_from_words(words), request.from))
+        .map_err(|error| EngineError::internal(format!("{url}: {error}")))
+}
+
+fn text_phrase(body: &Value, from: f64, to: f64) -> Vec<mediaa_core::transcript::Phrase> {
+    let text = body["text"].as_str().unwrap_or("").trim().to_string();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let end = from + (to - from).max(0.0);
+    phrases_from_words(vec![Word {
+        text,
+        start: from,
+        end,
+    }])
+}
+
+fn speaker_ids(body: &Value) -> std::collections::BTreeMap<String, u32> {
+    let mut ids = std::collections::BTreeMap::new();
+    let mut next = 0u32;
+    let remember =
+        |ids: &mut std::collections::BTreeMap<String, u32>, next: &mut u32, name: &str| {
+            ids.entry(name.to_string()).or_insert_with(|| {
+                let id = *next;
+                *next += 1;
+                id
+            });
+        };
+    if let Some(words) = body["words"].as_array() {
+        for word in words {
+            if let Some(name) = word["speaker"].as_str() {
+                remember(&mut ids, &mut next, name);
+            }
+        }
+    }
+    if let Some(segments) = body["segments"].as_array() {
+        for segment in segments {
+            if let Some(name) = segment["speaker"].as_str() {
+                remember(&mut ids, &mut next, name);
+            }
+        }
+    }
+    ids
+}
+
+fn turns_of(body: &Value, from: f64) -> Vec<mediaa_core::transcript::Turn> {
+    let ids = speaker_ids(body);
+    body["segments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|segment| {
+            let name = segment["speaker"].as_str()?;
+            Some(mediaa_core::transcript::Turn {
+                start: segment["start"].as_f64()? + from,
+                end: segment["end"].as_f64()? + from,
+                speaker: *ids.get(name)?,
+            })
+        })
+        .collect()
+}
+
+fn phrases_from_segments(body: &Value, from: f64) -> Vec<mediaa_core::transcript::Phrase> {
+    let words = body["segments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|segment| {
+            let text = segment["text"].as_str()?.trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(Word {
+                text,
+                start: segment["start"].as_f64()? + from,
+                end: segment["end"].as_f64()? + from,
+            })
+        })
+        .collect();
+    phrases_from_words(words)
+}
+
+fn voices_of(body: &Value) -> Vec<Vec<f32>> {
+    let ids = speaker_ids(body);
+    let mut voices = vec![Vec::new(); ids.len()];
+    let Some(speakers) = body["speakers"].as_array() else {
+        return voices;
+    };
+    for speaker in speakers {
+        let Some(name) = speaker["id"].as_str() else {
+            continue;
+        };
+        let Some(index) = ids.get(name).copied() else {
+            continue;
+        };
+        let vector = speaker["embedding"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_f64().map(|number| number as f32))
+            .collect();
+        if let Some(slot) = voices.get_mut(index as usize) {
+            *slot = vector;
+        }
+    }
+    voices
+}
+
+pub fn transcribe(
+    agent: &ureq::Agent,
+    connection: &Connection,
+    request: &TranscribeRequest,
+    wav: &[u8],
+) -> Result<SpeechBody, EngineError> {
+    if connection.kind == mediaa_core::agent::ConnectionKind::Transcription {
+        let url = format!("{}/v1/audio/transcriptions", connection.api_url());
+        let parsed = post_audio(agent, connection, request, wav, &url, None, false)?;
+        let words = words_of(&parsed);
+        let phrases = if words.is_empty() {
+            if request.word_times {
+                return Err(EngineError::bad_request("the transcript has no word times"));
+            }
+            if parsed["segments"]
+                .as_array()
+                .is_some_and(|rows| !rows.is_empty())
+            {
+                phrases_from_segments(&parsed, request.from)
+            } else {
+                text_phrase(&parsed, request.from, request.to)
+            }
+        } else {
+            shift_phrases(phrases_from_words(words), request.from)
+        };
+        let turns = if request.speakers {
+            turns_of(&parsed, request.from)
+        } else {
+            Vec::new()
+        };
+        let voices = if request.speakers && request.voiceprint {
+            voices_of(&parsed)
+        } else {
+            Vec::new()
+        };
+        return Ok(SpeechBody {
+            phrases,
+            turns,
+            voices,
+        });
+    }
+    let url = format!("{}/audio/transcriptions", connection.api_url());
+    let mut body = SpeechBody::default();
+    if request.word_times {
+        let parsed = post_audio(
+            agent,
+            connection,
+            request,
+            wav,
+            &url,
+            Some("verbose_json"),
+            true,
+        )?;
+        let words = words_of(&parsed);
+        if words.is_empty() {
+            return Err(EngineError::bad_request("the transcript has no word times"));
+        }
+        body.phrases = shift_phrases(phrases_from_words(words), request.from);
+    }
+    if request.speakers {
+        let parsed = post_audio(
+            agent,
+            connection,
+            request,
+            wav,
+            &url,
+            Some("diarized_json"),
+            false,
+        )?;
+        body.turns = turns_of(&parsed, request.from);
+        if body.phrases.is_empty() {
+            body.phrases = phrases_from_segments(&parsed, request.from);
+        }
+    }
+    if !request.word_times && !request.speakers {
+        let parsed = post_audio(agent, connection, request, wav, &url, Some("json"), false)?;
+        body.phrases = text_phrase(&parsed, request.from, request.to);
+    }
+    Ok(body)
 }
 
 fn words_of(body: &Value) -> Vec<Word> {
@@ -581,11 +774,14 @@ mod tests {
                 from: 10.0,
                 to: 12.0,
                 language: Some("en".into()),
+                word_times: true,
+                speakers: false,
+                voiceprint: false,
             },
             b"RIFFxxxx",
         )
         .unwrap();
-        assert!((phrases[0].words[0].start - 10.1).abs() < 1e-6);
+        assert!((phrases.phrases[0].words[0].start - 10.1).abs() < 1e-6);
     }
 
     #[test]

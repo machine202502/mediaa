@@ -7,3 +7,4 @@ services:
       - "8293:8293"
     environment:
       MEDIAA_SPEECH_KEY: mediaa
+      MEDIAA_IDLE_SECONDS: "120"

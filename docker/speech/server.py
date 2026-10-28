@@ -1,5 +1,8 @@
+import gc
 import json
 import os
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
@@ -65,7 +68,52 @@ def load():
     return asr, diarizer, extractor
 
 
-ASR, DIARIZER, EXTRACTOR = load()
+IDLE = int(os.environ.get("MEDIAA_IDLE_SECONDS", "120") or "0")
+_LOCK = threading.Lock()
+_MODELS = None
+_BUSY = 0
+_LAST = 0.0
+
+
+def borrow():
+    global _MODELS, _BUSY, _LAST
+    with _LOCK:
+        if _MODELS is None:
+            _MODELS = load()
+        _BUSY += 1
+        _LAST = time.time()
+        return _MODELS
+
+
+def release():
+    global _BUSY, _LAST
+    with _LOCK:
+        _BUSY = max(0, _BUSY - 1)
+        _LAST = time.time()
+
+
+def drop_if_idle():
+    global _MODELS
+    with _LOCK:
+        if _MODELS is None or _BUSY or IDLE <= 0:
+            return None
+        if time.time() - _LAST < IDLE:
+            return None
+        models = _MODELS
+        _MODELS = None
+        return models
+
+
+def reap():
+    while True:
+        time.sleep(15)
+        dropped = drop_if_idle()
+        if dropped is not None:
+            del dropped
+            gc.collect()
+
+
+threading.Thread(target=reap, daemon=True).start()
 
 
 def to_mono(samples):
@@ -88,10 +136,10 @@ def read_audio(path):
     return resample(to_mono(samples), int(rate))
 
 
-def transcribe(samples):
-    stream = ASR.create_stream()
+def transcribe(asr, samples):
+    stream = asr.create_stream()
     stream.accept_waveform(RATE, samples)
-    ASR.decode_stream(stream)
+    asr.decode_stream(stream)
     result = stream.result
     duration = float(len(samples)) / RATE
     tokens = list(getattr(result, "tokens", []) or [])
@@ -103,8 +151,32 @@ def transcribe(samples):
     return text, found, duration
 
 
-def diarize(samples):
-    result = DIARIZER.process(samples)
+def transcribe_long(asr, samples):
+    total = float(len(samples)) / RATE
+    if total <= 100.0:
+        return transcribe(asr, samples)
+    words = []
+    start = 0.0
+    while start < total - 0.05:
+        end = min(total, start + 100.0)
+        low = int(start * RATE)
+        high = max(low + 1, int(end * RATE))
+        _text, found, _duration = transcribe(asr, samples[low:high])
+        cutoff = start if start == 0.0 else start + 2.0
+        for word in found:
+            word["start"] += start
+            word["end"] += start
+            if word["start"] >= cutoff:
+                words.append(word)
+        if end >= total:
+            break
+        start = end - 2.0
+    text = " ".join(word["word"] for word in words)
+    return text, words, total
+
+
+def diarize(diarizer, samples):
+    result = diarizer.process(samples)
     ordered = result.sort_by_start_time() if hasattr(result, "sort_by_start_time") else result
     turns = []
     for segment in ordered:
@@ -130,22 +202,22 @@ def speaker_of(word, turns):
     return best
 
 
-def embed(samples, start, end):
+def embed(extractor, samples, start, end):
     low = max(0, int(start * RATE))
     high = min(len(samples), int(end * RATE))
     if high <= low:
         return []
     clip = samples[low:high]
-    stream = EXTRACTOR.create_stream()
+    stream = extractor.create_stream()
     stream.accept_waveform(sample_rate=RATE, waveform=clip)
     if hasattr(stream, "input_finished"):
         stream.input_finished()
-    if hasattr(EXTRACTOR, "is_ready") and not EXTRACTOR.is_ready(stream):
+    if hasattr(extractor, "is_ready") and not extractor.is_ready(stream):
         return []
-    return [float(value) for value in EXTRACTOR.compute(stream)]
+    return [float(value) for value in extractor.compute(stream)]
 
 
-def speakers_of(samples, turns):
+def speakers_of(extractor, samples, turns):
     grouped = {}
     for turn in turns:
         grouped.setdefault(turn["speaker"], []).append(turn)
@@ -157,7 +229,7 @@ def speakers_of(samples, turns):
             if taken >= 30.0:
                 break
             length = min(10.0, 30.0 - taken, turn["end"] - turn["start"])
-            vector = embed(samples, turn["start"], turn["start"] + length)
+            vector = embed(extractor, samples, turn["start"], turn["start"] + length)
             if vector:
                 vectors.append(vector)
             taken += length
@@ -173,9 +245,17 @@ def speakers_of(samples, turns):
 
 
 def analyse(path):
+    asr, diarizer, extractor = borrow()
+    try:
+        return _analyse(asr, diarizer, extractor, path)
+    finally:
+        release()
+
+
+def _analyse(asr, diarizer, extractor, path):
     samples = read_audio(path)
-    text, found, duration = transcribe(samples)
-    turns = diarize(samples)
+    text, found, duration = transcribe_long(asr, samples)
+    turns = diarize(diarizer, samples)
     for word in found:
         speaker = speaker_of(word, turns)
         if speaker is not None:
@@ -204,7 +284,7 @@ def analyse(path):
         "text": text,
         "words": found,
         "segments": segments,
-        "speakers": speakers_of(samples, turns),
+        "speakers": speakers_of(extractor, samples, turns),
     }
 
 

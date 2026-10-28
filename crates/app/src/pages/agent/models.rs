@@ -167,26 +167,63 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
             }
-            if role == ModelRole::Diarization
-                && app.settings.agent.models.diarization.is_some()
-                && app.settings.agent.models.voice_embedding.is_none()
-            {
-                theme::hint(ui, t!("agent.overlap_only"));
-            }
-            if let Some(source) = app.settings.agent.models.get(role) {
-                if source.supports_thinking() {
-                    let on = app.settings.agent.thinking_on(source);
-                    let mut enabled = on;
-                    if ui.checkbox(&mut enabled, t!("agent.thinking")).changed() {
-                        if enabled {
-                            app.settings.agent.thinking.push(source.clone());
-                        } else {
-                            app.settings
-                                .agent
-                                .thinking
-                                .retain(|item| item.key() != source.key());
+            if let Some(source) = app.settings.agent.models.get_mut(role) {
+                if matches!(role, ModelRole::Agent | ModelRole::Titles) {
+                    theme::row(ui, &t!("agent.context"), |ui| {
+                        let mut text = source.context.to_string();
+                        if ui.text_edit_singleline(&mut text).changed() {
+                            if let Ok(value) = text.trim().parse::<u32>() {
+                                source.context = value;
+                                changed = true;
+                            }
                         }
+                    });
+                    if ui
+                        .checkbox(&mut source.thinking, t!("agent.thinking"))
+                        .changed()
+                    {
                         changed = true;
+                    }
+                    if source.thinking {
+                        let mut depth = source.thinking_depth;
+                        egui::ComboBox::from_id_salt(("depth", role as u8))
+                            .selected_text(depth_label(depth))
+                            .show_ui(ui, |ui| {
+                                for item in [
+                                    mediaa_core::agent::ReasoningDepth::Low,
+                                    mediaa_core::agent::ReasoningDepth::Medium,
+                                    mediaa_core::agent::ReasoningDepth::High,
+                                    mediaa_core::agent::ReasoningDepth::XHigh,
+                                ] {
+                                    if ui
+                                        .selectable_label(depth == item, depth_label(item))
+                                        .clicked()
+                                    {
+                                        depth = item;
+                                    }
+                                }
+                            });
+                        if depth != source.thinking_depth {
+                            source.thinking_depth = depth;
+                            changed = true;
+                        }
+                    }
+                }
+                if role == ModelRole::SpeechRecognition {
+                    let transcription = connections.iter().any(|connection| {
+                        connection.id == source.connection
+                            && connection.kind == mediaa_core::agent::ConnectionKind::Transcription
+                    });
+                    changed |= ui
+                        .checkbox(&mut source.diarize, t!("agent.speech_diarize"))
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut source.word_times, t!("agent.speech_words"))
+                        .changed();
+                    if transcription {
+                        changed |= ui
+                            .checkbox(&mut source.voiceprint, t!("agent.speech_voice"))
+                            .changed();
                     }
                 }
             }
@@ -220,8 +257,15 @@ fn role_label(role: ModelRole) -> String {
         ModelRole::Agent => t!("agent.role_agent"),
         ModelRole::Titles => t!("agent.role_titles"),
         ModelRole::SpeechRecognition => t!("agent.role_speech_rec"),
-        ModelRole::Diarization => t!("agent.role_diarization"),
-        ModelRole::VoiceEmbedding => t!("agent.role_voice"),
     }
     .into()
+}
+
+fn depth_label(depth: mediaa_core::agent::ReasoningDepth) -> &'static str {
+    match depth {
+        mediaa_core::agent::ReasoningDepth::Low => "low",
+        mediaa_core::agent::ReasoningDepth::Medium => "medium",
+        mediaa_core::agent::ReasoningDepth::High => "high",
+        mediaa_core::agent::ReasoningDepth::XHigh => "xhigh",
+    }
 }

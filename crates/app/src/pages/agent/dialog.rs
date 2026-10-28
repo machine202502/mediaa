@@ -464,7 +464,11 @@ impl Dialog {
                 let agent = s.settings.read().expect("settings lock");
                 (
                     agent.analysis,
-                    agent.models.diarization.is_some(),
+                    agent
+                        .models
+                        .speech_recognition
+                        .as_ref()
+                        .is_some_and(|source| source.diarize),
                     mediaa_agent::names::model(&agent).is_some(),
                 )
             })

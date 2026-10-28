@@ -339,7 +339,7 @@ impl Stage for Diarize {
             ));
         }
         let settings = (self.settings)();
-        let Some(source) = settings.models.diarization.clone() else {
+        let Some(source) = settings.models.speech_recognition.clone() else {
             log::warn!(
                 "{}: no diarization model; the replies stay without speakers",
                 input.path.display()
@@ -348,7 +348,7 @@ impl Stage for Diarize {
                 json!({ "file_id": id, "warning": "the diarization model is not chosen" }),
             ));
         };
-        let voice = settings.models.voice_embedding.clone();
+        let voice: Option<ModelSource> = None;
         let voice_key = voice
             .as_ref()
             .map(|source| source.key())
@@ -1061,7 +1061,7 @@ mod tests {
 
     fn short_chunks(ai: &Path, chunk: f64, overlap: f64) -> (Diarize, AgentSettings) {
         let mut settings = AgentSettings::default();
-        settings.models.diarization = Some(ModelSource::new("c", "dia"));
+        settings.models.speech_recognition = Some(ModelSource::new("c", "dia"));
         let current = settings.clone();
         (
             Diarize {

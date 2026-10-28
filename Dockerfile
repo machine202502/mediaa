@@ -11,7 +11,7 @@ RUN curl -fsSL -o /tmp/llama.tar.gz \
         "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/llama-${LLAMA_TAG}-bin-ubuntu-x64.tar.gz" \
     && mkdir -p /tmp/llama \
     && tar -xzf /tmp/llama.tar.gz -C /tmp/llama \
-    && find /tmp/llama -type f -name llama-server -exec mv {} /usr/local/bin/llama-server \; \
+    && find /tmp/llama -type f \( -name llama-server -o -name '*.so' -o -name '*.so.*' \) -exec cp -a {} /usr/local/bin/ \; \
     && chmod +x /usr/local/bin/llama-server \
     && rm -rf /tmp/llama /tmp/llama.tar.gz
 
@@ -24,6 +24,7 @@ RUN mkdir -p /models \
     && hf download csukuangfj/speaker-embedding-models 3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx --local-dir /models/voices
 
 COPY docker/speech/server.py /opt/speech/server.py
+COPY docker/llama /opt/llama
 COPY docker/start.sh /opt/start.sh
 RUN chmod +x /opt/start.sh
 

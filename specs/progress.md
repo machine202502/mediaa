@@ -60,3 +60,12 @@
 | BUILD-1 | 28.10.26 11:44 | Вернуть Windows-сборке генератор VS и static CRT toolchain, чтобы `run.ps1` снова собирал и запускал приложение | готово | [windows-build.md](tasks/windows-build.md) |
 | RUN-1 | 28.10.26 13:40 | Запускать собранный MediaA копией вне репозитория, чтобы SQLite в библиотеке открывался | готово | [dev-run-outside-workspace.md](tasks/dev-run-outside-workspace.md) |
 | AGENT-EXT-1 | 28.10.26 13:11 | Убрать встроенный инференс (llama.cpp, Vulkan, sherpa-onnx) и перевести модели агента на внешние подключения | готово | [agent-external-steps.md](tasks/agent-external-steps.md) |
+| AGENT-GEN-1 | 28.10.26 19:10 | Поля модели: контекст, размышления, флаги речи, диаризация ролика выключена по умолчанию | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-2 | 28.10.26 19:10 | Перевести чат и эмбеддинги на genai, реранк и проверку имени оставить своими | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-3 | 28.10.26 19:10 | Убрать команду и отдельный OpenAI, добавить провайдера расшифровки | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-4 | 28.10.26 19:10 | Контракт расшифровки: время слов, спикеры, отпечаток и два запроса OpenAI | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-5 | 28.10.26 19:10 | Убрать стадию «Говорящие» и склеивать слова со спикерами в одной расшифровке | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-6 | 28.10.26 19:10 | Экран моделей: контекст, глубина размышлений, галочки речи | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-7 | 28.10.26 19:10 | Анализ ролика: диаризация выключена, пока её не включили, и молчит при выключенной модели | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-8 | 28.10.26 19:10 | Обновить архитектуру, ограничения и руководство под genai и одну расшифровку | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-9 | 28.10.26 19:10 | Полный прогон тестов и проверка diff после AGENT-GEN-8 | готово | [agent-genai.md](tasks/agent-genai.md) |

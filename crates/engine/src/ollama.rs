@@ -7,12 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub fn program_path(connection: &Connection) -> PathBuf {
-    if connection.program.trim().is_empty() {
-        PathBuf::from("ollama")
-    } else {
-        PathBuf::from(connection.program.trim())
-    }
+pub fn program_path(_connection: &Connection) -> PathBuf {
+    PathBuf::from("ollama")
 }
 
 pub fn version(program: &Path) -> Result<String, EngineError> {

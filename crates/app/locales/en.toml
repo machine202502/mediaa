@@ -295,6 +295,58 @@ diagnostics_hint = "Technical files and the application source code."
 logs = "Open log folder"
 logs_hint = "Open the MediaA technical log folder."
 repository = "GitHub repository"
+contract = "Transcription contract"
+contract_title = "Transcription server contract"
+contract_body = """
+This is the server you connect as Transcription. MediaA sends one slice of a recording and reads the answer. The text is enough to understand the format and to ask a model to write the server.
+
+The address on the card is the server root, with no path appended.
+
+Request
+
+POST {address}/v1/audio/transcriptions
+Content-Type: multipart/form-data
+Authorization: Bearer {key}
+
+If the key is empty, there is no Authorization header.
+
+Form fields:
+• model — the model name from the Models screen.
+• language — the interface language code, for example ru. The field is omitted when no language is set.
+• file — one slice of audio: WAV, 16 kHz, mono, 16-bit. The field name is file and the filename is window.wav.
+
+Times in the answer are seconds from the start of this file, not of the whole recording. A speaker label such as "A" exists only inside this answer. In the next slice "A" may be a different person. MediaA links people across slices.
+
+The answer is JSON. Extra fields are ignored. Any status outside 200–299 is an error, and its text is shown to the person.
+
+Answer fields:
+• text — the whole slice. Required when there are no words and no segments.
+• words — each word, with word, start and end. speaker may be omitted.
+• segments — phrases: start, end, text, speaker. MediaA uses them to name the person when words have no speaker.
+• speakers — one person. id matches speaker in words and segments. embedding is a list of numbers, the same length for every person. MediaA uses these numbers to recognise the voice in another slice.
+
+What MediaA reads:
+• It always reads the text.
+• It reads word times only when Word times is on for the model. Then words is required, and a slice without them is an error.
+• It reads speakers only when diarization is on both for the model and for this recording. Then segments with speaker are required.
+• It reads a voiceprint only for a Transcription connection, only together with speakers, and only when Voiceprint is on. Then speakers with embedding is required.
+
+Check models, for this connection, calls GET {address}/health and expects status 200. A model list is not required.
+"""
+contract_example = """
+{
+  "text": "hello",
+  "words": [
+    {"word": "hello", "start": 0.12, "end": 0.48, "speaker": "A"}
+  ],
+  "segments": [
+    {"start": 0.10, "end": 2.40, "text": "hello", "speaker": "A"}
+  ],
+  "speakers": [
+    {"id": "A", "embedding": [0.01, -0.02]}
+  ]
+}
+"""
 
 [notice]
 error = "Error"
@@ -426,15 +478,13 @@ close_all = "Close all"
 file_missing = "File not found — it was moved or deleted"
 no_sound = "“%{name}” has no sound — catalogs take only audio and video with sound"
 providers_title = "Providers"
-kind_openai = "OpenAI-compatible"
+kind_openai = "Custom OpenAI"
 kind_openrouter = "OpenRouter"
 remove_provider = "Remove provider"
 provider_name = "Name"
 base_url = "API URL"
 base_url_hint = "Root of an OpenAI-style API, usually ending in /v1 (Ollama, LM Studio, vLLM, OpenAI…)"
 api_key = "API key"
-show_key = "Show key"
-hide_key = "Hide key"
 check = "Check"
 provider_ok = "Works, %{n} models"
 models_title = "Models"
@@ -478,6 +528,11 @@ context = "Context"
 tokens = " tokens"
 context_hint = "How much text the agent model keeps in mind. More reads more at once and remembers longer, but takes more memory."
 thinking = "Thinking"
+thinking_depth = "Reasoning depth"
+speech_diarize = "Diarization"
+speech_words = "Word times"
+speech_voice = "Voiceprint"
+kind_transcription = "Transcription"
 thinking_hint = "The model reasons first and acts after: more accurate answers, but slower. Off by default."
 verify_answers = "Check answers"
 verify_answers_hint = "The model checks the draft against the moments and pages it cites, then writes the answer. On by default."
@@ -536,7 +591,7 @@ ready_ran = "loads and answers, %{size}"
 ready_provider = "the provider accepts the key and serves the model"
 ready_unused = "not used"
 check_models = "Check models"
-check_models_hint = "Downloads Hugging Face models, validates local model files and checks provider keys and models"
+check_models_hint = "Asks the server for its model list and checks that the chosen name is there"
 device = "Device"
 device_auto = "Auto"
 device_hint = "Where the model runs. Auto and GPU: on the graphics card when the memory budget allows, otherwise on the CPU. CPU: the processor only."
@@ -792,7 +847,7 @@ stage_index = "Index"
 stage_topics = "Topics"
 stage_details = "Topic breakdown"
 why_replies = "The transcript is needed first"
-why_model = "No diarization model is chosen (Agent → Models)"
+why_model = "Diarization is off for the speech model (Agent → Models)"
 why_index = "The index is needed"
 why_topics = "The topics are needed"
 why_busy = "An analysis is running: stop it first"

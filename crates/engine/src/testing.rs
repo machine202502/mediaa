@@ -1,6 +1,7 @@
 use crate::engine::{
     ChatAnswer, ChatRequest, DiarizeRequest, EmbedKind, EmbeddingsRequest, Engine, EngineError,
-    ModelCheck, ModelInfo, RerankRequest, RerankResult, TranscribeRequest, Usage, VoiceRequest,
+    ModelCheck, ModelInfo, RerankRequest, RerankResult, SpeechBody, TranscribeRequest, Usage,
+    VoiceRequest,
 };
 use mediaa_core::agent::ModelRole;
 use mediaa_core::transcript::{Phrase, Turn, Word};
@@ -16,7 +17,7 @@ pub struct RecordedChat {
     pub max_tokens: u32,
     pub temperature: f32,
     pub json_schema: Option<String>,
-    pub thinking: Option<u32>,
+    pub thinking: Option<String>,
     pub tools: usize,
 }
 
@@ -151,7 +152,15 @@ impl Engine for FakeEngine {
                 .json_schema
                 .as_ref()
                 .map(|schema| schema.to_string()),
-            thinking: request.thinking.map(|thinking| thinking.budget),
+            thinking: request.thinking.map(|thinking| {
+                match thinking.depth {
+                    mediaa_core::agent::ReasoningDepth::Low => "low",
+                    mediaa_core::agent::ReasoningDepth::Medium => "medium",
+                    mediaa_core::agent::ReasoningDepth::High => "high",
+                    mediaa_core::agent::ReasoningDepth::XHigh => "xhigh",
+                }
+                .to_string()
+            }),
             tools: request.tools.len(),
         });
         if request.source.model.trim() == "slow/model" {
@@ -246,7 +255,7 @@ impl Engine for FakeEngine {
         &self,
         request: &TranscribeRequest,
         _cancel: &AtomicBool,
-    ) -> Result<Vec<Phrase>, EngineError> {
+    ) -> Result<SpeechBody, EngineError> {
         if let Some(message) = self.inner.fail_next.lock().unwrap().take() {
             return Err(EngineError::internal(message));
         }
@@ -256,8 +265,8 @@ impl Engine for FakeEngine {
             .unwrap()
             .push(format!("{}:{}", request.from, request.to));
         let phrases = self.inner.phrases.lock().unwrap().clone();
-        if phrases.is_empty() {
-            return Ok(vec![Phrase {
+        let phrases = if phrases.is_empty() {
+            vec![Phrase {
                 start: request.from,
                 end: request.to,
                 words: vec![Word {
@@ -265,12 +274,28 @@ impl Engine for FakeEngine {
                     start: request.from,
                     end: request.to.min(request.from + 0.4),
                 }],
-            }]);
-        }
-        Ok(phrases
-            .into_iter()
-            .filter(|phrase| phrase.start >= request.from && phrase.start < request.to)
-            .collect())
+            }]
+        } else {
+            phrases
+                .into_iter()
+                .filter(|phrase| phrase.start >= request.from && phrase.start < request.to)
+                .collect()
+        };
+        let turns = if request.speakers {
+            self.inner.turns.lock().unwrap().clone()
+        } else {
+            Vec::new()
+        };
+        let voices = if request.voiceprint {
+            self.inner.voices.lock().unwrap().clone()
+        } else {
+            Vec::new()
+        };
+        Ok(SpeechBody {
+            phrases,
+            turns,
+            voices,
+        })
     }
 
     fn diarize(

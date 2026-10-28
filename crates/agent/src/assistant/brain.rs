@@ -107,8 +107,6 @@ pub trait Brain {
 
 pub const ANSWER: &str = "answer";
 
-pub const THINK_TOKENS: u32 = 2048;
-
 const THOUGHT_CHARS: u32 = 600;
 
 pub fn step_schema(tools: &[ToolSpec], may_answer: bool, thinking: bool) -> Value {
@@ -440,7 +438,7 @@ impl ChatBrain<'_> {
             max_tokens,
             temperature: 0.0,
             thinking: self.thinking.then_some(Thinking {
-                budget: THINK_TOKENS,
+                depth: self.source.thinking_depth,
             }),
             ..ChatRequest::default()
         }
@@ -934,7 +932,7 @@ mod tests {
         let chats = fake.chats();
         assert_eq!(
             chats[0].thinking,
-            Some(THINK_TOKENS),
+            Some("medium".into()),
             "the engine is asked to think first"
         );
         assert!(
@@ -1047,6 +1045,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out, r#"{"changed":true,"answer":"Нет."}"#);
-        assert_eq!(fake.chats()[1].thinking, Some(THINK_TOKENS));
+        assert_eq!(fake.chats()[1].thinking.as_deref(), Some("medium"));
     }
 }

@@ -535,12 +535,8 @@ fn with_brain<R>(
         .agent
         .clone()
         .ok_or_else(|| anyhow::anyhow!("no agent model chosen (Agent → Models)"))?;
-    let thinking = settings.thinking_on(&source);
-    let context = settings
-        .connection(&source.connection)
-        .map(|connection| connection.context)
-        .unwrap_or(settings.agent_context)
-        .clamp(2048, 262_144);
+    let thinking = source.thinking;
+    let context = source.context;
     let engine = scope.engine();
     let brain = ChatBrain {
         engine: engine.as_ref(),
@@ -3108,6 +3104,13 @@ mod tests {
         assert!(bad_citations(&a.text, &rec).is_empty());
     }
 
+    fn bench_model(spec: &str) -> Option<mediaa_core::agent::ModelSource> {
+        let (connection, model) = spec.split_once('/')?;
+        let mut source = mediaa_core::agent::ModelSource::new(connection, model);
+        source.context = 8192;
+        Some(source)
+    }
+
     #[test]
     #[ignore]
     fn bench_on_a_recording() {
@@ -3119,6 +3122,19 @@ mod tests {
         let file = std::path::PathBuf::from(var("MEDIAA_BENCH_FILE"));
         let id = transcript::file_id(&file).unwrap();
         let mut settings = AgentSettings::default();
+        if let Ok(spec) = std::env::var("MEDIAA_BENCH_AGENT") {
+            settings.models.agent = bench_model(&spec);
+            settings.models.titles = bench_model(&spec);
+        }
+        if let Ok(spec) = std::env::var("MEDIAA_BENCH_EMBED") {
+            settings.models.embedding = bench_model(&spec);
+        }
+        if let Ok(spec) = std::env::var("MEDIAA_BENCH_SPEECH") {
+            settings.models.speech_recognition = bench_model(&spec).map(|mut source| {
+                source.word_times = true;
+                source
+            });
+        }
         if let Ok(key) = std::env::var("MEDIAA_BENCH_TAVILY") {
             settings.web.engine = mediaa_core::agent::WebEngine::Tavily;
             settings.web.api_key = key;
@@ -3127,8 +3143,8 @@ mod tests {
             settings.web.proxy = proxy;
         }
         if std::env::var_os("MEDIAA_BENCH_THINKING").is_some() {
-            if let Some(model) = settings.models.agent.clone() {
-                settings.set_thinking(&model, true);
+            if let Some(model) = settings.models.agent.as_mut() {
+                model.thinking = true;
             }
         }
         let engine = crate::live::engine();

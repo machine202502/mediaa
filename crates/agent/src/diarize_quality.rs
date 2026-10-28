@@ -283,9 +283,9 @@ pub(crate) fn run_recording_chunks(
         Some(model) => ModelSource::new("live", model),
         None => settings
             .models
-            .diarization
+            .speech_recognition
             .clone()
-            .context("no diarization model is chosen in the settings")?,
+            .context("no speech model is chosen in the settings")?,
     };
     let started = Instant::now();
     let mut chunks = Vec::new();

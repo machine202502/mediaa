@@ -10,11 +10,10 @@ pub enum Reasoning {
 pub fn reasoning(kind: ConnectionKind) -> Reasoning {
     match kind {
         ConnectionKind::OpenRouter => Reasoning::OpenRouter,
-        ConnectionKind::OpenAi
-        | ConnectionKind::DeepSeek
+        ConnectionKind::DeepSeek
         | ConnectionKind::HuggingFace
         | ConnectionKind::OpenAiCompatible => Reasoning::Effort,
-        ConnectionKind::Ollama | ConnectionKind::Command => Reasoning::None,
+        ConnectionKind::Ollama | ConnectionKind::Transcription => Reasoning::None,
     }
 }
 

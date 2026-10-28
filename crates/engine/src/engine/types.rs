@@ -1,5 +1,6 @@
 use mediaa_core::agent::ModelSource;
-use mediaa_core::transcript::Phrase;
+use mediaa_core::agent::ReasoningDepth;
+use mediaa_core::transcript::{Phrase, Turn};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -76,7 +77,7 @@ pub struct ToolCall {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Thinking {
-    pub budget: u32,
+    pub depth: ReasoningDepth,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +174,16 @@ pub struct TranscribeRequest {
     pub from: f64,
     pub to: f64,
     pub language: Option<String>,
+    pub word_times: bool,
+    pub speakers: bool,
+    pub voiceprint: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SpeechBody {
+    pub phrases: Vec<Phrase>,
+    pub turns: Vec<Turn>,
+    pub voices: Vec<Vec<f32>>,
 }
 
 #[derive(Debug, Clone)]
