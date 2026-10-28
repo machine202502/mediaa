@@ -202,6 +202,12 @@ fn harness(page: Page) -> Harness<'static, UiState> {
     harness_with(page, settings(), catalog(), egui::vec2(1180.0, 900.0))
 }
 
+fn agent_settings() -> Settings {
+    let mut settings = settings();
+    settings.media_dir = std::env::temp_dir().join("mediaa-agent-ui-tests");
+    settings
+}
+
 fn harness_with(
     page: Page,
     settings: Settings,
@@ -1184,6 +1190,66 @@ fn key_pages_stay_inside_supported_window_widths() {
     }
 }
 
+#[test]
+fn the_agent_section_opens_catalogs() {
+    let mut harness = harness_with(
+        Page::Screenshot,
+        agent_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness.get_by_label_contains(&t!("section.agent")).click();
+    harness.run_steps(2);
+    assert!(harness
+        .query_all_by(|node| node
+            .label()
+            .is_some_and(|label| label.contains(&*t!("nav.catalogs"))))
+        .next()
+        .is_some());
+    assert!(harness
+        .query_by_label_contains(&t!("agent.catalogs_empty"))
+        .is_some());
+}
+
+#[test]
+fn agent_pages_are_listed_in_the_sub_navigation() {
+    let mut harness = harness_with(
+        Page::Catalogs,
+        agent_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    for label in [
+        t!("nav.catalogs"),
+        t!("nav.queue"),
+        t!("nav.budget"),
+        t!("nav.providers"),
+        t!("nav.models"),
+    ] {
+        assert!(
+            harness
+                .query_all_by(|node| node.label().is_some_and(|text| text.contains(&*label)))
+                .next()
+                .is_some(),
+            "missing sub-navigation entry {label}"
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_agent_catalogs() {
+    let mut harness = harness_with(
+        Page::Catalogs,
+        agent_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.snapshot("agent-catalogs-wide");
+}
+
 fn page_title(page: Page) -> String {
     match page {
         Page::Screenshot => t!("shot.title").into_owned(),
@@ -1191,6 +1257,11 @@ fn page_title(page: Page) -> String {
         Page::RecordAudio => t!("audio.title").into_owned(),
         Page::Library => t!("lib.title").into_owned(),
         Page::Convert => t!("convert.title").into_owned(),
+        Page::Catalogs => t!("nav.catalogs").into_owned(),
+        Page::Providers => t!("agent.providers_title").into_owned(),
+        Page::Models => t!("agent.models_title").into_owned(),
+        Page::Queue => t!("queue.title").into_owned(),
+        Page::Budget => t!("budget.title").into_owned(),
         Page::Settings => t!("settings.title").into_owned(),
         Page::About => t!("settings.about").into_owned(),
     }

@@ -1,0 +1,15 @@
+<!--
+  MSBuild picks this file up for every Visual Studio project under the repository, i.e. the
+  CMake builds of native dependencies inside `target/` (llama.cpp).
+
+  CMake marks custom commands `BuildInParallel` (policy CMP0147), and llama.cpp's
+  `vulkan-shaders-gen` external project has a build step without outputs (BUILD_ALWAYS), so
+  MSBuild cannot see that its install step depends on it and runs them at the same time: a
+  clean build fails with "file INSTALL cannot find vulkan-shaders-gen.exe". Run custom
+  commands one after another instead.
+-->
+<Project>
+  <ItemGroup>
+    <CustomBuild Update="@(CustomBuild)" BuildInParallel="false" />
+  </ItemGroup>
+</Project>

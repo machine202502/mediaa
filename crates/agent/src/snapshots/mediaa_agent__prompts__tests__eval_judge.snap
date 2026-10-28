@@ -1,0 +1,16 @@
+---
+source: crates/agent/src/prompts.rs
+expression: user
+---
+Question:
+Как зовут?
+
+Reference answer:
+Антон Назаров.
+
+Facts that must be covered:
+- Назаров
+- три юриста
+
+Assistant's answer:
+Его зовут Назаров [12:00].

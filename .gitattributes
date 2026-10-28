@@ -1,3 +1,5 @@
 *.sh text eol=lf
 Dockerfile text eol=lf
 *.ps1 text eol=crlf
+*.j2 text eol=lf
+*.snap text eol=lf

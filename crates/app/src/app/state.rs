@@ -14,6 +14,11 @@ pub enum Page {
     RecordAudio,
     Library,
     Convert,
+    Catalogs,
+    Providers,
+    Models,
+    Queue,
+    Budget,
     Settings,
     About,
 }

@@ -32,7 +32,13 @@ impl SettingsWriter {
     }
 
     fn start(path: PathBuf) -> Self {
-        Self::with_saver(path, |settings, path| settings.save_to(path))
+        Self::with_saver(path, |settings, path| {
+            settings.save_to(path)?;
+            if let Err(error) = mediaa_agent::secrets::save(&settings.agent) {
+                log::warn!("settings: provider keys were not saved: {error:#}");
+            }
+            Ok(())
+        })
     }
 
     fn with_saver(

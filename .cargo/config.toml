@@ -1,5 +1,8 @@
 [env]
 FFMPEG_DIR = { value = "vcpkg_installed/x64-windows-static-release", relative = true, force = false }
+LLAMA_STATIC_CRT = "1"
+CMAKE_GENERATOR = { value = "Visual Studio 18 2026", force = false }
+CMAKE_TOOLCHAIN_FILE = { value = "cmake/static-crt.cmake", relative = true, force = false }
 
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]

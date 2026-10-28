@@ -56,3 +56,5 @@
 | UX-AUDIT-1 | 26.10.26 07:00 | Закрыть приоритетные пробелы UX-тестов dynamic overlay, populated pages и responsive layout | готово | [ux-coverage-gaps.md](tasks/ux-coverage-gaps.md) |
 | UI-REGION-6 | 26.10.26 07:18 | Не допускать перекрытия selection size badge и активного text frame | готово | [region-size-badge-collision.md](tasks/region-size-badge-collision.md) |
 | SITE-1 | 26.10.26 07:24 | Создать маркетинговый сайт MediaA и Pages-деплой через GitHub Actions | готово | [site-marketing.md](tasks/site-marketing.md) |
+| AGENT-PORT-1 | 27.10.26 20:20 | Довести перенос агента до сборки, тестов и архитектурного соответствия main | готово | [agent-port.md](tasks/agent-port.md) |
+| BUILD-1 | 28.10.26 11:44 | Вернуть Windows-сборке генератор VS и static CRT toolchain, чтобы `run.ps1` снова собирал и запускал приложение | в работе | [windows-build.md](tasks/windows-build.md) |

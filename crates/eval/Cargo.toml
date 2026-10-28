@@ -1,0 +1,21 @@
+[package]
+name = "mediaa-eval"
+description = "Quality runs of the MediaA agent over a set of cases"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mediaa-core.workspace = true
+mediaa-engine.workspace = true
+mediaa-agent.workspace = true
+mediaa-queue.workspace = true
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json = "1"
+serde_yaml = "0.9"
+chrono = { workspace = true }
+env_logger.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

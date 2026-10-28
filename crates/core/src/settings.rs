@@ -331,6 +331,7 @@ pub struct Settings {
     pub audio_record: AudioRecordSettings,
     pub hotkey_audio: AudioRecordSettings,
     pub hotkeys: HotkeySettings,
+    pub agent: crate::agent::AgentSettings,
     pub launch_at_login: bool,
     pub start_in_tray: bool,
     pub close_to_tray: bool,
@@ -367,6 +368,7 @@ impl Default for Settings {
             audio_record: AudioRecordSettings::default(),
             hotkey_audio: AudioRecordSettings::default(),
             hotkeys: HotkeySettings::default(),
+            agent: crate::agent::AgentSettings::default(),
             launch_at_login: false,
             start_in_tray: false,
             close_to_tray: true,
@@ -474,7 +476,10 @@ mod tests {
     use crate::formats::{AnimFormat, VideoContainer};
 
     #[test]
-    #[allow(clippy::field_reassign_with_default)]
+    #[allow(
+        clippy::field_reassign_with_default,
+        reason = "the fixture changes one field at a time"
+    )]
     fn roundtrip_through_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("settings.toml");

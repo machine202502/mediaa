@@ -1,7 +1,7 @@
 mod cleanup;
 mod grid;
 mod hover_preview;
-mod player;
+pub(crate) mod player;
 pub(crate) mod thumbs;
 mod viewer;
 

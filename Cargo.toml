@@ -6,6 +6,10 @@ members = [
     "crates/render",
     "crates/media",
     "crates/platform",
+    "crates/engine",
+    "crates/agent",
+    "crates/queue",
+    "crates/eval",
     "crates/app",
     "crates/webp-pipeline",
 ]
@@ -23,6 +27,10 @@ mediaa-render = { path = "crates/render" }
 mediaa-platform = { path = "crates/platform" }
 mediaa-media = { path = "crates/media" }
 mediaa-webp-pipeline = { path = "crates/webp-pipeline" }
+mediaa-engine = { path = "crates/engine" }
+mediaa-agent = { path = "crates/agent" }
+mediaa-queue = { path = "crates/queue" }
+mediaa-eval = { path = "crates/eval" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -82,6 +90,17 @@ opt-level = 2
 opt-level = 2
 [profile.test-fast.package.mediaa-media]
 opt-level = 2
+[profile.test-fast.package.mediaa-engine]
+opt-level = 2
+[profile.test-fast.package.mediaa-agent]
+opt-level = 2
+[profile.test-fast.package.mediaa-queue]
+opt-level = 2
+[profile.test-fast.package.mediaa-eval]
+opt-level = 2
+
+[profile.dev]
+debug = 0
 
 [profile.dev.package."*"]
 opt-level = 1
@@ -94,4 +113,12 @@ opt-level = 2
 [profile.dev.package.mediaa-platform]
 opt-level = 2
 [profile.dev.package.mediaa-media]
+opt-level = 2
+[profile.dev.package.mediaa-engine]
+opt-level = 2
+[profile.dev.package.mediaa-agent]
+opt-level = 2
+[profile.dev.package.mediaa-queue]
+opt-level = 2
+[profile.dev.package.mediaa-eval]
 opt-level = 2

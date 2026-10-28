@@ -28,6 +28,7 @@ impl App {
         theme::install(ctx);
         theme::apply_preference(ctx, settings.theme);
         crate::i18n::apply(settings.language.as_deref());
+        let agent_budget = settings.agent.budget.clone();
         let (desktop_events_tx, desktop_events) = crossbeam_channel::bounded(64);
         Self {
             settings,
@@ -46,6 +47,11 @@ impl App {
                 page
             } else {
                 Page::Screenshot
+            },
+            last_agent_page: if page.section() == Some(pages::Section::Agent) {
+                page
+            } else {
+                Page::Catalogs
             },
             notices: Notices::default(),
             tray: None,
@@ -71,6 +77,10 @@ impl App {
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
             conversion: Default::default(),
+            agent: features::agent::AgentController::new(
+                std::sync::Arc::new(mediaa_engine::testing::FakeEngine::default()),
+                &agent_budget,
+            ),
             quit_when_idle: false,
             recovery_job: None,
             housekeeping_jobs: Vec::new(),

@@ -61,6 +61,7 @@ pub struct App {
     pub page: Page,
     pub last_capture_page: Page,
     pub last_main_page: Page,
+    pub last_agent_page: Page,
     notices: Notices,
     tray: Option<Tray>,
     tray_rx: Option<Receiver<TrayCommand>>,
@@ -85,6 +86,7 @@ pub struct App {
     pub lib: features::library::LibraryController,
     pub thumbs: Thumbnails,
     pub(crate) conversion: features::conversion::ConversionController,
+    pub agent: features::agent::AgentController,
     quit_when_idle: bool,
     recovery_job: Option<crate::jobs::Job<RecoveryReport>>,
     housekeeping_jobs: Vec<crate::jobs::Job<()>>,
@@ -133,7 +135,8 @@ impl App {
     ) -> Self {
         let ctx = &cc.egui_ctx;
         theme::install(ctx);
-        let settings = Settings::load();
+        let mut settings = Settings::load();
+        mediaa_agent::secrets::load(&mut settings.agent);
         let clipboard = ClipboardService::new(ctx.clone());
         let previews = mediaa_media::preview_cache::previews_dir(&settings.media_dir);
         let mut output_dirs = vec![settings.media_dir.clone(), settings.convert_dir()];
@@ -162,6 +165,11 @@ impl App {
             .as_mut()
             .map(|h| h.apply(&settings.hotkeys))
             .unwrap_or_default();
+        let agent_budget = settings.agent.budget.clone();
+        let engine: Arc<dyn mediaa_engine::Engine> = Arc::new(mediaa_engine::LocalEngine::new(
+            paths::models_dir(),
+            agent_budget.clone().into(),
+        ));
 
         let mut app = Self {
             settings,
@@ -170,6 +178,7 @@ impl App {
             page: Page::Screenshot,
             last_capture_page: Page::Screenshot,
             last_main_page: Page::Screenshot,
+            last_agent_page: Page::Catalogs,
             notices: Notices::default(),
             tray,
             tray_rx,
@@ -194,6 +203,7 @@ impl App {
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
             conversion: Default::default(),
+            agent: features::agent::AgentController::new(engine, &agent_budget),
             quit_when_idle: false,
             recovery_job: None,
             housekeeping_jobs: Vec::new(),
@@ -256,6 +266,9 @@ impl App {
             app.page = p;
             if let Some(pages::Section::Capture) = p.section() {
                 app.last_capture_page = p;
+            }
+            if let Some(pages::Section::Agent) = p.section() {
+                app.last_agent_page = p;
             }
         }
         let stale_previews = previews;
@@ -477,6 +490,11 @@ impl eframe::App for App {
                 ctx.request_repaint_after(SETTINGS_SAVE_DELAY + Duration::from_millis(50));
             }
         }
+        let ai_dir = mediaa_core::catalogs::ai_dir(&self.settings.media_dir);
+        let language = crate::i18n::current();
+        let active = self.page.section() == Some(pages::Section::Agent);
+        self.agent
+            .tick(&ai_dir, &self.settings.agent, &language, active, ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -570,6 +588,11 @@ pub fn page_from_args(args: &[String]) -> Option<Page> {
         "audio" => Some(Page::RecordAudio),
         "library" => Some(Page::Library),
         "convert" => Some(Page::Convert),
+        "catalogs" => Some(Page::Catalogs),
+        "providers" => Some(Page::Providers),
+        "models" => Some(Page::Models),
+        "queue" => Some(Page::Queue),
+        "budget" => Some(Page::Budget),
         "settings" => Some(Page::Settings),
         "about" => Some(Page::About),
         _ => None,

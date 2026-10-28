@@ -10,11 +10,19 @@ name = "mediaa"
 path = "src/main.rs"
 
 [dependencies]
+serde_json = "1"
+pulldown-cmark = "0.13"
 mediaa-core.workspace = true
 mediaa-storage.workspace = true
 mediaa-render.workspace = true
 mediaa-media.workspace = true
 mediaa-platform.workspace = true
+mediaa-engine.workspace = true
+mediaa-agent.workspace = true
+mediaa-queue.workspace = true
+serde.workspace = true
+egui_ltreeview = "0.9"
+egui_dock = "0.21"
 anyhow.workspace = true
 raw-window-handle = "0.6"
 log.workspace = true
@@ -22,7 +30,7 @@ image.workspace = true
 crossbeam-channel.workspace = true
 parking_lot.workspace = true
 chrono.workspace = true
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "persistence", "x11", "wayland"] }
 egui-phosphor = "0.14"
 fontdb = "0.23"
 global-hotkey = "0.8"
@@ -41,6 +49,7 @@ ico = "0.4"
 winresource = "0.1"
 
 [dev-dependencies]
+mediaa-engine = { workspace = true, features = ["testing"] }
 egui_kittest = { version = "0.36", features = ["wgpu", "snapshot"] }
 tempfile.workspace = true
 toml.workspace = true

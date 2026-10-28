@@ -1,4 +1,5 @@
 pub mod about;
+pub mod agent;
 pub mod audio;
 pub mod capture;
 pub mod record;
@@ -23,6 +24,7 @@ pub enum Section {
     Library,
     Capture,
     Convert,
+    Agent,
 }
 
 impl Page {
@@ -31,6 +33,9 @@ impl Page {
             Page::Library => Some(Section::Library),
             Page::Screenshot | Page::Record | Page::RecordAudio => Some(Section::Capture),
             Page::Convert => Some(Section::Convert),
+            Page::Catalogs | Page::Providers | Page::Models | Page::Queue | Page::Budget => {
+                Some(Section::Agent)
+            }
             Page::Settings | Page::About => None,
         }
     }
@@ -46,6 +51,21 @@ fn sub_pages(section: Section) -> Vec<(Page, &'static str, String)> {
                 icon::MICROPHONE,
                 t!("nav.record_audio").into(),
             ),
+        ],
+        Section::Agent => vec![
+            (
+                Page::Catalogs,
+                icon::TREE_STRUCTURE,
+                t!("nav.catalogs").into(),
+            ),
+            (Page::Queue, icon::QUEUE, t!("nav.queue").into()),
+            (Page::Budget, icon::GAUGE, t!("nav.budget").into()),
+            (
+                Page::Providers,
+                icon::PLUGS_CONNECTED,
+                t!("nav.providers").into(),
+            ),
+            (Page::Models, icon::CUBE, t!("nav.models").into()),
         ],
         Section::Library | Section::Convert => Vec::new(),
     }
@@ -69,6 +89,7 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
         app.last_main_page = app.page;
         match section {
             Section::Capture => app.last_capture_page = app.page,
+            Section::Agent => app.last_agent_page = app.page,
             Section::Library | Section::Convert => {}
         }
         let pages = sub_pages(section);
@@ -106,6 +127,11 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
             });
+    }
+
+    if app.page == Page::Catalogs {
+        agent::catalogs::screen(app, ui);
+        return;
     }
 
     egui::CentralPanel::default()
@@ -216,6 +242,11 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                             app.apply_conversion_ui_action(ui.ctx(), action);
                         }
                     }
+                    Page::Providers => agent::providers::ui(app, ui),
+                    Page::Models => agent::models::ui(app, ui),
+                    Page::Queue => agent::queue::ui(app, ui),
+                    Page::Budget => agent::budget::ui(app, ui),
+                    Page::Catalogs => {}
                     Page::Settings => settings::ui(app, ui),
                     Page::About => about::ui(app, ui),
                 });
@@ -248,6 +279,10 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                     Some(Section::Convert),
                     format!("{}  {}", icon::SHUFFLE, t!("section.convert")),
                 ),
+                (
+                    Some(Section::Agent),
+                    format!("{}  {}", icon::SPARKLE, t!("section.agent")),
+                ),
             ],
         );
         if section != before {
@@ -255,6 +290,7 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 Some(Section::Library) => Page::Library,
                 Some(Section::Capture) | None => app.last_capture_page,
                 Some(Section::Convert) => Page::Convert,
+                Some(Section::Agent) => app.last_agent_page,
             };
         }
 

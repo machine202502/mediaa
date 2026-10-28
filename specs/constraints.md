@@ -90,6 +90,8 @@
 - Timeout не доказывает отмену OS side effect. Уже принятая операция может завершиться позже.
 - Синхронная запись каждого изменения настроек блокировала бы UI на медленном диске.
   `SettingsWriter` объединяет изменения и сохраняет последнюю версию.
+- `settings.toml` сохраняется независимо от OS keychain: ключи провайдеров синхронизируются
+  best-effort после записи файла, иначе недоступный keychain терял бы все настройки.
 - Удаление этих защит требует воспроизводимого fault-injection на отдельной VM/session.
 
 ## Уведомления
@@ -134,6 +136,11 @@
 ## Сборка и проверки
 
 - FFmpeg статически связывается через vcpkg; команды требуют окружения из Windows scripts.
+- Windows-сборка дополнительно требует CMake и Vulkan SDK (`VULKAN_SDK`): `llama-cpp-2`
+  собирает llama.cpp с Vulkan-бэкендом. `LLAMA_STATIC_CRT=1` задаёт static CRT для cc.
+  `.cargo/config.toml` задаёт `CMAKE_GENERATOR = Visual Studio 18 2026` и
+  `CMAKE_TOOLCHAIN_FILE = cmake/static-crt.cmake`. Без toolchain-файла генератор VS не применяет
+  `/MT`, и кэш CMake ищет удалённый файл. Так собиралась `feature/agent-temp`.
 - Windows snapshot baselines не являются доказательством поведения Linux/macOS.
 - Live tests реального desktop/capture пропускаются без display session.
 - Documentation-only изменение не требует повторного Rust suite.
