@@ -1,12 +1,12 @@
-use super::brain::{Brain, Message, Role};
-use super::provider::ProviderBrain;
+use super::brain::{Message, Role};
 use super::tools::Recording;
 use crate::prompts;
 use crate::tools::{format_time, parse_time};
+use mediaa_core::agent::ModelSource;
 use mediaa_core::outline::{self, Window};
 use mediaa_core::retrieval::stems;
 use mediaa_core::transcript::{Reply, Transcript};
-use mediaa_engine::{ChatMessage, ChatRequest, Device, Engine, Priority};
+use mediaa_engine::{ChatMessage, ChatRequest, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -152,51 +152,12 @@ pub fn read_facts(text: &str) -> anyhow::Result<Vec<(String, String)>> {
         .unwrap_or_default())
 }
 
-pub struct EngineExtract<'a> {
+pub struct ChatExtract<'a> {
     pub engine: &'a dyn Engine,
-    pub model: String,
-    pub n_ctx: u32,
-    pub device: Device,
-    pub priority: Priority,
-    pub hf_token: Option<String>,
+    pub source: ModelSource,
 }
 
-impl Extract for EngineExtract<'_> {
-    fn extract(
-        &self,
-        instruction: &str,
-        part: &Window,
-        i: usize,
-        n: usize,
-        cancel: &AtomicBool,
-    ) -> anyhow::Result<Vec<(String, String)>> {
-        let messages = [
-            Message::new(Role::System, system(false)),
-            Message::new(Role::User, request(instruction, part, i, n)),
-        ];
-        let request = ChatRequest {
-            model: self.model.clone(),
-            messages: messages
-                .iter()
-                .map(|m| ChatMessage::new(m.role.into(), m.content.clone()))
-                .collect(),
-            max_tokens: 900,
-            temperature: 0.0,
-            json_schema: Some(facts_schema()),
-            no_repeats: true,
-            n_ctx: Some(self.n_ctx),
-            device: Some(self.device),
-            priority: Some(self.priority),
-            hf_token: self.hf_token.clone(),
-            ..ChatRequest::default()
-        };
-        read_facts(&self.engine.chat(&request, cancel, &mut |_| true)?.content)
-    }
-}
-
-pub struct ProviderExtract<'a>(pub &'a ProviderBrain);
-
-impl Extract for ProviderExtract<'_> {
+impl Extract for ChatExtract<'_> {
     fn extract(
         &self,
         instruction: &str,
@@ -209,7 +170,18 @@ impl Extract for ProviderExtract<'_> {
             Message::new(Role::System, system(true)),
             Message::new(Role::User, request(instruction, part, i, n)),
         ];
-        read_facts(&self.0.complete(&messages, cancel)?)
+        let request = ChatRequest {
+            source: self.source.clone(),
+            messages: messages
+                .iter()
+                .map(|m| ChatMessage::new(m.role.into(), m.content.clone()))
+                .collect(),
+            max_tokens: 900,
+            temperature: 0.0,
+            json_schema: Some(facts_schema()),
+            ..ChatRequest::default()
+        };
+        read_facts(&self.engine.chat(&request, cancel, &mut |_| true)?.content)
     }
 }
 

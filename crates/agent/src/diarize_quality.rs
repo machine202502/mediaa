@@ -1,8 +1,10 @@
+use crate::diarize::Diarization;
 use crate::transcribe::SAMPLE_RATE;
 use anyhow::Context;
 use mediaa_core::agent::AgentSettings;
+use mediaa_core::agent::ModelSource;
 use mediaa_core::transcript::Turn;
-use mediaa_engine::{Diarization, DiarizeRequest, Engine};
+use mediaa_engine::{DiarizeRequest, Engine};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -224,6 +226,22 @@ pub struct Found {
     pub diarization: Diarization,
 }
 
+fn write_wav(path: &Path, samples: &[f32]) -> anyhow::Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)?;
+    for sample in samples {
+        let clipped = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+        writer.write_sample(clipped)?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
 pub fn run_recording(
     engine: &dyn Engine,
     settings: &AgentSettings,
@@ -261,19 +279,36 @@ pub(crate) fn run_recording_chunks(
     let audio_seconds = samples.len() as f64 / f64::from(SAMPLE_RATE);
     let decode_seconds = started.elapsed().as_secs_f64();
 
-    let model = match &options.model {
-        Some(model) => model.clone(),
-        None => {
-            let source = settings
-                .models
-                .diarization
-                .as_ref()
-                .context("no diarization model is chosen in the settings")?;
-            crate::models::local_spec(source)?
-        }
+    let source = match &options.model {
+        Some(model) => ModelSource::new("live", model),
+        None => settings
+            .models
+            .diarization
+            .clone()
+            .context("no diarization model is chosen in the settings")?,
     };
     let started = Instant::now();
     let mut chunks = Vec::new();
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    let diarize_slice = |slice: &[f32]| -> anyhow::Result<Vec<Turn>> {
+        let path = std::env::temp_dir().join(format!(
+            "mediaa-quality-{}-{}.wav",
+            std::process::id(),
+            slice.len()
+        ));
+        write_wav(&path, slice)?;
+        let turns = engine
+            .diarize(
+                &DiarizeRequest {
+                    source: source.clone(),
+                    path: path.clone(),
+                },
+                &cancel_flag,
+            )
+            .with_context(|| format!("diarizing {}", audio.display()))?;
+        let _ = std::fs::remove_file(&path);
+        Ok(turns)
+    };
     let diarization = match options.chunk_seconds {
         Some(chunk_seconds) => {
             let overlap = options
@@ -284,42 +319,32 @@ pub(crate) fn run_recording_chunks(
             for (start, end) in ranges {
                 let low = (start * f64::from(SAMPLE_RATE)).round() as usize;
                 let high = ((end * f64::from(SAMPLE_RATE)).round() as usize).min(samples.len());
-                let request = DiarizeRequest {
-                    segmentation: crate::diarize::SEGMENTATION_MODEL.to_string(),
-                    embedding: model.clone(),
-                    speakers: None,
-                    clustering_threshold: options.clustering_threshold,
-                    merge_threshold: None,
-                    min_speaker_seconds: None,
-                    hf_token: crate::assistant::hf_token(settings),
-                };
-                let found = engine
-                    .diarize(&request, &samples[low..high])
-                    .with_context(|| format!("diarizing {}", audio.display()))?;
-                chunks.push(crate::diarize::Chunk::new(start, end, found));
+                let mut turns = diarize_slice(&samples[low..high])?;
+                let count = crate::voices::compact(&mut turns);
+                let voices = vec![
+                    crate::diarize::ChunkVoice {
+                        embedding: Vec::new(),
+                        seconds: 0.0,
+                    };
+                    count
+                ];
+                chunks.push(crate::diarize::Chunk::new(start, end, turns, voices));
             }
             crate::diarize::link(
                 &chunks,
                 options
                     .merge_threshold
-                    .unwrap_or(mediaa_engine::speech::DEFAULT_MERGE_THRESHOLD),
+                    .unwrap_or(crate::diarize::LINK_THRESHOLD),
                 crate::diarize::LINK_MIN_SECONDS,
                 None,
             )
         }
         None => {
-            let request = DiarizeRequest {
-                segmentation: crate::diarize::SEGMENTATION_MODEL.to_string(),
-                embedding: model,
-                speakers: None,
-                clustering_threshold: options.clustering_threshold,
-                merge_threshold: options.merge_threshold,
-                min_speaker_seconds: Some(mediaa_engine::speech::MIN_SPEAKER_SECONDS),
-                hf_token: crate::assistant::hf_token(settings),
-            };
-            engine
-                .diarize(&request, &samples)
-                .with_context(|| format!("diarizing {}", audio.display()))?
+            let turns = diarize_slice(&samples)?;
+            Diarization {
+                turns,
+                voices: Vec::new(),
+            }
         }
     };
     let diarize_seconds = started.elapsed().as_secs_f64();

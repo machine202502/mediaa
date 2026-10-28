@@ -216,7 +216,6 @@ mod tests {
             indexing: 8,
             web_search: 8,
             provider_calls: 8,
-            ..Budget::default()
         })
     }
 

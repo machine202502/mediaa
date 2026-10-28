@@ -1,9 +1,6 @@
-use mediaa_core::agent::ModelRole;
-use mediaa_engine::speech::Phrase;
 use mediaa_engine::{
-    Budget as EngineBudget, ChatAnswer, ChatRequest, Diarization, DiarizeRequest,
-    EmbeddingsRequest, Engine, EngineError, Health, ModelCheck, ModelInfo, ModelInspect,
-    ProgressCallback, RerankRequest, RerankResult, Status, Thinking, VadSession,
+    ChatAnswer, ChatRequest, DiarizeRequest, EmbeddingsRequest, Engine, EngineError, ModelCheck,
+    ModelInfo, RerankRequest, RerankResult, TranscribeRequest, VoiceRequest,
 };
 use mediaa_queue::{Stats, Status as TaskStatus, Store, TaskId};
 use serde_json::Value;
@@ -195,27 +192,16 @@ struct ScopedEngine {
     scope: Scope,
 }
 
+fn model_of(source: &mediaa_core::agent::ModelSource) -> String {
+    let model = source.model.trim();
+    if model.is_empty() {
+        source.key()
+    } else {
+        model.to_string()
+    }
+}
+
 impl Engine for ScopedEngine {
-    fn health(&self) -> Health {
-        self.scope.engine.health()
-    }
-
-    fn status(&self) -> Status {
-        self.scope.engine.status()
-    }
-
-    fn set_budget(&self, budget: EngineBudget) {
-        self.scope.engine.set_budget(budget);
-    }
-
-    fn set_wanted(&self, specs: &[String]) {
-        self.scope.engine.set_wanted(specs);
-    }
-
-    fn forget_loaded(&self, model: &str) {
-        self.scope.engine.forget_loaded(model);
-    }
-
     fn chat(
         &self,
         request: &ChatRequest,
@@ -225,30 +211,9 @@ impl Engine for ScopedEngine {
         let started = Instant::now();
         let result = self.scope.engine.chat(request, cancel, on_text);
         let usage = result.as_ref().ok().and_then(|answer| answer.usage);
+        let model = model_of(&request.source);
         self.scope.add_stats(
-            &[&request.model],
-            started,
-            usage.map_or(0, |u| u64::from(u.prompt_tokens)),
-            usage.map_or(0, |u| u64::from(u.completion_tokens)),
-        );
-        result
-    }
-
-    fn chat_thinking(
-        &self,
-        request: &ChatRequest,
-        thinking: Thinking,
-        cancel: &AtomicBool,
-        on_text: &mut dyn FnMut(&str) -> bool,
-    ) -> Result<ChatAnswer, EngineError> {
-        let started = Instant::now();
-        let result = self
-            .scope
-            .engine
-            .chat_thinking(request, thinking, cancel, on_text);
-        let usage = result.as_ref().ok().and_then(|answer| answer.usage);
-        self.scope.add_stats(
-            &[&request.model],
+            &[&model],
             started,
             usage.map_or(0, |u| u64::from(u.prompt_tokens)),
             usage.map_or(0, |u| u64::from(u.completion_tokens)),
@@ -263,7 +228,8 @@ impl Engine for ScopedEngine {
     ) -> Result<Vec<Vec<f32>>, EngineError> {
         let started = Instant::now();
         let result = self.scope.engine.embeddings(request, cancel);
-        self.scope.add_stats(&[&request.model], started, 0, 0);
+        let model = model_of(&request.source);
+        self.scope.add_stats(&[&model], started, 0, 0);
         result
     }
 
@@ -274,78 +240,57 @@ impl Engine for ScopedEngine {
     ) -> Result<Vec<RerankResult>, EngineError> {
         let started = Instant::now();
         let result = self.scope.engine.rerank(request, cancel);
-        self.scope.add_stats(&[&request.model], started, 0, 0);
+        let model = model_of(&request.source);
+        self.scope.add_stats(&[&model], started, 0, 0);
         result
     }
 
-    fn vad_open(
+    fn transcribe(
         &self,
-        model: &str,
-        offset: f64,
-        hf_token: Option<&str>,
-    ) -> Result<Box<dyn VadSession>, EngineError> {
+        request: &TranscribeRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<mediaa_core::transcript::Phrase>, EngineError> {
         let started = Instant::now();
-        let result = self.scope.engine.vad_open(model, offset, hf_token);
-        self.scope.add_stats(&[model], started, 0, 0);
-        result
-    }
-
-    fn recognize(
-        &self,
-        model: &str,
-        offset: f64,
-        samples: &[f32],
-        hf_token: Option<&str>,
-    ) -> Result<Phrase, EngineError> {
-        let started = Instant::now();
-        let result = self
-            .scope
-            .engine
-            .recognize(model, offset, samples, hf_token);
-        self.scope.add_stats(&[model], started, 0, 0);
+        let result = self.scope.engine.transcribe(request, cancel);
+        let model = model_of(&request.source);
+        self.scope.add_stats(&[&model], started, 0, 0);
         result
     }
 
     fn diarize(
         &self,
         request: &DiarizeRequest,
-        samples: &[f32],
-    ) -> Result<Diarization, EngineError> {
+        cancel: &AtomicBool,
+    ) -> Result<Vec<mediaa_core::transcript::Turn>, EngineError> {
         let started = Instant::now();
-        let result = self.scope.engine.diarize(request, samples);
-        self.scope
-            .add_stats(&[&request.segmentation, &request.embedding], started, 0, 0);
+        let result = self.scope.engine.diarize(request, cancel);
+        let model = model_of(&request.source);
+        self.scope.add_stats(&[&model], started, 0, 0);
         result
     }
 
-    fn models(&self) -> Result<Vec<ModelInfo>, EngineError> {
-        self.scope.engine.models()
-    }
-
-    fn inspect(&self, spec: &str, hf_token: Option<&str>) -> Result<ModelInspect, EngineError> {
-        self.scope.engine.inspect(spec, hf_token)
-    }
-
-    fn pull(
+    fn voice_embeddings(
         &self,
-        spec: &str,
-        hf_token: Option<&str>,
-        on_progress: ProgressCallback,
-    ) -> Result<std::path::PathBuf, EngineError> {
-        self.scope.engine.pull(spec, hf_token, on_progress)
+        request: &VoiceRequest,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<Vec<f32>>, EngineError> {
+        let started = Instant::now();
+        let result = self.scope.engine.voice_embeddings(request, cancel);
+        let model = model_of(&request.source);
+        self.scope.add_stats(&[&model], started, 0, 0);
+        result
     }
 
-    fn delete_model(&self, spec: &str) -> Result<(), EngineError> {
-        self.scope.engine.delete_model(spec)
+    fn models(&self, connection: &str) -> Result<Vec<ModelInfo>, EngineError> {
+        self.scope.engine.models(connection)
     }
 
-    fn check_model(
+    fn check(
         &self,
-        spec: &str,
-        role: ModelRole,
-        hf_token: Option<&str>,
+        source: &mediaa_core::agent::ModelSource,
+        role: mediaa_core::agent::ModelRole,
     ) -> Result<ModelCheck, EngineError> {
-        self.scope.engine.check_model(spec, role, hf_token)
+        self.scope.engine.check(source, role)
     }
 }
 
@@ -384,8 +329,9 @@ mod tests {
         );
         let engine = scope.engine();
 
+        let source = |model: &str| mediaa_core::agent::ModelSource::new("c", model);
         let request = ChatRequest {
-            model: "owner/model".into(),
+            source: source("owner/model"),
             messages: vec![ChatMessage::user("hi")],
             ..ChatRequest::default()
         };
@@ -394,7 +340,7 @@ mod tests {
         engine
             .embeddings(
                 &EmbeddingsRequest {
-                    model: "owner/embed".into(),
+                    source: source("owner/embed"),
                     input: vec!["a".into(), "b".into()],
                     ..EmbeddingsRequest::default()
                 },
@@ -404,30 +350,45 @@ mod tests {
         engine
             .rerank(
                 &RerankRequest {
-                    model: "owner/rerank".into(),
+                    source: source("owner/rerank"),
                     query: "q".into(),
                     documents: vec!["d".into()],
-                    ..RerankRequest::default()
                 },
                 &cancel,
             )
             .unwrap();
-        engine.vad_open("owner/vad.onnx", 0.0, None).unwrap();
+        let wav = dir.path().join("w.wav");
+        std::fs::write(&wav, []).unwrap();
         engine
-            .recognize("owner/asr", 0.0, &[0.0; 16], None)
+            .transcribe(
+                &TranscribeRequest {
+                    source: source("owner/asr"),
+                    path: wav.clone(),
+                    from: 0.0,
+                    to: 1.0,
+                    language: None,
+                },
+                &cancel,
+            )
             .unwrap();
         engine
             .diarize(
                 &DiarizeRequest {
-                    segmentation: "owner/seg.onnx".into(),
-                    embedding: "owner/spk.onnx".into(),
-                    speakers: None,
-                    hf_token: None,
-                    ..DiarizeRequest::default()
+                    source: source("owner/dia"),
+                    path: wav.clone(),
                 },
-                &[0.0; 16],
+                &cancel,
             )
             .unwrap();
+        engine
+            .voice_embeddings(
+                &VoiceRequest {
+                    source: source("owner/voice"),
+                    clips: vec![wav],
+                },
+                &cancel,
+            )
+            .unwrap_err();
 
         let stats = store.get(id).unwrap().unwrap().stats;
         assert_eq!(stats.model_calls, 6);
@@ -442,18 +403,16 @@ mod tests {
                 "owner/model",
                 "owner/embed",
                 "owner/rerank",
-                "owner/vad.onnx",
                 "owner/asr",
-                "owner/seg.onnx",
-                "owner/spk.onnx"
+                "owner/dia",
+                "owner/voice"
             ]
         );
 
-        engine.health();
-        engine.status();
-        engine.models().unwrap();
-        engine.set_budget(EngineBudget::default());
-        engine.set_wanted(&["owner/model".into()]);
+        engine.models("c").unwrap();
+        engine
+            .check(&source("owner/model"), mediaa_core::agent::ModelRole::Agent)
+            .unwrap();
         let after = store.get(id).unwrap().unwrap().stats;
         assert_eq!(after, stats);
     }
@@ -471,7 +430,7 @@ mod tests {
             .engine()
             .chat(
                 &ChatRequest {
-                    model: "owner/model".into(),
+                    source: mediaa_core::agent::ModelSource::new("c", "owner/model"),
                     messages: vec![ChatMessage::user("hi")],
                     ..ChatRequest::default()
                 },
@@ -535,7 +494,7 @@ mod tests {
                 s.spawn(move || {
                     scope.focus(Some(child));
                     let request = ChatRequest {
-                        model: "owner/model".into(),
+                        source: mediaa_core::agent::ModelSource::new("c", "owner/model"),
                         messages: vec![ChatMessage::user("hi")],
                         ..ChatRequest::default()
                     };
@@ -552,16 +511,5 @@ mod tests {
             0,
             "the parent runs nothing itself"
         );
-    }
-
-    #[test]
-    fn set_wanted_reaches_the_engine() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = opened(dir.path());
-        let id = task(store.as_ref(), "chat", None);
-        let fake = FakeEngine::new();
-        let scope = Scope::attach(store, id, Arc::new(fake.clone()), None);
-        scope.engine().set_wanted(&["owner/keep".into()]);
-        assert_eq!(fake.wanted(), vec!["owner/keep".to_string()]);
     }
 }

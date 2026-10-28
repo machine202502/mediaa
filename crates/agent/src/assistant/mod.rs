@@ -3,7 +3,6 @@ pub mod chat;
 pub mod folder;
 pub mod internet;
 pub mod memory;
-pub mod provider;
 pub mod queued;
 pub mod quote;
 pub mod scan;
@@ -11,9 +10,8 @@ pub mod step_title;
 pub mod title;
 pub mod tools;
 
-pub use brain::{Brain, Call, EngineBrain, Message, Piece, Role, Step, ToolSpec};
+pub use brain::{Brain, Call, ChatBrain, Message, Piece, Role, Step, ToolSpec};
 pub use memory::Memory;
-pub use provider::ProviderBrain;
 pub use tools::{Recording, Tools};
 
 use crate::prompts;
@@ -395,44 +393,6 @@ pub struct Waiter<'a> {
     pub grace: Duration,
 }
 
-pub fn wait_reason(
-    status: &mediaa_engine::Status,
-    model: &str,
-    busy: impl FnOnce() -> Vec<crate::scope::TaskRef>,
-) -> Option<WaitReason> {
-    let ours = |w: &&mediaa_engine::WaitingModel| w.model.as_deref() == Some(model);
-    let waiting = |reason: &str| {
-        status
-            .waiting
-            .iter()
-            .filter(ours)
-            .find(|w| w.reason == reason)
-    };
-    if let Some(w) = waiting("downloading") {
-        let (done, total) = w.progress.as_ref().map_or((0, 0), |p| (p.done, p.total));
-        return Some(WaitReason::Downloading {
-            model: model.to_string(),
-            done,
-            total,
-        });
-    }
-    if waiting("memory").is_some() {
-        return Some(WaitReason::Memory {
-            model: model.to_string(),
-        });
-    }
-    if status
-        .waiting
-        .iter()
-        .any(|w| matches!(w.reason.as_str(), "slot" | "turn"))
-    {
-        return Some(WaitReason::Busy { tasks: busy() });
-    }
-    (!status.loaded.iter().any(|m| m.model == model)).then(|| WaitReason::Loading {
-        model: model.to_string(),
-    })
-}
-
 pub fn provider_wait(status: &crate::slots::Status) -> Option<WaitReason> {
     status
         .waiting
@@ -442,23 +402,12 @@ pub fn provider_wait(status: &crate::slots::Status) -> Option<WaitReason> {
 }
 
 fn waiter(
-    scope: &Scope,
+    _scope: &Scope,
     slots: &Slots,
-    settings: &mediaa_core::agent::AgentSettings,
+    _settings: &mediaa_core::agent::AgentSettings,
 ) -> Box<dyn Fn() -> Option<WaitReason> + Send + Sync> {
-    use mediaa_core::agent::ModelSource;
-    match &settings.models.agent {
-        Some(ModelSource::Provider { .. }) => {
-            let slots = slots.clone();
-            Box::new(move || provider_wait(&slots.status()))
-        }
-        Some(local) => {
-            let model = crate::models::local_spec(local).unwrap_or_default();
-            let (scope, engine) = (scope.clone(), scope.engine());
-            Box::new(move || wait_reason(&engine.status(), &model, || scope.busy_with()))
-        }
-        None => Box::new(|| None),
-    }
+    let slots = slots.clone();
+    Box::new(move || provider_wait(&slots.status()))
 }
 
 fn for_model(
@@ -575,82 +524,38 @@ fn web_calls<'a>(
     )
 }
 
-fn provider_brain(
-    scope: &Scope,
-    slots: &Slots,
-    settings: &mediaa_core::agent::AgentSettings,
-    id: &str,
-    model: &str,
-    thinking: bool,
-) -> anyhow::Result<ProviderBrain> {
-    let p = settings
-        .provider(id)
-        .ok_or_else(|| anyhow::anyhow!("the provider of a model was removed"))?
-        .clone();
-    Ok(ProviderBrain {
-        provider: p,
-        model: model.to_string(),
-        slots: slots.clone(),
-        max_tokens: STEP_TOKENS,
-        scope: scope.clone(),
-        thinking,
-    })
-}
-
 fn with_brain<R>(
     scope: &Scope,
     slots: &Slots,
     settings: &mediaa_core::agent::AgentSettings,
     f: impl FnOnce(&dyn Brain, &dyn scan::Extract) -> anyhow::Result<R>,
 ) -> anyhow::Result<R> {
-    use mediaa_core::agent::{ModelRole, ModelSource};
-    use mediaa_engine::Priority;
     let source = settings
         .models
         .agent
-        .as_ref()
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("no agent model chosen (Agent → Models)"))?;
-    let thinking = settings.thinking_on(source);
-    match source {
-        ModelSource::Provider { provider, model } => {
-            let brain = provider_brain(scope, slots, settings, provider, model, thinking)?;
-            f(&brain, &scan::ProviderExtract(&brain))
-        }
-        local => {
-            let model = crate::models::local_spec(local)?;
-            let n_ctx = settings.agent_context.clamp(2048, 262_144);
-            let device = settings.devices.get(ModelRole::Agent);
-            let hf_token = hf_token(settings);
-            let engine = scope.engine();
-            let brain = EngineBrain {
-                engine: engine.as_ref(),
-                model: model.clone(),
-                n_ctx,
-                device,
-                priority: Priority::Interactive,
-                max_tokens: STEP_TOKENS,
-                hf_token: hf_token.clone(),
-                thinking,
-                speed: std::sync::Mutex::new(None),
-            };
-            let extract = scan::EngineExtract {
-                engine: engine.as_ref(),
-                model,
-                n_ctx,
-                device,
-                priority: Priority::Background,
-                hf_token,
-            };
-            f(&brain, &extract)
-        }
-    }
-}
-
-pub fn hf_token(settings: &mediaa_core::agent::AgentSettings) -> Option<String> {
-    settings
-        .hugging_face()
-        .map(|provider| provider.api_key.trim().to_string())
-        .filter(|token| !token.is_empty())
+    let thinking = settings.thinking_on(&source);
+    let context = settings
+        .connection(&source.connection)
+        .map(|connection| connection.context)
+        .unwrap_or(settings.agent_context)
+        .clamp(2048, 262_144);
+    let engine = scope.engine();
+    let brain = ChatBrain {
+        engine: engine.as_ref(),
+        source: source.clone(),
+        slots: slots.clone(),
+        context,
+        max_tokens: STEP_TOKENS,
+        thinking,
+        speed: std::sync::Mutex::new(None),
+    };
+    let extract = scan::ChatExtract {
+        engine: engine.as_ref(),
+        source,
+    };
+    f(&brain, &extract)
 }
 
 #[allow(
@@ -2426,81 +2331,7 @@ mod tests {
     }
 
     #[test]
-    fn the_wait_comes_from_the_engines_status() {
-        use mediaa_engine::{
-            Budget as EngineBudget, LoadedModel, Pool, Progress, Status, Used, WaitingModel,
-        };
-        let status = |loaded: &[&str], waiting: Vec<WaitingModel>| Status {
-            loaded: loaded
-                .iter()
-                .map(|m| LoadedModel {
-                    model: (*m).to_string(),
-                    pool: Pool::Gpu,
-                    bytes: 1,
-                    users: 1,
-                    idle: Duration::ZERO,
-                    unloads_in: None,
-                })
-                .collect(),
-            waiting,
-            budget: EngineBudget::default(),
-            used: Used::default(),
-        };
-        let waiting =
-            |model: Option<&str>, reason: &str, progress: Option<Progress>| WaitingModel {
-                id: 1,
-                model: model.map(String::from),
-                reason: reason.into(),
-                progress,
-            };
-        let m = "owner/agent";
-        let busy = || {
-            vec![crate::scope::TaskRef {
-                kind: "analysis".into(),
-                title: "интервью.mp4".into(),
-            }]
-        };
-        assert_eq!(wait_reason(&status(&[m], vec![]), m, busy), None);
-        assert_eq!(
-            wait_reason(&status(&["owner/other"], vec![]), m, busy),
-            Some(WaitReason::Loading { model: m.into() })
-        );
-        assert_eq!(
-            wait_reason(
-                &status(&[], vec![waiting(Some(m), "memory", None)]),
-                m,
-                busy
-            ),
-            Some(WaitReason::Memory { model: m.into() })
-        );
-        let progress = Progress { done: 5, total: 10 };
-        assert_eq!(
-            wait_reason(
-                &status(&[], vec![waiting(Some(m), "downloading", Some(progress))]),
-                m,
-                busy
-            ),
-            Some(WaitReason::Downloading {
-                model: m.into(),
-                done: 5,
-                total: 10
-            })
-        );
-        assert_eq!(
-            wait_reason(&status(&[m], vec![waiting(None, "turn", None)]), m, busy),
-            Some(WaitReason::Busy { tasks: busy() })
-        );
-        assert_eq!(
-            wait_reason(
-                &status(
-                    &[m],
-                    vec![waiting(Some("owner/other"), "downloading", None)]
-                ),
-                m,
-                busy
-            ),
-            None
-        );
+    fn a_full_provider_slot_is_the_wait() {
         let taken = crate::slots::Status {
             running: vec![],
             waiting: vec![(1, mediaa_core::agent::WorkKind::ProviderCalls)],

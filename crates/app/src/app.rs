@@ -166,9 +166,8 @@ impl App {
             .map(|h| h.apply(&settings.hotkeys))
             .unwrap_or_default();
         let agent_budget = settings.agent.budget.clone();
-        let engine: Arc<dyn mediaa_engine::Engine> = Arc::new(mediaa_engine::LocalEngine::new(
-            paths::models_dir(),
-            agent_budget.clone().into(),
+        let engine = std::sync::Arc::new(mediaa_engine::Connections::new(
+            settings.agent.connections.clone(),
         ));
 
         let mut app = Self {
@@ -203,7 +202,7 @@ impl App {
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
             conversion: Default::default(),
-            agent: features::agent::AgentController::new(engine, &agent_budget),
+            agent: features::agent::AgentController::with_connections(engine, &agent_budget),
             quit_when_idle: false,
             recovery_job: None,
             housekeeping_jobs: Vec::new(),

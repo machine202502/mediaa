@@ -184,11 +184,10 @@ icacls <repo> /setintegritylevel "(OI)(CI)M" /C /Q
 ## Сборка и проверки
 
 - FFmpeg статически связывается через vcpkg; команды требуют окружения из Windows scripts.
-- Windows-сборка дополнительно требует CMake и Vulkan SDK (`VULKAN_SDK`): `llama-cpp-2`
-  собирает llama.cpp с Vulkan-бэкендом. `LLAMA_STATIC_CRT=1` задаёт static CRT для cc.
-  `.cargo/config.toml` задаёт `CMAKE_GENERATOR = Visual Studio 18 2026` и
-  `CMAKE_TOOLCHAIN_FILE = cmake/static-crt.cmake`. Без toolchain-файла генератор VS не применяет
-  `/MT`, и кэш CMake ищет удалённый файл. Так собиралась `feature/agent-temp`.
+- Инференс только внешний. Приложение не линкует llama.cpp, Vulkan и sherpa-onnx. Команда
+  пользователя запускается без оболочки: исполняемый файл и аргументы отдельно, отмена убивает
+  известный дочерний процесс. Файл для OpenAI `/audio/transcriptions` не больше 25 МБ; окно
+  расшифровки около 600 с WAV 16 кГц mono этому соответствует.
 - Отказ в доступе к `%TEMP%` у `lib.exe`, MSBuild или `cl.exe` во время сборки сначала проверять
   на метку Low (раздел «Изоляция Windows от песочниц агентов»).
 - Windows snapshot baselines не являются доказательством поведения Linux/macOS.

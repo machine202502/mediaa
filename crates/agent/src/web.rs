@@ -21,15 +21,57 @@ pub struct Page {
     pub text: String,
 }
 
-fn client(web: &WebSettings) -> anyhow::Result<reqwest::blocking::Client> {
-    let b = reqwest::blocking::Client::builder()
-        .timeout(TIMEOUT)
-        .user_agent(USER_AGENT);
-    let b = match web.proxy.trim() {
-        "" => b.no_proxy(),
-        url => b.proxy(crate::providers::proxy(url)?),
-    };
-    Ok(b.build()?)
+fn agent(web: &WebSettings) -> anyhow::Result<ureq::Agent> {
+    let mut builder = ureq::Agent::config_builder()
+        .timeout_global(Some(TIMEOUT))
+        .http_status_as_error(false);
+    match web.proxy.trim() {
+        "" => {}
+        url => {
+            let proxy = ureq::Proxy::new(url)
+                .map_err(|error| anyhow::anyhow!("proxy \"{url}\": {error}"))?;
+            builder = builder.proxy(Some(proxy));
+        }
+    }
+    Ok(builder.build().new_agent())
+}
+
+struct Fetched {
+    status: u16,
+    content_type: String,
+    body: Vec<u8>,
+}
+
+impl Fetched {
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    fn json(&self) -> anyhow::Result<Value> {
+        Ok(serde_json::from_slice(&self.body)?)
+    }
+}
+
+fn take(response: ureq::http::Response<ureq::Body>) -> anyhow::Result<Fetched> {
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let mut response = response;
+    let mut body = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(MAX_PAGE)
+        .read_to_end(&mut body)?;
+    Ok(Fetched {
+        status,
+        content_type,
+        body,
+    })
 }
 
 fn text_of(e: scraper::ElementRef) -> String {
@@ -107,57 +149,58 @@ fn parse_json(body: &Value, items: &[&str], fields: (&str, &str, &str)) -> Vec<W
         .unwrap_or_default()
 }
 
-fn ok(
-    resp: reqwest::blocking::Response,
-    what: &str,
-) -> anyhow::Result<reqwest::blocking::Response> {
-    match resp.status().as_u16() {
-        200..=299 => Ok(resp),
-        403 if resp
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .is_some_and(|t| t.to_str().is_ok_and(|t| t.starts_with("text/html"))) =>
-        {
+fn ok(fetched: Fetched, what: &str) -> anyhow::Result<Fetched> {
+    match fetched.status {
+        200..=299 => Ok(fetched),
+        403 if fetched.content_type.starts_with("text/html") => {
             anyhow::bail!("{what} refuses requests from this network (403); set a proxy below or pick another search service")
         }
-        401 | 403 => anyhow::bail!("{what}: the key was rejected ({})", resp.status()),
+        401 | 403 => anyhow::bail!("{what}: the key was rejected ({})", fetched.status),
         429 => anyhow::bail!("{what}: too many requests, try later"),
-        _ => anyhow::bail!("{what}: {}", resp.status()),
+        status => anyhow::bail!("{what}: {status}"),
     }
 }
 
+fn get(agent: &ureq::Agent, url: &str, headers: &[(&str, &str)]) -> anyhow::Result<Fetched> {
+    let mut request = agent.get(url).header("user-agent", USER_AGENT);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    take(request.call()?)
+}
+
 pub fn search(web: &WebSettings, query: &str, n: usize) -> anyhow::Result<Vec<WebHit>> {
-    let c = client(web)?;
+    let c = agent(web)?;
     let key = web.api_key.trim();
     let mut hits = match web.engine {
         WebEngine::DuckDuckGo => {
-            let resp = ok(
-                c.get("https://html.duckduckgo.com/html/")
-                    .query(&[("q", query)])
-                    .send()?,
-                "DuckDuckGo",
-            )?;
-            parse_duckduckgo(&resp.text()?)?
+            let mut url = url::Url::parse("https://html.duckduckgo.com/html/")?;
+            url.query_pairs_mut().append_pair("q", query);
+            let resp = ok(get(&c, url.as_str(), &[])?, "DuckDuckGo")?;
+            parse_duckduckgo(&resp.text())?
         }
         WebEngine::SearXng => {
             let base = web.searxng_url.trim().trim_end_matches('/');
             anyhow::ensure!(!base.is_empty(), "no SearXNG address (Agent → Providers)");
-            let resp = ok(
-                c.get(format!("{base}/search"))
-                    .query(&[("q", query), ("format", "json")])
-                    .send()?,
-                "SearXNG",
-            )?;
+            let mut url = url::Url::parse(&format!("{base}/search"))?;
+            url.query_pairs_mut()
+                .append_pair("q", query)
+                .append_pair("format", "json");
+            let resp = ok(get(&c, url.as_str(), &[])?, "SearXNG")?;
             parse_json(&resp.json()?, &["results"], ("title", "url", "content"))
         }
         WebEngine::Brave => {
             anyhow::ensure!(!key.is_empty(), "no Brave Search key (Agent → Providers)");
-            let req = c
-                .get("https://api.search.brave.com/res/v1/web/search")
-                .query(&[("q", query), ("count", &n.to_string())])
-                .header("X-Subscription-Token", key);
+            let mut url = url::Url::parse("https://api.search.brave.com/res/v1/web/search")?;
+            url.query_pairs_mut()
+                .append_pair("q", query)
+                .append_pair("count", &n.to_string());
+            let resp = ok(
+                get(&c, url.as_str(), &[("X-Subscription-Token", key)])?,
+                "Brave Search",
+            )?;
             parse_json(
-                &ok(req.send()?, "Brave Search")?.json()?,
+                &resp.json()?,
                 &["web", "results"],
                 ("title", "url", "description"),
             )
@@ -165,12 +208,13 @@ pub fn search(web: &WebSettings, query: &str, n: usize) -> anyhow::Result<Vec<We
         WebEngine::Tavily => {
             anyhow::ensure!(!key.is_empty(), "no Tavily key (Agent → Providers)");
             let body = serde_json::json!({"query": query, "max_results": n});
-            let req = c
+            let response = c
                 .post("https://api.tavily.com/search")
-                .bearer_auth(key)
-                .json(&body);
+                .header("user-agent", USER_AGENT)
+                .header("Authorization", &format!("Bearer {key}"))
+                .send_json(&body)?;
             parse_json(
-                &ok(req.send()?, "Tavily")?.json()?,
+                &ok(take(response)?, "Tavily")?.json()?,
                 &["results"],
                 ("title", "url", "content"),
             )
@@ -231,27 +275,20 @@ pub fn read(web: &WebSettings, url: &str, max_chars: usize) -> anyhow::Result<Pa
         "only http(s) pages are read"
     );
     let resp = ok(
-        client(web)?.get(parsed.as_str()).send()?,
+        get(&agent(web)?, parsed.as_str(), &[])?,
         parsed.host_str().unwrap_or("the page"),
     )?;
-    let kind = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_lowercase();
+    let kind = resp.content_type.to_lowercase();
     anyhow::ensure!(
         kind.is_empty() || kind.contains("html") || kind.starts_with("text/"),
         "{url}: not a text page ({kind})"
     );
-    let mut bytes = Vec::new();
-    resp.take(MAX_PAGE).read_to_end(&mut bytes)?;
-    let body = String::from_utf8_lossy(&bytes);
+    let body = resp.text();
     let (title, text) = if kind.contains("html") || body.trim_start().starts_with('<') {
         let (title, markdown) = readable(&body, parsed.as_str())?;
         (title, lean(&markdown))
     } else {
-        (String::new(), body.into_owned())
+        (String::new(), body)
     };
     let mut text: String = text
         .lines()

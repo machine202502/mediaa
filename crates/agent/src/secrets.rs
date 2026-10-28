@@ -101,9 +101,9 @@ const WEB_KEY: &str = "web-search";
 
 fn entries_mut(agent: &mut AgentSettings) -> Vec<(String, &mut String)> {
     let mut e: Vec<(String, &mut String)> = agent
-        .providers
+        .connections
         .iter_mut()
-        .map(|p| (p.id.clone(), &mut p.api_key))
+        .map(|connection| (connection.id.clone(), &mut connection.api_key))
         .collect();
     e.push((WEB_KEY.into(), &mut agent.web.api_key));
     e
@@ -111,9 +111,9 @@ fn entries_mut(agent: &mut AgentSettings) -> Vec<(String, &mut String)> {
 
 fn entries(agent: &AgentSettings) -> Vec<(String, String)> {
     let mut e: Vec<(String, String)> = agent
-        .providers
+        .connections
         .iter()
-        .map(|p| (p.id.clone(), p.api_key.clone()))
+        .map(|connection| (connection.id.clone(), connection.api_key.clone()))
         .collect();
     e.push((WEB_KEY.into(), agent.web.api_key.clone()));
     e
@@ -130,7 +130,7 @@ pub fn save(agent: &AgentSettings) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaa_core::agent::{Provider, ProviderKind};
+    use mediaa_core::agent::{Connection, ConnectionKind};
     use std::sync::Arc;
 
     #[derive(Clone, Default)]
@@ -158,12 +158,12 @@ mod tests {
     fn keys_round_trip_and_follow_providers() {
         let memory = Memory::default();
         let mut agent = AgentSettings::default();
-        let mut a = Provider::new(ProviderKind::OpenRouter, "a");
+        let mut a = Connection::new(ConnectionKind::OpenRouter, "a");
         a.api_key = "sk-a".into();
-        let mut b = Provider::new(ProviderKind::HuggingFace, "b");
+        let mut b = Connection::new(ConnectionKind::HuggingFace, "b");
         b.id.push('b');
         b.api_key = "hf-b".into();
-        agent.providers = vec![a, b];
+        agent.connections = vec![a, b];
         agent.web.api_key = "brave-key".into();
         let mut keys = Keys::new(memory.clone());
         keys.sync(&entries(&agent)).unwrap();
@@ -176,14 +176,17 @@ mod tests {
         );
 
         let mut loaded = agent.clone();
-        loaded.providers.iter_mut().for_each(|p| p.api_key.clear());
+        loaded
+            .connections
+            .iter_mut()
+            .for_each(|connection| connection.api_key.clear());
         loaded.web.api_key.clear();
         let mut keys = Keys::new(memory.clone());
         keys.fill(entries_mut(&mut loaded));
         assert_eq!(loaded, agent);
 
-        loaded.providers.truncate(1);
-        loaded.providers[0].api_key.clear();
+        loaded.connections.truncate(1);
+        loaded.connections[0].api_key.clear();
         loaded.web.api_key.clear();
         keys.sync(&entries(&loaded)).unwrap();
         assert!(memory.0.lock().unwrap().0.is_empty());
@@ -203,7 +206,7 @@ mod tests {
 
     #[test]
     fn keys_are_not_in_the_settings_file() {
-        let mut p = Provider::new(ProviderKind::OpenRouter, "x");
+        let mut p = Connection::new(ConnectionKind::OpenRouter, "x");
         p.api_key = "sk-secret".into();
         let text = toml::to_string(&p).unwrap();
         assert!(!text.contains("sk-secret"));

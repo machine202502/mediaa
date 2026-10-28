@@ -1,9 +1,10 @@
 use crate::run::{Host, Stage, Work};
 use crate::scope::Scope;
 use crate::transcribe::SAMPLE_RATE;
-use mediaa_core::agent::AgentSettings;
+use crate::voices::{self, Voice};
+use mediaa_core::agent::{AgentSettings, ModelSource};
 use mediaa_core::transcript::{self, Transcript, Turn};
-use mediaa_engine::{Diarization, DiarizeRequest, Voice};
+use mediaa_engine::DiarizeRequest;
 use mediaa_queue::Task;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -13,8 +14,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const KIND: &str = "diarize";
-
-pub const SEGMENTATION_MODEL: &str = "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/model.onnx";
 
 pub const CHUNK_SECONDS: f64 = 480.0;
 pub const OVERLAP_SECONDS: f64 = 15.0;
@@ -43,28 +42,23 @@ pub struct ChunkVoice {
     pub seconds: f64,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Diarization {
+    pub turns: Vec<Turn>,
+    pub voices: Vec<Voice>,
+}
+
 impl Chunk {
-    pub fn new(start: f64, end: f64, found: Diarization) -> Chunk {
+    pub fn new(start: f64, end: f64, mut turns: Vec<Turn>, voices: Vec<ChunkVoice>) -> Chunk {
+        for turn in &mut turns {
+            turn.start += start;
+            turn.end += start;
+        }
         Chunk {
             start,
             end,
-            turns: found
-                .turns
-                .into_iter()
-                .map(|turn| Turn {
-                    start: turn.start + start,
-                    end: turn.end + start,
-                    ..turn
-                })
-                .collect(),
-            voices: found
-                .voices
-                .into_iter()
-                .map(|voice| ChunkVoice {
-                    embedding: voice.embedding,
-                    seconds: voice.seconds,
-                })
-                .collect(),
+            turns,
+            voices,
         }
     }
 }
@@ -73,6 +67,8 @@ impl Chunk {
 struct Cursor {
     #[serde(default)]
     chunks: Vec<Chunk>,
+    #[serde(default)]
+    voice_source: String,
 }
 
 pub fn plan(total: f64, chunk: f64, overlap: f64) -> Vec<(f64, f64)> {
@@ -135,15 +131,12 @@ pub fn link(
         }
     }
     let (turns, voices) =
-        mediaa_engine::speech::merge_voices_linked(&turns, &voices, &links, threshold, min_seconds);
+        voices::merge_voices_linked(&turns, &voices, &links, threshold, min_seconds);
     let found = Diarization { turns, voices };
     match speakers {
         Some(speakers) if found.voices.len() > speakers as usize => {
-            let (turns, voices) = mediaa_engine::speech::merge_voices_to(
-                &found.turns,
-                &found.voices,
-                speakers as usize,
-            );
+            let (turns, voices) =
+                voices::merge_voices_to(&found.turns, &found.voices, speakers as usize);
             Diarization { turns, voices }
         }
         _ => found,
@@ -231,6 +224,79 @@ fn decode_range(
     Ok(samples)
 }
 
+fn write_wav(path: &Path, samples: &[f32]) -> anyhow::Result<()> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: SAMPLE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create(path, spec)?;
+    for sample in samples {
+        let clipped = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16;
+        writer.write_sample(clipped)?;
+    }
+    writer.finalize()?;
+    Ok(())
+}
+
+fn tmp_dir(ai_dir: &Path, task: mediaa_queue::TaskId) -> PathBuf {
+    ai_dir.join("tmp").join(task.to_string())
+}
+
+fn voices_of(
+    engine: &dyn mediaa_engine::Engine,
+    source: Option<&ModelSource>,
+    samples: &[f32],
+    turns: &[Turn],
+    count: usize,
+    dir: &Path,
+    cancel: &Arc<AtomicBool>,
+) -> anyhow::Result<Vec<ChunkVoice>> {
+    let Some(source) = source else {
+        return Ok((0..count)
+            .map(|_| ChunkVoice {
+                embedding: Vec::new(),
+                seconds: 0.0,
+            })
+            .collect());
+    };
+    let clips = voices::clips(samples, turns, count);
+    let mut paths = Vec::new();
+    for (index, clip) in clips.iter().enumerate() {
+        let path = dir.join(format!("voice-{index}.wav"));
+        write_wav(&path, clip)?;
+        paths.push(path);
+    }
+    let vectors = engine
+        .voice_embeddings(
+            &mediaa_engine::VoiceRequest {
+                source: source.clone(),
+                clips: paths.clone(),
+            },
+            cancel,
+        )
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    for path in &paths {
+        let _ = std::fs::remove_file(path);
+    }
+    if vectors.len() != paths.len() {
+        anyhow::bail!(
+            "the command returned {} vectors for {} files",
+            vectors.len(),
+            paths.len()
+        );
+    }
+    Ok(clips
+        .iter()
+        .zip(vectors)
+        .map(|(clip, vector)| ChunkVoice {
+            embedding: voices::unit(&vector).unwrap_or_default(),
+            seconds: clip.len() as f64 / f64::from(SAMPLE_RATE),
+        })
+        .collect())
+}
+
 pub struct Diarize {
     ai_dir: PathBuf,
     settings: Arc<dyn Fn() -> AgentSettings + Send + Sync>,
@@ -273,12 +339,7 @@ impl Stage for Diarize {
             ));
         }
         let settings = (self.settings)();
-        let Some(model) = settings
-            .models
-            .diarization
-            .as_ref()
-            .and_then(|source| crate::models::local_spec(source).ok())
-        else {
+        let Some(source) = settings.models.diarization.clone() else {
             log::warn!(
                 "{}: no diarization model; the replies stay without speakers",
                 input.path.display()
@@ -287,6 +348,11 @@ impl Stage for Diarize {
                 json!({ "file_id": id, "warning": "the diarization model is not chosen" }),
             ));
         };
+        let voice = settings.models.voice_embedding.clone();
+        let voice_key = voice
+            .as_ref()
+            .map(|source| source.key())
+            .unwrap_or_default();
         if cancel.load(Ordering::Relaxed) {
             return Ok(Work::Stopped);
         }
@@ -300,42 +366,100 @@ impl Stage for Diarize {
         } else {
             serde_json::from_value(task.cursor.clone())?
         };
+        let dir = tmp_dir(&self.ai_dir, task.id);
+        std::fs::create_dir_all(&dir)?;
+        let scope = Scope::attach(
+            host.store.clone(),
+            task.id,
+            host.engine.clone(),
+            task.scope.clone(),
+        );
+        let engine = scope.engine();
+        if cursor.voice_source != voice_key {
+            for (index, chunk) in cursor.chunks.iter_mut().enumerate() {
+                let samples = decode_range(&input.path, chunk.start, chunk.end, cancel)?;
+                if cancel.load(Ordering::Relaxed) {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Ok(Work::Stopped);
+                }
+                let local: Vec<Turn> = chunk
+                    .turns
+                    .iter()
+                    .map(|turn| Turn {
+                        start: (turn.start - chunk.start).max(0.0),
+                        end: (turn.end - chunk.start).max(0.0),
+                        speaker: turn.speaker,
+                    })
+                    .collect();
+                let count = chunk.voices.len();
+                chunk.voices = voices_of(
+                    engine.as_ref(),
+                    voice.as_ref(),
+                    &samples,
+                    &local,
+                    count,
+                    &dir,
+                    cancel,
+                )?;
+                let _ = index;
+            }
+            cursor.voice_source = voice_key.clone();
+        }
         let reused = cursor.chunks.len();
         if let Some(&(start, end)) = ranges.get(reused) {
             let samples = decode_range(&input.path, start, end, cancel)?;
             if cancel.load(Ordering::Relaxed) {
+                let _ = std::fs::remove_dir_all(&dir);
                 return Ok(Work::Stopped);
             }
-            let request = DiarizeRequest {
-                segmentation: SEGMENTATION_MODEL.to_string(),
-                embedding: model,
-                speakers: None,
-                clustering_threshold: None,
-                merge_threshold: None,
-                min_speaker_seconds: None,
-                hf_token: crate::assistant::hf_token(&settings),
-            };
-            let scope = Scope::attach(
-                host.store.clone(),
-                task.id,
-                host.engine.clone(),
-                task.scope.clone(),
-            );
-            let engine = scope.engine();
-            let found = match engine.diarize(&request, &samples) {
+            let wav = dir.join(format!("chunk-{reused}.wav"));
+            write_wav(&wav, &samples)?;
+            let found = match engine.diarize(
+                &DiarizeRequest {
+                    source: source.clone(),
+                    path: wav.clone(),
+                },
+                cancel,
+            ) {
                 Ok(found) => found,
-                Err(_) if cancel.load(Ordering::Relaxed) => return Ok(Work::Stopped),
+                Err(_) if cancel.load(Ordering::Relaxed) => {
+                    let _ = std::fs::remove_file(&wav);
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Ok(Work::Stopped);
+                }
                 Err(e) => {
+                    let _ = std::fs::remove_file(&wav);
+                    let _ = std::fs::remove_dir_all(&dir);
                     log::warn!("{}: diarization failed: {e:#}", input.path.display());
                     return Ok(Work::Done(
                         json!({ "file_id": id, "warning": format!("{e:#}") }),
                     ));
                 }
             };
+            let _ = std::fs::remove_file(&wav);
             if cancel.load(Ordering::Relaxed) {
+                let _ = std::fs::remove_dir_all(&dir);
                 return Ok(Work::Stopped);
             }
-            cursor.chunks.push(Chunk::new(start, end, found));
+            let mut turns = found;
+            let count = voices::compact(&mut turns);
+            let voices = match voices_of(
+                engine.as_ref(),
+                voice.as_ref(),
+                &samples,
+                &turns,
+                count,
+                &dir,
+                cancel,
+            ) {
+                Ok(voices) => voices,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&dir);
+                    return Err(error);
+                }
+            };
+            cursor.chunks.push(Chunk::new(start, end, turns, voices));
+            cursor.voice_source = voice_key;
             log::info!(
                 "diarize: chunk {}/{} [{start:.0}..{end:.0}] s is done",
                 cursor.chunks.len(),
@@ -349,6 +473,7 @@ impl Stage for Diarize {
             });
         }
         if cancel.load(Ordering::Relaxed) {
+            let _ = std::fs::remove_dir_all(&dir);
             return Ok(Work::Stopped);
         }
         let found = link(
@@ -371,9 +496,12 @@ impl Stage for Diarize {
             .len();
         transcript.set_replies(&replies)?;
         transcript.set_meta("diarized", if found.turns.is_empty() { "0" } else { "1" })?;
-        Ok(Work::Done(
-            json!({ "file_id": id, "replies": replies.len(), "speakers": speakers, "chunks": cursor.chunks.len(), "reused": reused }),
-        ))
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut result = json!({ "file_id": id, "replies": replies.len(), "speakers": speakers, "chunks": cursor.chunks.len(), "reused": reused });
+        if voice.is_none() {
+            result["warning"] = json!("speakers are linked only by the overlaps");
+        }
+        Ok(Work::Done(result))
     }
 }
 
@@ -463,7 +591,7 @@ mod tests {
         let data = eval_data();
         let run = crate::diarize_quality::Run {
             model: Some("csukuangfj/speaker-embedding-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx".to_string()),
-            clustering_threshold: Some(mediaa_engine::speech::DEFAULT_CLUSTERING_THRESHOLD),
+            clustering_threshold: Some(0.5),
             merge_threshold: None,
             ..crate::diarize_quality::Run::default()
         };
@@ -481,14 +609,14 @@ mod tests {
                 }
             };
             for min in [2.0, 4.0, 6.0, 8.0] {
-                let (turns, voices) = mediaa_engine::speech::merge_voices(
+                let (turns, voices) = voices::merge_voices(
                     &found.diarization.turns,
                     &found.diarization.voices,
-                    mediaa_engine::speech::DEFAULT_MERGE_THRESHOLD,
+                    LINK_THRESHOLD,
                     min,
                 );
                 let scored = crate::diarize_quality::score(&crate::diarize_quality::Found {
-                    diarization: mediaa_engine::Diarization { turns, voices },
+                    diarization: Diarization { turns, voices },
                     ..found.clone()
                 })
                 .expect("scoring");
@@ -565,13 +693,13 @@ mod tests {
                         let diarization = match merge {
                             None => found.diarization.clone(),
                             Some(threshold) => {
-                                let (turns, voices) = mediaa_engine::speech::merge_voices(
+                                let (turns, voices) = voices::merge_voices(
                                     &found.diarization.turns,
                                     &found.diarization.voices,
                                     threshold,
-                                    mediaa_engine::speech::MIN_SPEAKER_SECONDS,
+                                    LINK_MIN_SECONDS,
                                 );
-                                mediaa_engine::Diarization { turns, voices }
+                                Diarization { turns, voices }
                             }
                         };
                         let scored =
@@ -603,11 +731,8 @@ mod tests {
         let settings = AgentSettings::default();
         let engine = crate::live::engine();
         let data = eval_data();
-        let mut grid = vec![(None, mediaa_engine::speech::DEFAULT_MERGE_THRESHOLD, None)];
-        for merge in [
-            LINK_THRESHOLD,
-            mediaa_engine::speech::DEFAULT_MERGE_THRESHOLD,
-        ] {
+        let mut grid = vec![(None, LINK_THRESHOLD, None)];
+        for merge in [LINK_THRESHOLD, LINK_THRESHOLD] {
             grid.push((Some(CHUNK_SECONDS), merge, None));
         }
         for (chunk, merge, overlap) in grid {
@@ -808,17 +933,7 @@ mod tests {
             1,
             "cosine ≈ 0.78"
         );
-        assert_eq!(
-            link(
-                &close,
-                mediaa_engine::speech::DEFAULT_MERGE_THRESHOLD,
-                0.0,
-                None
-            )
-            .voices
-            .len(),
-            2
-        );
+        assert_eq!(link(&close, 0.80, 0.0, None).voices.len(), 2);
     }
 
     #[test]
@@ -945,7 +1060,8 @@ mod tests {
     }
 
     fn short_chunks(ai: &Path, chunk: f64, overlap: f64) -> (Diarize, AgentSettings) {
-        let settings = AgentSettings::default();
+        let mut settings = AgentSettings::default();
+        settings.models.diarization = Some(ModelSource::new("c", "dia"));
         let current = settings.clone();
         (
             Diarize {

@@ -1,6 +1,5 @@
 use super::super::header;
 use super::analysis::{clock, left, left_text};
-use super::engine_state::{download_bar, EngineState};
 use super::task_details;
 use super::task_label;
 use super::topics;
@@ -12,7 +11,6 @@ use egui_phosphor::regular as icon;
 use mediaa_agent::slots;
 use mediaa_core::agent::{Budget, WorkKind};
 use mediaa_core::catalogs::ai_dir;
-use mediaa_engine::{LoadedModel, Pool, Status, WaitingModel};
 use mediaa_queue::{
     self as queue, Filter, KindGroup, KindStat, Scheduler, Stats, Status as TaskStatus, Store,
     Task, TaskId, WaitReason,
@@ -20,7 +18,7 @@ use mediaa_queue::{
 use rust_i18n::t;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const REFRESH: Duration = Duration::from_secs(1);
@@ -802,7 +800,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let dir = ai_dir(&library_dir(&app.settings));
     let budget = app.settings.agent.budget.clone();
     let slots = app.agent.slots().status();
-    runtime_card(ui, &app.agent.engine_state, &slots, &budget);
+    runtime_card(ui, &slots, &budget);
     let host = app
         .agent
         .services()
@@ -1021,19 +1019,6 @@ fn task_window(
     }
 }
 
-fn gb(bytes: u64) -> String {
-    format!("{:.1}", bytes as f64 / f64::from(1u32 << 30))
-}
-
-fn memory_bar(used: u64, max: u64) -> (f32, String) {
-    let fill = if max == 0 {
-        1.0
-    } else {
-        (used as f64 / max as f64).clamp(0.0, 1.0) as f32
-    };
-    (fill, format!("{} / {} GB", gb(used), gb(max)))
-}
-
 fn slots(status: &slots::Status, budget: &Budget) -> Vec<(WorkKind, u32, u32, usize)> {
     WorkKind::ALL
         .iter()
@@ -1053,92 +1038,15 @@ fn slots(status: &slots::Status, budget: &Budget) -> Vec<(WorkKind, u32, u32, us
         .collect()
 }
 
-fn model_line(m: &LoadedModel) -> String {
-    let path = m
-        .model
-        .rsplit_once('#')
-        .map_or(m.model.as_str(), |(p, _)| p);
-    let name = Path::new(path)
-        .file_name()
-        .map_or(path.into(), |n| n.to_string_lossy());
-    let pool = match m.pool {
-        Pool::Gpu => t!("queue.on_gpu"),
-        Pool::Cpu => t!("queue.on_cpu"),
-    };
-    let mut parts = vec![format!("{name} · {pool} · {} GB", gb(m.bytes))];
-    if m.users > 0 {
-        parts.push(t!("queue.jobs", n = m.users).to_string());
-    }
-    if !m.idle.is_zero() {
-        parts.push(t!("queue.idle_for", time = clock(m.idle)).to_string());
-    }
-    match m.unloads_in {
-        Some(left) if left.is_zero() => parts.push(t!("queue.unloads_now").to_string()),
-        Some(left) => parts.push(t!("queue.unloads_in", time = clock(left)).to_string()),
-        None => {}
-    }
-    parts.join(" · ")
-}
-
-fn reason_label(reason: &str) -> String {
-    match reason {
-        "downloading" => t!("queue.reason_downloading").into(),
-        "memory" => t!("queue.reason_memory").into(),
-        "slot" => t!("queue.reason_slot").into(),
-        "turn" => t!("queue.reason_turn").into(),
-        other => t!("queue.reason_other", reason = other).into(),
-    }
-}
-
-fn waiting_line(ui: &mut egui::Ui, w: &WaitingModel) {
-    let name = w
-        .model
-        .clone()
-        .unwrap_or_else(|| t!("queue.a_job").to_string());
-    ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
-    ui.horizontal(|ui| {
-        theme::hint(ui, reason_label(&w.reason));
-        if w.reason == "downloading" {
-            if let Some(p) = &w.progress {
-                let (fill, text) = download_bar(p.done, p.total);
-                ui.add(egui::ProgressBar::new(fill).desired_width(200.0).text(text));
-            }
-        }
-    });
-    ui.end_row();
-}
-
-fn runtime_card(ui: &mut egui::Ui, engine: &EngineState, state: &slots::Status, budget: &Budget) {
+fn runtime_card(ui: &mut egui::Ui, state: &slots::Status, budget: &Budget) {
     theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         theme::section(ui, icon::GAUGE, &t!("queue.budget"));
         let p = theme::palette(ui);
-        let status: Option<&Status> = engine.status();
-        let (gpu_used, ram_used) = status.map_or((0, 0), |s| (s.used.gpu_bytes, s.used.ram_bytes));
         egui::Grid::new("queue-budget")
             .num_columns(3)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
-                for (label, used, max) in [
-                    (t!("budget.gpu_memory"), gpu_used, budget.gpu_bytes()),
-                    (t!("budget.ram_memory"), ram_used, budget.ram_bytes()),
-                ] {
-                    let (fill, text) = memory_bar(used, max);
-                    ui.label(label);
-                    let color = if fill >= 0.95 { p.danger } else { p.accent };
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(220.0, 8.0), egui::Sense::hover());
-                    ui.painter().rect_filled(rect, 4.0, p.accent_soft);
-                    if fill > 0.0 {
-                        let done = egui::Rect::from_min_size(
-                            rect.min,
-                            egui::vec2((rect.width() * fill).max(rect.height()), rect.height()),
-                        );
-                        ui.painter().rect_filled(done, 4.0, color);
-                    }
-                    theme::hint(ui, text);
-                    ui.end_row();
-                }
                 for (kind, running, limit, waiting) in slots(state, budget) {
                     ui.label(super::budget::kind_label(kind));
                     ui.horizontal(|ui| {
@@ -1168,34 +1076,6 @@ fn runtime_card(ui: &mut egui::Ui, engine: &EngineState, state: &slots::Status, 
                     ui.end_row();
                 }
             });
-        if let Some(status) = status {
-            if !status.waiting.is_empty() {
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(format!("{}  {}", icon::HOURGLASS, t!("queue.waiting"))).strong(),
-                );
-                egui::Grid::new("queue-engine-waiting")
-                    .num_columns(2)
-                    .spacing([12.0, 4.0])
-                    .show(ui, |ui| {
-                        for w in &status.waiting {
-                            waiting_line(ui, w);
-                        }
-                    });
-            }
-            if !status.loaded.is_empty() {
-                ui.add_space(4.0);
-                ui.label(
-                    RichText::new(format!("{}  {}", icon::MEMORY, t!("queue.models"))).strong(),
-                );
-                for m in &status.loaded {
-                    theme::hint(ui, model_line(m));
-                }
-            }
-        } else {
-            ui.add_space(4.0);
-            engine.offline_hint(ui);
-        }
     });
     ui.add_space(4.0);
 }
@@ -1203,40 +1083,14 @@ fn runtime_card(ui: &mut egui::Ui, engine: &EngineState, state: &slots::Status, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaa_engine::{Budget as EngineBudget, Progress, Used};
 
     #[test]
     fn budget_in_use() {
-        let engine = Status {
-            loaded: vec![LoadedModel {
-                model: "C:\\m\\models\\q\\Qwen3-Q4_K_M.gguf#4096".into(),
-                pool: Pool::Gpu,
-                bytes: 3 << 30,
-                users: 2,
-                idle: Duration::ZERO,
-                unloads_in: None,
-            }],
-            waiting: vec![],
-            budget: EngineBudget {
-                gpu_bytes: 8 << 30,
-                ram_bytes: 8 << 30,
-                keep_alive: Duration::from_secs(5 * 60),
-            },
-            used: Used {
-                gpu_bytes: 3 << 30,
-                ram_bytes: 0,
-            },
-        };
         let state = slots::Status {
             running: vec![(WorkKind::Agent, 1), (WorkKind::WebSearch, 2)],
             waiting: vec![(7, WorkKind::WebSearch), (8, WorkKind::Transcription)],
         };
         let budget = Budget::default();
-        assert_eq!(
-            memory_bar(engine.used.gpu_bytes, budget.gpu_bytes()),
-            (0.375, "3.0 / 8.0 GB".to_string())
-        );
-        assert_eq!(memory_bar(5, 0).0, 1.0, "no budget: full");
         let s = slots(&state, &budget);
         assert_eq!(s.len(), WorkKind::ALL.len());
         assert!(
@@ -1244,55 +1098,6 @@ mod tests {
                 && s.contains(&(WorkKind::WebSearch, 2, 2, 1))
                 && s.contains(&(WorkKind::Transcription, 0, 1, 1)),
             "{s:?}"
-        );
-        let line = model_line(&engine.loaded[0]);
-        assert!(
-            line.starts_with("Qwen3-Q4_K_M.gguf · ")
-                && line.contains(" · 3.0 GB · ")
-                && line.ends_with('2'),
-            "{line}"
-        );
-        let mut idle = engine.loaded[0].clone();
-        idle.users = 0;
-        idle.idle = Duration::from_secs(83);
-        idle.unloads_in = Some(Duration::from_secs(217));
-        let line = model_line(&idle);
-        assert!(
-            !line.contains(&t!("queue.jobs", n = 0).to_string()),
-            "{line}"
-        );
-        assert!(
-            line.contains(&t!("queue.idle_for", time = "1:23").to_string()),
-            "{line}"
-        );
-        assert!(
-            line.contains(&t!("queue.unloads_in", time = "3:37").to_string()),
-            "{line}"
-        );
-        idle.unloads_in = Some(Duration::ZERO);
-        assert!(model_line(&idle).contains(&t!("queue.unloads_now").to_string()));
-        let waiting = WaitingModel {
-            id: 1,
-            model: Some("owner/repo".into()),
-            reason: "downloading".into(),
-            progress: Some(Progress {
-                done: 1 << 29,
-                total: 1 << 30,
-            }),
-        };
-        assert_eq!(waiting.model.as_deref(), Some("owner/repo"));
-        assert_eq!(
-            reason_label(&waiting.reason),
-            t!("queue.reason_downloading").to_string()
-        );
-        assert_eq!(
-            reason_label("mystery"),
-            "mystery",
-            "an unknown reason is shown as the engine sent it"
-        );
-        assert_eq!(
-            download_bar(waiting.progress.as_ref().unwrap().done, 1 << 30).0,
-            0.5
         );
     }
 

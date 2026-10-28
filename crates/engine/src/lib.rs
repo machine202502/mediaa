@@ -1,11 +1,9 @@
-pub mod embed;
+pub mod command;
 pub mod engine;
-pub mod hub;
-pub mod llm;
-pub mod local;
-pub mod runtime;
-pub mod scheduler;
-pub mod speech;
+pub mod ollama;
+pub mod openai;
+pub mod presets;
+
 #[cfg(feature = "testing")]
 pub mod testing;
 

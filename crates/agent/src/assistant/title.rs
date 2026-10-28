@@ -1,17 +1,16 @@
+use super::brain::split_thinking;
 use crate::prompts;
 use crate::scope::Scope;
 use mediaa_core::agent::{AgentSettings, ModelRole};
 use mediaa_core::chat::ChatId;
 use mediaa_core::transcript::Transcript;
-use mediaa_engine::llm::split_thinking;
-use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Priority};
+use mediaa_engine::{ChatMessage, ChatRequest, ChatRole};
 use serde_json::json;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const FALLBACK_CHARS: usize = 48;
 const TITLE_TOKENS: u32 = 128;
-const TITLE_CONTEXT: u32 = 2048;
 
 pub fn task_title(question: &str) -> String {
     let q = question.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -65,12 +64,11 @@ fn ask_model(
     let source = settings
         .models
         .get(ModelRole::Titles)
-        .as_ref()
+        .clone()
         .ok_or_else(|| anyhow::anyhow!("no model for titles chosen (Agent → Models)"))?;
-    let model = crate::models::local_spec(source)?;
     let language = settings.language_name();
     let request = ChatRequest {
-        model,
+        source,
         messages: vec![
             ChatMessage::system(prompts::render("chat/title_system.j2", ())),
             ChatMessage::new(
@@ -80,11 +78,6 @@ fn ask_model(
         ],
         max_tokens: TITLE_TOKENS,
         temperature: 0.0,
-        n_ctx: Some(TITLE_CONTEXT),
-        device: Some(settings.devices.get(ModelRole::Titles)),
-        priority: Some(Priority::Interactive),
-        hf_token: super::hf_token(settings),
-        enable_thinking: false,
         ..ChatRequest::default()
     };
     let answer = scope.engine().chat(&request, cancel, &mut |_| true)?;
@@ -186,9 +179,14 @@ mod tests {
         let engine = FakeEngine::new();
         engine.chat_answers(&["«Приветствие»."]);
         let (scope, chat) = start(ai, &engine, "првиет");
+        let mut settings = AgentSettings::default();
+        settings.models.titles = Some(mediaa_core::agent::ModelSource::new(
+            "c",
+            "unsloth/Qwen3-0.6B-GGUF",
+        ));
         let title = work(
             &scope,
-            &AgentSettings::default(),
+            &settings,
             ai,
             "rec",
             chat,
@@ -202,7 +200,7 @@ mod tests {
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0].model, "unsloth/Qwen3-0.6B-GGUF");
         assert!(
-            !chats[0].enable_thinking,
+            chats[0].thinking.is_none(),
             "a title is a short service call: the model does not think"
         );
         assert_eq!(chats[0].max_tokens, TITLE_TOKENS);
@@ -236,10 +234,14 @@ mod tests {
         ] {
             let engine = FakeEngine::new();
             engine.chat_answers(&["«Приветствие»."]);
-            let settings = AgentSettings {
+            let mut settings = AgentSettings {
                 ui_language: code.map(str::to_string),
                 ..AgentSettings::default()
             };
+            settings.models.titles = Some(mediaa_core::agent::ModelSource::new(
+                "c",
+                "unsloth/Qwen3-0.6B-GGUF",
+            ));
             let (scope, chat) = start(ai, &engine, "првиет");
             let title = work(
                 &scope,
@@ -269,9 +271,14 @@ mod tests {
         let engine = FakeEngine::new();
         engine.chat_answers(&["  "]);
         let (scope, chat) = start(ai, &engine, "когда отчёт?");
+        let mut settings = AgentSettings::default();
+        settings.models.titles = Some(mediaa_core::agent::ModelSource::new(
+            "c",
+            "unsloth/Qwen3-0.6B-GGUF",
+        ));
         work(
             &scope,
-            &AgentSettings::default(),
+            &settings,
             ai,
             "rec",
             chat,

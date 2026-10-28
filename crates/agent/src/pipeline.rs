@@ -303,7 +303,20 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
-    fn settings(models: ModelChoices) -> AgentSettings {
+    fn settings(mut models: ModelChoices) -> AgentSettings {
+        let source = |name: &str| ModelSource::new("c", name);
+        if models.speech_recognition.is_none() {
+            models.speech_recognition = Some(source("asr"));
+        }
+        if models.agent.is_none() {
+            models.agent = Some(source("agent"));
+        }
+        if models.embedding.is_none() {
+            models.embedding = Some(source("embed"));
+        }
+        if models.titles.is_none() {
+            models.titles = Some(source("titles"));
+        }
         AgentSettings {
             models,
             ..AgentSettings::default()
@@ -367,9 +380,15 @@ mod tests {
         let ai = tmp.path().join(".ai");
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
-        let settings = settings(ModelChoices::default());
+        let mut settings = settings(ModelChoices::default());
+        settings.models.diarization = Some(ModelSource::new("c", "dia"));
         let fake = FakeEngine::new();
         fake.chat_answers(&[DIGEST, SECTIONS]);
+        fake.script_turns(vec![mediaa_core::transcript::Turn {
+            start: 0.0,
+            end: 3.0,
+            speaker: 0,
+        }]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
         let sched = opened(&ai, engine, &settings);
         let task = start(&sched, &ai, &media, AnalysisOptions::default()).unwrap();
@@ -404,7 +423,7 @@ mod tests {
         ] {
             assert!(kinds.contains(&kind), "{kind} is in the tree: {kinds:?}");
         }
-        assert!(!fake.vads().is_empty() && !fake.recognizes().is_empty());
+        assert!(!fake.transcribes().is_empty());
         assert!(!fake.diarizes().is_empty());
         assert!(fake.embeddings_count() > 0);
         assert!(!fake.chats().is_empty());
@@ -465,9 +484,7 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
         let models = ModelChoices {
-            diarization: Some(ModelSource::HuggingFace {
-                repo: "fails/model".into(),
-            }),
+            diarization: Some(ModelSource::new("c", "fails/model")),
             ..ModelChoices::default()
         };
         let settings = settings(models);
@@ -506,8 +523,14 @@ mod tests {
         let ai = tmp.path().join(".ai");
         let media = tmp.path().join("talk.wav");
         wav(&media, 3.0);
-        let settings = settings(ModelChoices::default());
+        let mut settings = settings(ModelChoices::default());
+        settings.models.diarization = Some(ModelSource::new("c", "dia"));
         let fake = FakeEngine::new();
+        fake.script_turns(vec![mediaa_core::transcript::Turn {
+            start: 0.0,
+            end: 3.0,
+            speaker: 0,
+        }]);
         fake.chat_answers(&[DIGEST, SECTIONS, DIGEST, SECTIONS]);
         let engine: Arc<dyn Engine> = Arc::new(fake);
         let sched = opened(&ai, engine, &settings);

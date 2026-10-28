@@ -4,13 +4,14 @@ use crate::jobs::Job;
 use crate::theme;
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
-use mediaa_core::agent::{Provider, ProviderKind, WebEngine, WebSettings};
+use mediaa_core::agent::{Connection, ConnectionKind, OutputFormat, WebEngine, WebSettings};
 use rust_i18n::t;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 enum CheckState {
-    Running(Job<Result<Vec<String>, String>>),
-    Done(Result<Vec<String>, String>),
+    Running(Job<Result<String, String>>),
+    Done(Result<String, String>),
 }
 
 #[derive(Default)]
@@ -20,341 +21,277 @@ pub struct ProvidersUi {
     web_check: Option<CheckState>,
 }
 
-impl ProvidersUi {
-    pub fn known_models(&self, id: &str) -> Option<&[String]> {
-        match self.checks.get(id) {
-            Some(CheckState::Done(Ok(m))) => Some(m),
-            _ => None,
-        }
-    }
-
-    pub fn start_check(&mut self, p: &Provider) {
-        let p2 = p.clone();
-        let state = Job::spawn("provider-check", std::sync::Arc::default(), move || {
-            mediaa_agent::providers::list_models(&p2).map_err(|e| format!("{e:#}"))
-        })
-        .map_or_else(
-            |e| CheckState::Done(Err(format!("{e:#}"))),
-            CheckState::Running,
-        );
-        self.checks.insert(p.id.clone(), state);
-    }
-
-    fn start_web_check(&mut self, web: &WebSettings) {
-        let web = web.clone();
-        let state = Job::spawn("web-check", std::sync::Arc::default(), move || {
-            mediaa_agent::web::search(&web, "MediaA", 5)
-                .map(|hits| hits.into_iter().map(|h| h.title).collect())
-                .map_err(|e| format!("{e:#}"))
-        })
-        .map_or_else(
-            |e| CheckState::Done(Err(format!("{e:#}"))),
-            CheckState::Running,
-        );
-        self.web_check = Some(state);
-    }
-
-    fn poll(&mut self, ctx: &egui::Context) {
-        for c in self.checks.values_mut().chain(self.web_check.as_mut()) {
-            let CheckState::Running(job) = c else {
-                continue;
-            };
-            match job.poll() {
-                Some(Ok(result)) => *c = CheckState::Done(result),
-                Some(Err(error)) => *c = CheckState::Done(Err(format!("{error:#}"))),
-                None => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
-            }
-        }
+fn kind_label(kind: ConnectionKind) -> String {
+    match kind {
+        ConnectionKind::OpenRouter => t!("agent.kind_openrouter").into(),
+        ConnectionKind::OpenAi => t!("agent.kind_openai_api").into(),
+        ConnectionKind::DeepSeek => t!("agent.kind_deepseek").into(),
+        ConnectionKind::HuggingFace => t!("agent.kind_huggingface").into(),
+        ConnectionKind::Ollama => t!("agent.kind_ollama").into(),
+        ConnectionKind::OpenAiCompatible => t!("agent.kind_openai").into(),
+        ConnectionKind::Command => t!("agent.kind_command").into(),
     }
 }
 
-fn kind_label(k: ProviderKind) -> String {
-    match k {
-        ProviderKind::OpenAiCompatible => t!("agent.kind_openai").into(),
-        ProviderKind::OpenRouter => t!("agent.kind_openrouter").into(),
-        ProviderKind::HuggingFace => "Hugging Face".into(),
+fn format_label(format: OutputFormat) -> String {
+    match format {
+        OutputFormat::WhisperJson => "Whisper JSON".into(),
+        OutputFormat::OpenAiJson => "OpenAI JSON".into(),
+        OutputFormat::Srt => "SRT".into(),
+        OutputFormat::Vtt => "VTT".into(),
+        OutputFormat::Rttm => "RTTM".into(),
+        OutputFormat::Vectors => t!("agent.output_vectors").into(),
     }
 }
 
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
-    app.agent.providers.poll(ui.ctx());
     header(ui, &t!("agent.providers_title"), "");
-    ui.horizontal(|ui| {
+    let mut changed = false;
+    let mut remove = None;
+    ui.horizontal_wrapped(|ui| {
         for kind in [
-            ProviderKind::OpenAiCompatible,
-            ProviderKind::OpenRouter,
-            ProviderKind::HuggingFace,
+            ConnectionKind::OpenRouter,
+            ConnectionKind::OpenAi,
+            ConnectionKind::DeepSeek,
+            ConnectionKind::HuggingFace,
+            ConnectionKind::Ollama,
+            ConnectionKind::OpenAiCompatible,
+            ConnectionKind::Command,
         ] {
-            if ui
-                .add(theme::secondary(icon::PLUS, &kind_label(kind)))
-                .clicked()
-            {
-                app.settings
-                    .agent
-                    .providers
-                    .push(Provider::new(kind, &kind_label(kind)));
-                app.settings_changed();
+            if ui.button(kind_label(kind)).clicked() {
+                let mut connection = Connection::new(kind, &kind_label(kind));
+                if kind == ConnectionKind::Command {
+                    connection.command = Some(mediaa_core::agent::CommandSpec {
+                        program: PathBuf::from("whisper-cli"),
+                        args: vec!["-m".into(), "{model}".into(), "-f".into(), "{input}".into()],
+                        output: OutputFormat::WhisperJson,
+                        whole_file: false,
+                    });
+                }
+                app.settings.agent.connections.push(connection);
+                changed = true;
             }
         }
     });
-    ui.add_space(8.0);
-
-    let mut changed = false;
-    let mut remove = None;
-    let mut check = None;
-    for (i, p) in app.settings.agent.providers.iter_mut().enumerate() {
+    let ids: Vec<String> = app
+        .settings
+        .agent
+        .connections
+        .iter()
+        .map(|connection| connection.id.clone())
+        .collect();
+    for id in ids {
+        let Some(index) = app
+            .settings
+            .agent
+            .connections
+            .iter()
+            .position(|connection| connection.id == id)
+        else {
+            continue;
+        };
+        ui.add_space(6.0);
         theme::card(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
+            let connection = &mut app.settings.agent.connections[index];
             ui.horizontal(|ui| {
-                theme::section(ui, icon::PLUGS_CONNECTED, &kind_label(p.kind));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if theme::icon_button(ui, icon::TRASH, &t!("agent.remove_provider")).clicked() {
-                        remove = Some(i);
-                    }
-                });
+                ui.label(RichText::new(kind_label(connection.kind)).strong());
+                if ui.button(t!("agent.remove_provider")).clicked() {
+                    remove = Some(id.clone());
+                }
             });
             theme::row(ui, &t!("agent.provider_name"), |ui| {
-                changed |= ui
-                    .add(egui::TextEdit::singleline(&mut p.name).desired_width(320.0))
-                    .changed();
+                changed |= ui.text_edit_singleline(&mut connection.name).changed();
             });
-            if p.kind == ProviderKind::OpenAiCompatible {
-                theme::row(ui, &t!("agent.base_url"), |ui| {
-                    changed |= ui
-                        .add(
-                            egui::TextEdit::singleline(&mut p.base_url)
-                                .hint_text("http://localhost:11434/v1")
-                                .desired_width(420.0),
-                        )
-                        .on_hover_text(t!("agent.base_url_hint"))
-                        .changed();
-                });
-            }
-            let key_label = if p.kind == ProviderKind::HuggingFace {
-                t!("agent.hf_token")
-            } else {
-                t!("agent.api_key")
-            };
-            theme::row(ui, &key_label, |ui| {
-                let shown = app.agent.providers.shown_keys.contains(&p.id);
-                let mut edit = egui::TextEdit::singleline(&mut p.api_key)
-                    .password(!shown)
-                    .desired_width(420.0);
-                if p.kind == ProviderKind::HuggingFace {
-                    edit = edit.hint_text(t!("agent.hf_token_optional"));
-                }
-                let resp = ui.add(edit);
-                let resp = if p.kind == ProviderKind::HuggingFace {
-                    resp.on_hover_text(t!("agent.hf_token_hint"))
-                } else {
-                    resp
-                };
-                changed |= resp.changed();
-                let (ic, tip) = if shown {
-                    (icon::EYE_SLASH, t!("agent.hide_key"))
-                } else {
-                    (icon::EYE, t!("agent.show_key"))
-                };
-                if theme::icon_button(ui, ic, &tip).clicked() {
-                    if shown {
-                        app.agent.providers.shown_keys.retain(|k| *k != p.id);
-                    } else {
-                        app.agent.providers.shown_keys.push(p.id.clone());
-                    }
-                }
-            });
-            theme::row(ui, &t!("agent.proxy"), |ui| {
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut p.proxy)
-                            .hint_text("socks5://127.0.0.1:1080")
-                            .desired_width(320.0),
-                    )
-                    .on_hover_text(t!("agent.proxy_hint"))
-                    .changed();
-            });
-            theme::row(ui, &t!("agent.context"), |ui| {
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut p.context)
-                            .range(2048..=2_000_000)
-                            .speed(1024)
-                            .suffix(t!("agent.tokens")),
-                    )
-                    .on_hover_text(t!("agent.provider_context_hint"))
-                    .changed();
-            });
-            theme::row(ui, "", |ui| {
-                let running = matches!(
-                    app.agent.providers.checks.get(&p.id),
-                    Some(CheckState::Running(_))
-                );
-                if ui
-                    .add_enabled(
-                        !running,
-                        theme::secondary(icon::CHECK_CIRCLE, &t!("agent.check")),
-                    )
-                    .clicked()
-                {
-                    check = Some(p.clone());
-                }
-                match app.agent.providers.checks.get(&p.id) {
-                    Some(CheckState::Running(_)) => {
-                        ui.spinner();
-                    }
-                    Some(CheckState::Done(Ok(models))) => {
-                        let pal = theme::palette(ui);
-                        ui.label(
-                            RichText::new(format!(
-                                "{}  {}",
-                                icon::CHECK,
-                                t!("agent.provider_ok", n = models.len())
-                            ))
-                            .color(pal.success),
-                        )
-                        .on_hover_text(
-                            models
-                                .iter()
-                                .take(40)
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        );
-                    }
-                    Some(CheckState::Done(Err(e))) => {
-                        ui.colored_label(
-                            theme::palette(ui).danger,
-                            format!("{}  {e}", icon::WARNING),
-                        );
-                    }
-                    None => {}
-                }
-            });
+            changed |= fields(ui, connection, &mut app.agent.providers, &id);
         });
-        ui.add_space(6.0);
     }
-    if let Some(p) = check {
-        app.agent.providers.start_check(&p);
-    }
-    if let Some(i) = remove {
-        let p = app.settings.agent.providers.remove(i);
-        app.agent.providers.checks.remove(&p.id);
+    if let Some(id) = remove {
+        app.settings
+            .agent
+            .connections
+            .retain(|connection| connection.id != id);
         changed = true;
     }
-    changed |= web_card(app, ui);
+    ui.add_space(8.0);
+    changed |= web(ui, &mut app.settings.agent.web, &mut app.agent.providers);
     if changed {
         app.settings_changed();
     }
 }
 
-fn web_card(app: &mut App, ui: &mut egui::Ui) -> bool {
+fn fields(
+    ui: &mut egui::Ui,
+    connection: &mut Connection,
+    state: &mut ProvidersUi,
+    id: &str,
+) -> bool {
     let mut changed = false;
-    let mut check = false;
-    let web = &mut app.settings.agent.web;
-    theme::card(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        theme::section(ui, icon::GLOBE, &t!("agent.web_title"));
-        theme::row(ui, "", |ui| {
-            changed |= ui
-                .checkbox(&mut web.enabled, t!("agent.web_enabled"))
-                .on_hover_text(t!("agent.web_enabled_hint"))
-                .changed();
-        });
-        if !web.enabled {
-            return;
+    if connection.kind != ConnectionKind::Command {
+        if matches!(
+            connection.kind,
+            ConnectionKind::Ollama | ConnectionKind::OpenAiCompatible
+        ) {
+            theme::row(ui, &t!("agent.base_url"), |ui| {
+                changed |= ui.text_edit_singleline(&mut connection.base_url).changed();
+            });
         }
-        theme::row(ui, &t!("agent.web_engine"), |ui| {
-            let opts = [
-                (WebEngine::DuckDuckGo, "DuckDuckGo".to_string()),
-                (WebEngine::SearXng, "SearXNG".to_string()),
-                (WebEngine::Brave, "Brave".to_string()),
-                (WebEngine::Tavily, "Tavily".to_string()),
-            ];
-            changed |= theme::segmented(ui, &mut web.engine, &opts);
-        });
-        let hint = match web.engine {
-            WebEngine::DuckDuckGo => t!("agent.web_ddg_hint"),
-            WebEngine::SearXng => t!("agent.web_searxng_hint"),
-            WebEngine::Brave | WebEngine::Tavily => t!("agent.web_key_hint"),
-        };
-        theme::row(ui, "", |ui| theme::hint(ui, hint));
-        match web.engine {
-            WebEngine::SearXng => theme::row(ui, &t!("agent.base_url"), |ui| {
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut web.searxng_url)
-                            .hint_text("http://localhost:8888")
-                            .desired_width(420.0),
-                    )
-                    .changed();
-            }),
-            WebEngine::Brave | WebEngine::Tavily => theme::row(ui, &t!("agent.api_key"), |ui| {
-                changed |= ui
-                    .add(
-                        egui::TextEdit::singleline(&mut web.api_key)
-                            .password(true)
-                            .desired_width(420.0),
-                    )
-                    .changed();
-            }),
-            WebEngine::DuckDuckGo => {}
-        }
-        theme::row(ui, &t!("agent.proxy"), |ui| {
-            changed |= ui
-                .add(
-                    egui::TextEdit::singleline(&mut web.proxy)
-                        .hint_text("socks5://127.0.0.1:1080")
-                        .desired_width(320.0),
-                )
-                .on_hover_text(t!("agent.web_proxy_hint"))
-                .changed();
-        });
-        theme::row(ui, "", |ui| {
-            let running = matches!(app.agent.providers.web_check, Some(CheckState::Running(_)));
+        theme::row(ui, &t!("agent.api_key"), |ui| {
+            let shown = state.shown_keys.iter().any(|item| item == id);
+            let mut edit = egui::TextEdit::singleline(&mut connection.api_key);
+            if !shown {
+                edit = edit.password(true);
+            }
+            changed |= ui.add(edit).changed();
             if ui
-                .add_enabled(
-                    !running,
-                    theme::secondary(icon::MAGNIFYING_GLASS, &t!("agent.web_check")),
-                )
+                .button(if shown {
+                    t!("agent.hide_key")
+                } else {
+                    t!("agent.show_key")
+                })
                 .clicked()
             {
-                check = true;
-            }
-            match &app.agent.providers.web_check {
-                Some(CheckState::Running(_)) => {
-                    ui.spinner();
+                if shown {
+                    state.shown_keys.retain(|item| item != id);
+                } else {
+                    state.shown_keys.push(id.to_string());
                 }
-                Some(CheckState::Done(Ok(titles))) if titles.is_empty() => {
-                    ui.colored_label(
-                        theme::palette(ui).danger,
-                        format!("{}  {}", icon::WARNING, t!("agent.web_nothing")),
-                    );
-                }
-                Some(CheckState::Done(Ok(titles))) => {
-                    let pal = theme::palette(ui);
-                    ui.label(
-                        RichText::new(format!(
-                            "{}  {}",
-                            icon::CHECK,
-                            t!("agent.web_ok", n = titles.len())
-                        ))
-                        .color(pal.success),
-                    )
-                    .on_hover_text(titles.join("\n"));
-                }
-                Some(CheckState::Done(Err(e))) => {
-                    ui.colored_label(theme::palette(ui).danger, format!("{}  {e}", icon::WARNING));
-                }
-                None => {}
             }
         });
+        theme::row(ui, &t!("agent.proxy"), |ui| {
+            changed |= ui.text_edit_singleline(&mut connection.proxy).changed();
+        });
+        if connection.kind == ConnectionKind::Ollama {
+            ollama(ui, connection, state, id);
+        }
+    } else if let Some(command) = connection.command.as_mut() {
+        theme::row(ui, &t!("agent.command_program"), |ui| {
+            let mut program = command.program.display().to_string();
+            if ui.text_edit_singleline(&mut program).changed() {
+                command.program = PathBuf::from(program);
+                changed = true;
+            }
+        });
+        theme::row(ui, &t!("agent.command_args"), |ui| {
+            let mut args = command.args.join("\n");
+            if ui.text_edit_multiline(&mut args).changed() {
+                command.args = args.lines().map(str::to_string).collect();
+                changed = true;
+            }
+        });
+        theme::row(ui, &t!("agent.command_output"), |ui| {
+            for format in [
+                OutputFormat::WhisperJson,
+                OutputFormat::OpenAiJson,
+                OutputFormat::Srt,
+                OutputFormat::Vtt,
+                OutputFormat::Rttm,
+                OutputFormat::Vectors,
+            ] {
+                if ui
+                    .selectable_label(command.output == format, format_label(format))
+                    .clicked()
+                {
+                    command.output = format;
+                    changed = true;
+                }
+            }
+        });
+        changed |= ui
+            .checkbox(&mut command.whole_file, t!("agent.command_whole"))
+            .changed();
+        theme::hint(ui, t!("agent.command_placeholders"));
+    }
+    changed
+}
+
+fn ollama(ui: &mut egui::Ui, connection: &Connection, state: &mut ProvidersUi, id: &str) {
+    if let Some(CheckState::Running(job)) = state.checks.get_mut(id) {
+        if let Some(result) = job.poll() {
+            state.checks.insert(
+                id.to_string(),
+                CheckState::Done(result.unwrap_or_else(|error| Err(format!("{error:#}")))),
+            );
+        } else {
+            ui.spinner();
+        }
+    }
+    if ui.button(t!("agent.check")).clicked() {
+        let id_owned = connection.id.clone();
+        let connections =
+            std::sync::Arc::new(mediaa_engine::Connections::new(vec![connection.clone()]));
+        let started = Job::spawn("ollama-check", std::sync::Arc::default(), move || {
+            connections
+                .ollama_version(&id_owned)
+                .map_err(|error| format!("{error:#}"))
+        });
+        state.checks.insert(
+            id.to_string(),
+            started.map_or_else(
+                |error| CheckState::Done(Err(format!("{error:#}"))),
+                CheckState::Running,
+            ),
+        );
+    }
+    if let Some(CheckState::Done(Err(error))) = state.checks.get(id) {
+        theme::hint(ui, error);
+        if ui.button(t!("agent.ollama_serve")).clicked() {
+            let id_owned = connection.id.clone();
+            let connections =
+                std::sync::Arc::new(mediaa_engine::Connections::new(vec![connection.clone()]));
+            let _ = Job::spawn("ollama-serve", std::sync::Arc::default(), move || {
+                connections.ollama_serve(&id_owned)
+            });
+        }
+    }
+    if let Some(CheckState::Done(Ok(version))) = state.checks.get(id) {
+        theme::hint(ui, version);
+    }
+}
+
+fn web(ui: &mut egui::Ui, web: &mut WebSettings, state: &mut ProvidersUi) -> bool {
+    let mut changed = false;
+    theme::card(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        theme::section(ui, icon::GLOBE, &t!("agent.web_search"));
+        changed |= ui
+            .checkbox(&mut web.enabled, t!("agent.web_enabled"))
+            .changed();
+        theme::row(ui, &t!("agent.proxy"), |ui| {
+            changed |= ui.text_edit_singleline(&mut web.proxy).changed();
+        });
+        if matches!(web.engine, WebEngine::Brave | WebEngine::Tavily) {
+            theme::row(ui, &t!("agent.api_key"), |ui| {
+                changed |= ui.text_edit_singleline(&mut web.api_key).changed();
+            });
+        }
+        if let Some(CheckState::Running(job)) = state.web_check.as_mut() {
+            if let Some(result) = job.poll() {
+                state.web_check = Some(CheckState::Done(
+                    result.unwrap_or_else(|error| Err(format!("{error:#}"))),
+                ));
+            }
+        }
+        if ui.button(t!("agent.check")).clicked() {
+            let web = web.clone();
+            state.web_check = Some(
+                Job::spawn("web-check", std::sync::Arc::default(), move || {
+                    mediaa_agent::web::search(&web, "MediaA", 3)
+                        .map(|hits| hits.len().to_string())
+                        .map_err(|error| format!("{error:#}"))
+                })
+                .map_or_else(
+                    |error| CheckState::Done(Err(format!("{error:#}"))),
+                    CheckState::Running,
+                ),
+            );
+        }
+        if let Some(CheckState::Done(result)) = &state.web_check {
+            match result {
+                Ok(count) => theme::hint(ui, t!("agent.provider_ok", n = count)),
+                Err(error) => theme::hint(ui, error),
+            }
+        }
     });
-    if check {
-        let web = app.settings.agent.web.clone();
-        app.agent.providers.start_web_check(&web);
-    }
-    if changed {
-        app.agent.providers.web_check = None;
-    }
     changed
 }

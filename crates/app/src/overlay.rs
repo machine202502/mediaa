@@ -1050,8 +1050,26 @@ mod tests {
     }
 
     #[cfg(windows)]
+    struct LocaleGuard(String);
+
+    #[cfg(windows)]
+    impl Drop for LocaleGuard {
+        fn drop(&mut self) {
+            rust_i18n::set_locale(&self.0);
+        }
+    }
+
+    #[cfg(windows)]
+    fn russian_locale() -> LocaleGuard {
+        let previous = rust_i18n::locale().to_string();
+        rust_i18n::set_locale("ru");
+        LocaleGuard(previous)
+    }
+
+    #[cfg(windows)]
     #[test]
     fn ui_regression_snapshot_region_text_menu() {
+        let _locale = russian_locale();
         let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
         crate::theme::install(&harness.ctx);
         harness.run_steps(2);
@@ -1070,6 +1088,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn ui_regression_snapshot_region_palette() {
+        let _locale = russian_locale();
         let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
         crate::theme::install(&harness.ctx);
         harness.run_steps(2);
@@ -1086,6 +1105,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn ui_regression_snapshot_region_edge_selection() {
+        let _locale = russian_locale();
         let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
         crate::theme::install(&harness.ctx);
         harness.run_steps(2);

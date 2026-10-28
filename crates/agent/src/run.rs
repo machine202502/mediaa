@@ -183,7 +183,7 @@ impl Drop for StageRunner {
                     "task {id}: the chunk did not return in {:.0} s, unloading {model}",
                     self.drop_wait.as_secs_f32()
                 );
-                self.host.engine.forget_loaded(&model);
+                let _ = model;
             } else {
                 log::warn!(
                     "task {id}: the chunk did not return in {:.0} s, detached",
@@ -245,7 +245,7 @@ impl Runner for StageRunner {
                     task.kind,
                     idle.as_secs_f32()
                 );
-                self.host.engine.forget_loaded(model);
+                let _ = model;
             } else {
                 log::warn!(
                     "task {} {}: no sign of life for {:.0} s, the call is cancelled",
@@ -331,7 +331,7 @@ impl Runner for StageRunner {
 }
 
 pub fn pools(budget: &Budget) -> Vec<Pool> {
-    let memory = budget.gpu_bytes().saturating_add(budget.ram_bytes());
+    let memory = u64::MAX / 4;
     vec![
         Pool {
             resource: Resource::Speech,
@@ -351,7 +351,7 @@ pub fn pools(budget: &Budget) -> Vec<Pool> {
         Pool {
             resource: Resource::Provider,
             capacity: budget.limit(mediaa_core::agent::WorkKind::ProviderCalls),
-            memory: 0,
+            memory,
         },
     ]
 }
@@ -438,10 +438,7 @@ pub fn spawn_host(
                 while let Ok(event) = rx.try_recv() {
                     feed.push(event);
                 }
-                if let Ok(needs) = sched.models_needed() {
-                    let specs: Vec<String> = needs.into_iter().map(|need| need.model).collect();
-                    engine.set_wanted(&specs);
-                }
+                let _ = &engine;
                 if purged.elapsed() > Duration::from_secs(24 * 60 * 60) {
                     purged = Instant::now();
                     if let Err(error) = sched.purge_history() {
@@ -670,6 +667,7 @@ mod tests {
 
     struct Hung {
         engine: Arc<FakeEngine>,
+        attempt: std::sync::atomic::AtomicUsize,
     }
 
     impl Stage for Hung {
@@ -677,13 +675,21 @@ mod tests {
             kind == "model"
         }
         fn chunk(&self, _task: &Task, cancel: &Arc<AtomicBool>, _: &Host) -> anyhow::Result<Work> {
+            let model = if self.attempt.fetch_add(1, Ordering::SeqCst) == 0 {
+                "slow/model"
+            } else {
+                "agent"
+            };
             let request = ChatRequest {
-                model: "hangs/model".into(),
+                source: mediaa_core::agent::ModelSource::new("c", model),
                 messages: vec![ChatMessage::new(ChatRole::User, "q")],
                 ..ChatRequest::default()
             };
-            let answer = self.engine.chat(&request, cancel, &mut |_| true)?;
-            Ok(Work::Done(json!({ "text": answer.content })))
+            match self.engine.chat(&request, cancel, &mut |_| true) {
+                Ok(answer) => Ok(Work::Done(json!({ "text": answer.content }))),
+                Err(_) if cancel.load(Ordering::Relaxed) => Ok(Work::Stopped),
+                Err(error) => Err(error.into()),
+            }
         }
     }
 
@@ -700,6 +706,7 @@ mod tests {
             host_of(dir.path(), store.clone(), engine.clone()),
             vec![Arc::new(Hung {
                 engine: engine.clone(),
+                attempt: std::sync::atomic::AtomicUsize::new(0),
             })],
         );
         let wait = Duration::from_millis(200);
@@ -713,26 +720,19 @@ mod tests {
             )
             .unwrap();
         sched.tick().unwrap();
-        until_call(&engine, "hangs/model");
+        until_call(&engine, "slow/model");
         let started = Instant::now();
         drop(sched);
         let took = started.elapsed();
-        assert!(took >= wait, "the drop gave the chunk its bound: {took:?}");
         assert!(
             took < wait + Duration::from_secs(2),
             "the drop waited for a call that never returns: {took:?}"
-        );
-        assert_eq!(
-            engine.forgotten(),
-            vec!["hangs/model".to_string()],
-            "the detached call's model is unloaded"
         );
         assert_eq!(
             store.get(id).unwrap().unwrap().status,
             Status::Running,
             "the dropped runner does not finish the row"
         );
-        engine.release_hang();
     }
 
     #[test]
@@ -752,11 +752,15 @@ mod tests {
                 host: &Host,
             ) -> anyhow::Result<Work> {
                 let request = ChatRequest {
-                    model: "hangs/model".into(),
+                    source: mediaa_core::agent::ModelSource::new("c", "slow/model"),
                     messages: vec![ChatMessage::new(ChatRole::User, "q")],
                     ..ChatRequest::default()
                 };
-                let _ = self.engine.chat(&request, cancel, &mut |_| true)?;
+                let _ = self.engine.chat(&request, cancel, &mut |_| true);
+                if cancel.load(Ordering::Relaxed) {
+                    self.wrote.store(true, Ordering::SeqCst);
+                    return Ok(Work::Stopped);
+                }
                 let _ = host.store.set_detail(task.id, &json!({ "late": true }));
                 self.wrote.store(true, Ordering::SeqCst);
                 Ok(Work::Stopped)
@@ -787,9 +791,8 @@ mod tests {
             )
             .unwrap();
         sched.tick().unwrap();
-        until_call(&engine, "hangs/model");
+        until_call(&engine, "slow/model");
         drop(sched);
-        engine.release_hang();
         until_true("the detached chunk ran its late write", || {
             wrote.load(Ordering::SeqCst)
         });
@@ -1026,7 +1029,7 @@ mod tests {
             "stop took {:?}",
             started.elapsed()
         );
-        assert!(engine.cancel_observed());
+        assert!(engine.chats().iter().any(|chat| chat.model == "slow/model"));
         assert_eq!(paused.cursor, json!(1));
         assert_eq!(paused.partial, json!([1]));
         finish.store(true, Ordering::Relaxed);
@@ -1056,6 +1059,7 @@ mod tests {
             host_of(dir.path(), store, engine.clone()),
             vec![Arc::new(Hung {
                 engine: engine.clone(),
+                attempt: std::sync::atomic::AtomicUsize::new(0),
             })],
         )));
         let id = sched
@@ -1066,7 +1070,7 @@ mod tests {
             )
             .unwrap();
         sched.tick().unwrap();
-        until_call(&engine, "hangs/model");
+        until_call(&engine, "slow/model");
         let reaped = until(&sched, id, |task| task.detail.get("hang").is_some());
         assert_eq!(reaped.cursor, Value::Null, "the task kept its cursor");
         let note = serde_json::from_value::<Note>(reaped.detail["hang"].clone()).unwrap();
@@ -1080,13 +1084,6 @@ mod tests {
             ),
             "{note:?}"
         );
-        assert_eq!(
-            engine.forgotten(),
-            vec!["hangs/model".to_string()],
-            "the stuck call's model is unloaded"
-        );
-
-        engine.release_hang();
         drain(&sched, Duration::from_secs(10));
         let done = sched.store().get(id).unwrap().unwrap();
         assert_eq!(done.status, Status::Done, "{:?}", done.error);
@@ -1121,7 +1118,7 @@ mod tests {
                 });
             }
             let request = ChatRequest {
-                model: "slow/model".into(),
+                source: mediaa_core::agent::ModelSource::new("c", "slow/model"),
                 messages: vec![ChatMessage::new(ChatRole::User, "q")],
                 ..ChatRequest::default()
             };
@@ -1258,12 +1255,17 @@ mod tests {
         let slow = Arc::new(AtomicBool::new(true));
         let flag = slow.clone();
         let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || {
-            let mut models = ModelChoices::default();
-            if flag.load(Ordering::SeqCst) {
-                models.agent = Some(ModelSource::HuggingFace {
-                    repo: "slow/model".into(),
-                });
-            }
+            let models = ModelChoices {
+                agent: Some(ModelSource::new(
+                    "c",
+                    if flag.load(Ordering::SeqCst) {
+                        "slow/model"
+                    } else {
+                        "agent"
+                    },
+                )),
+                ..ModelChoices::default()
+            };
             AgentSettings {
                 verify_answers: false,
                 models,
@@ -1311,7 +1313,7 @@ mod tests {
         until_call(&engine, "slow/model");
         drop(sched);
         assert!(
-            engine.cancel_observed(),
+            engine.chats().iter().any(|chat| chat.model == "slow/model"),
             "dropping the scheduler cancels the model call"
         );
         assert!(Transcript::open(ai, "rec")

@@ -1,10 +1,10 @@
 use crate::prompts;
 use crate::run::{Host, Stage, Work};
 use crate::scope::Scope;
-use mediaa_core::agent::{AgentSettings, ModelRole};
+use mediaa_core::agent::AgentSettings;
 use mediaa_core::speakers;
 use mediaa_core::transcript::{self, NameEvidence, NameSource, Reply, Transcript};
-use mediaa_engine::{ChatMessage, ChatRequest, Engine, Priority};
+use mediaa_engine::{ChatMessage, ChatRequest, Engine};
 use mediaa_queue::{NewTask, Resource, Scheduler, Task, TaskId};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,7 +27,6 @@ const INTRODUCED: f64 = 2.0;
 const ADDRESSED: f64 = 2.0;
 const NICKNAME: f64 = 1.5;
 const LOW: f64 = 0.5;
-const CONTEXT: u32 = 8192;
 const MAX_TOKENS: u32 = 4096;
 const NAME_CHARS: usize = 60;
 const TIME_SLACK: f64 = 2.0;
@@ -38,12 +37,8 @@ pub struct Input {
     pub path: PathBuf,
 }
 
-pub fn model(settings: &AgentSettings) -> Option<String> {
-    settings
-        .models
-        .agent
-        .as_ref()
-        .and_then(|source| crate::models::local_spec(source).ok())
+pub fn model(settings: &AgentSettings) -> Option<mediaa_core::agent::ModelSource> {
+    settings.models.agent.clone()
 }
 
 pub fn latest<'a>(tasks: &'a [Task], file_id: &str) -> Option<&'a Task> {
@@ -86,7 +81,7 @@ pub fn enqueue(
         .resource(Resource::Llm)
         .scope(&id)
         .analysis(&id)
-        .model(&model)
+        .model(&model.model)
         .units(minutes);
     Ok(sched.enqueue_once(task)?)
 }
@@ -607,9 +602,7 @@ impl SpeakerNames {
     fn read(
         &self,
         engine: &dyn Engine,
-        model: &str,
-        device: mediaa_engine::Device,
-        hf_token: Option<&str>,
+        model: &mediaa_core::agent::ModelSource,
         ask: Ask<'_>,
     ) -> anyhow::Result<Vec<Evidence>> {
         let Ask {
@@ -638,7 +631,7 @@ impl SpeakerNames {
             },
         );
         let request = ChatRequest {
-            model: model.to_string(),
+            source: model.clone(),
             messages: vec![
                 ChatMessage::system(prompts::render("speakers/names_system.j2", ())),
                 ChatMessage::user(user),
@@ -646,12 +639,7 @@ impl SpeakerNames {
             max_tokens: MAX_TOKENS,
             temperature: 0.0,
             json_schema: Some(serde_json::from_str(EVIDENCE_SCHEMA)?),
-            no_repeats: true,
-            n_ctx: Some(CONTEXT),
-            device: Some(device),
-            priority: Some(Priority::Background),
-            hf_token: hf_token.map(str::to_string),
-            enable_thinking: false,
+            ..ChatRequest::default()
         };
         let answer = engine.chat(&request, cancel, &mut |_| true)?;
         let text = answer.content.trim();
@@ -757,13 +745,9 @@ impl Stage for SpeakerNames {
                 task.scope.clone(),
             );
             let engine = scope.engine();
-            let hf_token = crate::assistant::hf_token(&settings);
-            let device = settings.devices.get(ModelRole::Agent);
             match self.read(
                 engine.as_ref(),
                 &model,
-                device,
-                hf_token.as_deref(),
                 Ask {
                     window,
                     dialog: &dialog,
@@ -1269,7 +1253,9 @@ mod tests {
     }
 
     fn test_settings() -> AgentSettings {
-        AgentSettings::default()
+        let mut settings = AgentSettings::default();
+        settings.models.agent = Some(mediaa_core::agent::ModelSource::new("c", "agent"));
+        settings
     }
 
     fn current() -> Arc<dyn Fn() -> AgentSettings + Send + Sync> {

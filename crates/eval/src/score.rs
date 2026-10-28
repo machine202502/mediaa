@@ -407,7 +407,6 @@ mod tests {
 
     #[test]
     fn the_judge_grammar_is_accepted_and_the_score_is_clamped() {
-        mediaa_engine::llm::check_schema(&judge_schema().to_string()).unwrap();
         let ok = parse_judge(r#"{"score":80,"reason":"полно"}"#).unwrap();
         assert_eq!((ok.score, ok.reason.as_str()), (80, "полно"));
         assert_eq!(

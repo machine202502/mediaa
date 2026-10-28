@@ -1,6 +1,6 @@
 [package]
 name = "mediaa-engine"
-description = "Model engine of MediaA: language models, embeddings, reranking, speech, model downloads and the memory budget"
+description = "External model connections: OpenAI-compatible HTTP, Ollama and user commands"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,18 +12,15 @@ testing = []
 mediaa-core.workspace = true
 anyhow.workspace = true
 log.workspace = true
-reqwest = { version = "0.13", features = ["blocking", "json", "socks"] }
-hf-hub = { version = "1", features = ["blocking"] }
-safetensors = "0.8"
-memmap2 = "0.9"
-llama-cpp-2 = "0.1.159"
-libloading = "0.8"
-sherpa-onnx = "1.13.8"
 serde.workspace = true
 serde_json = "1"
-
-[target.'cfg(windows)'.dependencies]
-llama-cpp-2 = { version = "0.1.159", features = ["vulkan"] }
+ureq.workspace = true
+directories.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tiny_http = "0.12"
+
+[[bin]]
+name = "command_stub"
+path = "src/bin/command_stub.rs"

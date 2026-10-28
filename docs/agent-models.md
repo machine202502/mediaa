@@ -1,9 +1,8 @@
 # Модели для агента MediaA: что установить на свой компьютер
 
-> Документ описывает MediaA после задачи `AGENT-EXT-1`
-> ([план](../specs/tasks/agent-external-models.md)). В этой версии приложение не содержит
-> собственных моделей и движков. Пока задача не выполнена, текущая сборка ещё использует
-> встроенные llama.cpp и sherpa-onnx, и этот документ к ней не относится.
+> Приложение не содержит собственных моделей и движков. Подключение описывается в Agent →
+> Подключения, роль — в Agent → Модели. План задачи:
+> [agent-external-models.md](../specs/tasks/agent-external-models.md).
 
 В путях ниже `~` означает вашу домашнюю папку (`C:\Users\<вы>` в Windows, `/home/<вы>` в
 Linux). MediaA понимает `~` и в полях подключения «Команда».
@@ -207,19 +206,10 @@ GigaAM — модель распознавания русской речи от 
    hf download csukuangfj/sherpa-onnx-nemo-ctc-punct-giga-am-v3-russian-2025-12-16 --local-dir ~/mediaa-models/gigaam-v3
    ```
    В папке будут `model.onnx` (или `model.int8.onnx` — меньше и быстрее) и `tokens.txt`.
-3. В MediaA: Подключения → «Команда»:
-   - программа: путь к `python` из окружения;
-   - аргументы (по одному в строке):
-     ```
-     <папка MediaA>/scripts/agent/sherpa_transcribe.py
-     --model
-     ~/mediaa-models/gigaam-v3/model.int8.onnx
-     --tokens
-     ~/mediaa-models/gigaam-v3/tokens.txt
-     {input}
-     ```
-   - формат вывода: «OpenAI JSON».
-   Затем в Модели → «Расшифровка» выберите это подключение.
+3. Свой сервер расшифровки должен принять файл и вернуть текст. GigaAM сама не ставит
+   спикеров и не считает отпечаток. Для разработки в корне репозитория есть
+   `docker compose up`: чат на порту 8080, эмбеддинги на 8081, расшифровка с диаризацией
+   и отпечатком на 8293 (ключ `mediaa`). Пользователю этот контейнер поднимать не нужно.
 
 Другие модели sherpa-onnx (английский, мультиязычные, Whisper в ONNX) подключаются так же.
 Список — [k2-fsa.github.io/sherpa/onnx/pretrained_models](https://k2-fsa.github.io/sherpa/onnx/pretrained_models/index.html).
@@ -256,29 +246,9 @@ MediaA обрабатывает запись кусками по 8 минут. �
    hf download csukuangfj/sherpa-onnx-pyannote-segmentation-3-0 --local-dir ~/mediaa-models/segmentation
    hf download csukuangfj/speaker-embedding-models 3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx --local-dir ~/mediaa-models/voices
    ```
-3. Подключение «Команда» для **диаризации**:
-   - программа: `python` из окружения;
-   - аргументы:
-     ```
-     <папка MediaA>/scripts/agent/sherpa_diarize.py
-     --segmentation
-     ~/mediaa-models/segmentation/model.onnx
-     --embedding
-     ~/mediaa-models/voices/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
-     {input}
-     ```
-   - формат вывода: «RTTM».
-4. Подключение «Команда» для **отпечатка голоса**:
-   - программа: `python` из окружения;
-   - аргументы:
-     ```
-     <папка MediaA>/scripts/agent/voice_embeddings.py
-     --model
-     ~/mediaa-models/voices/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
-     {inputs}
-     ```
-   - формат вывода: «Векторы».
-5. В Модели выберите эти подключения для ролей «Диаризация» и «Отпечаток голоса».
+3. Обёртка над этими моделями должна отдавать реплики и, если умеет, вектор голоса.
+   Готовые скрипты в репозиторий не входят. Тот же набор для разработки поднимает
+   `docker compose up` из корня: порт 8293.
 
 Альтернатива — [pyannote.audio](https://github.com/pyannote/pyannote-audio). Он точнее на
 сложных записях, но требует PyTorch, токен Hugging Face и принятия лицензии модели. Подключается

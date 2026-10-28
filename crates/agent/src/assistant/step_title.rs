@@ -1,10 +1,10 @@
+use super::brain::split_thinking;
 use crate::prompts;
 use crate::scope::Scope;
 use mediaa_core::agent::{AgentSettings, ModelRole};
 use mediaa_core::chat::{Timeline, TimelineEntry};
 use mediaa_core::transcript::Transcript;
-use mediaa_engine::llm::split_thinking;
-use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Priority};
+use mediaa_engine::{ChatMessage, ChatRequest, ChatRole};
 use mediaa_queue::{Resource, Status, Task};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -14,7 +14,6 @@ use super::Session;
 
 pub const KIND: &str = "step-title";
 const PHRASE_TOKENS: u32 = 128;
-const PHRASE_CONTEXT: u32 = 2048;
 
 pub fn caption(tool: &str, topic: bool, english: bool) -> String {
     let key = if tool == "outline" && topic {
@@ -78,12 +77,11 @@ fn ask(
     language: &str,
     cancel: &AtomicBool,
 ) -> anyhow::Result<Option<String>> {
-    let Some(source) = settings.models.get(ModelRole::Titles).as_ref() else {
+    let Some(source) = settings.models.get(ModelRole::Titles).clone() else {
         return Ok(None);
     };
-    let model = crate::models::local_spec(source)?;
     let request = ChatRequest {
-        model,
+        source,
         messages: vec![
             ChatMessage::system(prompts::render("chat/step_title_system.j2", ())),
             ChatMessage::new(
@@ -96,11 +94,6 @@ fn ask(
         ],
         max_tokens: PHRASE_TOKENS,
         temperature: 0.0,
-        n_ctx: Some(PHRASE_CONTEXT),
-        device: Some(settings.devices.get(ModelRole::Titles)),
-        priority: Some(Priority::Interactive),
-        hf_token: super::hf_token(settings),
-        enable_thinking: false,
         ..ChatRequest::default()
     };
     let answer = scope.engine().chat(&request, cancel, &mut |_| true)?;
@@ -371,19 +364,19 @@ mod tests {
         let engine = FakeEngine::new();
         engine.chat_answers(&["«Ищу срок отчёта»."]);
         let (scope, task) = open_task(dir.path(), &engine);
-        let phrase = work(
-            &scope,
-            &AgentSettings::default(),
-            &task,
-            &AtomicBool::new(false),
-        );
+        let mut settings = AgentSettings::default();
+        settings.models.titles = Some(mediaa_core::agent::ModelSource::new("c", "titles"));
+        let phrase = work(&scope, &settings, &task, &AtomicBool::new(false));
         assert_eq!(phrase.as_deref(), Some("Ищу срок отчёта"));
         let stored = scope.store().get(scope.task()).unwrap().unwrap();
         assert_eq!(stored.status, Status::Done);
         assert_eq!(stored.result.as_ref().unwrap()["phrase"], "Ищу срок отчёта");
         let chats = engine.chats();
         assert_eq!(chats.len(), 1);
-        assert!(!chats[0].enable_thinking, "the titles model does not think");
+        assert!(
+            chats[0].thinking.is_none(),
+            "the titles model does not think"
+        );
         assert_eq!(chats[0].temperature, 0.0);
         assert!(
             chats[0].texts[1].contains("Когда отчёт?") && chats[0].texts[1].contains("Russian"),

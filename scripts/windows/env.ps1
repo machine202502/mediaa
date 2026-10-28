@@ -26,13 +26,6 @@ function Find-LibClang {
     throw 'libclang.dll not found: install the VS component "C++ Clang Compiler for Windows" or LLVM, or set LIBCLANG_PATH.'
 }
 
-if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
-    throw 'cmake not found: install CMake and add it to PATH (llama.cpp is built with CMake).'
-}
-if (-not $env:VULKAN_SDK -or -not (Test-Path "$env:VULKAN_SDK\Lib\vulkan-1.lib")) {
-    throw 'Vulkan SDK not found: install it and set VULKAN_SDK (llama.cpp Vulkan backend).'
-}
-
 $env:VCPKG_ROOT = Find-Vcpkg
 $env:LIBCLANG_PATH = Find-LibClang
 $env:FFMPEG_DIR = "$Root\vcpkg_installed\$Triplet"

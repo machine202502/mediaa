@@ -2,8 +2,8 @@ use crate::pages::agent::{AgentUi, Services};
 use eframe::egui;
 use mediaa_agent::run::{self, Feed, Streams};
 use mediaa_agent::slots::Slots;
-use mediaa_core::agent::AgentSettings;
-use mediaa_engine::Engine;
+use mediaa_core::agent::{AgentSettings, Connection};
+use mediaa_engine::{Connections, Engine};
 use mediaa_queue::Scheduler;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -34,7 +34,8 @@ fn with_language(agent: &AgentSettings, language: &str) -> AgentSettings {
 pub struct AgentController {
     ui: AgentUi,
     engine: Arc<dyn Engine>,
-    engine_budget: mediaa_engine::Budget,
+    connections: Option<Arc<Connections>>,
+    applied: Vec<Connection>,
     slots: Slots,
     hosted: Option<Hosted>,
     checked: Option<PathBuf>,
@@ -60,7 +61,25 @@ impl AgentController {
         AgentController {
             ui: AgentUi::default(),
             engine,
-            engine_budget: budget.clone().into(),
+            connections: None,
+            applied: Vec::new(),
+            slots: Slots::new(budget.clone()),
+            hosted: None,
+            checked: None,
+            pending: false,
+        }
+    }
+
+    pub fn with_connections(
+        connections: Arc<Connections>,
+        budget: &mediaa_core::agent::Budget,
+    ) -> AgentController {
+        let engine: Arc<dyn Engine> = connections.clone();
+        AgentController {
+            ui: AgentUi::default(),
+            engine,
+            connections: Some(connections),
+            applied: Vec::new(),
             slots: Slots::new(budget.clone()),
             hosted: None,
             checked: None,
@@ -95,14 +114,13 @@ impl AgentController {
         if !active && !self.pending_work(ai_dir) {
             return;
         }
-        if active {
-            self.ui.engine_state.tick(&self.engine, ctx);
-        }
+        let _ = ctx;
         self.slots.set_budget(agent.budget.clone());
-        let budget: mediaa_engine::Budget = agent.budget.clone().into();
-        if budget != self.engine_budget {
-            self.engine.set_budget(budget);
-            self.engine_budget = budget;
+        if self.applied != agent.connections {
+            if let Some(connections) = &self.connections {
+                connections.set_connections(agent.connections.clone());
+            }
+            self.applied = agent.connections.clone();
         }
         let wanted = with_language(agent, language);
         if let Some(hosted) = &self.hosted {

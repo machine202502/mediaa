@@ -4,6 +4,9 @@
 
 `.\scripts\windows\run.ps1` снова собирает и запускает MediaA.
 
+После `AGENT-EXT-1` сборка больше не требует CMake, Vulkan SDK и static CRT toolchain:
+llama.cpp из дерева зависимостей убран. Ниже — расследование сборки, в которой он ещё был.
+
 ## Контекст
 
 `feature/agent-temp` собиралась, потому что `.cargo/config.toml` задавал

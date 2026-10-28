@@ -377,6 +377,11 @@ impl Transcript {
         Ok(())
     }
 
+    pub fn clear_embeddings(&self) -> anyhow::Result<()> {
+        self.db.execute("UPDATE chunks SET embedding = NULL", [])?;
+        Ok(())
+    }
+
     pub fn clear_speakers(&self) -> anyhow::Result<()> {
         let tx = self.db.unchecked_transaction()?;
         tx.execute_batch(

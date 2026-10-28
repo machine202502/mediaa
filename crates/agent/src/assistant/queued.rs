@@ -577,7 +577,11 @@ mod tests {
             engine,
             store,
             slots: Slots::default(),
-            settings: Arc::new(AgentSettings::default),
+            settings: Arc::new(|| {
+                let mut settings = AgentSettings::default();
+                settings.models.titles = Some(mediaa_core::agent::ModelSource::new("c", "titles"));
+                settings
+            }),
             streams: Arc::new(Streams::default()),
         };
         let mut live = Live::new();

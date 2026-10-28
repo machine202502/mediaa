@@ -135,10 +135,8 @@ HEAD `feature/agent` совпадает с `main`; перенос существ
 
 ## Материальные риски
 
-- Linux/macOS-сборка не проверена: нет окружения; конфигурация больше не задаёт
-  `CMAKE_GENERATOR`/`CMAKE_TOOLCHAIN_FILE`, а Windows-сборка проверена на чистом каталоге
-  llama.cpp.
-- Нативные зависимости (`llama.cpp` + Vulkan, `sherpa-onnx`) требуют CMake и Vulkan SDK;
-  без `VULKAN_SDK` сборка падает в build.rs.
+- Linux/macOS-сборка на момент переноса не проверялась.
+- Нативные llama.cpp и sherpa-onnx убраны задачей `AGENT-EXT-1`. CMake и Vulkan SDK для
+  сборки MediaA больше не нужны.
 - Полный `cargo test --workspace` в одном процессе на этой машине нестабилен из-за
   конкурирующего GPU-процесса; функциональные прогоны выполнены по группам.

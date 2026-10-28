@@ -4,7 +4,6 @@ pub mod catalogs;
 pub mod chat;
 pub mod composer;
 pub mod dialog;
-pub mod engine_state;
 pub mod markdown;
 pub mod mentions;
 pub mod models;
@@ -31,7 +30,6 @@ pub struct AgentUi {
     pub providers: providers::ProvidersUi,
     pub models: models::ModelsUi,
     pub queue: queue::QueueUi,
-    pub engine_state: engine_state::EngineState,
 }
 
 #[derive(Clone)]

@@ -15,7 +15,6 @@ anyhow.workspace = true
 log.workspace = true
 serde = { workspace = true }
 serde_json = "1"
-reqwest = { version = "0.13", features = ["blocking", "json", "socks", "query"] }
 evalexpr = "13"
 scraper = "0.27"
 dom_smoothie = "0.18"
@@ -25,6 +24,8 @@ minijinja = "2"
 minijinja-embed = "2"
 deunicode = "1"
 keyring = "4"
+ureq = { workspace = true }
+hound = { workspace = true }
 
 [dev-dependencies]
 mediaa-engine = { workspace = true, features = ["testing"] }

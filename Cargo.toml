@@ -44,6 +44,7 @@ log = { version = "0.4", features = ["std"] }
 env_logger = "0.11"
 fnv = "1"
 directories = "6"
+ureq = { version = "3", default-features = false, features = ["json", "socks-proxy", "rustls"] }
 tempfile = "3"
 rusqlite = { version = "0.40", features = ["bundled"] }
 url = "2"
@@ -98,9 +99,6 @@ opt-level = 2
 opt-level = 2
 [profile.test-fast.package.mediaa-eval]
 opt-level = 2
-
-[profile.dev]
-debug = 0
 
 [profile.dev.package."*"]
 opt-level = 1

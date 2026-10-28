@@ -7,15 +7,15 @@ use crate::score::{
 };
 use crate::{locate, repo_root, visible, Judge, RunArgs};
 use anyhow::Context;
+use mediaa_agent::assistant::brain::split_thinking;
 use mediaa_agent::assistant::title::task_title;
-use mediaa_agent::assistant::{ask, hf_token, Event, Memory, Recording, StepRecord, Turn};
-use mediaa_agent::models::local_spec;
+use mediaa_agent::assistant::{ask, Event, Memory, Recording, StepRecord, Turn};
 use mediaa_agent::scope::Scope;
 use mediaa_agent::slots::Slots;
-use mediaa_core::agent::{AgentSettings, ModelRole};
+use mediaa_core::agent::AgentSettings;
 use mediaa_core::catalogs::ai_dir;
 use mediaa_core::transcript::{self, Transcript};
-use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Engine, LocalEngine, Priority};
+use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Connections, Engine};
 use mediaa_queue::TaskId;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -30,7 +30,6 @@ pub fn execute(args: &RunArgs) -> anyhow::Result<PathBuf> {
     let cases_path = locate(&root, &args.cases);
     let library = locate(&root, &args.library);
     let file = locate(&root, &args.file);
-    let models = locate(&root, &args.models);
     anyhow::ensure!(args.repeat >= 1, "--repeat must be at least 1");
     let suite = crate::cases::load_cases(&cases_path)?;
     let cases = select(&suite, args.case.as_deref())?;
@@ -41,13 +40,16 @@ pub fn execute(args: &RunArgs) -> anyhow::Result<PathBuf> {
         library.display()
     );
     anyhow::ensure!(file.is_file(), "recording not found: {}", file.display());
-    anyhow::ensure!(
-        models.is_dir(),
-        "models folder not found: {}",
-        models.display()
-    );
 
-    let settings = AgentSettings::default();
+    let mut settings = AgentSettings::default();
+    if let Some(text) = std::env::var("MEDIAA_LIVE_CONNECTIONS")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+    {
+        if let Ok(connections) = serde_json::from_str(&text) {
+            settings.connections = connections;
+        }
+    }
     let judge_model = judge_model(&settings, &args.judge)?;
     let run_dir = make_run_dir(&root.join("target").join("evals"), args.label.as_deref())?;
     let queue_dir = run_dir.join("queue");
@@ -60,8 +62,7 @@ pub fn execute(args: &RunArgs) -> anyhow::Result<PathBuf> {
     );
     eprintln!("out: {}", run_dir.display());
 
-    let engine: Arc<dyn Engine> =
-        Arc::new(LocalEngine::new(models, settings.budget.clone().into()));
+    let engine: Arc<dyn Engine> = Arc::new(Connections::new(settings.connections.clone()));
     let slots = Slots::new(settings.budget.clone());
     let (file_id, recording) = load_recording(&ai, &file)?;
     let ctx = Ctx {
@@ -525,7 +526,7 @@ fn judge_model(settings: &AgentSettings, judge: &Judge) -> anyhow::Result<Option
                 .agent
                 .as_ref()
                 .context("no agent model is set")?;
-            Ok(Some(local_spec(source)?))
+            Ok(Some(source.model.clone()))
         }
         Judge::Spec(spec) => Ok(Some(spec.clone())),
     }
@@ -553,8 +554,13 @@ fn judge_turn(
         facts,
         answer,
     };
+    let source = settings
+        .models
+        .agent
+        .clone()
+        .unwrap_or_else(|| mediaa_core::agent::ModelSource::new("", model));
     let request = ChatRequest {
-        model: model.to_string(),
+        source,
         messages: vec![
             ChatMessage::new(
                 ChatRole::System,
@@ -568,18 +574,13 @@ fn judge_turn(
         max_tokens: 512,
         temperature: 0.0,
         json_schema: Some(judge_schema()),
-        no_repeats: true,
-        n_ctx: Some(settings.agent_context),
-        device: Some(settings.devices.get(ModelRole::Agent)),
-        priority: Some(Priority::Interactive),
-        hf_token: hf_token(settings),
-        enable_thinking: false,
+        ..ChatRequest::default()
     };
     let cancel = AtomicBool::new(false);
     let raw = engine
         .chat(&request, &cancel, &mut |_| true)
         .map_err(|e| format!("{e:#}"))?;
-    let text = mediaa_engine::llm::strip_reasoning(&raw.content);
+    let text = split_thinking(&raw.content).1;
     parse_judge(&text).map_err(|e| shorten(&format!("{e:#}")))
 }
 

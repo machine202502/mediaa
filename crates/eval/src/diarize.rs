@@ -1,7 +1,8 @@
 use anyhow::Context;
 use mediaa_agent::diarize_quality::{self, Der};
 use mediaa_core::agent::AgentSettings;
-use mediaa_engine::{Engine, LocalEngine};
+use mediaa_core::agent::Connection;
+use mediaa_engine::{Connections, Engine};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -44,15 +45,17 @@ pub fn execute(args: &Args) -> anyhow::Result<()> {
     let root = crate::repo_root();
     let data = crate::locate(&root, &args.data);
     anyhow::ensure!(data.is_dir(), "data folder not found: {}", data.display());
-    let settings = AgentSettings::default();
-    let models = args
-        .models
-        .as_ref()
-        .map_or_else(mediaa_core::paths::models_dir, |path| {
-            crate::locate(&root, path)
-        });
-    let engine: Arc<dyn Engine> =
-        Arc::new(LocalEngine::new(models, settings.budget.clone().into()));
+    let mut settings = AgentSettings::default();
+    let _ = (root, args.models.as_ref());
+    if let Some(text) = std::env::var("MEDIAA_LIVE_CONNECTIONS")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+    {
+        if let Ok(connections) = serde_json::from_str::<Vec<Connection>>(&text) {
+            settings.connections = connections;
+        }
+    }
+    let engine: Arc<dyn Engine> = Arc::new(Connections::new(settings.connections.clone()));
     let reports = diarize_quality::measure_all(engine.as_ref(), &settings, &data)?;
     for report in &reports {
         println!("{report}");

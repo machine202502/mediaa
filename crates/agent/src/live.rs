@@ -1,9 +1,12 @@
-use mediaa_core::agent::Budget;
-use mediaa_engine::{Engine, LocalEngine};
+use mediaa_core::agent::Connection;
+use mediaa_engine::{Connections, Engine};
 use std::sync::Arc;
 
 pub fn engine() -> Arc<dyn Engine> {
-    let dir = std::env::var_os("MEDIAA_TEST_MODELS")
-        .map_or_else(mediaa_core::paths::models_dir, std::path::PathBuf::from);
-    Arc::new(LocalEngine::new(dir, Budget::default().into()))
+    let connections = std::env::var("MEDIAA_LIVE_CONNECTIONS")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str::<Vec<Connection>>(&text).ok())
+        .unwrap_or_default();
+    Arc::new(Connections::new(connections))
 }

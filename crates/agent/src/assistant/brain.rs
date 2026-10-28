@@ -1,5 +1,8 @@
-use mediaa_engine::llm::{split_thinking, Part, ThinkSplitter};
-use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Device, Engine, Priority, Thinking};
+use crate::slots::Slots;
+use mediaa_core::agent::{ModelSource, WorkKind};
+use mediaa_engine::{
+    ChatAnswer, ChatMessage, ChatRequest, ChatRole, Engine, Thinking, ToolCall, ToolChoice,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::sync::atomic::AtomicBool;
@@ -339,38 +342,110 @@ pub fn finished(text: &str) -> String {
     }
 }
 
-pub struct EngineBrain<'a> {
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Part {
+    Thinking(String),
+    Text(String),
+}
+
+#[derive(Debug, Default)]
+struct ThinkSplitter {
+    pending: String,
+    inside: bool,
+}
+
+impl ThinkSplitter {
+    fn push(&mut self, piece: &str) -> Vec<Part> {
+        self.pending.push_str(piece);
+        let mut parts = Vec::new();
+        let mut emit = |inside: bool, text: &str| {
+            if !text.is_empty() {
+                parts.push(if inside {
+                    Part::Thinking(text.to_string())
+                } else {
+                    Part::Text(text.to_string())
+                });
+            }
+        };
+        loop {
+            let tag = if self.inside { THINK_CLOSE } else { THINK_OPEN };
+            if let Some(i) = self.pending.find(tag) {
+                emit(self.inside, &self.pending[..i]);
+                self.pending.drain(..i + tag.len());
+                self.inside = !self.inside;
+                continue;
+            }
+            let cut = self.pending.len() - partial_tag_len(&self.pending, tag);
+            emit(self.inside, &self.pending[..cut]);
+            self.pending.drain(..cut);
+            return parts;
+        }
+    }
+
+    fn finish(&mut self) -> Vec<Part> {
+        let rest = std::mem::take(&mut self.pending);
+        if rest.is_empty() {
+            return Vec::new();
+        }
+        vec![if self.inside {
+            Part::Thinking(rest)
+        } else {
+            Part::Text(rest)
+        }]
+    }
+}
+
+pub fn split_thinking(text: &str) -> (String, String) {
+    let mut splitter = ThinkSplitter::default();
+    let mut parts = splitter.push(text);
+    parts.extend(splitter.finish());
+    let (mut thinking, mut rest) = (String::new(), String::new());
+    for part in parts {
+        match part {
+            Part::Thinking(t) => thinking.push_str(&t),
+            Part::Text(t) => rest.push_str(&t),
+        }
+    }
+    (thinking.trim().to_string(), rest.trim().to_string())
+}
+
+fn partial_tag_len(text: &str, tag: &str) -> usize {
+    (1..tag.len())
+        .rev()
+        .find(|&k| text.ends_with(&tag[..k]))
+        .unwrap_or(0)
+}
+
+pub struct ChatBrain<'a> {
     pub engine: &'a dyn Engine,
-    pub model: String,
-    pub n_ctx: u32,
-    pub device: Device,
-    pub priority: Priority,
+    pub source: ModelSource,
+    pub slots: Slots,
+    pub context: u32,
     pub max_tokens: u32,
-    pub hf_token: Option<String>,
     pub thinking: bool,
     pub(crate) speed: std::sync::Mutex<Option<f64>>,
 }
 
-impl EngineBrain<'_> {
+impl ChatBrain<'_> {
     fn request(&self, messages: &[Message], max_tokens: u32) -> ChatRequest {
         ChatRequest {
-            model: self.model.clone(),
+            source: self.source.clone(),
             messages: messages
                 .iter()
                 .map(|m| ChatMessage::new(m.role.into(), m.content.clone()))
                 .collect(),
             max_tokens,
             temperature: 0.0,
-            n_ctx: Some(self.n_ctx),
-            device: Some(self.device),
-            priority: Some(self.priority),
-            hf_token: self.hf_token.clone(),
+            thinking: self.thinking.then_some(Thinking {
+                budget: THINK_TOKENS,
+            }),
             ..ChatRequest::default()
         }
     }
-}
 
-impl EngineBrain<'_> {
     fn measure_speed(&self, tokens: u32, since: Option<std::time::Instant>) {
         let Some(since) = since else { return };
         let secs = since.elapsed().as_secs_f64();
@@ -378,9 +453,69 @@ impl EngineBrain<'_> {
             *self.speed.lock().expect("speed lock") = Some(f64::from(tokens) / secs);
         }
     }
+
+    fn lease(&self, cancel: &AtomicBool) -> anyhow::Result<crate::slots::Lease> {
+        self.slots
+            .request(WorkKind::ProviderCalls, true)
+            .wait(cancel)
+    }
 }
 
-impl Brain for EngineBrain<'_> {
+fn step_from_calls(content: &str, calls: &[ToolCall]) -> anyhow::Result<Step> {
+    let mut parsed = Vec::new();
+    for call in calls {
+        let tool = call.name.trim().to_string();
+        anyhow::ensure!(!tool.is_empty(), "the step calls no tool");
+        let mut args: Value = serde_json::from_str(&call.arguments).map_err(|e| {
+            anyhow::anyhow!(crate::prompts::render(
+                "errors/arguments_not_json.j2",
+                minijinja::context! { tool => &tool, error => e.to_string(), raw => &call.arguments }
+            ))
+        })?;
+        if let Some(obj) = args.as_object_mut() {
+            obj.remove("title");
+        }
+        parsed.push(Call { tool, args });
+    }
+    anyhow::ensure!(!parsed.is_empty(), "the step calls no tool");
+    if parsed.len() > MAX_CALLS {
+        log::warn!(
+            "the model wrote {} calls in one step; only the first {MAX_CALLS} are kept",
+            parsed.len()
+        );
+        parsed.truncate(MAX_CALLS);
+    }
+    Ok(Step::Tool {
+        thought: content.trim().to_string(),
+        calls: parsed,
+    })
+}
+
+fn step_from_answer(
+    answer: &ChatAnswer,
+    streamed: &str,
+    looped: Option<usize>,
+) -> anyhow::Result<Step> {
+    if !answer.tool_calls.is_empty() {
+        return step_from_calls(&answer.content, &answer.tool_calls);
+    }
+    let (_, content) = split_thinking(&answer.content);
+    match (parse_step(&content), looped) {
+        (Ok(step), None) => Ok(step),
+        (_, cut) if !streamed.trim().is_empty() => {
+            if cut.is_some() {
+                log::info!("the model went round in a loop; the answer is cut where it began");
+            }
+            Ok(Step::Answer {
+                thought: String::new(),
+                text: finished(&streamed[..cut.unwrap_or(streamed.len())]),
+            })
+        }
+        (result, _) => result,
+    }
+}
+
+impl Brain for ChatBrain<'_> {
     fn step(
         &self,
         messages: &[Message],
@@ -389,90 +524,108 @@ impl Brain for EngineBrain<'_> {
         cancel: &AtomicBool,
         on_piece: &mut dyn FnMut(Piece),
     ) -> anyhow::Result<Step> {
-        let request = ChatRequest {
-            json_schema: Some(step_schema(tools, may_answer, self.thinking)),
-            no_repeats: true,
-            ..self.request(messages, self.max_tokens)
-        };
-        let mut stream = AnswerStream::default();
-        let mut answer = String::new();
-        let mut looped = None;
-        let mut tokens = 0u32;
-        let mut first: Option<std::time::Instant> = None;
-        let mut handle = |part: Part| -> bool {
-            tokens += 1;
-            let at = *first.get_or_insert_with(std::time::Instant::now);
-            self.measure_speed(tokens, Some(at));
-            match part {
-                Part::Thinking(text) => {
-                    on_piece(Piece::Thinking(&text));
-                    true
-                }
-                Part::Text(text) => {
-                    let new = stream.push(&text);
-                    if new.is_empty() {
-                        return true;
-                    }
-                    answer.push_str(&new);
-                    if let Some(cut) = loop_start(&answer) {
-                        looped = Some(cut);
-                        return false;
-                    }
-                    on_piece(Piece::Answer(&new));
-                    true
-                }
-            }
-        };
-        let (content, usage) = if self.thinking {
-            let mut splitter = ThinkSplitter::default();
-            let generated = self.engine.chat_thinking(
-                &request,
-                Thinking {
-                    budget: THINK_TOKENS,
-                },
-                cancel,
-                &mut |piece| splitter.push(piece).into_iter().all(&mut handle),
-            )?;
-            splitter.finish().into_iter().for_each(|part| {
-                handle(part);
-            });
-            (split_thinking(&generated.content).1, generated.usage)
-        } else {
-            let generated = self.engine.chat(&request, cancel, &mut |piece| {
-                handle(Part::Text(piece.to_string()))
-            })?;
-            (generated.content, generated.usage)
-        };
-        if let Some(usage) = usage {
-            self.measure_speed(usage.completion_tokens, first);
-        }
-        match (parse_step(&content), looped) {
-            (Ok(step), None) => Ok(step),
-            (_, cut) if !answer.trim().is_empty() => {
-                if cut.is_some() {
-                    log::info!("the model went round in a loop; the answer is cut where it began");
-                }
-                Ok(Step::Answer {
-                    thought: String::new(),
-                    text: finished(&answer[..cut.unwrap_or(answer.len())]),
+        let mut messages = messages.to_vec();
+        let mut retried = false;
+        loop {
+            let lease = self.lease(cancel)?;
+            let specs: Vec<mediaa_engine::ToolSpec> = tools
+                .iter()
+                .map(|tool| mediaa_engine::ToolSpec {
+                    name: tool.name.to_string(),
+                    description: tool.description.clone(),
+                    parameters: tool.params.clone(),
                 })
+                .collect();
+            let request = ChatRequest {
+                json_schema: Some(step_schema(tools, may_answer, self.thinking)),
+                tools: specs,
+                tool_choice: if !tools.is_empty() && !may_answer {
+                    ToolChoice::Required
+                } else if tools.is_empty() {
+                    ToolChoice::None
+                } else {
+                    ToolChoice::Auto
+                },
+                ..self.request(&messages, self.max_tokens)
+            };
+            let mut stream = AnswerStream::default();
+            let mut shown = String::new();
+            let mut looped = None;
+            let mut tokens = 0u32;
+            let mut first: Option<std::time::Instant> = None;
+            let mut splitter = ThinkSplitter::default();
+            let mut handle = |part: Part| -> bool {
+                tokens += 1;
+                let at = *first.get_or_insert_with(std::time::Instant::now);
+                self.measure_speed(tokens, Some(at));
+                match part {
+                    Part::Thinking(text) => {
+                        on_piece(Piece::Thinking(&text));
+                        true
+                    }
+                    Part::Text(text) => {
+                        let new = stream.push(&text);
+                        if new.is_empty() {
+                            return true;
+                        }
+                        shown.push_str(&new);
+                        if let Some(cut) = loop_start(&shown) {
+                            looped = Some(cut);
+                            return false;
+                        }
+                        on_piece(Piece::Answer(&new));
+                        true
+                    }
+                }
+            };
+            let generated = self.engine.chat(&request, cancel, &mut |piece| {
+                if self.thinking {
+                    splitter.push(piece).into_iter().all(&mut handle)
+                } else {
+                    handle(Part::Text(piece.to_string()))
+                }
+            });
+            drop(lease);
+            let generated = generated?;
+            if self.thinking {
+                splitter.finish().into_iter().for_each(|part| {
+                    handle(part);
+                });
+                if !generated.reasoning.is_empty() {
+                    on_piece(Piece::Thinking(&generated.reasoning));
+                }
             }
-            (result, _) => result,
+            if let Some(usage) = generated.usage {
+                self.measure_speed(usage.completion_tokens, first);
+            }
+            match step_from_answer(&generated, &shown, looped) {
+                Ok(step) => return Ok(step),
+                Err(e) if !retried && e.to_string().contains("not JSON") => {
+                    retried = true;
+                    messages.push(Message::new(
+                        Role::User,
+                        crate::prompts::render(
+                            "nudges/malformed_call.j2",
+                            minijinja::context! { error => e.to_string() },
+                        ),
+                    ));
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 
     fn complete(&self, messages: &[Message], cancel: &AtomicBool) -> anyhow::Result<String> {
-        anyhow::ensure!(
-            !cancel.load(std::sync::atomic::Ordering::Relaxed),
-            "cancelled"
+        let lease = self.lease(cancel)?;
+        let generated = self.engine.chat(
+            &self.request(messages, self.max_tokens),
+            cancel,
+            &mut |_| true,
         );
-        let request = self.request(messages, self.max_tokens);
-        Ok(self
-            .engine
-            .chat(&request, cancel, &mut |_| true)?
-            .content
-            .trim()
-            .to_string())
+        drop(lease);
+        let generated = generated?;
+        let (_, content) = split_thinking(&generated.content);
+        Ok(content.trim().to_string())
     }
 
     fn complete_json(
@@ -481,32 +634,20 @@ impl Brain for EngineBrain<'_> {
         schema: &Value,
         cancel: &AtomicBool,
     ) -> anyhow::Result<String> {
-        anyhow::ensure!(
-            !cancel.load(std::sync::atomic::Ordering::Relaxed),
-            "cancelled"
-        );
+        let lease = self.lease(cancel)?;
         let request = ChatRequest {
             json_schema: Some(schema.clone()),
             ..self.request(messages, self.max_tokens)
         };
-        let content = if self.thinking {
-            let generated = self.engine.chat_thinking(
-                &request,
-                Thinking {
-                    budget: THINK_TOKENS,
-                },
-                cancel,
-                &mut |_| true,
-            )?;
-            split_thinking(&generated.content).1
-        } else {
-            self.engine.chat(&request, cancel, &mut |_| true)?.content
-        };
+        let generated = self.engine.chat(&request, cancel, &mut |_| true);
+        drop(lease);
+        let generated = generated?;
+        let (_, content) = split_thinking(&generated.content);
         Ok(content.trim().to_string())
     }
 
     fn context(&self) -> u32 {
-        self.n_ctx
+        self.context
     }
 
     fn speed(&self) -> Option<f64> {
@@ -567,23 +708,6 @@ mod tests {
     }
 
     #[test]
-    fn the_engine_turns_the_schema_of_a_step_with_calls_into_a_grammar() {
-        for tools in [
-            vec![],
-            vec![spec("search")],
-            vec![spec("search"), spec("read"), spec("say")],
-        ] {
-            for may_answer in [true, false] {
-                for thinking in [true, false] {
-                    let schema = step_schema(&tools, may_answer, thinking);
-                    mediaa_engine::llm::check_schema(&schema.to_string())
-                        .unwrap_or_else(|e| panic!("{schema}\n{e:#}"));
-                }
-            }
-        }
-    }
-
-    #[test]
     fn a_thinking_model_writes_no_thought_field() {
         let s = step_schema(&[spec("search")], true, true);
         for option in s["oneOf"].as_array().unwrap() {
@@ -610,7 +734,7 @@ mod tests {
         for thinking in [true, false] {
             let fake = mediaa_engine::testing::FakeEngine::new();
             fake.chat_deltas(&[r#"{"action":"answer","answer":"Да."}"#]);
-            let brain = engine_brain(&fake, thinking);
+            let brain = chat_brain(&fake, thinking);
             brain
                 .step(
                     &[Message::new(Role::User, "q")],
@@ -703,25 +827,20 @@ mod tests {
         );
     }
 
-    fn engine_brain(
-        engine: &mediaa_engine::testing::FakeEngine,
-        thinking: bool,
-    ) -> EngineBrain<'_> {
-        EngineBrain {
+    fn chat_brain(engine: &mediaa_engine::testing::FakeEngine, thinking: bool) -> ChatBrain<'_> {
+        ChatBrain {
             engine,
-            model: "owner/model".into(),
-            n_ctx: 4096,
-            device: Device::Auto,
-            priority: Priority::Interactive,
+            source: ModelSource::new("c", "owner/model"),
+            slots: Slots::new(mediaa_core::agent::Budget::default()),
+            context: 4096,
             max_tokens: 256,
-            hf_token: None,
             thinking,
             speed: std::sync::Mutex::new(None),
         }
     }
 
     fn pieces_of(
-        brain: &EngineBrain,
+        brain: &ChatBrain,
         tools: &[ToolSpec],
     ) -> (Vec<(bool, String)>, anyhow::Result<Step>) {
         let mut pieces = Vec::new();
@@ -757,7 +876,7 @@ mod tests {
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
             );
-            let (pieces, step) = pieces_of(&engine_brain(&fake, false), &[spec("search")]);
+            let (pieces, step) = pieces_of(&chat_brain(&fake, false), &[spec("search")]);
             assert!(pieces.is_empty(), "pieces of {size}: {pieces:?}");
             assert!(matches!(step.unwrap(), Step::Tool { calls, .. } if calls[0].tool == "search"));
         }
@@ -768,7 +887,7 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
         );
-        let (pieces, step) = pieces_of(&engine_brain(&fake, true), &[spec("search")]);
+        let (pieces, step) = pieces_of(&chat_brain(&fake, true), &[spec("search")]);
         assert!(pieces.iter().all(|(reasoning, _)| *reasoning), "{pieces:?}");
         assert_eq!(
             pieces.iter().map(|(_, t)| t.as_str()).collect::<String>(),
@@ -787,7 +906,7 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
         );
-        let (pieces, step) = pieces_of(&engine_brain(&fake, true), &[]);
+        let (pieces, step) = pieces_of(&chat_brain(&fake, true), &[]);
         let reasoning: String = pieces
             .iter()
             .filter(|(r, _)| *r)
@@ -824,7 +943,7 @@ mod tests {
         );
 
         fake.chat_deltas(&["{\"thought\":\"\",\"action\":\"answer\",\"answer\":\"Да.\"}"]);
-        let (pieces, step) = pieces_of(&engine_brain(&fake, false), &[]);
+        let (pieces, step) = pieces_of(&chat_brain(&fake, false), &[]);
         assert_eq!(pieces, [(false, "Да.".to_string())]);
         assert!(step.is_ok());
         assert_eq!(fake.chats()[1].thinking, None);
@@ -905,7 +1024,7 @@ mod tests {
         let fake = mediaa_engine::testing::FakeEngine::new();
         let schema = json!({"type":"object","properties":{"changed":{"type":"boolean"},"answer":{"type":"string"}},"required":["changed","answer"],"additionalProperties":false});
         fake.chat_answers(&[r#"{"changed":false,"answer":"Да."}"#]);
-        let out = engine_brain(&fake, false)
+        let out = chat_brain(&fake, false)
             .complete_json(
                 &[Message::new(Role::User, "q")],
                 &schema,
@@ -920,7 +1039,7 @@ mod tests {
             .contains("\"changed\""));
 
         fake.chat_answers(&["<think>\nсмотрю\n</think>\n\n{\"changed\":true,\"answer\":\"Нет.\"}"]);
-        let out = engine_brain(&fake, true)
+        let out = chat_brain(&fake, true)
             .complete_json(
                 &[Message::new(Role::User, "q")],
                 &schema,

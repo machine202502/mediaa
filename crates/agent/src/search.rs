@@ -1,6 +1,5 @@
-use crate::index::EMBED_CTX;
 use crate::slots::Slots;
-use mediaa_core::agent::{AgentSettings, ModelRole, ModelSource, WorkKind};
+use mediaa_core::agent::{AgentSettings, ModelSource, WorkKind};
 use mediaa_core::retrieval::{Chunk, Hit};
 use mediaa_core::speakers::Parsed;
 use mediaa_core::transcript::Transcript;
@@ -107,8 +106,6 @@ pub fn search_files_with(
     } else {
         WorkKind::Indexing
     };
-    let device = |role| settings.devices.get(role);
-    let hf_token = crate::assistant::hf_token(settings);
     let mut trace = Trace {
         files: files.len(),
         ..Trace::default()
@@ -132,16 +129,12 @@ pub fn search_files_with(
     }
     let embedding = settings.models.embedding.as_ref().and_then(|source| {
         let run = || {
-            let model = crate::models::local_spec(source)?;
             let _lease = slots.request(kind, interactive).wait(&cancel)?;
             let found = engine.embeddings(
                 &EmbeddingsRequest {
-                    model,
+                    source: source.clone(),
                     input: vec![query.to_string()],
                     kind: EmbedKind::Query,
-                    n_ctx: Some(EMBED_CTX),
-                    device: Some(device(ModelRole::Embedding)),
-                    hf_token: hf_token.clone(),
                 },
                 &cancel,
             )?;
@@ -206,16 +199,12 @@ pub fn search_files_with(
     hits.truncate(CANDIDATES.max(limit));
     if let (Some(source), false) = (&settings.models.reranker, hits.is_empty()) {
         let rerank = || -> anyhow::Result<Vec<f32>> {
-            let model = crate::models::local_spec(source)?;
             let _lease = slots.request(kind, interactive).wait(&cancel)?;
             let results = engine.rerank(
                 &RerankRequest {
-                    model,
+                    source: source.clone(),
                     query: query.to_string(),
                     documents: hits.iter().map(|h| h.hit.chunk.text.clone()).collect(),
-                    n_ctx: Some(EMBED_CTX),
-                    device: Some(device(ModelRole::Reranker)),
-                    hf_token: hf_token.clone(),
                 },
                 &cancel,
             )?;
@@ -260,9 +249,7 @@ fn embed_span(
     interactive: bool,
     cancel: &AtomicBool,
 ) -> anyhow::Result<usize> {
-    let model = crate::models::local_spec(source)?;
-    let device = Some(settings.devices.get(ModelRole::Embedding));
-    let hf_token = crate::assistant::hf_token(settings);
+    let _ = settings;
     let mut embedded = 0;
     for f in files {
         if !Transcript::exists(ai_dir, &f.id) {
@@ -282,12 +269,9 @@ fn embed_span(
         for (id, text) in todo {
             let found = engine.embeddings(
                 &EmbeddingsRequest {
-                    model: model.clone(),
+                    source: source.clone(),
                     input: vec![text],
-                    kind: EmbedKind::Passage,
-                    n_ctx: Some(EMBED_CTX),
-                    device,
-                    hf_token: hf_token.clone(),
+                    kind: EmbedKind::Document,
                 },
                 cancel,
             )?;
@@ -408,9 +392,7 @@ mod tests {
     }
 
     fn with_embedding() -> AgentSettings {
-        let source = ModelSource::Local {
-            path: PathBuf::from("C:/models/embed.gguf"),
-        };
+        let source = ModelSource::new("embed", "embed");
         AgentSettings {
             models: ModelChoices {
                 embedding: Some(source),
@@ -651,7 +633,7 @@ mod tests {
             engine
                 .kinds()
                 .iter()
-                .filter(|k| **k == EmbedKind::Passage)
+                .filter(|k| **k == EmbedKind::Document)
                 .count(),
             6
         );

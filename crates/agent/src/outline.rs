@@ -2,16 +2,14 @@ use crate::assistant::{Message, Role};
 use crate::prompts;
 use crate::run::{Host, Stage, Work};
 use crate::scope::Scope;
-use mediaa_core::agent::{AgentSettings, AnalysisOptions, ModelRole};
+use mediaa_core::agent::{AgentSettings, AnalysisOptions};
 use mediaa_core::library::human_duration;
 use mediaa_core::outline::{
     self, Chapter, ChunkVector, Digest, FineLine, Item, Part, PlanTopic, Quote, Section,
     SectionKind, Window, DIGEST_SCHEMA, WINDOW_WORDS,
 };
 use mediaa_core::transcript::{self, Reply, Transcript};
-use mediaa_engine::{
-    ChatMessage, ChatRequest, Device, EmbedKind, EmbeddingsRequest, Engine, Priority, Usage,
-};
+use mediaa_engine::{ChatMessage, ChatRequest, EmbedKind, EmbeddingsRequest, Engine, Usage};
 use mediaa_queue::{Child, NewTask, Resource, Store, Task};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -449,14 +447,12 @@ fn chat_request(
     user: String,
     schema: Value,
     max_tokens: u32,
-    device: Device,
-    hf_token: Option<&str>,
 ) -> ChatRequest {
     let messages = [
         Message::new(Role::System, system),
         Message::new(Role::User, user),
     ];
-    chat_request_messages(model, &messages, schema, max_tokens, device, hf_token)
+    chat_request_messages(model, &messages, schema, max_tokens)
 }
 
 fn chat_request_messages(
@@ -464,11 +460,9 @@ fn chat_request_messages(
     messages: &[Message],
     schema: Value,
     max_tokens: u32,
-    device: Device,
-    hf_token: Option<&str>,
 ) -> ChatRequest {
     ChatRequest {
-        model: model.to_string(),
+        source: mediaa_core::agent::ModelSource::new("", model),
         messages: messages
             .iter()
             .map(|m| ChatMessage::new(m.role.into(), m.content.clone()))
@@ -476,11 +470,6 @@ fn chat_request_messages(
         max_tokens,
         temperature: 0.0,
         json_schema: Some(schema),
-        no_repeats: true,
-        n_ctx: Some(OUTLINE_CTX),
-        device: Some(device),
-        priority: Some(Priority::Background),
-        hf_token: hf_token.map(str::to_string),
         ..ChatRequest::default()
     }
 }
@@ -492,15 +481,13 @@ fn chat_request_messages(
 fn ask(
     engine: &dyn Engine,
     model: &str,
-    device: Device,
-    hf_token: Option<&str>,
     system: String,
     user: String,
     schema: Value,
     max_tokens: u32,
     cancel: &AtomicBool,
 ) -> anyhow::Result<Digest> {
-    let request = chat_request(model, system, user, schema, max_tokens, device, hf_token);
+    let request = chat_request(model, system, user, schema, max_tokens);
     let text = engine.chat(&request, cancel, &mut |_| true)?.content;
     let raw: RawDigest = serde_json::from_str(text.trim())
         .map_err(|e| anyhow::anyhow!("the model's digest is not valid: {e}"))?;
@@ -514,8 +501,6 @@ fn ask(
 pub fn digest(
     engine: &dyn Engine,
     model: &str,
-    device: Device,
-    hf_token: Option<&str>,
     window: &Window,
     i: usize,
     n: usize,
@@ -526,8 +511,6 @@ pub fn digest(
     ask(
         engine,
         model,
-        device,
-        hf_token,
         prompts::render("outline/system.j2", ()),
         prompt(window, i, n, previous, language),
         serde_json::from_str(DIGEST_SCHEMA)?,
@@ -564,8 +547,6 @@ fn quotes_of(parts: &[Digest]) -> Vec<Quote> {
 struct Ask<'a> {
     engine: &'a dyn Engine,
     model: &'a str,
-    device: Device,
-    hf_token: Option<&'a str>,
     cancel: &'a AtomicBool,
 }
 
@@ -581,8 +562,6 @@ impl Ask<'_> {
         digest(
             self.engine,
             self.model,
-            self.device,
-            self.hf_token,
             window,
             i,
             n,
@@ -620,8 +599,6 @@ impl Ask<'_> {
         let mut digest = ask(
             self.engine,
             self.model,
-            self.device,
-            self.hf_token,
             prompts::render("outline/reduce_system.j2", ()),
             user,
             serde_json::from_str(DIGEST_SCHEMA)?,
@@ -655,8 +632,6 @@ impl Ask<'_> {
             user,
             pair_schema(),
             PAIR_TOKENS,
-            self.device,
-            self.hf_token,
         );
         let text = self
             .engine
@@ -677,14 +652,7 @@ impl Ask<'_> {
         schema: Value,
         max_tokens: u32,
     ) -> anyhow::Result<ModelText> {
-        let request = chat_request_messages(
-            self.model,
-            messages,
-            schema,
-            max_tokens,
-            self.device,
-            self.hf_token,
-        );
+        let request = chat_request_messages(self.model, messages, schema, max_tokens);
         let answer = self.engine.chat(&request, self.cancel, &mut |_| true)?;
         Ok(ModelText {
             text: answer.content,
@@ -750,8 +718,6 @@ impl Ask<'_> {
             user,
             outline::points_schema(),
             points_tokens(),
-            self.device,
-            self.hf_token,
         );
         let text = self
             .engine
@@ -1169,8 +1135,6 @@ impl PairScore {
 struct Embed<'a> {
     engine: &'a dyn Engine,
     model: String,
-    device: Device,
-    hf_token: Option<&'a str>,
     cancel: &'a AtomicBool,
     cache: HashMap<String, Vec<f64>>,
     failed: bool,
@@ -1186,12 +1150,9 @@ impl Embed<'_> {
         }
         if !missing.is_empty() && !self.failed {
             let request = EmbeddingsRequest {
-                model: self.model.clone(),
+                source: mediaa_core::agent::ModelSource::new("", self.model.clone()),
                 input: missing.clone(),
-                kind: EmbedKind::Passage,
-                n_ctx: Some(crate::index::EMBED_CTX),
-                device: Some(self.device),
-                hf_token: self.hf_token.map(str::to_string),
+                kind: EmbedKind::Document,
             };
             match self.engine.embeddings(&request, self.cancel) {
                 Ok(vectors)
@@ -1476,8 +1437,7 @@ fn merge_stage(
     t: &Transcript,
     ask: &Ask<'_>,
     language: &str,
-    embedding: Option<(&str, Device)>,
-    hf_token: Option<&str>,
+    embedding: Option<&str>,
 ) -> anyhow::Result<Option<usize>> {
     if t.meta(MERGED_KEY)?.is_some() {
         if let Some(json) = t.meta(FINAL_KEY)? {
@@ -1519,11 +1479,9 @@ fn merge_stage(
         Some(state) if state.fits(chapters.len()) => state,
         _ => MergeState::fresh(chapters.len()),
     };
-    let embed = embedding.map(|(model, device)| Embed {
+    let embed = embedding.map(|model| Embed {
         engine: ask.engine,
         model: model.to_string(),
-        device,
-        hf_token,
         cancel: ask.cancel,
         cache: HashMap::new(),
         failed: false,
@@ -1555,10 +1513,7 @@ struct Run {
     dialog: Vec<Reply>,
     language: &'static str,
     model: String,
-    device: Device,
     embedding: Option<String>,
-    embedding_device: Device,
-    hf_token: Option<String>,
 }
 
 fn open_run(ai_dir: &Path, path: &Path, settings: &AgentSettings) -> anyhow::Result<Option<Run>> {
@@ -1572,7 +1527,7 @@ fn open_run(ai_dir: &Path, path: &Path, settings: &AgentSettings) -> anyhow::Res
         .models
         .agent
         .as_ref()
-        .and_then(|source| crate::models::local_spec(source).ok())
+        .map(|source| source.model.clone())
     else {
         return Ok(None);
     };
@@ -1583,14 +1538,11 @@ fn open_run(ai_dir: &Path, path: &Path, settings: &AgentSettings) -> anyhow::Res
         dialog,
         language: settings.language_name(),
         model,
-        device: settings.devices.get(ModelRole::Agent),
         embedding: settings
             .models
             .embedding
             .as_ref()
-            .and_then(|source| crate::models::local_spec(source).ok()),
-        embedding_device: settings.devices.get(ModelRole::Embedding),
-        hf_token: crate::assistant::hf_token(settings),
+            .map(|source| source.model.clone()),
     }))
 }
 
@@ -1774,8 +1726,6 @@ impl TopicTask {
         let ask = Ask {
             engine: engine.as_ref(),
             model: &run.model,
-            device: run.device,
-            hf_token: run.hf_token.as_deref(),
             cancel: cancel.as_ref(),
         };
         let picked = topic_replies(&run.dialog, &topic, input.topic + 1 == plan.len());
@@ -1869,19 +1819,9 @@ impl TopicTask {
         let ask = Ask {
             engine: engine.as_ref(),
             model: &run.model,
-            device: run.device,
-            hf_token: run.hf_token.as_deref(),
             cancel: cancel.as_ref(),
         };
-        let chapters = merge_stage(
-            t,
-            &ask,
-            run.language,
-            run.embedding
-                .as_deref()
-                .map(|model| (model, run.embedding_device)),
-            run.hf_token.as_deref(),
-        )?;
+        let chapters = merge_stage(t, &ask, run.language, run.embedding.as_deref())?;
         let Some(chapters) = chapters else {
             let n = task.cursor.get("n").and_then(|v| v.as_u64()).unwrap_or(0) + 1;
             return Ok(Work::More {
@@ -1941,8 +1881,6 @@ impl TopicTask {
         let ask = Ask {
             engine: engine.as_ref(),
             model: &run.model,
-            device: run.device,
-            hf_token: run.hf_token.as_deref(),
             cancel: cancel.as_ref(),
         };
         let topic = PlanTopic {
@@ -2042,10 +1980,7 @@ mod tests {
     fn digests_a_meeting() {
         let _ = env_logger::Builder::from_env(env_logger::Env::default()).try_init();
         let engine = crate::live::engine();
-        let model = match ModelRole::Agent.default_source().unwrap() {
-            mediaa_core::agent::ModelSource::HuggingFace { repo } => repo,
-            other => panic!("{other:?}"),
-        };
+        let model = "agent".to_string();
         let text = "[00:00] Дана: Давайте по отчёту для заказчика. Олег, где мы?\n\
                     [00:05] Олег: Цифры за квартал собраны, не хватает графиков по продажам.\n\
                     [00:12] Дана: Графики сделает Ира до четверга. Отчёт отправляем в пятницу утром, решено.\n\
@@ -2060,8 +1995,6 @@ mod tests {
         let d = digest(
             engine.as_ref(),
             &model,
-            Device::Auto,
-            None,
             &w,
             0,
             1,
@@ -2210,8 +2143,6 @@ mod tests {
         let ask = Ask {
             engine: &fake,
             model: "unsloth/Qwen3.5-4B-GGUF",
-            device: Device::Auto,
-            hf_token: None,
             cancel: &cancel,
         };
         let chapters: Vec<Chapter> = (0..4)
@@ -2262,8 +2193,6 @@ mod tests {
         let ask = Ask {
             engine: &fake,
             model: "unsloth/Qwen3.5-4B-GGUF",
-            device: Device::Auto,
-            hf_token: None,
             cancel: &cancel,
         };
         let chapters: Vec<Chapter> = (0..4)
@@ -2310,8 +2239,6 @@ mod tests {
             let ask = Ask {
                 engine: &fake,
                 model: "unsloth/Qwen3.5-4B-GGUF",
-                device: Device::Auto,
-                hf_token: None,
                 cancel: &cancel,
             };
             let chapters = [
@@ -2363,8 +2290,6 @@ mod tests {
         let ask = Ask {
             engine: &fake,
             model: "unsloth/Qwen3.5-4B-GGUF",
-            device: Device::Auto,
-            hf_token: None,
             cancel: &cancel,
         };
         let chapters = [
@@ -2413,8 +2338,6 @@ mod tests {
         let ask = Ask {
             engine: &fake,
             model: "unsloth/Qwen3.5-4B-GGUF",
-            device: Device::Auto,
-            hf_token: None,
             cancel: &cancel,
         };
         let chapters = [
@@ -2425,8 +2348,6 @@ mod tests {
         let embed = Some(Embed {
             engine: &fake,
             model: "ggml-org/embeddinggemma-300M-GGUF".into(),
-            device: Device::Auto,
-            hf_token: None,
             cancel: &cancel,
             cache: HashMap::new(),
             failed: false,
@@ -2445,7 +2366,7 @@ mod tests {
         assert_eq!(m.finish().len(), 2);
         assert_eq!(
             fake.embeddings_count(),
-            2,
+            1,
             "both descriptions are embedded in one request"
         );
         assert!(fake.chats().is_empty());
@@ -2509,6 +2430,8 @@ mod tests {
 
     fn settings() -> AgentSettings {
         let mut settings = AgentSettings::default();
+        settings.models.agent = Some(mediaa_core::agent::ModelSource::new("c", "agent"));
+        settings.models.titles = Some(mediaa_core::agent::ModelSource::new("c", "titles"));
         settings.models.embedding = None;
         settings.budget.agent = 1;
         settings
@@ -3047,8 +2970,6 @@ mod tests {
         let ask = Ask {
             engine: &fake,
             model: "unsloth/Qwen3.5-4B-GGUF",
-            device: Device::Auto,
-            hf_token: None,
             cancel: &cancel,
         };
         let chapter = Chapter {
@@ -3125,8 +3046,6 @@ mod tests {
         let ask = Ask {
             engine: &fake,
             model: "unsloth/Qwen3.5-4B-GGUF",
-            device: Device::Auto,
-            hf_token: None,
             cancel: &cancel,
         };
         let chapter = Chapter {
@@ -3181,8 +3100,6 @@ mod tests {
         let ask = Ask {
             engine: &fake,
             model: "unsloth/Qwen3.5-4B-GGUF",
-            device: Device::Auto,
-            hf_token: None,
             cancel: &cancel,
         };
         let chapter = Chapter {
@@ -3225,8 +3142,6 @@ mod tests {
         let ask = Ask {
             engine: &fake,
             model: "unsloth/Qwen3.5-4B-GGUF",
-            device: Device::Auto,
-            hf_token: None,
             cancel: &cancel,
         };
         let chapter = Chapter {
@@ -3347,8 +3262,6 @@ mod tests {
         let ask = Ask {
             engine: &fake,
             model: "unsloth/Qwen3.5-4B-GGUF",
-            device: Device::Auto,
-            hf_token: None,
             cancel: &cancel,
         };
         let chapter = Chapter {

@@ -14,9 +14,8 @@ use mediaa_agent::assistant::queued::{self, ANSWER_KIND, TITLE_KIND};
 #[cfg(test)]
 use mediaa_agent::assistant::Turn;
 use mediaa_agent::assistant::{quote, step_title, title, Event, StepRecord};
-use mediaa_agent::models::local_spec;
 use mediaa_agent::tools::parse_time;
-use mediaa_core::agent::{AgentSettings, ModelSource};
+use mediaa_core::agent::AgentSettings;
 use mediaa_core::chat::{Author, ChatId, ChatInfo, ChatMessage, Timeline, TimelineEntry};
 use mediaa_core::speakers::{self, Popup};
 use mediaa_core::transcript::{self, Transcript};
@@ -404,7 +403,7 @@ impl Chat {
             .models
             .titles
             .as_ref()
-            .and_then(|source| local_spec(source).ok());
+            .map(|source| source.model.clone());
         let task = queued::title_task(store, chat, question, &for_model, model.as_deref());
         if let Err(e) = services.sched.enqueue(task) {
             log::warn!("the title task was not started: {e:#}");
@@ -1490,8 +1489,7 @@ fn with_restored(open: &[ChatId], chat: ChatId) -> Vec<ChatId> {
 
 fn answer_resource(settings: &AgentSettings) -> (Resource, Option<String>) {
     match settings.models.agent.as_ref() {
-        Some(ModelSource::Provider { model, .. }) => (Resource::Provider, Some(model.clone())),
-        Some(source) => (Resource::Llm, local_spec(source).ok()),
+        Some(source) => (Resource::Llm, Some(source.model.clone())),
         None => (Resource::Llm, None),
     }
 }

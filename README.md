@@ -38,9 +38,10 @@ The window has four sections:
   Quality / resolution / bitrate settings, sound removal, output name and folder (by default
   the library folder, set in Settings); progress and cancel.
 - **Agent** — catalogs over recordings, transcription and speaker names, summaries and topics,
-  local llama.cpp/sherpa-onnx models plus OpenAI-compatible providers, a queue with resource
-  budgets, search and chat. Provider keys are stored in the OS keychain, never in `settings.toml`;
-  models are downloaded into the app data directory.
+  search and chat. Models are external connections only (OpenRouter, OpenAI, DeepSeek, Ollama,
+  any OpenAI-compatible server, or a user command). What to install is in
+  [docs/agent-models.md](docs/agent-models.md). Keys stay in the OS keychain, never in
+  `settings.toml`.
 - **Global hotkeys** (configurable), **dark / light / system theme**, **languages**: English and
   Russian (system language by default). Closing the window hides the app to the **tray** (on by
   default, switchable in Settings); a left click starts an area screenshot by default, can open the
@@ -58,7 +59,7 @@ crates/
   media/          FFmpeg via ez-ffmpeg: recording, muxing, conversion, previews and thumbnails
   platform/       OS capture, audio I/O, clipboard/files, cursor and window integration
   webp-pipeline/  budgeted parallel animated-WebP scheduler and segment merge
-  engine/         llama.cpp, sherpa-onnx, embeddings, reranker, downloads and the model budget
+  engine/         external model connections: OpenAI-compatible HTTP, Ollama and user commands
   agent/          chat loop, tools, indexing, transcription, speaker names, providers and secrets
   queue/          persistent task queue: composites, resource pools, chunked runs
   eval/           quality runs of the agent over a set of cases
@@ -102,9 +103,7 @@ Skills support, enabled in `.vscode/settings.json`. Claude Code uses the thin wr
 |---|---|---|---|
 | Rust | stable, `x86_64-pc-windows-msvc` | stable | stable |
 | C/C++ toolchain | Visual Studio 2022+ "Desktop development with C++" **and** "C++ Clang Compiler for Windows" (libclang for bindgen) | `build-essential`, `clang`, `libclang-dev` | Xcode command line tools |
-| CMake | CMake 3.20+ (llama.cpp) | `cmake`, `ninja-build` | `cmake`, `ninja` |
 | FFmpeg build | vcpkg (cloned automatically if missing) | vcpkg + `nasm pkg-config cmake ninja-build autoconf automake libtool` | vcpkg + `brew install nasm pkg-config cmake ninja autoconf automake libtool` |
-| Local models | Vulkan SDK (`VULKAN_SDK`, for llama.cpp's Vulkan backend) | not required (CPU backend) | not required (CPU backend) |
 | System libs | — | see `scripts/linux/Dockerfile` (pipewire, xcb, alsa, dbus, xkbcommon, wayland, GL dev packages) | — |
 | Optional | Docker Desktop (Linux builds), WSL2 (running Linux builds) | Docker | Docker |
 
@@ -264,7 +263,7 @@ changed in Settings.
 | Screenshots, recordings, conversions | `Documents/MediaA` (changeable in Settings) |
 | Library cache | `.cache/` in that folder: `library.db` (SQLite: file index with titles, sizes, dates, dimensions, durations, and thumbnail slots; every change is written by row) and thumbnail atlases `thumbs-N.jpg`; everything is rebuilt when missing |
 | Agent data | `.ai/` in that folder: `catalogs.db`, `chat.db`, `queue.db` and per-recording transcripts/outlines; changing the library folder starts a new `.ai` there |
-| Local models | the platform's local data dir (`…\MediaA\data\models`): GGUF, ONNX and sherpa-onnx models |
+| Agent models | not stored by MediaA; the user runs Ollama, a server or a CLI and describes that connection |
 | Settings | Windows `%APPDATA%\MediaA\MediaA\config\settings.toml`, Linux `~/.config/mediaa`, macOS `~/Library/Application Support/dev.MediaA.MediaA` |
 | Logs, scratch files | the platform's local data dir (`…\MediaA\data\logs`) |
 

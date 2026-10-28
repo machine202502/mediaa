@@ -41,7 +41,19 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
     let run = Run::new(&scope);
     let (rec, settings, slots) = (
         recording(),
-        AgentSettings::default(),
+        {
+            let mut settings = AgentSettings::default();
+            settings.models.agent = Some(mediaa_core::agent::ModelSource::new(
+                "c",
+                "unsloth/Qwen3.5-4B-GGUF",
+            ));
+            settings.models.embedding = Some(mediaa_core::agent::ModelSource::new(
+                "c",
+                "ggml-org/embeddinggemma-300M-GGUF",
+            ));
+            settings.models.titles = Some(mediaa_core::agent::ModelSource::new("c", "titles"));
+            settings
+        },
         Slots::new(Budget::default()),
     );
     let mut memory = Memory::default();
