@@ -191,7 +191,6 @@ impl App {
         action: StopAction,
         source: StopSource,
     ) {
-        self.recording_quiet = source == StopSource::Tray;
         if let Some(result) = self.recording.stop(action, source) {
             if action == StopAction::Save {
                 self.page = result.page;

@@ -123,6 +123,10 @@ pub fn merge_parts(parts: &[PathBuf], output: &Path) -> anyhow::Result<()> {
     webp_parts::merge_animation(parts, output)
 }
 
+pub fn trim_part(path: &Path, max_duration_us: i64) -> anyhow::Result<()> {
+    webp_parts::trim_animation(path, max_duration_us)
+}
+
 pub fn validate_part(path: &Path) -> anyhow::Result<()> {
     webp_parts::validate_animation(path)
 }

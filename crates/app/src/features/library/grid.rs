@@ -171,7 +171,8 @@ pub(super) fn library_tile(
                 let mut timeline = None;
                 let mut playing_at = None;
                 let mut loading = false;
-                if playable && active && !controller.cleanup_active() {
+                if playable && active && !controller.cleanup_active() && controller.previews_enabled
+                {
                     *previewing = true;
                     let pv = controller.previews.play(
                         ui.ctx(),
@@ -195,7 +196,7 @@ pub(super) fn library_tile(
                     if let Some(t) = pv.frame() {
                         texture = Some(t.clone());
                     }
-                    loading = pv.is_loading();
+                    loading = pv.is_loading() || pv.is_generating();
                     playing_at = Some(pv.position());
                     timeline = Some((pv.position() / pv.length()) as f32);
                 }
@@ -225,10 +226,7 @@ pub(super) fn library_tile(
                     }
                 }
                 if loading {
-                    let spinner = Rect::from_center_size(rect.center(), egui::vec2(28.0, 28.0));
-                    egui::Spinner::new()
-                        .color(Color32::WHITE)
-                        .paint_at(ui, spinner);
+                    theme::preview_loader(ui, rect.center(), 28.0);
                 }
 
                 let pad = 7.0;

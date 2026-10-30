@@ -12,6 +12,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     header(ui, &t!("settings.title"), "");
     let changed = std::cell::Cell::new(false);
+    let mut previews_changed = false;
 
     let mut open_dir = None;
     let mut autostart_error = None;
@@ -117,6 +118,33 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                         }
                         Err(error) => autostart_error = Some(format!("{error:#}")),
                     }
+                }
+            });
+            theme::section(ui, icon::FILM_STRIP, &t!("settings.previews"));
+            theme::row(ui, "", |ui| {
+                if ui
+                    .checkbox(
+                        &mut app.settings.animated_previews,
+                        t!("settings.animated_previews"),
+                    )
+                    .on_hover_text(t!("settings.animated_previews_hint"))
+                    .changed()
+                {
+                    previews_changed = true;
+                    changed.set(true);
+                }
+            });
+            theme::row(ui, "", |ui| {
+                if ui
+                    .checkbox(
+                        &mut app.settings.full_preview_videos,
+                        t!("settings.full_preview_videos"),
+                    )
+                    .on_hover_text(t!("settings.full_preview_videos_hint"))
+                    .changed()
+                {
+                    previews_changed = true;
+                    changed.set(true);
                 }
             });
         },
@@ -446,6 +474,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         app.refresh_catalogs(ui.ctx());
     }
 
+    if previews_changed {
+        app.preview_options_changed();
+    }
     if changed.get() {
         app.settings_changed();
     }

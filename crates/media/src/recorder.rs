@@ -35,17 +35,48 @@ struct ControlState {
     stopping: bool,
 }
 
+#[derive(Default)]
+struct StartGate {
+    open: Mutex<bool>,
+    cv: Condvar,
+}
+
+impl StartGate {
+    fn wait(&self) {
+        let mut open = self.open.lock();
+        while !*open {
+            self.cv.wait(&mut open);
+        }
+    }
+
+    fn open(&self) {
+        *self.open.lock() = true;
+        self.cv.notify_all();
+    }
+}
+
 struct Control {
     state: Mutex<ControlState>,
     cv: Condvar,
     clock: Mutex<SessionClock>,
     started: Instant,
+    capture_origin: Mutex<Option<Duration>>,
     audio_paused: Arc<AtomicBool>,
 }
 
 impl Control {
     fn now(&self) -> Duration {
         self.started.elapsed()
+    }
+
+    fn begin(&self) {
+        *self.capture_origin.lock() = Some(self.active_time());
+    }
+
+    fn capture_time(&self) -> Duration {
+        let origin = *self.capture_origin.lock();
+        self.active_time()
+            .saturating_sub(origin.unwrap_or_default())
     }
 
     fn active_time(&self) -> Duration {
@@ -69,7 +100,9 @@ impl Control {
     }
 
     fn stop(&self) {
-        self.state.lock().stopping = true;
+        let mut state = self.state.lock();
+        state.stopping = true;
+        drop(state);
         self.cv.notify_all();
     }
 
@@ -129,6 +162,84 @@ fn encode_with_linear_fallback(
         }
         WebpMode::Direct => encode(WebpSegmentation::Direct),
     }
+}
+
+fn equalize_outputs(
+    paths: &[PathBuf],
+    output: OutputKind,
+    cancel: &AtomicBool,
+) -> anyhow::Result<()> {
+    if paths.len() < 2 {
+        return Ok(());
+    }
+    let mut durations = Vec::with_capacity(paths.len());
+    for path in paths {
+        durations.push(
+            crate::info::probe(path)?
+                .duration_us
+                .filter(|duration| *duration > 0)
+                .ok_or_else(|| anyhow::anyhow!("{} has no duration", path.display()))?,
+        );
+    }
+    let Some(min) = durations.iter().copied().min() else {
+        return Ok(());
+    };
+    for (path, duration) in paths.iter().zip(durations) {
+        if duration <= min {
+            continue;
+        }
+        match output {
+            OutputKind::Anim(AnimFormat::Webp) => {
+                mediaa_webp_pipeline::trim_part(path, min)?;
+            }
+            OutputKind::Anim(AnimFormat::Gif) => trim_gif(path, min, cancel)?,
+            OutputKind::Video(container) => trim_video(path, min, container, cancel)?,
+            OutputKind::Audio(_) => continue,
+        }
+        log::info!(
+            "trimmed output {} by {} us to a shared duration",
+            path.display(),
+            duration - min
+        );
+    }
+    Ok(())
+}
+
+fn trim_gif(path: &Path, max_duration_us: i64, cancel: &AtomicBool) -> anyhow::Result<()> {
+    let pending = AtomicFile::new(path)?;
+    let seconds = max_duration_us as f64 / 1_000_000.0;
+    let output = Output::from(pending.path().to_string_lossy().into_owned())
+        .set_format("gif")
+        .set_format_opt("t", format!("{seconds:.6}"))
+        .add_stream_map("0:v");
+    let context = FfmpegContext::builder()
+        .input(Input::from(path.to_string_lossy().into_owned()))
+        .output(output)
+        .build()?;
+    crate::job::run(context, None, &mut |_| {}, cancel)?;
+    pending.commit_replace()?;
+    Ok(())
+}
+
+fn trim_video(
+    path: &Path,
+    max_duration_us: i64,
+    container: mediaa_core::formats::VideoContainer,
+    cancel: &AtomicBool,
+) -> anyhow::Result<()> {
+    let pending = AtomicFile::new(path)?;
+    let seconds = max_duration_us as f64 / 1_000_000.0;
+    let output = Output::from(pending.path().to_string_lossy().into_owned())
+        .set_format(container.muxer())
+        .add_stream_map_with_copy("0")
+        .set_format_opt("t", format!("{seconds:.6}"));
+    let context = FfmpegContext::builder()
+        .input(Input::from(path.to_string_lossy().into_owned()))
+        .output(output)
+        .build()?;
+    crate::job::run(context, None, &mut |_| {}, cancel)?;
+    pending.commit_replace()?;
+    Ok(())
 }
 
 struct FinalizeFailure {
@@ -244,6 +355,7 @@ impl RecordingSession {
             cv: Condvar::new(),
             clock: Mutex::new(SessionClock::new()),
             started: Instant::now(),
+            capture_origin: Mutex::new(None),
             audio_paused: Arc::new(AtomicBool::new(false)),
         });
 
@@ -293,6 +405,7 @@ impl RecordingSession {
         let mut live_lists = Vec::new();
         let mut live_sizes = Vec::new();
         let mut captures = Vec::new();
+        let gate = Arc::new(StartGate::default());
         let mut errors = Vec::new();
         let mut fatal_error = None;
         let mut preserve_work_dir = false;
@@ -325,6 +438,7 @@ impl RecordingSession {
             let (s, f) = (scratch.clone(), frames.clone());
             let events = events_tx.clone();
             let live2 = live.clone();
+            let gate2 = gate.clone();
             let join = std::thread::Builder::new()
                 .name(format!("capture-{i}"))
                 .spawn(move || {
@@ -339,6 +453,7 @@ impl RecordingSession {
                         s,
                         f,
                         ready_tx,
+                        gate2,
                     );
                     if let Err(e) = &r {
                         log::error!("capture {i} failed: {e:#}");
@@ -402,6 +517,11 @@ impl RecordingSession {
                 }
             }
         }
+
+        if fatal_error.is_none() && !start_cancel.load(Ordering::Relaxed) {
+            control.begin();
+        }
+        gate.open();
 
         let live_webp =
             if live_enabled && fatal_error.is_none() && !start_cancel.load(Ordering::Relaxed) {
@@ -746,20 +866,6 @@ impl RecordingSession {
                         }
                         continue;
                     }
-                    let preview = if video.files.len() > 1 {
-                        let combined = self
-                            .work_dir
-                            .join(format!("video-{}-preview.mkv", video.index));
-                        match concat_chunks(&video.files, &combined, cancel) {
-                            Ok(()) => Some(combined),
-                            Err(error) => {
-                                log::warn!("preview source for {}: {error:#}", video.name);
-                                None
-                            }
-                        }
-                    } else {
-                        Some(video.files[0].clone())
-                    };
                     let title = linked_title(&self.title, i, videos.len(), &video.name, false);
                     let out = naming::media_path(&self.out_dir, &title, self.started, "webp");
                     self.progress.set(None);
@@ -774,11 +880,11 @@ impl RecordingSession {
                         webp_fallback = true;
                         continue;
                     }
-                    if let Some(preview) = preview {
+                    if crate::preview_cache::full_previews_enabled() {
                         if let Err(error) =
-                            crate::preview_cache::ensure_proxy_for(&preview, &out, cancel)
+                            crate::preview_cache::ensure_proxy_for(&out, &out, cancel)
                         {
-                            log::warn!("preview proxy {}: {error:#}", preview.display());
+                            log::warn!("preview proxy {}: {error:#}", out.display());
                         }
                     }
                     if let Some(trace) = trace {
@@ -793,8 +899,10 @@ impl RecordingSession {
             if let Some(trace) = trace {
                 log::info!("[{trace}] stage=live complete; merged=webp");
             }
+            let paths: Vec<_> = live_outputs.into_iter().flatten().collect();
+            equalize_outputs(&paths, self.output, cancel)?;
             return Ok(FinalizeOutput {
-                paths: live_outputs.into_iter().flatten().collect(),
+                paths,
                 keep_work_dir,
             });
         }
@@ -923,9 +1031,11 @@ impl RecordingSession {
                     keep_work_dir,
                 });
             }
-            if matches!(self.output, OutputKind::Anim(_)) {
-                if let Err(error) = crate::preview_cache::ensure_proxy_for(scratch, &out, cancel) {
-                    log::warn!("preview proxy {}: {error:#}", scratch.display());
+            if matches!(self.output, OutputKind::Anim(_))
+                && crate::preview_cache::full_previews_enabled()
+            {
+                if let Err(error) = crate::preview_cache::ensure_proxy_for(&out, &out, cancel) {
+                    log::warn!("preview proxy {}: {error:#}", out.display());
                 }
             }
             outputs[i] = Some(out);
@@ -945,8 +1055,10 @@ impl RecordingSession {
         } else if let Some(trace) = trace {
             log::info!("[{trace}] stage=complete fallback=false");
         }
+        let paths: Vec<_> = outputs.into_iter().flatten().collect();
+        equalize_outputs(&paths, self.output, cancel)?;
         Ok(FinalizeOutput {
-            paths: outputs.into_iter().flatten().collect(),
+            paths,
             keep_work_dir,
         })
     }

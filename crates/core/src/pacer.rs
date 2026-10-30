@@ -53,7 +53,7 @@ impl SlotTracker {
     }
 
     pub fn slot(&mut self, active: Duration) -> Option<u64> {
-        let idx = (active.as_secs_f64() / self.interval.as_secs_f64()).floor() as u64;
+        let idx = self.slot_at(active);
         match self.last {
             Some(last) if idx <= last => None,
             _ => {
@@ -61,6 +61,14 @@ impl SlotTracker {
                 Some(idx)
             }
         }
+    }
+
+    pub fn slot_at(&self, active: Duration) -> u64 {
+        (active.as_secs_f64() / self.interval.as_secs_f64()).floor() as u64
+    }
+
+    pub fn last(&self) -> Option<u64> {
+        self.last
     }
 
     pub fn next_deadline(&self) -> Duration {

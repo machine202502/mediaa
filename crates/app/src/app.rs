@@ -46,6 +46,7 @@ const HIDE_DELAY: Duration = Duration::from_millis(300);
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
 const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(600);
 const SETTINGS_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+const CACHE_SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
 
 #[cfg(test)]
 type TestMonitorCapture = Arc<dyn Fn(screen::MonitorId) -> Result<Frame, String> + Send + Sync>;
@@ -89,6 +90,7 @@ pub struct App {
     quit_when_idle: bool,
     recovery_job: Option<crate::jobs::Job<RecoveryReport>>,
     housekeeping_jobs: Vec<crate::jobs::Job<()>>,
+    last_cache_sweep: Instant,
     _instance: Option<SingleInstance>,
     native_window: Option<NativeWindow>,
     startup: StartupAction,
@@ -136,6 +138,8 @@ impl App {
         theme::install(ctx);
         let mut settings = Settings::load();
         mediaa_agent::secrets::load(&mut settings.agent);
+        mediaa_media::preview_cache::set_animated_previews_enabled(settings.animated_previews);
+        mediaa_media::preview_cache::set_full_previews_enabled(settings.full_preview_videos);
         let clipboard = ClipboardService::new(ctx.clone());
         let previews = mediaa_media::preview_cache::previews_dir(&settings.media_dir);
         let mut output_dirs = vec![settings.media_dir.clone(), settings.convert_dir()];
@@ -206,6 +210,7 @@ impl App {
             quit_when_idle: false,
             recovery_job: None,
             housekeeping_jobs: Vec::new(),
+            last_cache_sweep: Instant::now(),
             _instance: instance,
             native_window: cc
                 .window_handle()
@@ -291,6 +296,27 @@ impl App {
 
     pub fn settings_changed(&mut self) {
         self.settings_dirty = Some(Instant::now());
+    }
+
+    pub fn preview_options_changed(&mut self) {
+        let animated = self.settings.animated_previews;
+        let full = self.settings.full_preview_videos;
+        mediaa_media::preview_cache::set_animated_previews_enabled(animated);
+        mediaa_media::preview_cache::set_full_previews_enabled(full);
+        self.lib.stop_previews();
+        if !animated || !full {
+            let removed = mediaa_media::preview_cache::clear_previews(
+                &self.settings.media_dir,
+                !animated,
+                !full,
+            );
+            log::info!(
+                "preview cache cleared animated={} full={} files={removed}",
+                !animated,
+                !full
+            );
+        }
+        self.settings_changed();
     }
 
     pub fn refresh_monitors(&mut self) {
@@ -453,6 +479,29 @@ impl eframe::App for App {
                 true
             }
         });
+        if self.last_cache_sweep.elapsed() >= CACHE_SWEEP_EVERY {
+            self.last_cache_sweep = Instant::now();
+            let media_dir = self.settings.media_dir.clone();
+            let ctx = ctx.clone();
+            match crate::jobs::Job::spawn("cache-sweep", Arc::default(), move || {
+                let report = features::cache_maintenance::sweep(
+                    &media_dir,
+                    std::time::SystemTime::now(),
+                    features::cache_maintenance::CACHE_TTL,
+                );
+                if report.previews > 0 || report.atlas_pages > 0 {
+                    log::info!(
+                        "cache sweep removed previews={} atlas_pages={}",
+                        report.previews,
+                        report.atlas_pages
+                    );
+                }
+                ctx.request_repaint();
+            }) {
+                Ok(job) => self.housekeeping_jobs.push(job),
+                Err(error) => log::warn!("cache sweep: {error}"),
+            }
+        }
         features::library::poll_cleanup(self, ctx);
         self.update_tray();
         self.show_recording_region(ctx);

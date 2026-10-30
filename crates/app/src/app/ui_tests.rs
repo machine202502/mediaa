@@ -959,6 +959,7 @@ fn stop_from_tray_uses_the_same_save_flow() {
     let app = harness.state_mut().app.as_mut().unwrap();
     app.tray_rx = Some(tray_rx);
     app.recording.test_recording(session, events);
+    app.recording_quiet = true;
     std::thread::sleep(std::time::Duration::from_millis(120));
     tray_tx.send(TrayCommand::StopAndSave).unwrap();
     app.handle_tray(&ctx);
@@ -977,6 +978,33 @@ fn stop_from_tray_uses_the_same_save_flow() {
         app.page,
         Page::Library,
         "the finished recording is copied and shown in the library"
+    );
+}
+
+#[test]
+fn stop_from_tray_restores_a_window_recording_even_after_hide_to_tray() {
+    let _recording = recording_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().join("out");
+    selected.hotkey_record.hide_to_tray = true;
+    let mut harness = harness_with(Page::Record, selected, catalog(), egui::vec2(1180.0, 900.0));
+    let session = test_recording("Window stop", dir.path());
+    let events = session.events();
+    let (tray_tx, tray_rx) = crossbeam_channel::bounded(1);
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.tray_rx = Some(tray_rx);
+    app.recording.test_recording(session, events);
+    app.recording_quiet = false;
+    app.hidden_by_us = true;
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    tray_tx.send(TrayCommand::StopAndSave).unwrap();
+    app.handle_tray(&ctx);
+    finish_recording(app, &ctx);
+    assert!(
+        !app.hidden_by_us,
+        "a window-started recording comes back from the tray"
     );
 }
 
@@ -1145,6 +1173,69 @@ fn settings_controls_change_application_state() {
         settings.tray_left_click,
         mediaa_core::settings::TrayClickAction::OpenWindow
     );
+}
+
+#[test]
+fn preview_options_clear_only_their_own_cache_when_disabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Settings,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    let media_dir = harness
+        .state()
+        .app
+        .as_ref()
+        .unwrap()
+        .settings
+        .media_dir
+        .clone();
+    let previews = mediaa_media::preview_cache::previews_dir(&media_dir);
+    std::fs::create_dir_all(&previews).unwrap();
+    let full = previews.join("full.mp4");
+    let hover = previews.join("hover-animated.mp4");
+    std::fs::write(&full, b"full").unwrap();
+    std::fs::write(&hover, b"hover").unwrap();
+
+    harness
+        .get_by_label(&t!("settings.animated_previews"))
+        .click();
+    harness.run();
+    let settings = &harness.state().app.as_ref().unwrap().settings;
+    assert!(!settings.animated_previews);
+    assert!(full.exists(), "full previews are a separate cache");
+    assert!(!hover.exists(), "animated cache is cleared");
+
+    harness
+        .get_by_label(&t!("settings.full_preview_videos"))
+        .click();
+    harness.run();
+    assert!(
+        !harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .settings
+            .full_preview_videos
+    );
+    assert!(!full.exists(), "full preview cache is cleared");
+
+    harness
+        .get_by_label(&t!("settings.animated_previews"))
+        .click();
+    harness.run();
+    harness
+        .get_by_label(&t!("settings.full_preview_videos"))
+        .click();
+    harness.run();
+    mediaa_media::preview_cache::set_animated_previews_enabled(true);
+    mediaa_media::preview_cache::set_full_previews_enabled(true);
 }
 
 #[test]

@@ -60,6 +60,27 @@ pub fn palette(ui: &egui::Ui) -> Palette {
     }
 }
 
+pub fn preview_loader(ui: &egui::Ui, center: egui::Pos2, size: f32) {
+    let p = palette(ui);
+    let t = ui.input(|input| input.time) as f32;
+    let painter = ui.painter();
+    let orbit = size * 0.28;
+    for i in 0..3 {
+        let angle = t * 2.8 + i as f32 * std::f32::consts::TAU / 3.0;
+        let alpha = (90.0 + 55.0 * (angle - t * 2.8).cos()) as u8;
+        let color =
+            Color32::from_rgba_unmultiplied(p.accent.r(), p.accent.g(), p.accent.b(), alpha);
+        painter.circle_filled(
+            center + egui::vec2(angle.cos() * orbit, angle.sin() * orbit),
+            size * 0.085,
+            color,
+        );
+    }
+    painter.circle_filled(center, size * 0.035, p.accent);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(16));
+}
+
 pub const TAB_SCROLL_BAR: f32 = 3.0;
 
 pub fn tab_row_scroll(ui: &mut egui::Ui) {

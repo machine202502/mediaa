@@ -384,6 +384,42 @@ impl ThumbCache {
     }
 }
 
+pub fn prune_pages(dir: &Path, older_than: SystemTime) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(page) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("thumbs-"))
+            .and_then(|name| name.strip_suffix(".jpg"))
+            .and_then(|page| page.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let old = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .is_ok_and(|modified| modified < older_than);
+        if old && std::fs::remove_file(&path).is_ok() {
+            removed.push(page);
+        }
+    }
+    if !removed.is_empty() {
+        if let Ok(db) = crate::cache_db::open(dir) {
+            for page in &removed {
+                if let Err(error) = db.execute("DELETE FROM thumbs WHERE page = ?1", [page]) {
+                    log::debug!("thumbnail cache prune: {error}");
+                }
+            }
+        }
+    }
+    removed.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,5 +563,58 @@ mod tests {
             ThumbCache::open(dir.path()).items.is_empty(),
             "its rows are dropped"
         );
+    }
+
+    #[test]
+    fn stale_atlas_pages_are_pruned() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = page_file(dir.path(), 0);
+        let fresh = page_file(dir.path(), 1);
+        for path in [&old, &fresh] {
+            std::fs::write(path, b"page").unwrap();
+        }
+        std::fs::File::options()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60))
+            .unwrap();
+        let removed = prune_pages(
+            dir.path(),
+            SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60),
+        );
+        assert_eq!(removed, 1);
+        assert!(!old.exists());
+        assert!(fresh.exists());
+    }
+
+    #[test]
+    fn pruning_an_atlas_page_removes_its_database_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = SystemTime::UNIX_EPOCH;
+        let mut cache = ThumbCache::open(dir.path());
+        cache.put("old.png", 1, t, &thumb(64, 64, [1, 2, 3]));
+        cache.flush().unwrap();
+        drop(cache);
+
+        let page = page_file(dir.path(), 0);
+        std::fs::File::options()
+            .write(true)
+            .open(&page)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(40 * 24 * 60 * 60))
+            .unwrap();
+        assert_eq!(
+            prune_pages(
+                dir.path(),
+                SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60)
+            ),
+            1
+        );
+        let db = crate::cache_db::open(dir.path()).unwrap();
+        let rows: i64 = db
+            .query_row("SELECT COUNT(*) FROM thumbs", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 }

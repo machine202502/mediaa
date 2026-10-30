@@ -84,6 +84,7 @@ impl App {
             quit_when_idle: false,
             recovery_job: None,
             housekeeping_jobs: Vec::new(),
+            last_cache_sweep: std::time::Instant::now(),
             _instance: None,
             native_window: None,
             startup: StartupAction::None,

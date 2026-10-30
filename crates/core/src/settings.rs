@@ -291,6 +291,8 @@ pub struct Settings {
     pub close_to_tray: bool,
     pub tray_left_click: TrayClickAction,
     pub tray_progress: bool,
+    pub animated_previews: bool,
+    pub full_preview_videos: bool,
     pub stop_recording_on_left_click: bool,
     pub highlight_recording_region: bool,
     pub recording_region_outline_width: u32,
@@ -327,6 +329,8 @@ impl Default for Settings {
             close_to_tray: true,
             tray_left_click: TrayClickAction::default(),
             tray_progress: true,
+            animated_previews: true,
+            full_preview_videos: true,
             stop_recording_on_left_click: true,
             highlight_recording_region: true,
             recording_region_outline_width: 4,
@@ -509,6 +513,26 @@ mod tests {
         assert!(Settings::load_from(&path).tray_progress);
         std::fs::write(&path, "tray_progress = false\n").unwrap();
         assert!(!Settings::load_from(&path).tray_progress);
+    }
+
+    #[test]
+    fn preview_options_are_on_by_default() {
+        let settings = Settings::default();
+        assert!(settings.animated_previews);
+        assert!(settings.full_preview_videos);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        assert!(Settings::load_from(&path).animated_previews);
+        assert!(Settings::load_from(&path).full_preview_videos);
+        std::fs::write(
+            &path,
+            "animated_previews = false\nfull_preview_videos = false\n",
+        )
+        .unwrap();
+        let loaded = Settings::load_from(&path);
+        assert!(!loaded.animated_previews);
+        assert!(!loaded.full_preview_videos);
     }
 
     #[test]

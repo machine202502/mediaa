@@ -205,6 +205,57 @@ pub(crate) fn validate_animation(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn trim_animation(path: &Path, max_duration_us: i64) -> anyhow::Result<()> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let chunks = parse_chunks(&bytes, path)?;
+    let max_ms = u32::try_from(max_duration_us.max(0).saturating_add(999) / 1_000)
+        .unwrap_or(u32::MAX)
+        .max(1);
+    let mut total = 0u32;
+    let mut kept: Vec<Vec<u8>> = Vec::new();
+    for chunk in &chunks {
+        if &chunk.id != b"ANMF" {
+            continue;
+        }
+        if total >= max_ms {
+            break;
+        }
+        let duration = {
+            let bytes = &chunk.data[12..15];
+            u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16)
+        };
+        let remaining = max_ms - total;
+        if duration > remaining {
+            let mut frame = chunk.data.to_vec();
+            write_u24(&mut frame[12..15], remaining);
+            kept.push(frame);
+            break;
+        }
+        kept.push(chunk.data.to_vec());
+        total = total.saturating_add(duration);
+    }
+    anyhow::ensure!(
+        !kept.is_empty(),
+        "{} has no animation frames",
+        path.display()
+    );
+    let mut output = Vec::new();
+    output.extend_from_slice(b"RIFF");
+    output.extend_from_slice(&[0; 4]);
+    output.extend_from_slice(b"WEBP");
+    for chunk in &chunks {
+        if &chunk.id != b"ANMF" {
+            write_chunk_bytes(&mut output, &chunk.id, chunk.data)?;
+        }
+    }
+    for frame in &kept {
+        write_chunk_bytes(&mut output, b"ANMF", frame)?;
+    }
+    let riff_size = u32::try_from(output.len() - 8).context("trimmed WebP is too large")?;
+    output[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    std::fs::write(path, output).with_context(|| format!("write {}", path.display()))
+}
+
 pub(crate) fn merge_animation(parts: &[PathBuf], output: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(!parts.is_empty(), "no WebP segments to merge");
     let first = std::fs::read(&parts[0]).with_context(|| format!("read {}", parts[0].display()))?;
@@ -331,6 +382,49 @@ pub(crate) fn synthetic_transparent_still(width: u32, height: u32, frame: u8) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trimming_animation_keeps_only_the_common_duration() {
+        fn animation_with_duration(duration_ms: u32) -> Vec<u8> {
+            let mut bytes = synthetic_animation(0);
+            let at = bytes
+                .windows(4)
+                .position(|window| window == b"ANMF")
+                .expect("ANMF")
+                + 8;
+            bytes[at + 12] = duration_ms as u8;
+            bytes[at + 13] = (duration_ms >> 8) as u8;
+            bytes[at + 14] = (duration_ms >> 16) as u8;
+            bytes
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let parts: Vec<_> = (0..3)
+            .map(|i| {
+                let path = dir.path().join(format!("part-{i}.webp"));
+                std::fs::write(&path, animation_with_duration(100)).unwrap();
+                path
+            })
+            .collect();
+        let output = dir.path().join("merged.webp");
+        merge_animation(&parts, &output).unwrap();
+        let before = std::fs::read(&output).unwrap();
+        for chunk in parse_chunks(&before, &output).unwrap() {
+            if &chunk.id == b"ANMF" {
+                assert!(chunk.data.len() >= 15, "frame len {}", chunk.data.len());
+            }
+        }
+        trim_animation(&output, 150_000).unwrap();
+        let bytes = std::fs::read(&output).unwrap();
+        let chunks = parse_chunks(&bytes, &output).unwrap();
+        let frames: Vec<_> = chunks.iter().filter(|chunk| &chunk.id == b"ANMF").collect();
+        assert_eq!(frames.len(), 2);
+        let duration = &frames[1].data[12..15];
+        assert_eq!(
+            u32::from(duration[0]) | (u32::from(duration[1]) << 8) | (u32::from(duration[2]) << 16),
+            50
+        );
+    }
 
     #[test]
     fn merges_frames_and_keeps_one_animation_header() {

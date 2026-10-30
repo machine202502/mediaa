@@ -62,6 +62,7 @@ pub(super) fn capture_loop(
     scratch: PathBuf,
     frames: Arc<AtomicU64>,
     ready: Sender<anyhow::Result<(String, (u32, u32))>>,
+    gate: Arc<StartGate>,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let setup = (|| -> anyhow::Result<_> {
         if let Some(live) = &live {
@@ -102,26 +103,27 @@ pub(super) fn capture_loop(
         }
     };
 
+    gate.wait();
     let mut slots = SlotTracker::new(fps);
     let mut result = Ok(());
     loop {
-        let active = control.active_time();
+        let active = control.capture_time();
         if let Some(slot) = slots.slot(active) {
             match source.grab() {
                 Ok(frame) => {
-                    if let Err(e) = handle.push_owned(frame.data, slot as i64, Some(1)) {
-                        result = Err(anyhow::anyhow!("encoder stopped: {e}"));
+                    if let Err(error) = handle.push_owned(frame.data, slot as i64, Some(1)) {
+                        result = Err(anyhow::anyhow!("encoder stopped: {error}"));
                         break;
                     }
                     frames.fetch_add(1, Ordering::Relaxed);
                 }
-                Err(e) => {
-                    result = Err(e.context(format!("capturing \"{}\"", source.name())));
+                Err(error) => {
+                    result = Err(error.context(format!("capturing \"{}\"", source.name())));
                     break;
                 }
             }
         }
-        let wait = slots.next_deadline().saturating_sub(control.active_time());
+        let wait = slots.next_deadline().saturating_sub(control.capture_time());
         if !control.wait(wait.max(Duration::from_millis(1))) {
             break;
         }

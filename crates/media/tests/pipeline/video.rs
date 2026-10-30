@@ -1,6 +1,126 @@
 use super::*;
 
 #[test]
+fn sources_starting_at_different_times_have_equal_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            delayed_pattern(64, 48, Duration::from_millis(0)),
+            delayed_pattern(96, 64, Duration::from_millis(250)),
+        ],
+        vec![],
+        OutputKind::Video(VideoContainer::Mkv),
+    );
+    let paths = record(dir.path(), req, 1.2);
+    assert_eq!(paths.len(), 2);
+    let durations: Vec<f64> = paths
+        .iter()
+        .map(|path| probe(path).unwrap().duration_secs().unwrap_or(0.0))
+        .collect();
+    assert!(
+        durations.iter().all(|duration| *duration > 0.8),
+        "{durations:?}"
+    );
+    assert!(
+        (durations[0] - durations[1]).abs() <= 1.0 / 20.0 + 0.01,
+        "captures must share one duration: {durations:?}"
+    );
+}
+
+#[test]
+fn animated_sources_have_equal_duration_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            delayed_pattern(64, 48, Duration::from_millis(0)),
+            delayed_pattern(96, 64, Duration::from_millis(250)),
+        ],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let paths = record(dir.path(), req, 1.2);
+    let durations: Vec<f64> = paths
+        .iter()
+        .map(|path| probe(path).unwrap().duration_secs().unwrap_or(0.0))
+        .collect();
+    assert!(
+        (durations[0] - durations[1]).abs() <= 1.0 / 10.0 + 0.01,
+        "animated captures must share one duration: {durations:?}"
+    );
+}
+
+#[test]
+fn a_slow_animated_source_keeps_the_shared_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            pattern(64, 48),
+            slow_pattern(96, 64, Duration::from_millis(90)),
+        ],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let paths = record(dir.path(), req, 1.2);
+    let durations: Vec<f64> = paths
+        .iter()
+        .map(|path| probe(path).unwrap().duration_secs().unwrap_or(0.0))
+        .collect();
+    assert!(
+        (durations[0] - durations[1]).abs() <= 1.0 / 10.0 + 0.01,
+        "slow animated captures must share one duration: {durations:?}"
+    );
+}
+
+#[test]
+fn a_slow_gif_source_keeps_the_shared_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            pattern(64, 48),
+            slow_pattern(96, 64, Duration::from_millis(90)),
+        ],
+        vec![],
+        OutputKind::Anim(AnimFormat::Gif),
+    );
+    let paths = record(dir.path(), req, 1.2);
+    let durations: Vec<f64> = paths
+        .iter()
+        .map(|path| probe(path).unwrap().duration_secs().unwrap_or(0.0))
+        .collect();
+    assert!(
+        (durations[0] - durations[1]).abs() <= 1.0 / 10.0 + 0.01,
+        "slow GIF captures must share one duration: {durations:?}"
+    );
+}
+
+#[test]
+fn a_slow_source_is_trimmed_to_the_shared_duration() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            pattern(64, 48),
+            slow_pattern(96, 64, Duration::from_millis(90)),
+        ],
+        vec![],
+        OutputKind::Video(VideoContainer::Mkv),
+    );
+    let paths = record(dir.path(), req, 1.2);
+    let durations: Vec<f64> = paths
+        .iter()
+        .map(|path| probe(path).unwrap().duration_secs().unwrap_or(0.0))
+        .collect();
+    assert!(
+        (durations[0] - durations[1]).abs() <= 1.0 / 20.0 + 0.01,
+        "a slow source must not shorten the set: {durations:?}"
+    );
+}
+
+#[test]
 fn static_build_has_required_codecs() {
     use ez_ffmpeg::capabilities as caps;
     for name in ["libx264", "libx264rgb", "aac", "gif", "libwebp_anim"] {
@@ -196,6 +316,7 @@ fn segmented_fallback_encodes_two_sources_without_hanging() {
 #[test]
 fn live_webp_handles_three_large_monitors_without_hanging() {
     let dir = tempfile::tempdir().unwrap();
+    let log_start = super::log_position();
     let req = request(
         dir.path(),
         vec![
@@ -220,6 +341,11 @@ fn live_webp_handles_three_large_monitors_without_hanging() {
             "{info:?}"
         );
     }
+    let logs = super::logs_since(log_start).join("\n");
+    assert!(
+        !logs.contains("Invalid NAL unit size") && !logs.contains("Packet corrupt"),
+        "preview decoding must not read the intermediate MKV: {logs}"
+    );
 }
 
 #[test]

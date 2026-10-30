@@ -88,3 +88,14 @@
 | UI-4 | 30.10.26 15:45 | Открытая модалка блокирует мышь, клавиатуру и уведомления, не затемняя фон | готово | [modal-input-block.md](tasks/modal-input-block.md) |
 | REC-3 | 30.10.26 16:05 | Устранено зависание параллельного сегментированного WebP при сохранении (bounded result channels) | готово | [webp-live-result-deadlock.md](tasks/webp-live-result-deadlock.md) |
 | REC-4 | 30.10.26 16:25 | Фикстуры-видео, тесты 3 мониторов/2 окон, per-source live fallback, закрытие окна, linear fallback | готово | [webp-multi-source-tests.md](tasks/webp-multi-source-tests.md) |
+| REC-5 | 30.10.26 16:40 | Preview для WebP строится из финального файла, без ошибок NAL при чтении промежуточного MKV | готово | [preview-proxy-nal-noise.md](tasks/preview-proxy-nal-noise.md) |
+| UI-5 | 30.10.26 16:55 | Просмотрщик декодирует с backpressure, без CPU-шторма и выброшенных кадров | готово | [viewer-frame-backpressure.md](tasks/viewer-frame-backpressure.md) |
+| UI-6 | 30.10.26 17:10 | WebP/GIF миниатюры и плеер не ждут MP4-прокси, генерация в фоне | готово | [lazy-animation-thumbnails.md](tasks/lazy-animation-thumbnails.md) |
+| UI-7 | 30.10.26 17:25 | Полные hover-превью через лёгкий 360p/15fps прокси, без декода оригинала | готово | [hover-preview-proxy.md](tasks/hover-preview-proxy.md) |
+| UI-8 | 30.10.26 17:45 | Настройки анимированных превью и полных видео-превью, очистка кэша при выключении | готово | [preview-options.md](tasks/preview-options.md) |
+| UI-9 | 30.10.26 18:05 | Фоновая очистка preview-прокси и атласов миниатюр старше 7 дней | готово | [cache-maintenance.md](tasks/cache-maintenance.md) |
+| UI-10 | 30.10.26 18:20 | Тесты настроек превью, hover, backpressure и очистки кэшей | готово | [preview-coverage.md](tasks/preview-coverage.md) |
+| UI-11 | 30.10.26 18:35 | Удаление обычного и hover-кэша вместе с медиафайлом, тест на сбой перемещения | готово | [delete-media-cache.md](tasks/delete-media-cache.md) |
+| UI-12 | 30.10.26 18:55 | Анимированный индикатор генерации превью в карточках и просмотрщике | готово | [preview-loader.md](tasks/preview-loader.md) |
+| UI-13 | 30.10.26 19:10 | Возврат окна после записи зависит от источника старта, не от источника остановки | готово | [recording-stop-window-source.md](tasks/recording-stop-window-source.md) |
+| REC-6 | 30.10.26 19:30 | Общий старт capture-потоков и финальная обрезка выходов под минимальную длительность | готово | [multi-source-duration.md](tasks/multi-source-duration.md) |

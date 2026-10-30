@@ -243,6 +243,42 @@ fn pattern(w: u32, h: u32) -> SourceFactory {
     Box::new(move || Ok(Box::new(Pattern { w, h, n: 0 }) as Box<dyn FrameSource>))
 }
 
+fn delayed_pattern(w: u32, h: u32, delay: Duration) -> SourceFactory {
+    Box::new(move || {
+        std::thread::sleep(delay);
+        Ok(Box::new(Pattern { w, h, n: 0 }) as Box<dyn FrameSource>)
+    })
+}
+
+struct SlowPattern {
+    inner: Pattern,
+    delay: Duration,
+}
+
+impl FrameSource for SlowPattern {
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+
+    fn size(&self) -> (u32, u32) {
+        self.inner.size()
+    }
+
+    fn grab(&mut self) -> anyhow::Result<Frame> {
+        std::thread::sleep(self.delay);
+        self.inner.grab()
+    }
+}
+
+fn slow_pattern(w: u32, h: u32, delay: Duration) -> SourceFactory {
+    Box::new(move || {
+        Ok(Box::new(SlowPattern {
+            inner: Pattern { w, h, n: 0 },
+            delay,
+        }) as Box<dyn FrameSource>)
+    })
+}
+
 fn still(w: u32, h: u32) -> SourceFactory {
     Box::new(move || Ok(Box::new(Still { w, h }) as Box<dyn FrameSource>))
 }
