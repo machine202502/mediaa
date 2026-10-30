@@ -1,5 +1,4 @@
-use crate::slots::Slots;
-use mediaa_core::agent::{AgentSettings, ModelSource, WorkKind};
+use mediaa_core::agent::{AgentSettings, ModelSource};
 use mediaa_core::retrieval::{Chunk, Hit};
 use mediaa_core::speakers::Parsed;
 use mediaa_core::transcript::Transcript;
@@ -64,24 +63,20 @@ pub fn diverse(hits: Vec<FileHit>, limit: usize) -> Vec<FileHit> {
 )]
 pub fn search_files(
     engine: &dyn Engine,
-    slots: &Slots,
     settings: &AgentSettings,
     ai_dir: &Path,
     files: &[Source],
     query: &str,
     limit: usize,
-    interactive: bool,
 ) -> anyhow::Result<(Vec<FileHit>, Trace)> {
     search_files_with(
         engine,
-        slots,
         settings,
         ai_dir,
         files,
         query,
         limit,
         Options::default(),
-        interactive,
     )
 }
 
@@ -91,45 +86,26 @@ pub fn search_files(
 )]
 pub fn search_files_with(
     engine: &dyn Engine,
-    slots: &Slots,
     settings: &AgentSettings,
     ai_dir: &Path,
     files: &[Source],
     query: &str,
     limit: usize,
     options: Options,
-    interactive: bool,
 ) -> anyhow::Result<(Vec<FileHit>, Trace)> {
     let cancel = AtomicBool::new(false);
-    let kind = if interactive {
-        WorkKind::Agent
-    } else {
-        WorkKind::Indexing
-    };
     let mut trace = Trace {
         files: files.len(),
         ..Trace::default()
     };
     if let (Some(source), Some(span)) = (settings.models.embedding.as_ref(), options.span) {
-        match embed_span(
-            engine,
-            slots,
-            settings,
-            source,
-            ai_dir,
-            files,
-            span,
-            kind,
-            interactive,
-            &cancel,
-        ) {
+        match embed_span(engine, source, ai_dir, files, span, &cancel) {
             Ok(n) => trace.embedded = n,
             Err(e) => log::info!("search without indexing the span: {e:#}"),
         }
     }
     let embedding = settings.models.embedding.as_ref().and_then(|source| {
         let run = || {
-            let _lease = slots.request(kind, interactive).wait(&cancel)?;
             let found = engine.embeddings(
                 &EmbeddingsRequest {
                     source: source.clone(),
@@ -199,7 +175,6 @@ pub fn search_files_with(
     hits.truncate(CANDIDATES.max(limit));
     if let (Some(source), false) = (&settings.models.reranker, hits.is_empty()) {
         let rerank = || -> anyhow::Result<Vec<f32>> {
-            let _lease = slots.request(kind, interactive).wait(&cancel)?;
             let results = engine.rerank(
                 &RerankRequest {
                     source: source.clone(),
@@ -239,17 +214,12 @@ pub fn search_files_with(
 )]
 fn embed_span(
     engine: &dyn Engine,
-    slots: &Slots,
-    settings: &AgentSettings,
     source: &ModelSource,
     ai_dir: &Path,
     files: &[Source],
     span: (f64, f64),
-    kind: WorkKind,
-    interactive: bool,
     cancel: &AtomicBool,
 ) -> anyhow::Result<usize> {
-    let _ = settings;
     let mut embedded = 0;
     for f in files {
         if !Transcript::exists(ai_dir, &f.id) {
@@ -265,7 +235,6 @@ fn embed_span(
         if todo.is_empty() {
             continue;
         }
-        let _lease = slots.request(kind, interactive).wait(cancel)?;
         for (id, text) in todo {
             let found = engine.embeddings(
                 &EmbeddingsRequest {
@@ -293,24 +262,20 @@ fn embed_span(
 )]
 pub fn search(
     engine: &dyn Engine,
-    slots: &Slots,
     settings: &AgentSettings,
     ai_dir: &Path,
     id: &str,
     query: &str,
     limit: usize,
-    interactive: bool,
 ) -> anyhow::Result<(Vec<Hit>, Trace)> {
     search_with(
         engine,
-        slots,
         settings,
         ai_dir,
         id,
         query,
         limit,
         Options::default(),
-        interactive,
     )
 }
 
@@ -320,37 +285,26 @@ pub fn search(
 )]
 pub fn search_with(
     engine: &dyn Engine,
-    slots: &Slots,
     settings: &AgentSettings,
     ai_dir: &Path,
     id: &str,
     query: &str,
     limit: usize,
     options: Options,
-    interactive: bool,
 ) -> anyhow::Result<(Vec<Hit>, Trace)> {
     let file = Source {
         id: id.to_string(),
         path: PathBuf::new(),
     };
-    let (hits, trace) = search_files_with(
-        engine,
-        slots,
-        settings,
-        ai_dir,
-        &[file],
-        query,
-        limit,
-        options,
-        interactive,
-    )?;
+    let (hits, trace) =
+        search_files_with(engine, settings, ai_dir, &[file], query, limit, options)?;
     Ok((hits.into_iter().map(|h| h.hit).collect(), trace))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaa_core::agent::{Budget, ModelChoices};
+    use mediaa_core::agent::ModelChoices;
     use mediaa_core::retrieval::Chunk;
     use mediaa_engine::testing::FakeEngine;
 
@@ -452,18 +406,8 @@ mod tests {
             })
             .collect();
         let engine = FakeEngine::new();
-        let slots = Slots::new(Budget::default());
-        let (hits, trace) = search_files(
-            &engine,
-            &slots,
-            &keywords_only(),
-            ai,
-            &files,
-            "отчёт",
-            5,
-            true,
-        )
-        .unwrap();
+        let (hits, trace) =
+            search_files(&engine, &keywords_only(), ai, &files, "отчёт", 5).unwrap();
         assert!(
             engine.chats().is_empty() && engine.embeddings_count() == 0,
             "the engine is not asked anything"
@@ -504,24 +448,14 @@ mod tests {
             path: "/m/a.mp4".into(),
         }];
         let engine = FakeEngine::new();
-        let slots = Slots::new(Budget::default());
         let find = |span| {
             let options = Options {
                 span: Some(span),
                 ..Options::default()
             };
-            let (hits, _) = search_files_with(
-                &engine,
-                &slots,
-                &keywords_only(),
-                ai,
-                &files,
-                "отчёт",
-                5,
-                options,
-                true,
-            )
-            .unwrap();
+            let (hits, _) =
+                search_files_with(&engine, &keywords_only(), ai, &files, "отчёт", 5, options)
+                    .unwrap();
             hits.iter().map(|h| h.hit.chunk.start).collect::<Vec<_>>()
         };
         let mut touching = find((100.0, 300.0));
@@ -550,24 +484,14 @@ mod tests {
             path: "/m/a.mp4".into(),
         }];
         let engine = FakeEngine::new();
-        let slots = Slots::new(Budget::default());
         let starts = |speaker| {
             let options = Options {
                 speaker,
                 ..Options::default()
             };
-            let (hits, _) = search_files_with(
-                &engine,
-                &slots,
-                &keywords_only(),
-                ai,
-                &files,
-                "отчёт",
-                5,
-                options,
-                true,
-            )
-            .unwrap();
+            let (hits, _) =
+                search_files_with(&engine, &keywords_only(), ai, &files, "отчёт", 5, options)
+                    .unwrap();
             hits.iter().map(|h| h.hit.chunk.start).collect::<Vec<_>>()
         };
         assert_eq!(starts(None), [0.0, 120.0]);
@@ -611,23 +535,12 @@ mod tests {
             path: "/m/a.mp4".into(),
         }];
         let engine = FakeEngine::new();
-        let slots = Slots::new(Budget::default());
         let span = Options {
             span: Some((0.0, 1800.0)),
             ..Options::default()
         };
-        let (_, trace) = search_files_with(
-            &engine,
-            &slots,
-            &with_embedding(),
-            ai,
-            &files,
-            "отчёт",
-            3,
-            span,
-            true,
-        )
-        .unwrap();
+        let (_, trace) =
+            search_files_with(&engine, &with_embedding(), ai, &files, "отчёт", 3, span).unwrap();
         assert_eq!(trace.embedded, 6);
         assert_eq!(
             engine
@@ -657,18 +570,8 @@ mod tests {
             (0..24).map(|i| i < 6).collect::<Vec<_>>(),
             "only the span was embedded, and it was saved"
         );
-        let (_, again) = search_files_with(
-            &engine,
-            &slots,
-            &with_embedding(),
-            ai,
-            &files,
-            "отчёт",
-            3,
-            span,
-            true,
-        )
-        .unwrap();
+        let (_, again) =
+            search_files_with(&engine, &with_embedding(), ai, &files, "отчёт", 3, span).unwrap();
         assert_eq!(again.embedded, 0);
         assert_eq!(
             engine.embeddings_count(),

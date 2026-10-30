@@ -11,11 +11,11 @@ use mediaa_agent::assistant::brain::split_thinking;
 use mediaa_agent::assistant::title::task_title;
 use mediaa_agent::assistant::{ask, Event, Memory, Recording, StepRecord, Turn};
 use mediaa_agent::scope::Scope;
-use mediaa_agent::slots::Slots;
 use mediaa_core::agent::AgentSettings;
 use mediaa_core::catalogs::ai_dir;
+use mediaa_core::slots::Slots;
 use mediaa_core::transcript::{self, Transcript};
-use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Connections, Engine};
+use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Connections, Engine, Gated};
 use mediaa_queue::TaskId;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -62,8 +62,12 @@ pub fn execute(args: &RunArgs) -> anyhow::Result<PathBuf> {
     );
     eprintln!("out: {}", run_dir.display());
 
-    let engine: Arc<dyn Engine> = Arc::new(Connections::new(settings.connections.clone()));
-    let slots = Slots::new(settings.budget.clone());
+    let slots = Slots::new();
+    slots.configure(&settings);
+    let engine: Arc<dyn Engine> = Arc::new(Gated::new(
+        Arc::new(Connections::new(settings.connections.clone())),
+        slots.clone(),
+    ));
     let (file_id, recording) = load_recording(&ai, &file)?;
     let ctx = Ctx {
         engine,

@@ -28,7 +28,6 @@ impl App {
         theme::install(ctx);
         theme::apply_preference(ctx, settings.theme);
         crate::i18n::apply(settings.language.as_deref());
-        let agent_budget = settings.agent.budget.clone();
         let (desktop_events_tx, desktop_events) = crossbeam_channel::bounded(64);
         Self {
             settings,
@@ -69,6 +68,7 @@ impl App {
             desktop_jobs: Vec::new(),
             pending: None,
             hidden_by_us: false,
+            recording_quiet: false,
             ghosted: false,
             recording: Default::default(),
             capture: Default::default(),
@@ -79,7 +79,7 @@ impl App {
             conversion: Default::default(),
             agent: features::agent::AgentController::new(
                 std::sync::Arc::new(mediaa_engine::testing::FakeEngine::default()),
-                &agent_budget,
+                mediaa_core::slots::Slots::new(),
             ),
             quit_when_idle: false,
             recovery_job: None,

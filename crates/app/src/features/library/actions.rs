@@ -125,6 +125,7 @@ pub(super) fn delete_dialog(app: &mut App, ctx: &egui::Context) {
             }
         });
     });
+    theme::mark_modal_rect(ctx, modal.response.rect);
     if modal.should_close() && decision.is_none() {
         decision = Some(false);
     }
@@ -185,6 +186,7 @@ pub(super) fn cleanup_modal(ctx: &egui::Context, plan: &CleanupPlan) -> Option<b
             }
         });
     });
+    theme::mark_modal_rect(ctx, modal.response.rect);
     if modal.should_close() && decision.is_none() {
         decision = Some(false);
     }
@@ -292,6 +294,7 @@ pub(super) fn rename_dialog(app: &mut App, ctx: &egui::Context) {
             }
         });
     });
+    theme::mark_modal_rect(ctx, modal.response.rect);
     if modal.should_close() && decision.is_none() {
         decision = Some(false);
     }

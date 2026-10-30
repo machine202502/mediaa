@@ -168,6 +168,33 @@ fn segmented_failure_retries_only_the_direct_encoder() {
 }
 
 #[test]
+fn two_source_fallbacks_use_the_linear_encoder_independently() {
+    for source in 0..2 {
+        let mut calls = Vec::new();
+        let mut warnings = Vec::new();
+        encode_with_linear_fallback(
+            WebpMode::SegmentedParallel,
+            &mut |segmentation| {
+                calls.push(segmentation);
+                if segmentation == WebpSegmentation::Segmented {
+                    anyhow::bail!("source {source}: segmented encoder failed")
+                }
+                Ok(())
+            },
+            &mut |warning| warnings.push(warning),
+        )
+        .unwrap();
+        assert_eq!(
+            calls,
+            [WebpSegmentation::Segmented, WebpSegmentation::Direct],
+            "source {source}"
+        );
+        assert_eq!(warnings.len(), 1, "source {source}");
+        assert!(warnings[0].contains(&format!("source {source}")));
+    }
+}
+
+#[test]
 fn cancel_and_linear_paths_do_not_retry() {
     let mut cancelled_calls = Vec::new();
     let error = encode_with_linear_fallback(

@@ -305,7 +305,7 @@ impl Stage for Transcribe {
 mod tests {
     use super::*;
     use crate::run::Host;
-    use mediaa_core::agent::{AgentSettings, AnalysisOptions, Budget, ModelChoices, ModelSource};
+    use mediaa_core::agent::{AgentSettings, AnalysisOptions, ModelChoices, ModelSource};
     use mediaa_core::transcript::Word;
     use mediaa_engine::testing::FakeEngine;
     use mediaa_engine::Engine;
@@ -370,7 +370,7 @@ mod tests {
             ai_dir: ai.to_path_buf(),
             engine,
             store,
-            slots: crate::slots::Slots::new(settings.budget.clone()),
+            slots: mediaa_core::slots::Slots::new(),
             settings: Arc::new(move || current.clone()),
             streams: Arc::new(crate::run::Streams::default()),
         }
@@ -516,13 +516,13 @@ mod tests {
             topics: false,
             details: false,
         };
-        let sched = crate::run::open_scheduler(&ai, &defaults.budget).unwrap();
+        let sched = crate::run::open_scheduler(&ai).unwrap();
         for t in sched.store().list().unwrap() {
             sched.remove(t.id).unwrap();
         }
         let id = crate::pipeline::start(&sched, &ai, &media, options).unwrap();
         let engine = crate::live::engine();
-        let slots = crate::slots::Slots::new(Budget::default());
+        let slots = mediaa_core::slots::Slots::new();
         let settings: Arc<dyn Fn() -> AgentSettings + Send + Sync> =
             Arc::new(AgentSettings::default);
         crate::run::register_stages(
@@ -547,13 +547,11 @@ mod tests {
         assert!(t.chunks().unwrap().iter().all(|(_, _, embedded)| *embedded));
         let (hits, trace) = crate::search::search(
             engine.as_ref(),
-            &slots,
             &defaults,
             &ai,
             &transcript::file_id(&media).unwrap(),
             "где растёт дерево у моря?",
             3,
-            true,
         )
         .unwrap();
         assert!(

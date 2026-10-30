@@ -139,6 +139,7 @@ fn toast_text_stays_on_one_short_line() {
 
 #[test]
 fn important_notice_is_not_evicted_by_new_transient_toasts() {
+    let _ui_guard = super::test_support::ui_test_guard();
     let mut notices = Notices::default();
     notices.push(
         NoticeLevel::Warning,
@@ -167,6 +168,7 @@ fn important_notice_is_not_evicted_by_new_transient_toasts() {
 
 #[test]
 fn notice_expands_to_the_full_context_and_keeps_its_id() {
+    let _ui_guard = super::test_support::ui_test_guard();
     let mut notices = Notices::default();
     let summary = "Скриншот 3200×2000 скопирован и сохранён: Recording screenshot.png";
     notices.push(
@@ -245,6 +247,7 @@ fn notice_expands_to_the_full_context_and_keeps_its_id() {
 
 #[test]
 fn expanded_notice_expires_with_a_fade() {
+    let _ui_guard = super::test_support::ui_test_guard();
     let mut notices = Notices::default();
     notices.push(
         NoticeLevel::Info,
@@ -272,6 +275,7 @@ fn expanded_notice_expires_with_a_fade() {
 
 #[test]
 fn notice_icon_and_title_are_vertically_centred() {
+    let _ui_guard = super::test_support::ui_test_guard();
     let mut notices = Notices::default();
     notices.push(
         NoticeLevel::Success,

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const LIVE_CANCEL_TIMEOUT: Duration = Duration::from_secs(20);
+const LIVE_FINISH_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
 struct LiveChunk {
@@ -20,7 +21,7 @@ struct LiveChunk {
 
 pub(crate) struct LiveResult {
     pub parts: Vec<Vec<PathBuf>>,
-    pub error: Option<String>,
+    pub errors: Vec<Option<String>>,
     pub timed_out: bool,
 }
 
@@ -77,7 +78,7 @@ impl LiveWebp {
     }
 
     pub(crate) fn finish(self, external_cancel: Arc<AtomicBool>) -> LiveResult {
-        self.wait_for_result(true, Some(external_cancel), None)
+        self.wait_for_result(true, Some(external_cancel), Some(LIVE_FINISH_TIMEOUT))
     }
 
     pub(crate) fn cancel(self) -> LiveResult {
@@ -119,9 +120,9 @@ impl LiveWebp {
                 log::warn!("live WebP cancel acknowledgement timed out after {seconds} s");
                 return LiveResult {
                     parts: Vec::new(),
-                    error: Some(format!(
+                    errors: vec![Some(format!(
                         "live WebP cancel acknowledgement timed out after {seconds} s"
-                    )),
+                    ))],
                     timed_out: true,
                 };
             }
@@ -134,7 +135,7 @@ impl LiveWebp {
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
                     return LiveResult {
                         parts: Vec::new(),
-                        error: Some("live WebP manager stopped without a result".into()),
+                        errors: vec![Some("live WebP manager stopped without a result".into())],
                         timed_out: false,
                     };
                 }
@@ -159,14 +160,15 @@ fn run_manager(
 ) -> LiveResult {
     let (jobs_tx, jobs_rx): (Sender<LiveChunk>, Receiver<LiveChunk>) =
         bounded(workers.saturating_mul(2).max(8));
-    let (results_tx, results_rx) = bounded(workers.max(1));
-    let failed = Arc::new(AtomicBool::new(false));
+    let (results_tx, results_rx) = crossbeam_channel::unbounded();
+    let failed_sources: Arc<Vec<AtomicBool>> =
+        Arc::new((0..lists.len()).map(|_| AtomicBool::new(false)).collect());
     let mut handles = Vec::new();
-    let mut error = None;
+    let mut worker_error = None;
     for worker in 0..workers {
         let jobs_rx = jobs_rx.clone();
         let results_tx = results_tx.clone();
-        let worker_failed = failed.clone();
+        let worker_failed = failed_sources.clone();
         let cancel = cancel.clone();
         let settings = settings.clone();
         let scheduling = scheduling.clone();
@@ -175,8 +177,12 @@ fn run_manager(
             .name(format!("live-webp-{worker}"))
             .spawn(move || {
                 while let Ok(chunk) = jobs_rx.recv() {
-                    if cancel.load(Ordering::Relaxed) || worker_failed.load(Ordering::Relaxed) {
-                        break;
+                    if cancel.load(Ordering::Relaxed)
+                        || worker_failed
+                            .get(chunk.source)
+                            .is_some_and(|failed| failed.load(Ordering::Relaxed))
+                    {
+                        continue;
                     }
                     let request = AnimationEncodeRequest {
                         input: &chunk.input,
@@ -203,19 +209,21 @@ fn run_manager(
                             format!("encode live WebP chunk {}", chunk.input.display())
                         });
                     if let Err(error) = &result {
-                        worker_failed.store(true, Ordering::Relaxed);
-                        log::warn!("[{}] stage=live chunk-failed: {error:#}", worker_trace);
+                        if let Some(failed) = worker_failed.get(chunk.source) {
+                            failed.store(true, Ordering::Relaxed);
+                        }
+                        log::warn!(
+                            "[{}] stage=live chunk-failed source={}: {error:#}",
+                            worker_trace,
+                            chunk.source
+                        );
                     }
                     let _ = results_tx.send((chunk, result));
-                    if worker_failed.load(Ordering::Relaxed) {
-                        break;
-                    }
                 }
             }) {
             Ok(handle) => handles.push(handle),
             Err(failure) => {
-                failed.store(true, Ordering::Relaxed);
-                error = Some(format!("could not start live WebP worker: {failure}"));
+                worker_error = Some(format!("could not start live WebP worker: {failure}"));
                 break;
             }
         }
@@ -224,23 +232,23 @@ fn run_manager(
 
     let mut seen = vec![0usize; lists.len()];
     let mut parts = vec![Vec::new(); lists.len()];
+    let mut errors: Vec<Option<String>> = vec![None; lists.len()];
     loop {
         for (chunk, result) in results_rx.try_iter() {
             match result {
                 Ok(()) => parts[chunk.source].push(chunk.output),
                 Err(failure) => {
-                    failed.store(true, Ordering::Relaxed);
-                    error = Some(format!("{failure:#}"));
+                    errors[chunk.source] = Some(format!("{failure:#}"));
                 }
             }
         }
-        if failed.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) {
+        if cancel.load(Ordering::Relaxed) {
             break;
         }
-        scan_lists(&lists, &mut seen, &root, &jobs_tx, false);
+        scan_lists(&lists, &mut seen, &root, &jobs_tx, false, &failed_sources);
         match control.recv_timeout(Duration::from_millis(100)) {
             Ok(true) => {
-                scan_lists(&lists, &mut seen, &root, &jobs_tx, true);
+                scan_lists(&lists, &mut seen, &root, &jobs_tx, true, &failed_sources);
                 break;
             }
             Ok(false) => break,
@@ -256,39 +264,55 @@ fn run_manager(
         match result {
             Ok(()) => parts[chunk.source].push(chunk.output),
             Err(failure) => {
-                failed.store(true, Ordering::Relaxed);
-                error = Some(format!("{failure:#}"));
+                errors[chunk.source] = Some(format!("{failure:#}"));
             }
         }
     }
     for source_parts in &mut parts {
         source_parts.sort();
     }
-    if cancel.load(Ordering::Relaxed) {
-        error = Some("cancelled".into());
-    } else if error.is_none() {
-        let expected: usize = seen.iter().sum();
-        let completed: usize = parts.iter().map(Vec::len).sum();
-        if completed != expected {
-            error = Some(format!(
-                "live WebP encoded {completed} of {expected} chunks"
-            ));
+    if let Some(worker_error) = worker_error {
+        for error in &mut errors {
+            if error.is_none() {
+                *error = Some(worker_error.clone());
+            }
         }
     }
-    match &error {
-        Some(error) => log::warn!(
-            "[{trace_id}] stage=live stopped completed={} expected={} error={error}",
+    if cancel.load(Ordering::Relaxed) {
+        for error in &mut errors {
+            if error.is_none() {
+                *error = Some("cancelled".into());
+            }
+        }
+    } else {
+        for (source, error) in errors.iter_mut().enumerate() {
+            if error.is_none() {
+                let expected = seen[source];
+                let completed = parts[source].len();
+                if completed != expected {
+                    *error = Some(format!(
+                        "source {source}: live WebP encoded {completed} of {expected} chunks"
+                    ));
+                }
+            }
+        }
+    }
+    let failed = errors.iter().filter(|error| error.is_some()).count();
+    if failed > 0 {
+        log::warn!(
+            "[{trace_id}] stage=live stopped failed_sources={failed} completed={} expected={} errors={errors:?}",
             parts.iter().map(Vec::len).sum::<usize>(),
             seen.iter().sum::<usize>()
-        ),
-        None => log::info!(
+        );
+    } else {
+        log::info!(
             "[{trace_id}] stage=live complete chunks={}",
             parts.iter().map(Vec::len).sum::<usize>()
-        ),
+        );
     }
     LiveResult {
         parts,
-        error,
+        errors,
         timed_out: false,
     }
 }
@@ -299,8 +323,15 @@ fn scan_lists(
     root: &Path,
     jobs: &Sender<LiveChunk>,
     final_scan: bool,
+    failed_sources: &[AtomicBool],
 ) {
     for (source, list) in lists.iter().enumerate() {
+        if failed_sources
+            .get(source)
+            .is_some_and(|failed| failed.load(Ordering::Relaxed))
+        {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(list) else {
             continue;
         };
@@ -372,6 +403,7 @@ mod tests {
             dir.path(),
             &jobs,
             false,
+            &[],
         );
         assert_eq!(seen, [2]);
         let first = queued.try_recv().unwrap();
@@ -386,6 +418,7 @@ mod tests {
             dir.path(),
             &jobs,
             true,
+            &[],
         );
         assert_eq!(seen, [3]);
         assert_eq!(
@@ -419,7 +452,11 @@ mod tests {
         )
         .unwrap();
         let result = live.finish(Arc::new(AtomicBool::new(false)));
-        let error = result.error.expect("missing chunk must fail");
+        let error = result
+            .errors
+            .first()
+            .and_then(|error| error.clone())
+            .expect("missing chunk must fail");
         assert!(error.contains("missing.mkv"), "{error}");
     }
 
@@ -431,7 +468,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
             let _ = result_tx.send(LiveResult {
                 parts: Vec::new(),
-                error: None,
+                errors: vec![None],
                 timed_out: false,
             });
         });
@@ -443,8 +480,9 @@ mod tests {
         let started = std::time::Instant::now();
         let output = live.wait_for_result(false, None, Some(Duration::from_millis(10)));
         assert!(output
-            .error
-            .as_deref()
+            .errors
+            .first()
+            .and_then(|error| error.as_deref())
             .is_some_and(|e| e.contains("cancel acknowledgement")));
         assert!(started.elapsed() < Duration::from_secs(1));
     }
@@ -457,7 +495,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
             let _ = result_tx.send(LiveResult {
                 parts: Vec::new(),
-                error: None,
+                errors: vec![None],
                 timed_out: false,
             });
         });
@@ -466,6 +504,10 @@ mod tests {
             cancel: Arc::new(AtomicBool::new(false)),
             result,
         };
-        assert!(live.wait_for_result(true, None, None).error.is_none());
+        assert!(live
+            .wait_for_result(true, None, None)
+            .errors
+            .iter()
+            .all(Option::is_none));
     }
 }

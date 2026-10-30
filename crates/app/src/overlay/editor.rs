@@ -200,9 +200,9 @@ impl State {
             return;
         }
         if copy {
-            self.finish_image(AfterCapture::Copy, None);
+            self.finish_image(AfterCapture::CopyAndSave, None);
         } else if save {
-            self.finish_image(AfterCapture::Save, None);
+            self.begin_save(ctx);
         } else if enter {
             self.finish_image(self.default_action, None);
         }
@@ -270,18 +270,13 @@ impl State {
                         .on_hover_text("Ctrl+C")
                         .clicked()
                     {
-                        self.finish_image(AfterCapture::Copy, None);
+                        self.finish_image(AfterCapture::CopyAndSave, None);
                     }
-                    for fmt in ImageFormat::ALL {
-                        if btn(
-                            ui,
-                            icon::FLOPPY_DISK,
-                            &t!("overlay.save", format = fmt.label()),
-                        )
+                    if btn(ui, icon::FLOPPY_DISK, &t!("overlay.save"))
+                        .on_hover_text(t!("overlay.save_hint"))
                         .clicked()
-                        {
-                            self.finish_image(AfterCapture::Save, Some(fmt));
-                        }
+                    {
+                        self.begin_save(ui.ctx());
                     }
                     if self.purpose == Purpose::Area
                         && btn(ui, icon::RECORD, &t!("overlay.record"))
@@ -304,6 +299,9 @@ impl State {
                 self.outcome = Some(Outcome::Cancel);
             }
         });
+        if let Some(error) = &self.save_error {
+            ui.colored_label(theme::palette(ui).danger, error);
+        }
     }
 
     pub(super) fn text_menu(&mut self, ui: &mut egui::Ui) {

@@ -2433,7 +2433,6 @@ mod tests {
         settings.models.agent = Some(mediaa_core::agent::ModelSource::new("c", "agent"));
         settings.models.titles = Some(mediaa_core::agent::ModelSource::new("c", "titles"));
         settings.models.embedding = None;
-        settings.budget.agent = 1;
         settings
     }
 
@@ -2442,8 +2441,15 @@ mod tests {
         engine: Arc<dyn Engine>,
         settings: &AgentSettings,
     ) -> Arc<mediaa_queue::Scheduler> {
-        let sched = crate::run::open_scheduler(ai, &settings.budget).unwrap();
-        let slots = crate::slots::Slots::new(settings.budget.clone());
+        let sched = crate::run::open_scheduler(ai).unwrap();
+        let mut pools = crate::run::pools();
+        for pool in &mut pools {
+            if pool.resource == Resource::Llm {
+                pool.capacity = 1;
+            }
+        }
+        sched.set_pools(pools);
+        let slots = mediaa_core::slots::Slots::new();
         let s = settings.clone();
         let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || s.clone());
         crate::run::register_stages(

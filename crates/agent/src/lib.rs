@@ -13,7 +13,6 @@ pub mod run;
 pub mod scope;
 pub mod search;
 pub mod secrets;
-pub mod slots;
 pub mod tools;
 pub mod transcribe;
 pub mod voices;

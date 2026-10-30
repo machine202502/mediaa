@@ -527,9 +527,9 @@ mod tests {
         use super::super::chat::Live;
         use super::super::{StepRecord, StepStatus};
         use crate::run::{open_store, Host, Stage, Streams, Work};
-        use crate::slots::Slots;
         use mediaa_core::agent::AgentSettings;
         use mediaa_core::chat::{Author, Timeline, TimelineEntry};
+        use mediaa_core::slots::Slots;
         use mediaa_core::transcript::Transcript;
         use mediaa_engine::testing::FakeEngine;
         use mediaa_engine::Engine;
@@ -678,9 +678,9 @@ mod tests {
     #[test]
     fn a_correction_after_the_last_step_becomes_the_next_question() {
         use crate::run::{open_store, Host, Streams};
-        use crate::slots::Slots;
         use mediaa_core::agent::AgentSettings;
         use mediaa_core::chat::Author;
+        use mediaa_core::slots::Slots;
         use mediaa_core::transcript::Transcript;
         use mediaa_engine::testing::FakeEngine;
         use mediaa_engine::Engine;

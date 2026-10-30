@@ -1,6 +1,6 @@
 use crate::assistant::chat::Live;
-use crate::slots::Slots;
-use mediaa_core::agent::{AgentSettings, Budget};
+use mediaa_core::agent::AgentSettings;
+use mediaa_core::slots::Slots;
 use mediaa_engine::Engine;
 use mediaa_queue::state::{Op, Outcome, World};
 use mediaa_queue::{
@@ -330,30 +330,23 @@ impl Runner for StageRunner {
     }
 }
 
-pub fn pools(budget: &Budget) -> Vec<Pool> {
+const TASKS: u32 = 1024;
+
+pub fn pools() -> Vec<Pool> {
     let memory = u64::MAX / 4;
-    vec![
-        Pool {
-            resource: Resource::Speech,
-            capacity: budget.limit(mediaa_core::agent::WorkKind::Transcription),
-            memory,
-        },
-        Pool {
-            resource: Resource::Embed,
-            capacity: budget.limit(mediaa_core::agent::WorkKind::Indexing),
-            memory,
-        },
-        Pool {
-            resource: Resource::Llm,
-            capacity: budget.limit(mediaa_core::agent::WorkKind::Agent),
-            memory,
-        },
-        Pool {
-            resource: Resource::Provider,
-            capacity: budget.limit(mediaa_core::agent::WorkKind::ProviderCalls),
-            memory,
-        },
+    [
+        Resource::Speech,
+        Resource::Embed,
+        Resource::Llm,
+        Resource::Provider,
     ]
+    .into_iter()
+    .map(|resource| Pool {
+        resource,
+        capacity: TASKS,
+        memory,
+    })
+    .collect()
 }
 
 pub fn open_store(ai_dir: &Path) -> anyhow::Result<Arc<dyn Store>> {
@@ -391,8 +384,8 @@ pub fn register_stages(
     sched.register(Box::new(StageRunner::new(host, stages)));
 }
 
-pub fn open_scheduler(ai_dir: &Path, budget: &Budget) -> anyhow::Result<Arc<Scheduler>> {
-    let sched = Arc::new(Scheduler::new(open_store(ai_dir)?, pools(budget)));
+pub fn open_scheduler(ai_dir: &Path) -> anyhow::Result<Arc<Scheduler>> {
+    let sched = Arc::new(Scheduler::new(open_store(ai_dir)?, pools()));
     sched.recover()?;
     sched.purge_history()?;
     Ok(sched)
@@ -482,25 +475,24 @@ pub const QUEUE_HISTORY: Duration = HISTORY;
 mod tests {
     use super::*;
     use crate::assistant::queued::{answer_task, ANSWER_KIND};
-    use crate::slots::Slots;
     use mediaa_core::agent::{AgentSettings, ModelChoices, ModelSource, WebSettings};
     use mediaa_core::chat::Author;
+    use mediaa_core::slots::Slots;
     use mediaa_core::transcript::Transcript;
     use mediaa_engine::testing::FakeEngine;
     use mediaa_engine::{ChatMessage, ChatRequest, ChatRole, Engine};
-    use mediaa_queue::{failure_note, NewTask, Note, Resource, Status, Store, WaitReason};
+    use mediaa_queue::{failure_note, NewTask, Note, Pool, Resource, Status, Store, WaitReason};
     use serde_json::json;
 
     fn sched_with(stage: Arc<dyn Stage>) -> (tempfile::TempDir, Arc<Scheduler>) {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path()).unwrap();
-        let settings = AgentSettings::default();
-        let sched = Arc::new(Scheduler::new(store.clone(), pools(&settings.budget)));
+        let sched = Arc::new(Scheduler::new(store.clone(), pools()));
         let host = Host {
             ai_dir: dir.path().to_path_buf(),
             engine: Arc::new(FakeEngine::new()),
             store,
-            slots: Slots::new(settings.budget),
+            slots: Slots::new(),
             settings: Arc::new(AgentSettings::default),
             streams: Arc::new(Streams::default()),
         };
@@ -597,10 +589,7 @@ mod tests {
             Status::Running,
             "the dropped runner does not finish the row"
         );
-        let sched = Arc::new(Scheduler::new(
-            store,
-            pools(&AgentSettings::default().budget),
-        ));
+        let sched = Arc::new(Scheduler::new(store, pools()));
         sched.recover().unwrap();
         let restored = sched.store().get(id).unwrap().unwrap();
         assert_eq!(
@@ -613,7 +602,7 @@ mod tests {
                 ai_dir: std::env::temp_dir(),
                 engine: Arc::new(FakeEngine::new()),
                 store: sched.store().clone(),
-                slots: Slots::new(AgentSettings::default().budget),
+                slots: Slots::new(),
                 settings: Arc::new(AgentSettings::default),
                 streams: Arc::new(Streams::default()),
             },
@@ -698,10 +687,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path()).unwrap();
         let engine = Arc::new(FakeEngine::new());
-        let sched = Arc::new(Scheduler::new(
-            store.clone(),
-            pools(&AgentSettings::default().budget),
-        ));
+        let sched = Arc::new(Scheduler::new(store.clone(), pools()));
         let mut runner = StageRunner::new(
             host_of(dir.path(), store.clone(), engine.clone()),
             vec![Arc::new(Hung {
@@ -770,10 +756,7 @@ mod tests {
         let store = open_store(dir.path()).unwrap();
         let engine = Arc::new(FakeEngine::new());
         let wrote = Arc::new(AtomicBool::new(false));
-        let sched = Arc::new(Scheduler::new(
-            store.clone(),
-            pools(&AgentSettings::default().budget),
-        ));
+        let sched = Arc::new(Scheduler::new(store.clone(), pools()));
         let mut runner = StageRunner::new(
             host_of(dir.path(), store.clone(), engine.clone()),
             vec![Arc::new(Late {
@@ -876,7 +859,7 @@ mod tests {
                 .begin_inline("tool", "a tool", &json!({}), None, Some("rec"))
                 .unwrap()
         };
-        let sched = open_scheduler(dir.path(), &AgentSettings::default().budget).unwrap();
+        let sched = open_scheduler(dir.path()).unwrap();
         assert_eq!(
             sched.store().get(id).unwrap().unwrap().status,
             Status::Cancelled
@@ -914,7 +897,7 @@ mod tests {
             ai_dir: dir.to_path_buf(),
             engine,
             store,
-            slots: Slots::new(AgentSettings::default().budget),
+            slots: Slots::new(),
             settings: Arc::new(AgentSettings::default),
             streams: Arc::new(Streams::default()),
         }
@@ -924,10 +907,7 @@ mod tests {
     fn speech_and_topics_run_at_the_same_time() {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path()).unwrap();
-        let sched = Arc::new(Scheduler::new(
-            store.clone(),
-            pools(&AgentSettings::default().budget),
-        ));
+        let sched = Arc::new(Scheduler::new(store.clone(), pools()));
         let entered = Arc::new(Mutex::new(Vec::new()));
         let release = Arc::new(AtomicBool::new(false));
         let speech = Arc::new(Gate {
@@ -999,10 +979,7 @@ mod tests {
         let finish = Arc::new(AtomicBool::new(false));
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path()).unwrap();
-        let sched = Arc::new(Scheduler::new(
-            store.clone(),
-            pools(&AgentSettings::default().budget),
-        ));
+        let sched = Arc::new(Scheduler::new(store.clone(), pools()));
         sched.register(Box::new(StageRunner::new(
             host_of(dir.path(), store, engine.clone()),
             vec![Arc::new(SlowModel {
@@ -1050,10 +1027,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = open_store(dir.path()).unwrap();
         let engine = Arc::new(FakeEngine::new());
-        let sched = Arc::new(Scheduler::new(
-            store.clone(),
-            pools(&AgentSettings::default().budget),
-        ));
+        let sched = Arc::new(Scheduler::new(store.clone(), pools()));
         sched.set_stale_for(Resource::Llm, Duration::from_millis(50));
         sched.register(Box::new(StageRunner::new(
             host_of(dir.path(), store, engine.clone()),
@@ -1177,10 +1151,15 @@ mod tests {
         let first = t.create_chat("Первый").unwrap();
         let second = t.create_chat("Второй").unwrap();
         drop(t);
-        let mut budget = AgentSettings::default().budget;
-        budget.agent = 1;
         let store = open_store(ai).unwrap();
-        let sched = Arc::new(Scheduler::new(store.clone(), pools(&budget)));
+        let sched = Arc::new(Scheduler::new(
+            store.clone(),
+            vec![Pool {
+                resource: Resource::Llm,
+                capacity: 1,
+                memory: u64::MAX / 4,
+            }],
+        ));
         let entered = Arc::new(Mutex::new(Vec::new()));
         let release = Arc::new(AtomicBool::new(false));
         sched.register(Box::new(StageRunner::new(
@@ -1269,10 +1248,6 @@ mod tests {
             AgentSettings {
                 verify_answers: false,
                 models,
-                budget: Budget {
-                    agent: 1,
-                    ..Default::default()
-                },
                 web: WebSettings {
                     enabled: false,
                     ..Default::default()
@@ -1287,12 +1262,12 @@ mod tests {
         let chat = Transcript::open(ai, "rec").unwrap().chats().unwrap()[0].id;
         let input = json!({ "chat": chat, "store": "rec", "question": "Когда?", "path": "rec.mp4", "file_id": "rec" });
         let open = |engine: Arc<dyn Engine>| {
-            let sched = open_scheduler(ai, &current().budget).unwrap();
+            let sched = open_scheduler(ai).unwrap();
             register_stages(
                 &sched,
                 ai,
                 engine,
-                Slots::new(current().budget),
+                Slots::new(),
                 current.clone(),
                 Arc::new(Streams::default()),
             );

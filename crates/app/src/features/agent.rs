@@ -1,8 +1,8 @@
 use crate::pages::agent::{AgentUi, Services};
 use eframe::egui;
 use mediaa_agent::run::{self, Feed, Streams};
-use mediaa_agent::slots::Slots;
 use mediaa_core::agent::{AgentSettings, Connection};
+use mediaa_core::slots::Slots;
 use mediaa_engine::{Connections, Engine};
 use mediaa_queue::Scheduler;
 use std::ops::{Deref, DerefMut};
@@ -57,34 +57,27 @@ impl DerefMut for AgentController {
 }
 
 impl AgentController {
-    pub fn new(engine: Arc<dyn Engine>, budget: &mediaa_core::agent::Budget) -> AgentController {
+    pub fn new(engine: Arc<dyn Engine>, slots: Slots) -> AgentController {
         AgentController {
             ui: AgentUi::default(),
             engine,
             connections: None,
             applied: Vec::new(),
-            slots: Slots::new(budget.clone()),
+            slots,
             hosted: None,
             checked: None,
             pending: false,
         }
     }
 
-    pub fn with_connections(
-        connections: Arc<Connections>,
-        budget: &mediaa_core::agent::Budget,
-    ) -> AgentController {
-        let engine: Arc<dyn Engine> = connections.clone();
-        AgentController {
-            ui: AgentUi::default(),
-            engine,
-            connections: Some(connections),
-            applied: Vec::new(),
-            slots: Slots::new(budget.clone()),
-            hosted: None,
-            checked: None,
-            pending: false,
-        }
+    pub fn with_connections(connections: Arc<Connections>, slots: Slots) -> AgentController {
+        let engine: Arc<dyn Engine> = Arc::new(mediaa_engine::Gated::new(
+            connections.clone(),
+            slots.clone(),
+        ));
+        let mut controller = AgentController::new(engine, slots);
+        controller.connections = Some(connections);
+        controller
     }
 
     pub fn engine(&self) -> &Arc<dyn Engine> {
@@ -115,7 +108,7 @@ impl AgentController {
             return;
         }
         let _ = ctx;
-        self.slots.set_budget(agent.budget.clone());
+        self.slots.configure(agent);
         if self.applied != agent.connections {
             if let Some(connections) = &self.connections {
                 connections.set_connections(agent.connections.clone());
@@ -129,7 +122,7 @@ impl AgentController {
                 if stale {
                     *hosted.settings.write().expect("settings lock") = wanted;
                 }
-                hosted.sched.set_pools(run::pools(&agent.budget));
+                hosted.sched.set_pools(run::pools());
                 return;
             }
         }
@@ -143,7 +136,7 @@ impl AgentController {
         let streams = Arc::new(Streams::default());
         let feed = Arc::new(Feed::default());
         let stop = Arc::new(AtomicBool::new(false));
-        match run::open_scheduler(ai_dir, &agent.budget) {
+        match run::open_scheduler(ai_dir) {
             Ok(sched) => {
                 run::register_stages(
                     &sched,
@@ -175,7 +168,6 @@ impl AgentController {
         Some(Services {
             ai_dir: hosted.dir.clone(),
             engine: self.engine.clone(),
-            slots: self.slots.clone(),
             settings: hosted.settings.clone(),
             sched: hosted.sched.clone(),
             streams: hosted.streams.clone(),

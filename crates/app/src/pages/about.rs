@@ -69,46 +69,38 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             }
         });
         ui.add_space(8.0);
-        section_help(
-            ui,
-            icon::FILE_TEXT,
-            &t!("settings.contract"),
-            &t!("settings.contract_title"),
-        );
-        let open_id = egui::Id::new("about-speech-contract");
-        let mut open = ui.ctx().data(|data| data.get_temp(open_id).unwrap_or(false));
-        if ui
-            .add(theme::secondary(icon::FILE_TEXT, &t!("settings.contract")))
-            .clicked()
-        {
-            open = true;
-        }
-        if open {
-            egui::Window::new(t!("settings.contract_title"))
-                .id(egui::Id::new("about-speech-contract-window"))
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(true)
-                .default_width(560.0)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ui.ctx(), |ui| {
-                    ui.set_min_width(480.0);
-                    egui::ScrollArea::vertical()
-                        .max_height(440.0)
-                        .show(ui, |ui| {
-                            ui.add(egui::Label::new(t!("settings.contract_body")).wrap());
-                            ui.add_space(8.0);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(t!("settings.contract_example")).monospace(),
-                                )
-                                .wrap(),
-                            );
-                        });
-                });
-        }
-        ui.ctx().data_mut(|data| data.insert_temp(open_id, open));
     });
+}
+
+pub(crate) fn contract_window(ctx: &egui::Context, open: &mut bool) {
+    if !*open {
+        return;
+    }
+    theme::modal_backdrop(ctx);
+    let response = egui::Window::new(t!("settings.contract_title"))
+        .id(egui::Id::new("speech-contract-window"))
+        .order(egui::Order::Foreground)
+        .open(open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(560.0)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_min_width(480.0);
+            egui::ScrollArea::vertical()
+                .max_height(440.0)
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(t!("settings.contract_body")).wrap());
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(t!("settings.contract_example")).monospace(),
+                        )
+                        .wrap(),
+                    );
+                });
+        });
+    theme::mark_modal(ctx, &response);
 }
 
 fn section_help(ui: &mut egui::Ui, icon: &str, title: &str, help: &str) {

@@ -1177,8 +1177,10 @@ impl OptionsWindow {
         let draft = &mut self.draft;
         let restart = self.restart;
         theme::with_compact_title(ctx, || {
-            egui::Window::new(t!("analysis.options_title"))
+            theme::modal_backdrop(ctx);
+            let response = egui::Window::new(t!("analysis.options_title"))
                 .id(id)
+                .order(egui::Order::Foreground)
                 .collapsible(false)
                 .resizable(false)
                 .open(&mut open)
@@ -1243,6 +1245,7 @@ impl OptionsWindow {
                         }
                     });
                 });
+            theme::mark_modal(ctx, &response);
         });
         if !open {
             return Outcome::Cancel;
@@ -1295,8 +1298,10 @@ impl ConfirmWindow {
             .trim_end_matches('…')
             .to_string();
         theme::with_compact_title(ctx, || {
-            egui::Window::new(&title)
+            theme::modal_backdrop(ctx);
+            let response = egui::Window::new(&title)
                 .id(id)
+                .order(egui::Order::Foreground)
                 .collapsible(false)
                 .resizable(false)
                 .open(&mut open)
@@ -1340,6 +1345,7 @@ impl ConfirmWindow {
                         }
                     });
                 });
+            theme::mark_modal(ctx, &response);
         });
         if !open {
             return Outcome::Cancel;

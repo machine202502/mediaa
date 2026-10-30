@@ -69,3 +69,22 @@
 | AGENT-GEN-7 | 28.10.26 19:10 | Анализ ролика: диаризация выключена, пока её не включили, и молчит при выключенной модели | готово | [agent-genai.md](tasks/agent-genai.md) |
 | AGENT-GEN-8 | 28.10.26 19:10 | Обновить архитектуру, ограничения и руководство под genai и одну расшифровку | готово | [agent-genai.md](tasks/agent-genai.md) |
 | AGENT-GEN-9 | 28.10.26 19:10 | Полный прогон тестов и проверка diff после AGENT-GEN-8 | готово | [agent-genai.md](tasks/agent-genai.md) |
+| LIMIT-1 | 28.10.26 22:35 | Группы лимитов вместо бюджета и вкладка «Параметры» | готово | [limit-groups.md](tasks/limit-groups.md) |
+| LIMIT-2 | 29.10.26 01:55 | Пулы по умолчанию пусты, в интерфейсе «группа» переименована в «пул» | готово | [limit-groups.md](tasks/limit-groups.md) |
+| SHOT-1 | 29.10.26 02:10 | Скриншот области: выбор папки и формата в системном диалоге, оверлей закрывается после записи | готово | [screenshot-save-dialog.md](tasks/screenshot-save-dialog.md) |
+| HK-1 | 29.10.26 02:20 | Глобальные горячие клавиши выключены по умолчанию | готово | [hotkeys-off-by-default.md](tasks/hotkeys-off-by-default.md) |
+| SHOT-2 | 29.10.26 02:35 | Убрать опции «После снимка» и скрывать окно с задержкой перед снимком области | готово | [screenshot-options-removed.md](tasks/screenshot-options-removed.md) |
+| REC-1 | 29.10.26 02:50 | Завершённая запись всегда копируется в буфер и попадает в библиотеку; выбор убран | готово | [recording-completion-always-copies.md](tasks/recording-completion-always-copies.md) |
+| TRAY-1 | 29.10.26 03:00 | «При запуске открывать в трее» доступно только при автозапуске | готово | [tray-start-requires-autostart.md](tasks/tray-start-requires-autostart.md) |
+| TRAY-2 | 29.10.26 03:10 | Галочка «Скрывать в трей» только в записи из программы, с проверкой задержки и скрытия | готово | [hide-to-tray-option-scope.md](tasks/hide-to-tray-option-scope.md) |
+| SHOT-3 | 29.10.26 03:25 | «Копировать» и Enter в region overlay всегда сохраняют в библиотеку и копируют в буфер | готово | [copy-always-saves.md](tasks/copy-always-saves.md) |
+| UI-2 | 29.10.26 03:40 | Контракт расшифровки открывается из меню провайдеров, кнопка со страницы «О программе» убрана | готово | [transcription-contract-in-providers.md](tasks/transcription-contract-in-providers.md) |
+| TOOL-1 | 29.10.26 03:55 | run.ps1 сам сбрасывает кэш ffmpeg при сбое, снимает блокировку скриптов; добавлен run.cmd | готово | [self-healing-run-script.md](tasks/self-healing-run-script.md) |
+| TRAY-3 | 29.10.26 19:30 | Настройка «Показывать прогресс в трее», по умолчанию включена | готово | [tray-progress-toggle.md](tasks/tray-progress-toggle.md) |
+| UI-3 | 30.10.26 14:40 | UI-снимок области и выбор области записи возвращают окно после оверлея; трей и хоткей — нет | готово | [ui-capture-restores-window.md](tasks/ui-capture-restores-window.md) |
+| TRAY-4 | 30.10.26 14:55 | Запись экрана и аудио из трея не скрывает и не показывает окно | готово | [tray-recording-keeps-window.md](tasks/tray-recording-keeps-window.md) |
+| TRAY-5 | 30.10.26 15:10 | Любое действие трея, кроме «Открыть окно», не меняет состояние окна | готово | [tray-never-touches-window.md](tasks/tray-never-touches-window.md) |
+| REC-2 | 30.10.26 15:25 | Во время записи цели и настройки видны, но неактивны; иконка трея не показывает capture | готово | [recording-ui-lock.md](tasks/recording-ui-lock.md) |
+| UI-4 | 30.10.26 15:45 | Открытая модалка блокирует мышь, клавиатуру и уведомления, не затемняя фон | готово | [modal-input-block.md](tasks/modal-input-block.md) |
+| REC-3 | 30.10.26 16:05 | Устранено зависание параллельного сегментированного WebP при сохранении (bounded result channels) | готово | [webp-live-result-deadlock.md](tasks/webp-live-result-deadlock.md) |
+| REC-4 | 30.10.26 16:25 | Фикстуры-видео, тесты 3 мониторов/2 окон, per-source live fallback, закрытие окна, linear fallback | готово | [webp-multi-source-tests.md](tasks/webp-multi-source-tests.md) |

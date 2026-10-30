@@ -2,7 +2,8 @@ use anyhow::Context;
 use mediaa_agent::diarize_quality::{self, Der};
 use mediaa_core::agent::AgentSettings;
 use mediaa_core::agent::Connection;
-use mediaa_engine::{Connections, Engine};
+use mediaa_core::slots::Slots;
+use mediaa_engine::{Connections, Engine, Gated};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -55,7 +56,12 @@ pub fn execute(args: &Args) -> anyhow::Result<()> {
             settings.connections = connections;
         }
     }
-    let engine: Arc<dyn Engine> = Arc::new(Connections::new(settings.connections.clone()));
+    let slots = Slots::new();
+    slots.configure(&settings);
+    let engine: Arc<dyn Engine> = Arc::new(Gated::new(
+        Arc::new(Connections::new(settings.connections.clone())),
+        slots,
+    ));
     let reports = diarize_quality::measure_all(engine.as_ref(), &settings, &data)?;
     for report in &reports {
         println!("{report}");

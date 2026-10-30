@@ -708,92 +708,104 @@ impl RecordingSession {
             && self.webp_mode == WebpMode::SegmentedParallel;
         let mut webp_fallback = false;
         let mut webp_fallback_detail = Vec::new();
-        let mut live_success = live.as_ref().is_some_and(|result| {
-            result.error.is_none()
-                && videos.iter().all(|video| {
-                    result
-                        .parts
-                        .get(video.index)
-                        .is_some_and(|parts| !parts.is_empty())
-                })
-        });
-        if let Some(error) = live.as_ref().and_then(|result| result.error.as_deref()) {
-            let trace = trace.unwrap_or("webp");
-            log::warn!("[{trace}] stage=live stopped; converting the MKV after recording: {error}");
-            webp_fallback_detail.push(format!("live: {error}"));
-            webp_fallback = true;
-        } else if live_requested && live.is_none() {
+        let mut live_ok = vec![false; videos.len()];
+        let mut live_outputs: Vec<Option<PathBuf>> = vec![None; videos.len()];
+        if live_requested && live.is_none() {
             let trace = trace.unwrap_or("webp");
             log::warn!("[{trace}] stage=live not-started; converting the MKV after recording");
             webp_fallback_detail.push("live: not started".into());
             webp_fallback = true;
-        } else if live_requested && !live_success {
-            let trace = trace.unwrap_or("webp");
-            log::warn!("[{trace}] stage=live incomplete; converting the MKV after recording");
-            webp_fallback_detail.push("live: incomplete".into());
-            webp_fallback = true;
         }
-
-        if live_success {
-            let live = live.as_ref().expect("checked above");
-            let mut live_outputs = Vec::new();
-            for (i, video) in videos.iter().enumerate() {
-                let source = if video.files.len() > 1 {
-                    let combined = self
-                        .work_dir
-                        .join(format!("video-{}-preview.mkv", video.index));
-                    match concat_chunks(&video.files, &combined, cancel) {
-                        Ok(()) => Some(combined),
-                        Err(error) => {
-                            log::warn!("preview source for {}: {error:#}", video.name);
-                            None
+        if let Some(result) = &live {
+            for (source, error) in result.errors.iter().enumerate() {
+                if let Some(error) = error {
+                    let trace = trace.unwrap_or("webp");
+                    log::warn!(
+                        "[{trace}] stage=live source={source} failed; converting this source offline: {error}"
+                    );
+                    webp_fallback_detail.push(format!("live source {source}: {error}"));
+                    webp_fallback = true;
+                }
+            }
+            if live_requested && result.timed_out {
+                webp_fallback_detail.push("live: stopped in time".into());
+                webp_fallback = true;
+            } else if live_requested {
+                for (i, video) in videos.iter().enumerate() {
+                    let source = video.index;
+                    let has_error = result
+                        .errors
+                        .get(source)
+                        .is_some_and(|error| error.is_some());
+                    let parts = result.parts.get(source);
+                    if has_error || parts.is_none_or(Vec::is_empty) {
+                        if !has_error {
+                            webp_fallback_detail
+                                .push(format!("live source {source}: incomplete parts"));
+                            webp_fallback = true;
+                        }
+                        continue;
+                    }
+                    let preview = if video.files.len() > 1 {
+                        let combined = self
+                            .work_dir
+                            .join(format!("video-{}-preview.mkv", video.index));
+                        match concat_chunks(&video.files, &combined, cancel) {
+                            Ok(()) => Some(combined),
+                            Err(error) => {
+                                log::warn!("preview source for {}: {error:#}", video.name);
+                                None
+                            }
+                        }
+                    } else {
+                        Some(video.files[0].clone())
+                    };
+                    let title = linked_title(&self.title, i, videos.len(), &video.name, false);
+                    let out = naming::media_path(&self.out_dir, &title, self.started, "webp");
+                    self.progress.set(None);
+                    let pending = AtomicFile::new(&out)?;
+                    if let Err(error) = mediaa_webp_pipeline::merge_parts(
+                        parts.expect("checked above"),
+                        pending.path(),
+                    )
+                    .and_then(|()| pending.commit().map(|_| ()))
+                    {
+                        webp_fallback_detail.push(format!("live source {source} merge: {error:#}"));
+                        webp_fallback = true;
+                        continue;
+                    }
+                    if let Some(preview) = preview {
+                        if let Err(error) =
+                            crate::preview_cache::ensure_proxy_for(&preview, &out, cancel)
+                        {
+                            log::warn!("preview proxy {}: {error:#}", preview.display());
                         }
                     }
-                } else {
-                    Some(video.files[0].clone())
-                };
-                let title = linked_title(&self.title, i, videos.len(), &video.name, false);
-                let out = naming::media_path(&self.out_dir, &title, self.started, "webp");
-                let parts = &live.parts[video.index];
-                self.progress.set(None);
-                let pending = AtomicFile::new(&out)?;
-                if let Err(error) = mediaa_webp_pipeline::merge_parts(parts, pending.path())
-                    .and_then(|()| pending.commit().map(|_| ()))
-                {
-                    webp_fallback_detail.push(format!("live merge: {error:#}"));
-                    live_success = false;
-                    break;
-                }
-                if let Some(source) = source {
-                    if let Err(error) =
-                        crate::preview_cache::ensure_proxy_for(&source, &out, cancel)
-                    {
-                        log::warn!("preview proxy {}: {error:#}", source.display());
+                    if let Some(trace) = trace {
+                        log::info!("[{trace}] stage=live source={source} merged=webp");
                     }
+                    live_ok[i] = true;
+                    live_outputs[i] = Some(out);
                 }
-                live_outputs.push(out);
             }
-            if live_success {
-                if let Some(trace) = trace {
-                    log::info!("[{trace}] stage=live complete; merged=webp");
-                }
-                return Ok(FinalizeOutput {
-                    paths: live_outputs,
-                    keep_work_dir,
-                });
+        }
+        if !videos.is_empty() && live_ok.iter().all(|ok| *ok) {
+            if let Some(trace) = trace {
+                log::info!("[{trace}] stage=live complete; merged=webp");
             }
-            for output in live_outputs {
-                let _ = std::fs::remove_file(output);
-            }
-            let trace = trace.unwrap_or("webp");
-            log::warn!("[{trace}] stage=live merge-failed; falling back to MKV encoding");
-            webp_fallback = true;
+            return Ok(FinalizeOutput {
+                paths: live_outputs.into_iter().flatten().collect(),
+                keep_work_dir,
+            });
         }
 
         if let Some(trace) = trace {
             log::info!("[{trace}] stage=offline-mkv");
         }
-        for video in &mut videos {
+        for (i, video) in videos.iter_mut().enumerate() {
+            if live_ok[i] {
+                continue;
+            }
             if video.files.len() > 1 {
                 let combined = self
                     .work_dir
@@ -814,8 +826,11 @@ impl RecordingSession {
             }
         }
         let total = videos.len() as f32;
-        let mut outputs = Vec::new();
+        let mut outputs = live_outputs;
         for (i, video) in videos.iter().enumerate() {
+            if live_ok[i] {
+                continue;
+            }
             let scratch = &video.files[0];
             let with_audio = !wavs.is_empty()
                 && match self.audio_layout {
@@ -913,7 +928,7 @@ impl RecordingSession {
                     log::warn!("preview proxy {}: {error:#}", scratch.display());
                 }
             }
-            outputs.push(out);
+            outputs[i] = Some(out);
         }
         if webp_fallback {
             let trace_id = self
@@ -931,7 +946,7 @@ impl RecordingSession {
             log::info!("[{trace}] stage=complete fallback=false");
         }
         Ok(FinalizeOutput {
-            paths: outputs,
+            paths: outputs.into_iter().flatten().collect(),
             keep_work_dir,
         })
     }

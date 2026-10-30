@@ -18,6 +18,7 @@ pub mod paths;
 pub mod pulse;
 pub mod retrieval;
 pub mod settings;
+pub mod slots;
 pub mod source;
 pub mod speakers;
 pub mod transcript;

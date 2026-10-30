@@ -44,10 +44,23 @@ fn command_for(id: &str) -> Option<TrayCommand> {
     ITEMS.iter().find(|(i, _)| *i == id).map(|(_, c)| *c)
 }
 
+fn tray_icon_rgba(state: TrayState, progress: bool) -> Vec<u8> {
+    if !progress {
+        return crate::icon::rgba(32);
+    }
+    match state {
+        TrayState::Idle => crate::icon::rgba(32),
+        TrayState::Starting => crate::icon::rgba_status(32, crate::icon::StatusDot::Saving),
+        TrayState::Recording => crate::icon::rgba_status(32, crate::icon::StatusDot::Recording),
+        TrayState::Paused => crate::icon::rgba_status(32, crate::icon::StatusDot::Paused),
+        TrayState::Saving => crate::icon::rgba_status(32, crate::icon::StatusDot::Saving),
+    }
+}
+
 pub struct Tray {
     icon: TrayIcon,
     items: Vec<(TrayCommand, IconMenuItem)>,
-    applied: Option<(TrayState, String)>,
+    applied: Option<(TrayState, bool, String)>,
 }
 
 impl Tray {
@@ -93,7 +106,7 @@ impl Tray {
             items,
             applied: None,
         };
-        tray.set_state(TrayState::Idle);
+        tray.set_state(TrayState::Idle, true);
         Ok((tray, rx))
     }
 
@@ -106,12 +119,12 @@ impl Tray {
             .1
     }
 
-    pub fn set_state(&mut self, state: TrayState) {
+    pub fn set_state(&mut self, state: TrayState, progress: bool) {
         let locale = crate::i18n::current();
-        if self.applied.as_ref() == Some(&(state, locale.clone())) {
+        if self.applied.as_ref() == Some(&(state, progress, locale.clone())) {
             return;
         }
-        self.applied = Some((state, locale));
+        self.applied = Some((state, progress, locale));
         let active = matches!(state, TrayState::Recording | TrayState::Paused);
         let cancel_available = active || state == TrayState::Starting;
         for (cmd, text, enabled) in [
@@ -167,21 +180,19 @@ impl Tray {
         });
         self.item(TrayCommand::StopAndSave)
             .set_icon(if active { mark(Badge::Stop) } else { None });
-        let tip = match state {
-            TrayState::Idle => "MediaA".to_string(),
-            TrayState::Starting => format!("MediaA — {}", t!("record.starting")),
-            TrayState::Recording => format!("MediaA — {}", t!("record.recording")),
-            TrayState::Paused => format!("MediaA — {}", t!("record.paused")),
-            TrayState::Saving => format!("MediaA — {}", t!("record.saving")),
+        let tip = if !progress {
+            "MediaA".to_string()
+        } else {
+            match state {
+                TrayState::Idle => "MediaA".to_string(),
+                TrayState::Starting => format!("MediaA — {}", t!("record.starting")),
+                TrayState::Recording => format!("MediaA — {}", t!("record.recording")),
+                TrayState::Paused => format!("MediaA — {}", t!("record.paused")),
+                TrayState::Saving => format!("MediaA — {}", t!("record.saving")),
+            }
         };
         let _ = self.icon.set_tooltip(Some(tip));
-        let rgba = match state {
-            TrayState::Idle => crate::icon::rgba(32),
-            TrayState::Starting => crate::icon::rgba_status(32, crate::icon::StatusDot::Saving),
-            TrayState::Recording => crate::icon::rgba_status(32, crate::icon::StatusDot::Recording),
-            TrayState::Paused => crate::icon::rgba_status(32, crate::icon::StatusDot::Paused),
-            TrayState::Saving => crate::icon::rgba_status(32, crate::icon::StatusDot::Saving),
-        };
+        let rgba = tray_icon_rgba(state, progress);
         if let Ok(icon) = Icon::from_rgba(rgba, 32, 32) {
             let _ = self.icon.set_icon(Some(icon));
         }
@@ -225,5 +236,14 @@ mod tests {
             assert_eq!(command_for(id), Some(cmd));
         }
         assert_eq!(command_for("nope"), None);
+    }
+
+    #[test]
+    fn the_progress_switch_removes_and_restores_the_status_dot() {
+        let base = crate::icon::rgba(32);
+        assert_eq!(tray_icon_rgba(TrayState::Recording, false), base);
+        assert_eq!(tray_icon_rgba(TrayState::Saving, false), base);
+        assert_ne!(tray_icon_rgba(TrayState::Recording, true), base);
+        assert_ne!(tray_icon_rgba(TrayState::Saving, true), base);
     }
 }

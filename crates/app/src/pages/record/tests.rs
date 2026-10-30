@@ -60,6 +60,7 @@ fn animation_editor_shows_one_frame_rate_and_resolution() {
 
 #[test]
 fn parallel_webp_is_shown_only_for_segmented_webp() {
+    let _ui = crate::app::test_support::ui_test_guard();
     let mut settings = Settings::default();
     settings.region_record.output = OutputKind::Anim(AnimFormat::Webp);
     let mut harness = egui_kittest::Harness::new_ui_state(

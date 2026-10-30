@@ -87,6 +87,128 @@ impl FrameSource for Pattern {
     }
 }
 
+struct VideoSource {
+    file: PathBuf,
+    width: u32,
+    height: u32,
+    close_after: Option<usize>,
+    grabs: usize,
+    decoder: Option<image_webp::WebPDecoder<std::io::BufReader<std::fs::File>>>,
+    buffer: Vec<u8>,
+    frame: u32,
+    frames: u32,
+    source_width: u32,
+    source_height: u32,
+}
+
+impl VideoSource {
+    fn new(file: PathBuf, width: u32, height: u32, close_after: Option<usize>) -> Self {
+        Self {
+            file,
+            width,
+            height,
+            close_after,
+            grabs: 0,
+            decoder: None,
+            buffer: Vec::new(),
+            frame: 0,
+            frames: 0,
+            source_width: 480,
+            source_height: 270,
+        }
+    }
+
+    fn reopen(&mut self) -> anyhow::Result<()> {
+        let decoder = image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(
+            &self.file,
+        )?))?;
+        let (width, height) = decoder.dimensions();
+        self.source_width = width;
+        self.source_height = height;
+        self.buffer = vec![
+            0;
+            decoder
+                .output_buffer_size()
+                .ok_or_else(|| anyhow::anyhow!("WebP is too large"))?
+        ];
+        self.frames = decoder.num_frames().max(1);
+        self.frame = 0;
+        self.decoder = Some(decoder);
+        Ok(())
+    }
+
+    fn next_frame(&mut self) -> anyhow::Result<&[u8]> {
+        if self.decoder.is_none() {
+            self.reopen()?;
+        }
+        let decoder = self.decoder.as_mut().unwrap();
+        let delay = decoder.read_frame(&mut self.buffer)?;
+        let _ = delay;
+        self.frame += 1;
+        if self.frame >= self.frames {
+            self.decoder = None;
+        }
+        Ok(&self.buffer)
+    }
+}
+
+impl FrameSource for VideoSource {
+    fn name(&self) -> String {
+        format!(
+            "Video {}x{} ({})",
+            self.width,
+            self.height,
+            self.file.file_name().unwrap_or_default().to_string_lossy()
+        )
+    }
+
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn grab(&mut self) -> anyhow::Result<Frame> {
+        if self.close_after.is_some_and(|limit| self.grabs >= limit) {
+            anyhow::bail!("window closed");
+        }
+        self.grabs += 1;
+        let source = self.next_frame()?.to_vec();
+        let (sw, sh) = (self.source_width, self.source_height);
+        let mut data = Vec::with_capacity((self.width * self.height * 4) as usize);
+        for y in 0..self.height {
+            let sy = (y * sh / self.height).min(sh - 1);
+            for x in 0..self.width {
+                let sx = (x * sw / self.width).min(sw - 1);
+                let i = ((sy * sw + sx) * 4) as usize;
+                data.extend_from_slice(&source[i..i + 4]);
+            }
+        }
+        Ok(Frame::new(self.width, self.height, data))
+    }
+}
+
+fn fixture(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name)
+}
+
+fn video_source(name: &str, width: u32, height: u32) -> SourceFactory {
+    let file = fixture(name);
+    Box::new(move || {
+        Ok(Box::new(VideoSource::new(file.clone(), width, height, None)) as Box<dyn FrameSource>)
+    })
+}
+
+fn closing_video_source(name: &str, width: u32, height: u32, frames: usize) -> SourceFactory {
+    let file = fixture(name);
+    Box::new(move || {
+        Ok(
+            Box::new(VideoSource::new(file.clone(), width, height, Some(frames)))
+                as Box<dyn FrameSource>,
+        )
+    })
+}
+
 struct Still {
     w: u32,
     h: u32,
@@ -249,6 +371,24 @@ fn finish(session: RecordingSession, action: StopAction) -> (SessionEvent, Vec<S
             SessionEvent::Notice(notice) => warnings.push(format!("{notice:?}")),
             other => return (other, warnings),
         }
+    }
+}
+
+fn finish_with_timeout(
+    session: RecordingSession,
+    action: StopAction,
+    limit: Duration,
+) -> (SessionEvent, Vec<String>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let _ = tx.send(finish(session, action));
+    });
+    match rx.recv_timeout(limit) {
+        Ok(result) => {
+            handle.join().unwrap();
+            result
+        }
+        Err(_) => panic!("recording finalizer hung for {limit:?}"),
     }
 }
 

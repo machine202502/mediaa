@@ -211,13 +211,11 @@ fn search(services: &Services, id: &str, query: &str) -> anyhow::Result<Vec<Hit>
     let settings = services.settings.read().expect("settings lock").clone();
     Ok(mediaa_agent::search::search(
         services.engine.as_ref(),
-        &services.slots,
         &settings,
         &services.ai_dir,
         id,
         query,
         SEARCH_HITS,
-        true,
     )?
     .0)
 }
@@ -1187,8 +1185,10 @@ impl Dialog {
         let focus = std::mem::take(&mut self.name_focus);
         let ctx = ui.ctx().clone();
         theme::with_compact_title(&ctx, || {
-            egui::Window::new(t!("studio.names"))
+            theme::modal_backdrop(&ctx);
+            let response = egui::Window::new(t!("studio.names"))
                 .id(egui::Id::new(("speaker-names", &self.path)))
+                .order(egui::Order::Foreground)
                 .collapsible(false)
                 .resizable(false)
                 .open(&mut open)
@@ -1269,6 +1269,7 @@ impl Dialog {
                         }
                     });
                 });
+            theme::mark_modal(&ctx, &response);
         });
         if save && !cancel {
             self.save_names();
@@ -1300,8 +1301,10 @@ impl Dialog {
         let mut done = false;
         let ctx = ui.ctx().clone();
         theme::with_compact_title(&ctx, || {
-            egui::Window::new(t!("studio.rename_speaker"))
+            theme::modal_backdrop(&ctx);
+            let response = egui::Window::new(t!("studio.rename_speaker"))
                 .id(egui::Id::new(("speaker-name", &self.path)))
+                .order(egui::Order::Foreground)
                 .collapsible(false)
                 .resizable(false)
                 .open(&mut open)
@@ -1323,6 +1326,7 @@ impl Dialog {
                         done = true;
                     }
                 });
+            theme::mark_modal(&ctx, &response);
         });
         if done {
             let name = name.clone();
@@ -1540,8 +1544,7 @@ mod tests {
     fn an_event_reloads_the_recording() {
         use super::Services;
         use mediaa_agent::run::{Feed, Streams};
-        use mediaa_agent::slots::Slots;
-        use mediaa_core::agent::{AgentSettings, Budget};
+        use mediaa_core::agent::AgentSettings;
         use mediaa_core::transcript::Word;
         use mediaa_engine::testing::FakeEngine;
         use mediaa_queue::{Event, EventKind, FakeClock, MemStore, Scheduler};
@@ -1577,12 +1580,8 @@ mod tests {
         let services = Services {
             ai_dir: ai.clone(),
             engine: Arc::new(FakeEngine::new()),
-            slots: Slots::new(Budget::default()),
             settings: Arc::new(RwLock::new(AgentSettings::default())),
-            sched: Arc::new(Scheduler::new(
-                store,
-                mediaa_agent::run::pools(&Budget::default()),
-            )),
+            sched: Arc::new(Scheduler::new(store, mediaa_agent::run::pools())),
             streams: Arc::new(Streams::default()),
             feed: feed.clone(),
         };

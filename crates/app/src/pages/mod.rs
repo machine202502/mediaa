@@ -74,6 +74,7 @@ fn sub_pages(section: Section) -> Vec<(Page, &'static str, String)> {
 pub fn shell(app: &mut App, ui: &mut egui::Ui) {
     let p = theme::palette(ui);
     let ctx = ui.ctx().clone();
+    theme::block_background_input(&ctx);
     egui::Panel::top("header")
         .resizable(false)
         .exact_size(46.0)
@@ -107,7 +108,7 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    if matches!(app.page, Page::Record | Page::RecordAudio) && app.recording.is_idle() {
+    if matches!(app.page, Page::Record | Page::RecordAudio) {
         egui::Panel::bottom("record-start")
             .resizable(false)
             .frame(
@@ -116,6 +117,9 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                     .inner_margin(Margin::symmetric(18, 10)),
             )
             .show(ui, |ui| {
+                if !app.recording.is_idle() {
+                    ui.disable();
+                }
                 if app.page == Page::Record {
                     let target = app.record_target_from_ui().map(|_| ());
                     if record::start_bar(&app.settings, app.recovery_active(), &target, ui) {
@@ -123,7 +127,7 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                     }
                 } else {
                     if audio::start_bar(&app.settings, app.recovery_active(), ui) {
-                        app.start_audio_recording(ui.ctx(), RecordProfile::App);
+                        app.start_audio_recording(ui.ctx(), RecordProfile::App, None);
                     }
                 }
             });
@@ -149,7 +153,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                             capture::ui(&mut app.settings, &app.monitors, &app.windows, ui);
                         for action in actions {
                             match action {
-                                capture::CaptureUiAction::SettingsChanged => app.settings_changed(),
                                 capture::CaptureUiAction::RefreshCatalogs => {
                                     app.refresh_catalogs(ui.ctx())
                                 }

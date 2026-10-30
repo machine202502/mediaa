@@ -1,4 +1,4 @@
-use mediaa_core::settings::{AfterCapture, GifDither, ThemePreference};
+use mediaa_core::settings::{GifDither, ThemePreference};
 use mediaa_core::MediaKind;
 use rust_i18n::t;
 
@@ -27,15 +27,6 @@ pub fn apply(setting: Option<&str>) -> &'static str {
 
 pub fn current() -> String {
     rust_i18n::locale().to_string()
-}
-
-pub fn after_capture(a: AfterCapture) -> String {
-    match a {
-        AfterCapture::Copy => t!("after.copy"),
-        AfterCapture::Save => t!("after.save"),
-        AfterCapture::CopyAndSave => t!("after.copy_save"),
-    }
-    .into()
 }
 
 pub fn dither(d: GifDither) -> String {

@@ -1,5 +1,4 @@
-use crate::slots::Slots;
-use mediaa_core::agent::{ModelSource, WorkKind};
+use mediaa_core::agent::ModelSource;
 use mediaa_engine::{
     ChatAnswer, ChatMessage, ChatRequest, ChatRole, Engine, Thinking, ToolCall, ToolChoice,
 };
@@ -420,7 +419,6 @@ fn partial_tag_len(text: &str, tag: &str) -> usize {
 pub struct ChatBrain<'a> {
     pub engine: &'a dyn Engine,
     pub source: ModelSource,
-    pub slots: Slots,
     pub context: u32,
     pub max_tokens: u32,
     pub thinking: bool,
@@ -450,12 +448,6 @@ impl ChatBrain<'_> {
         if secs >= 0.15 && tokens > 1 {
             *self.speed.lock().expect("speed lock") = Some(f64::from(tokens) / secs);
         }
-    }
-
-    fn lease(&self, cancel: &AtomicBool) -> anyhow::Result<crate::slots::Lease> {
-        self.slots
-            .request(WorkKind::ProviderCalls, true)
-            .wait(cancel)
     }
 }
 
@@ -525,7 +517,6 @@ impl Brain for ChatBrain<'_> {
         let mut messages = messages.to_vec();
         let mut retried = false;
         loop {
-            let lease = self.lease(cancel)?;
             let specs: Vec<mediaa_engine::ToolSpec> = tools
                 .iter()
                 .map(|tool| mediaa_engine::ToolSpec {
@@ -583,7 +574,6 @@ impl Brain for ChatBrain<'_> {
                     handle(Part::Text(piece.to_string()))
                 }
             });
-            drop(lease);
             let generated = generated?;
             if self.thinking {
                 splitter.finish().into_iter().for_each(|part| {
@@ -614,13 +604,11 @@ impl Brain for ChatBrain<'_> {
     }
 
     fn complete(&self, messages: &[Message], cancel: &AtomicBool) -> anyhow::Result<String> {
-        let lease = self.lease(cancel)?;
         let generated = self.engine.chat(
             &self.request(messages, self.max_tokens),
             cancel,
             &mut |_| true,
         );
-        drop(lease);
         let generated = generated?;
         let (_, content) = split_thinking(&generated.content);
         Ok(content.trim().to_string())
@@ -632,13 +620,11 @@ impl Brain for ChatBrain<'_> {
         schema: &Value,
         cancel: &AtomicBool,
     ) -> anyhow::Result<String> {
-        let lease = self.lease(cancel)?;
         let request = ChatRequest {
             json_schema: Some(schema.clone()),
             ..self.request(messages, self.max_tokens)
         };
         let generated = self.engine.chat(&request, cancel, &mut |_| true);
-        drop(lease);
         let generated = generated?;
         let (_, content) = split_thinking(&generated.content);
         Ok(content.trim().to_string())
@@ -829,7 +815,6 @@ mod tests {
         ChatBrain {
             engine,
             source: ModelSource::new("c", "owner/model"),
-            slots: Slots::new(mediaa_core::agent::Budget::default()),
             context: 4096,
             max_tokens: 256,
             thinking,

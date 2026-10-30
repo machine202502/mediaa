@@ -11,6 +11,7 @@ use mediaa_render::annotate::{self, Shape, ShapeKind, Style, Tool};
 use mediaa_render::layout::{place_panels, RectF};
 use parking_lot::Mutex;
 use rust_i18n::t;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,10 @@ pub enum Outcome {
         format: Option<ImageFormat>,
         after_completion: bool,
     },
+    Saved {
+        path: PathBuf,
+        size: String,
+    },
     SelectedRegion {
         monitor: MonitorInfo,
         rect: Rect,
@@ -44,6 +49,20 @@ pub enum Outcome {
         index: usize,
         monitor: MonitorInfo,
     },
+}
+
+fn resolve_save_path(path: PathBuf, fallback: ImageFormat) -> Option<(PathBuf, ImageFormat)> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension {
+        None => Some((path.with_extension(fallback.extension()), fallback)),
+        Some(extension) => ImageFormat::ALL
+            .iter()
+            .find(|format| format.extension() == extension)
+            .map(|format| (path, *format)),
+    }
 }
 
 const COLORS: [[u8; 4]; 8] = [
@@ -85,9 +104,26 @@ struct TextEdit {
 
 const WINDOW_TITLE: &str = "MediaA area picker";
 
+#[derive(Clone)]
+pub(crate) struct SaveDefaults {
+    pub dir: PathBuf,
+    pub format: ImageFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveDialog {
+    None,
+    Lower,
+}
+
 struct State {
     purpose: Purpose,
     after_completion: bool,
+    restore: bool,
+    save_dir: PathBuf,
+    save_format: ImageFormat,
+    save_error: Option<String>,
+    save_dialog: SaveDialog,
     shots: Vec<(MonitorInfo, Option<Frame>)>,
     current: usize,
     texture: Option<(usize, egui::TextureHandle)>,
@@ -135,6 +171,19 @@ impl Overlay {
         self.state.lock().switching_monitor = false;
     }
 
+    pub(super) fn restore(&self) -> bool {
+        self.state.lock().restore
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_outcome(&self, outcome: Outcome) {
+        self.state.lock().outcome = Some(outcome);
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "explicit parameters of one overlay"
+    )]
     pub fn new(
         ctx: &egui::Context,
         purpose: Purpose,
@@ -143,6 +192,8 @@ impl Overlay {
         first: Frame,
         default_action: AfterCapture,
         after_completion: bool,
+        restore: bool,
+        save: SaveDefaults,
     ) -> Self {
         register_fonts(ctx);
         let current = start.min(monitors.len().saturating_sub(1));
@@ -159,6 +210,11 @@ impl Overlay {
             state: Arc::new(Mutex::new(State {
                 purpose,
                 after_completion,
+                restore,
+                save_dir: save.dir,
+                save_format: save.format,
+                save_error: None,
+                save_dialog: SaveDialog::None,
                 shots,
                 current,
                 texture,
@@ -356,8 +412,79 @@ impl State {
         }
     }
 
+    fn save_stem(&self) -> String {
+        mediaa_core::naming::media_path(
+            &self.save_dir,
+            "Screenshot",
+            chrono::Local::now(),
+            self.save_format.extension(),
+        )
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("Screenshot")
+        .to_string()
+    }
+
+    fn begin_save(&mut self, ctx: &egui::Context) {
+        if self.outcome.is_some() || self.save_dialog != SaveDialog::None {
+            return;
+        }
+        self.save_error = None;
+        self.save_dialog = SaveDialog::Lower;
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::WindowLevel::Normal,
+        ));
+        ctx.request_repaint();
+    }
+
+    fn open_save_dialog(&mut self, ctx: &egui::Context) {
+        let mut dialog = rfd::FileDialog::new()
+            .set_directory(&self.save_dir)
+            .set_file_name(self.save_stem());
+        for format in self.save_formats() {
+            dialog = dialog.add_filter(format.label(), &[format.extension()]);
+        }
+        let path = dialog.save_file();
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(
+            egui::WindowLevel::AlwaysOnTop,
+        ));
+        if let Some(path) = path {
+            self.save_to(path);
+        }
+    }
+
+    fn save_formats(&self) -> [ImageFormat; 2] {
+        if self.save_format == ImageFormat::Png {
+            [ImageFormat::Png, ImageFormat::Webp]
+        } else {
+            [ImageFormat::Webp, ImageFormat::Png]
+        }
+    }
+
+    fn save_to(&mut self, path: PathBuf) {
+        self.save_error = None;
+        let Some((path, format)) = resolve_save_path(path, self.save_format) else {
+            self.save_error = Some(t!("overlay.save_bad_format").into());
+            return;
+        };
+        let Some(selection) = self.editor.usable_selection() else {
+            return;
+        };
+        self.commit_text();
+        let frame = annotate::render_crop(self.frame(), selection, &self.shapes);
+        let size = format!("{}×{}", frame.width, frame.height);
+        match mediaa_storage::screenshot::save(&frame, format, &path) {
+            Ok(()) => self.outcome = Some(Outcome::Saved { path, size }),
+            Err(error) => self.save_error = Some(format!("{error:#}")),
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        if self.save_dialog == SaveDialog::Lower {
+            self.save_dialog = SaveDialog::None;
+            self.open_save_dialog(&ctx);
+        }
         if ctx.input(|i| i.viewport().close_requested()) {
             self.outcome = Some(Outcome::Cancel);
             return;
@@ -759,11 +886,15 @@ fn text_font(ctx: &egui::Context, style: &Style, size: f32) -> FontId {
 
 #[cfg(test)]
 mod tests {
-    use super::{consume_copy_shortcut, AfterCapture, ImageFormat, Outcome, Overlay, Purpose};
+    use super::{
+        consume_copy_shortcut, resolve_save_path, AfterCapture, ImageFormat, Outcome, Overlay,
+        Purpose, SaveDefaults,
+    };
     use eframe::egui;
     use egui_kittest::kittest::Queryable;
     use mediaa_core::Frame;
     use mediaa_platform::screen::{MonitorId, MonitorInfo};
+    use std::path::PathBuf;
 
     fn monitor(id: u32, x: i32, width: u32, primary: bool) -> MonitorInfo {
         MonitorInfo {
@@ -798,8 +929,13 @@ mod tests {
                             monitors.clone(),
                             0,
                             frame.clone(),
-                            AfterCapture::Save,
+                            AfterCapture::CopyAndSave,
                             false,
+                            false,
+                            SaveDefaults {
+                                dir: std::env::temp_dir(),
+                                format: ImageFormat::Png,
+                            },
                         )
                     });
                     overlay.state.lock().ui(ui);
@@ -891,6 +1027,8 @@ mod tests {
 
     #[test]
     fn region_editor_selects_annotates_and_saves() {
+        let _ui = crate::app::test_support::ui_test_guard();
+        let _locale = english_locale();
         let mut harness = overlay_harness(
             vec![monitor(1, 0, 800, true), monitor(2, 800, 800, false)],
             Purpose::Screenshot,
@@ -916,19 +1054,53 @@ mod tests {
         #[cfg(windows)]
         harness.snapshot("region-editor-selected");
 
-        let save = rust_i18n::t!("overlay.save", format = ImageFormat::Png.label()).to_string();
-        harness.get_by_label_contains(&save).click();
-        harness.run_steps(2);
-        let state = harness.state().as_ref().unwrap().state.lock();
-        let Outcome::Image {
-            selection, shapes, ..
-        } = state.outcome.as_ref().unwrap()
-        else {
-            panic!("region was not saved: {:?}", state.outcome)
-        };
-        assert!((340..=350).contains(&selection.w), "{selection:?}");
-        assert!((240..=250).contains(&selection.h), "{selection:?}");
-        assert!(!shapes.is_empty());
+        assert!(
+            harness
+                .query_by_label_contains(&rust_i18n::t!("overlay.save"))
+                .is_some(),
+            "the save button is in the action bar"
+        );
+        let target =
+            std::env::temp_dir().join(format!("mediaa-region-save-{}.png", std::process::id()));
+        let overlay = harness.state().as_ref().unwrap().state.clone();
+        {
+            let mut state = overlay.lock();
+            let selection = state.editor.usable_selection().expect("a selection");
+            let (width, height) = (selection.w, selection.h);
+            assert!((340..=350).contains(&width), "{selection:?}");
+            assert!((240..=250).contains(&height), "{selection:?}");
+            state.save_to(target.clone());
+            let Some(Outcome::Saved { path, size }) = state.outcome.as_ref() else {
+                panic!("region was not saved: {:?}", state.outcome)
+            };
+            assert_eq!(path, &target);
+            assert_eq!(size, &format!("{width}×{height}"));
+            assert!(!state.shapes.is_empty());
+        }
+        let bytes = std::fs::read(&target).expect("the screenshot is written");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n", "a real PNG is written");
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn the_extension_of_the_save_path_decides_the_format() {
+        assert_eq!(
+            resolve_save_path(PathBuf::from("/a/shot.png"), ImageFormat::Webp),
+            Some((PathBuf::from("/a/shot.png"), ImageFormat::Png))
+        );
+        assert_eq!(
+            resolve_save_path(PathBuf::from("/a/shot.WEBP"), ImageFormat::Png),
+            Some((PathBuf::from("/a/shot.WEBP"), ImageFormat::Webp))
+        );
+        let (path, format) = resolve_save_path(PathBuf::from("/a/shot"), ImageFormat::Webp)
+            .expect("the default format is added");
+        assert_eq!(format, ImageFormat::Webp);
+        assert_eq!(path, PathBuf::from("/a/shot.webp"));
+        assert_eq!(
+            resolve_save_path(PathBuf::from("/a/shot.jpg"), ImageFormat::Png),
+            None,
+            "only PNG and WebP are accepted"
+        );
     }
 
     #[test]
@@ -973,6 +1145,8 @@ mod tests {
 
     #[test]
     fn active_text_frame_moves_and_outside_click_commits() {
+        let _ui = crate::app::test_support::ui_test_guard();
+        let _locale = english_locale();
         let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
         crate::theme::install(&harness.ctx);
         harness.run_steps(2);
@@ -1049,26 +1223,30 @@ mod tests {
         assert_eq!(text.1, "Label\n!");
     }
 
-    #[cfg(windows)]
     struct LocaleGuard(String);
 
-    #[cfg(windows)]
     impl Drop for LocaleGuard {
         fn drop(&mut self) {
             rust_i18n::set_locale(&self.0);
         }
     }
 
-    #[cfg(windows)]
     fn russian_locale() -> LocaleGuard {
         let previous = rust_i18n::locale().to_string();
         rust_i18n::set_locale("ru");
         LocaleGuard(previous)
     }
 
+    fn english_locale() -> LocaleGuard {
+        let previous = rust_i18n::locale().to_string();
+        rust_i18n::set_locale("en");
+        LocaleGuard(previous)
+    }
+
     #[cfg(windows)]
     #[test]
     fn ui_regression_snapshot_region_text_menu() {
+        let _ui = crate::app::test_support::ui_test_guard();
         let _locale = russian_locale();
         let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
         crate::theme::install(&harness.ctx);
@@ -1088,6 +1266,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn ui_regression_snapshot_region_palette() {
+        let _ui = crate::app::test_support::ui_test_guard();
         let _locale = russian_locale();
         let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
         crate::theme::install(&harness.ctx);
@@ -1105,6 +1284,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn ui_regression_snapshot_region_edge_selection() {
+        let _ui = crate::app::test_support::ui_test_guard();
         let _locale = russian_locale();
         let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
         crate::theme::install(&harness.ctx);
@@ -1211,7 +1391,31 @@ mod tests {
         harness.run_steps(2);
         assert!(matches!(
             harness.state().as_ref().unwrap().state.lock().outcome,
-            Some(Outcome::Image { .. })
+            Some(Outcome::Image {
+                action: AfterCapture::CopyAndSave,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn enter_saves_and_copies_like_the_copy_button() {
+        let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
+        crate::theme::install(&harness.ctx);
+        harness.run_steps(2);
+        drag(
+            &mut harness,
+            egui::pos2(100.0, 80.0),
+            egui::pos2(360.0, 280.0),
+        );
+        harness.key_press(egui::Key::Enter);
+        harness.run_steps(2);
+        assert!(matches!(
+            harness.state().as_ref().unwrap().state.lock().outcome,
+            Some(Outcome::Image {
+                action: AfterCapture::CopyAndSave,
+                ..
+            })
         ));
     }
 

@@ -444,6 +444,62 @@ pub fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) ->
 
 pub const COLUMN_MIN: f32 = 330.0;
 
+pub(crate) fn mark_modal<R>(ctx: &egui::Context, response: &Option<egui::InnerResponse<R>>) {
+    if let Some(response) = response {
+        ctx.memory_mut(|memory| memory.set_modal_layer(response.response.layer_id));
+        mark_modal_rect(ctx, response.response.rect);
+    }
+}
+
+pub(crate) fn mark_modal_rect(ctx: &egui::Context, rect: egui::Rect) {
+    ctx.data_mut(|data| {
+        let id = egui::Id::new("modal-rects");
+        let mut rects: Vec<egui::Rect> = data.get_temp(id).unwrap_or_default();
+        rects.push(rect);
+        data.insert_temp(id, rects);
+    });
+}
+
+pub(crate) fn block_background_input(ctx: &egui::Context) {
+    let rects: Vec<egui::Rect> = ctx
+        .data_mut(|data| data.remove_temp(egui::Id::new("modal-rects")))
+        .unwrap_or_default();
+    if rects.is_empty() {
+        return;
+    }
+    let wants_keys = ctx.egui_wants_keyboard_input();
+    ctx.input_mut(|input| {
+        input.events.retain(|event| match event {
+            egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => {
+                rects.iter().any(|rect| rect.contains(*pos))
+            }
+            egui::Event::Key { .. }
+            | egui::Event::Text(_)
+            | egui::Event::Paste(_)
+            | egui::Event::Copy
+            | egui::Event::Cut => wants_keys,
+            _ => true,
+        });
+    });
+}
+
+pub(crate) fn modal_backdrop(ctx: &egui::Context) {
+    let frame = ctx.cumulative_frame_nr();
+    let id = egui::Id::new("modal-backdrop-frame");
+    if ctx.data(|data| data.get_temp::<u64>(id)) == Some(frame) {
+        return;
+    }
+    ctx.data_mut(|data| data.insert_temp(id, frame));
+    egui::Area::new(egui::Id::new("modal-backdrop"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::Pos2::ZERO)
+        .show(ctx, |ui| {
+            let rect = ctx.content_rect();
+            ui.set_min_size(rect.size());
+            ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        });
+}
+
 pub fn is_wide(ui: &egui::Ui) -> bool {
     ui.available_width() >= 2.0 * COLUMN_MIN + ui.spacing().item_spacing.x
 }
@@ -465,46 +521,6 @@ pub fn split_card(
             ui.separator();
             right(ui);
         }
-    });
-}
-
-pub fn equal_cards(
-    ui: &mut egui::Ui,
-    _id: &str,
-    left: impl FnOnce(&mut egui::Ui),
-    right: impl FnOnce(&mut egui::Ui),
-) {
-    if !is_wide(ui) {
-        for add in [
-            Box::new(left) as Box<dyn FnOnce(&mut egui::Ui)>,
-            Box::new(right),
-        ] {
-            card(ui).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                add(ui);
-            });
-            ui.add_space(4.0);
-        }
-        return;
-    }
-    ui.columns(2, |cols| {
-        let (a, b) = cols.split_at_mut(1);
-        let (ca, cb) = (&mut a[0], &mut b[0]);
-        let mut pa = card(ca).begin(ca);
-        let mut pb = card(cb).begin(cb);
-        pa.content_ui.set_width(pa.content_ui.available_width());
-        pb.content_ui.set_width(pb.content_ui.available_width());
-        left(&mut pa.content_ui);
-        right(&mut pb.content_ui);
-        let (ha, hb) = (
-            pa.content_ui.min_rect().height(),
-            pb.content_ui.min_rect().height(),
-        );
-        let h = ha.max(hb);
-        pa.content_ui.add_space(h - ha);
-        pb.content_ui.add_space(h - hb);
-        pa.end(ca);
-        pb.end(cb);
     });
 }
 

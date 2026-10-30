@@ -12,6 +12,7 @@ pub(crate) enum CaptureKind {
     Region {
         purpose: crate::overlay::Purpose,
         after_completion: bool,
+        restore: bool,
         start: usize,
     },
     Fullscreen {

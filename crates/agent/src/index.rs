@@ -175,7 +175,6 @@ mod tests {
             },
             ..AgentSettings::default()
         };
-        let budget = settings.budget.clone();
         let index = Index::new(ai, Arc::new(move || settings.clone()));
         let store = crate::run::open_store(ai).unwrap();
         let task_id = store
@@ -188,7 +187,7 @@ mod tests {
             ai_dir: ai.to_path_buf(),
             engine: Arc::new(fake.clone()),
             store,
-            slots: crate::slots::Slots::new(budget),
+            slots: mediaa_core::slots::Slots::new(),
             settings: Arc::new(AgentSettings::default),
             streams: Arc::new(crate::run::Streams::default()),
         };

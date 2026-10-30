@@ -326,8 +326,8 @@ mod tests {
     }
 
     fn opened(ai: &Path, engine: Arc<dyn Engine>, settings: &AgentSettings) -> Arc<Scheduler> {
-        let sched = crate::run::open_scheduler(ai, &settings.budget).unwrap();
-        let slots = crate::slots::Slots::new(settings.budget.clone());
+        let sched = crate::run::open_scheduler(ai).unwrap();
+        let slots = mediaa_core::slots::Slots::new();
         let s = settings.clone();
         let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || s.clone());
         crate::run::register_stages(
@@ -1155,13 +1155,12 @@ mod tests {
     }
 
     fn drain_with_a_fake_handler(store: Arc<dyn Store>, seed: u64) {
-        let settings = AgentSettings::default();
-        let sched = Scheduler::new(store.clone(), crate::run::pools(&settings.budget));
+        let sched = Scheduler::new(store.clone(), crate::run::pools());
         let host = crate::run::Host {
             ai_dir: std::env::temp_dir(),
             engine: Arc::new(FakeEngine::new()),
             store: store.clone(),
-            slots: crate::slots::Slots::new(settings.budget.clone()),
+            slots: mediaa_core::slots::Slots::new(),
             settings: Arc::new(AgentSettings::default),
             streams: Arc::new(crate::run::Streams::default()),
         };

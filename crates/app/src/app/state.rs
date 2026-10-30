@@ -28,6 +28,7 @@ pub(crate) enum Pending {
     RegionScreenshot {
         purpose: overlay::Purpose,
         after_completion: bool,
+        restore: bool,
     },
     FullscreenScreenshot {
         monitor: MonitorInfo,

@@ -1,4 +1,4 @@
-use crate::formats::{AnimFormat, AudioFormat, ImageFormat, OutputKind, VideoContainer};
+use crate::formats::{AnimFormat, AudioFormat, OutputKind, VideoContainer};
 use crate::limits::{AUDIO_KBPS, DEFAULT_MUSIC_AUDIO_KBPS, FPS, GIF_COLORS, VIDEO_QUALITY};
 use crate::paths;
 use serde::{Deserialize, Serialize};
@@ -23,12 +23,6 @@ pub enum AfterCapture {
 }
 
 impl AfterCapture {
-    pub const ALL: [AfterCapture; 3] = [
-        AfterCapture::Copy,
-        AfterCapture::Save,
-        AfterCapture::CopyAndSave,
-    ];
-
     pub fn copies(self) -> bool {
         matches!(self, AfterCapture::Copy | AfterCapture::CopyAndSave)
     }
@@ -62,24 +56,6 @@ impl GifDither {
             GifDither::Bayer => "Bayer",
             GifDither::Sierra2 => "Sierra-2",
             GifDither::FloydSteinberg => "Floyd–Steinberg",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ScreenshotSettings {
-    pub format: ImageFormat,
-    pub after_capture: AfterCapture,
-    pub hide_window: bool,
-}
-
-impl Default for ScreenshotSettings {
-    fn default() -> Self {
-        Self {
-            format: ImageFormat::Png,
-            after_capture: AfterCapture::CopyAndSave,
-            hide_window: true,
         }
     }
 }
@@ -257,7 +233,7 @@ impl AnimSettings {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HotkeySettings {
     pub enabled: bool,
@@ -268,33 +244,12 @@ pub struct HotkeySettings {
     pub stop_recording: String,
 }
 
-impl Default for HotkeySettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            region_screenshot: String::new(),
-            fullscreen_screenshot: String::new(),
-            start_video: String::new(),
-            start_audio: String::new(),
-            stop_recording: String::new(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TrayClickAction {
     OpenWindow,
     #[default]
     ScreenArea,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AfterCompletionAction {
-    #[default]
-    OpenLibrary,
-    CopyFile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -320,7 +275,6 @@ pub struct Settings {
     pub language: Option<String>,
     pub media_dir: PathBuf,
     pub convert_dir: Option<PathBuf>,
-    pub screenshot: ScreenshotSettings,
     pub record: RecordSettings,
     pub anim: AnimationQuality,
     pub hotkey_record: RecordSettings,
@@ -336,8 +290,8 @@ pub struct Settings {
     pub start_in_tray: bool,
     pub close_to_tray: bool,
     pub tray_left_click: TrayClickAction,
+    pub tray_progress: bool,
     pub stop_recording_on_left_click: bool,
-    pub after_completion: AfterCompletionAction,
     pub highlight_recording_region: bool,
     pub recording_region_outline_width: u32,
 }
@@ -349,7 +303,6 @@ impl Default for Settings {
             language: None,
             media_dir: paths::default_media_dir(),
             convert_dir: None,
-            screenshot: ScreenshotSettings::default(),
             record: RecordSettings::default(),
             anim: AnimationQuality::default(),
             hotkey_record: RecordSettings {
@@ -373,8 +326,8 @@ impl Default for Settings {
             start_in_tray: false,
             close_to_tray: true,
             tray_left_click: TrayClickAction::default(),
+            tray_progress: true,
             stop_recording_on_left_click: true,
-            after_completion: AfterCompletionAction::default(),
             highlight_recording_region: true,
             recording_region_outline_width: 4,
         }
@@ -431,6 +384,9 @@ impl Settings {
         }
         if self.media_dir.as_os_str().is_empty() {
             self.media_dir = paths::default_media_dir();
+        }
+        if !self.launch_at_login {
+            self.start_in_tray = false;
         }
         self.recording_region_outline_width = self.recording_region_outline_width.clamp(2, 32);
         self
@@ -491,7 +447,6 @@ mod tests {
         s.record.output_height = 360;
         s.tray_left_click = TrayClickAction::OpenWindow;
         s.stop_recording_on_left_click = false;
-        s.after_completion = AfterCompletionAction::CopyFile;
         s.highlight_recording_region = false;
         s.recording_region_outline_width = 17;
         s.record.segmented_webp = false;
@@ -546,6 +501,17 @@ mod tests {
     }
 
     #[test]
+    fn tray_progress_is_on_by_default() {
+        assert!(Settings::default().tray_progress);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.toml");
+        std::fs::write(&path, "close_to_tray = true\n").unwrap();
+        assert!(Settings::load_from(&path).tray_progress);
+        std::fs::write(&path, "tray_progress = false\n").unwrap();
+        assert!(!Settings::load_from(&path).tray_progress);
+    }
+
+    #[test]
     fn autostart_and_tray_start_are_disabled_by_default() {
         let settings = Settings::default();
         assert!(!settings.launch_at_login);
@@ -560,6 +526,9 @@ mod tests {
         let loaded = Settings::load_from(&path);
         assert!(loaded.launch_at_login);
         assert!(loaded.start_in_tray);
+        std::fs::write(&path, "launch_at_login = false\nstart_in_tray = true\n").unwrap();
+        let loaded = Settings::load_from(&path);
+        assert!(!loaded.start_in_tray, "tray start needs autostart");
     }
 
     #[test]
@@ -588,26 +557,6 @@ mod tests {
         assert!(Settings::load_from(&path).stop_recording_on_left_click);
         std::fs::write(&path, "stop_recording_on_left_click = false\n").unwrap();
         assert!(!Settings::load_from(&path).stop_recording_on_left_click);
-    }
-
-    #[test]
-    fn completion_opens_the_library_by_default() {
-        assert_eq!(
-            AfterCompletionAction::default(),
-            AfterCompletionAction::OpenLibrary
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("s.toml");
-        std::fs::write(&path, "close_to_tray = true\n").unwrap();
-        assert_eq!(
-            Settings::load_from(&path).after_completion,
-            AfterCompletionAction::OpenLibrary
-        );
-        std::fs::write(&path, "after_completion = \"copy_file\"\n").unwrap();
-        assert_eq!(
-            Settings::load_from(&path).after_completion,
-            AfterCompletionAction::CopyFile
-        );
     }
 
     #[test]
@@ -734,6 +683,14 @@ mod tests {
         ]
         .iter()
         .all(|k| k.is_empty()));
+    }
+
+    #[test]
+    fn global_hotkeys_are_off_by_default() {
+        assert!(!HotkeySettings::default().enabled);
+        assert!(!Settings::default().hotkeys.enabled);
+        let bare: HotkeySettings = toml::from_str("").unwrap();
+        assert!(!bare.enabled);
     }
 
     #[test]

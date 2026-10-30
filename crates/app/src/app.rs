@@ -21,9 +21,7 @@ use crate::{pages, theme};
 use command::{AppCommand, RecordingCommand};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
-use mediaa_core::settings::{
-    AfterCapture, AfterCompletionAction, RecordProfile, ScreenChoice, TrayClickAction,
-};
+use mediaa_core::settings::{AfterCapture, RecordProfile, ScreenChoice, TrayClickAction};
 use mediaa_core::source::{AudioSource, SourceFactory};
 use mediaa_core::{library, naming, paths, Frame, ImageFormat, OutputKind, Settings};
 use mediaa_media::recorder::{
@@ -78,6 +76,7 @@ pub struct App {
     desktop_jobs: Vec<crate::jobs::Job<()>>,
     pending: Option<(Instant, Pending)>,
     hidden_by_us: bool,
+    recording_quiet: bool,
     ghosted: bool,
     pub(crate) recording: features::recording::RecordingController,
     pub(crate) capture: features::capture::CaptureController,
@@ -165,8 +164,8 @@ impl App {
             .as_mut()
             .map(|h| h.apply(&settings.hotkeys))
             .unwrap_or_default();
-        let agent_budget = settings.agent.budget.clone();
-        let engine = std::sync::Arc::new(mediaa_engine::Connections::new(
+        let slots = mediaa_core::slots::Slots::new();
+        let connections = std::sync::Arc::new(mediaa_engine::Connections::new(
             settings.agent.connections.clone(),
         ));
 
@@ -194,6 +193,7 @@ impl App {
             desktop_jobs: Vec::new(),
             pending: None,
             hidden_by_us: false,
+            recording_quiet: false,
             ghosted: false,
             recording: Default::default(),
             capture: Default::default(),
@@ -202,7 +202,7 @@ impl App {
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
             conversion: Default::default(),
-            agent: features::agent::AgentController::with_connections(engine, &agent_budget),
+            agent: features::agent::AgentController::with_connections(connections, slots),
             quit_when_idle: false,
             recovery_job: None,
             housekeeping_jobs: Vec::new(),
@@ -502,8 +502,9 @@ impl eframe::App for App {
         self.prewarm_region_overlay(&ctx);
         self.handle_overlay(&ctx);
         pages::shell(self, ui);
+        let interactive = ctx.memory(|memory| memory.allows_interaction(ui.layer_id()));
         if !self.lib.viewer_open() {
-            self.show_notices(&ctx);
+            self.show_notices(&ctx, interactive);
         }
     }
 
@@ -602,7 +603,7 @@ pub fn page_from_args(args: &[String]) -> Option<Page> {
 mod tests;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod ui_tests;

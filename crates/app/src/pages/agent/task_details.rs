@@ -586,8 +586,10 @@ pub fn show(
         .unwrap_or_default();
     let failed = task.status == TaskStatus::Failed || !facts.error.is_empty();
     theme::with_compact_title(ctx, || {
-        egui::Window::new(t!("details.title"))
+        theme::modal_backdrop(ctx);
+        let response = egui::Window::new(t!("details.title"))
             .id(egui::Id::new(("task-details", task.id)))
+            .order(egui::Order::Foreground)
             .collapsible(false)
             .resizable(true)
             .default_width(560.0)
@@ -712,6 +714,7 @@ pub fn show(
                     }
                 });
             });
+        theme::mark_modal(ctx, &response);
     });
     if !open {
         return Some(Cmd::Close);

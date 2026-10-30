@@ -857,7 +857,7 @@ fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaa_core::agent::{AgentSettings, Budget};
+    use mediaa_core::agent::AgentSettings;
     use mediaa_core::transcript::{Reply, Word};
     use mediaa_engine::testing::FakeEngine;
     use mediaa_engine::Engine;
@@ -1295,12 +1295,12 @@ mod tests {
             n += 1;
         }
         t.set_replies(&replies).unwrap();
-        let sched = crate::run::open_scheduler(ai, &test_settings().budget).unwrap();
+        let sched = crate::run::open_scheduler(ai).unwrap();
         crate::run::register_stages(
             &sched,
             ai,
             engine,
-            crate::slots::Slots::new(Budget::default()),
+            mediaa_core::slots::Slots::new(),
             current(),
             Arc::new(crate::run::Streams::default()),
         );
@@ -1440,7 +1440,7 @@ mod tests {
         }
         let defaults = AgentSettings::default();
         let engine = crate::live::engine();
-        let sched = crate::run::open_scheduler(&ai, &defaults.budget).unwrap();
+        let sched = crate::run::open_scheduler(&ai).unwrap();
         for t in sched.store().list().unwrap() {
             let _ = sched.remove(t.id);
         }
@@ -1450,7 +1450,7 @@ mod tests {
             &sched,
             &ai,
             engine,
-            crate::slots::Slots::new(Budget::default()),
+            mediaa_core::slots::Slots::new(),
             settings,
             Arc::new(crate::run::Streams::default()),
         );
@@ -1542,7 +1542,7 @@ mod tests {
             ai_dir: ai.clone(),
             engine,
             store: sched.store().clone(),
-            slots: crate::slots::Slots::new(Budget::default()),
+            slots: mediaa_core::slots::Slots::new(),
             settings: current(),
             streams: Arc::new(crate::run::Streams::default()),
         };
@@ -1595,7 +1595,7 @@ mod tests {
             ai_dir: ai.clone(),
             engine,
             store: sched.store().clone(),
-            slots: crate::slots::Slots::new(Budget::default()),
+            slots: mediaa_core::slots::Slots::new(),
             settings: current(),
             streams: Arc::new(crate::run::Streams::default()),
         };
@@ -1663,7 +1663,7 @@ mod tests {
             ai_dir: ai.clone(),
             engine,
             store: sched.store().clone(),
-            slots: crate::slots::Slots::new(Budget::default()),
+            slots: mediaa_core::slots::Slots::new(),
             settings: current(),
             streams: Arc::new(crate::run::Streams::default()),
         };
@@ -1721,12 +1721,12 @@ mod tests {
             r#"{"evidence":[{"speaker":"@s1","name":"Антон","how":"addressed","time":"6:35","sure":"high"}]}"#,
         ]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
-        let sched = crate::run::open_scheduler(&ai, &test_settings().budget).unwrap();
+        let sched = crate::run::open_scheduler(&ai).unwrap();
         crate::run::register_stages(
             &sched,
             &ai,
             engine.clone(),
-            crate::slots::Slots::new(Budget::default()),
+            mediaa_core::slots::Slots::new(),
             current(),
             Arc::new(crate::run::Streams::default()),
         );
@@ -1736,7 +1736,7 @@ mod tests {
             ai_dir: ai.clone(),
             engine,
             store: sched.store().clone(),
-            slots: crate::slots::Slots::new(Budget::default()),
+            slots: mediaa_core::slots::Slots::new(),
             settings: current(),
             streams: Arc::new(crate::run::Streams::default()),
         };

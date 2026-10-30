@@ -1085,7 +1085,7 @@ mod tests {
             ai_dir: ai.to_path_buf(),
             engine,
             store,
-            slots: crate::slots::Slots::new(settings.budget.clone()),
+            slots: mediaa_core::slots::Slots::new(),
             settings: Arc::new(move || current.clone()),
             streams: Arc::new(crate::run::Streams::default()),
         }
@@ -1217,16 +1217,15 @@ mod tests {
             transcript.put_phrases(0.0, &phrases).unwrap();
         }
 
-        let settings = AgentSettings::default();
         let open = || {
-            let sched = crate::run::open_scheduler(&ai, &settings.budget).unwrap();
+            let sched = crate::run::open_scheduler(&ai).unwrap();
             let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> =
                 Arc::new(AgentSettings::default);
             crate::run::register_stages(
                 &sched,
                 &ai,
                 crate::live::engine(),
-                crate::slots::Slots::new(settings.budget.clone()),
+                mediaa_core::slots::Slots::new(),
                 current,
                 Arc::new(crate::run::Streams::default()),
             );

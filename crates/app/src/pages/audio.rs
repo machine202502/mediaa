@@ -22,9 +22,13 @@ pub fn ui(
     let mut actions = Vec::new();
     let ctx = ui.ctx().clone();
     header(ui, &t!("audio.title"), "");
+    let live = !recording.is_idle();
     if let Some(command) = super::record::status::live_status(recording, ui, &ctx) {
         actions.push(AudioUiAction::RecordingCommand(command));
         return actions;
+    }
+    if live {
+        ui.disable();
     }
 
     let (changed, refresh_mics) = audio_editor(ui, &mut settings.audio_record, microphones, "page");

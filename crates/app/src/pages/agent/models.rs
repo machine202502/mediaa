@@ -14,6 +14,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Default)]
 pub struct ModelsUi {
     models: HashMap<String, Vec<String>>,
+    listing: HashMap<String, Job<Result<Vec<String>, String>>>,
+    list_error: HashMap<String, String>,
     pull: HashMap<String, Job<Result<(), String>>>,
     pull_progress: HashMap<String, Arc<Mutex<(u64, u64)>>>,
     check: Option<Job<Vec<(ModelRole, Status)>>>,
@@ -21,6 +23,32 @@ pub struct ModelsUi {
 
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     header(ui, &t!("agent.models_title"), "");
+    let listed: Vec<(String, Result<Vec<String>, String>)> = app
+        .agent
+        .models
+        .listing
+        .iter_mut()
+        .filter_map(|(id, job)| {
+            job.poll().map(|result| {
+                (
+                    id.clone(),
+                    result.unwrap_or_else(|error| Err(format!("{error:#}"))),
+                )
+            })
+        })
+        .collect();
+    for (id, result) in listed {
+        app.agent.models.listing.remove(&id);
+        match result {
+            Ok(models) => {
+                app.agent.models.list_error.remove(&id);
+                app.agent.models.models.insert(id, models);
+            }
+            Err(error) => {
+                app.agent.models.list_error.insert(id, error);
+            }
+        }
+    }
     if let Some(job) = app.agent.models.check.as_mut() {
         if let Some(result) = job.poll() {
             let _ = result;
@@ -108,12 +136,18 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 if ui.button(t!("agent.list_models")).clicked() {
                     let engine = app.agent.engine().clone();
                     let id = connection_id.clone();
-                    if let Ok(list) = engine.models(&id) {
-                        app.agent
-                            .models
-                            .models
-                            .insert(id, list.into_iter().map(|model| model.id).collect());
+                    let job = Job::spawn("list-models", Arc::default(), move || {
+                        engine
+                            .models(&id)
+                            .map(|list| list.into_iter().map(|model| model.id).collect())
+                            .map_err(|error| format!("{error:#}"))
+                    });
+                    if let Ok(job) = job {
+                        app.agent.models.listing.insert(connection_id.clone(), job);
                     }
+                }
+                if let Some(error) = app.agent.models.list_error.get(&connection_id) {
+                    theme::hint(ui, error);
                 }
                 let model_name = source.model.clone();
                 let listed = app
@@ -142,18 +176,20 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                         .find(|connection| connection.id == connection_id)
                         .cloned();
                     if let Some(connection) = connection {
+                        let engine = app.agent.engine().clone();
                         let model = model_name.clone();
                         let job = Job::spawn("ollama-pull", Arc::default(), move || {
                             let cancel = AtomicBool::new(false);
-                            mediaa_engine::pull(
-                                &connection,
-                                &model,
-                                &mut |done, total| {
-                                    *progress.lock().expect("pull progress") = (done, total);
-                                },
-                                &cancel,
-                            )
-                            .map_err(|error| format!("{error:#}"))
+                            engine
+                                .pull(
+                                    &connection.id,
+                                    &model,
+                                    &mut |done, total| {
+                                        *progress.lock().expect("pull progress") = (done, total);
+                                    },
+                                    &cancel,
+                                )
+                                .map_err(|error| format!("{error:#}"))
                         });
                         if let Ok(job) = job {
                             app.agent.models.pull.insert(role_key(role), job);

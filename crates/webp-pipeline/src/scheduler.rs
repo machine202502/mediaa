@@ -1,5 +1,6 @@
 use super::memory::MemoryBudget;
 use super::*;
+use crossbeam_channel::unbounded;
 
 pub(super) struct Schedule {
     pub(super) config: PipelineConfig,
@@ -87,7 +88,7 @@ impl Schedule {
         backend: &dyn SegmentBackend,
     ) -> Round {
         let (work_tx, work_rx) = bounded(self.pending.len().max(1));
-        let (result_tx, result_rx) = bounded(self.workers.max(1));
+        let (result_tx, result_rx) = unbounded();
         for segment in &self.pending {
             let _ = work_tx.send(segment.clone());
         }

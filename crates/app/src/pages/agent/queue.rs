@@ -8,8 +8,8 @@ use crate::features::library::library_dir;
 use crate::theme::{self, Palette};
 use eframe::egui::{self, Align2, CornerRadius, FontId, Rect, RichText, Sense};
 use egui_phosphor::regular as icon;
-use mediaa_agent::slots;
-use mediaa_core::agent::{Budget, WorkKind};
+use mediaa_core::slots;
+
 use mediaa_core::catalogs::ai_dir;
 use mediaa_queue::{
     self as queue, Filter, KindGroup, KindStat, Scheduler, Stats, Status as TaskStatus, Store,
@@ -798,9 +798,9 @@ fn row_ui(
 pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     header(ui, &t!("queue.title"), "");
     let dir = ai_dir(&library_dir(&app.settings));
-    let budget = app.settings.agent.budget.clone();
+
     let slots = app.agent.slots().status();
-    runtime_card(ui, &slots, &budget);
+    runtime_card(ui, &slots);
     let host = app
         .agent
         .services()
@@ -1019,65 +1019,57 @@ fn task_window(
     }
 }
 
-fn slots(status: &slots::Status, budget: &Budget) -> Vec<(WorkKind, u32, u32, usize)> {
-    WorkKind::ALL
+fn rows(state: &slots::Status) -> Vec<(String, u32, u32, usize)> {
+    state
+        .groups
         .iter()
-        .map(|&k| {
-            let running = status
-                .running
-                .iter()
-                .find(|(r, _)| *r == k)
-                .map_or(0, |(_, n)| *n);
-            (
-                k,
-                running,
-                budget.limit(k),
-                status.waiting.iter().filter(|(_, w)| *w == k).count(),
-            )
-        })
+        .map(|group| (group.name.clone(), group.busy, group.limit, group.waiting))
         .collect()
 }
 
-fn runtime_card(ui: &mut egui::Ui, state: &slots::Status, budget: &Budget) {
+fn runtime_card(ui: &mut egui::Ui, state: &slots::Status) {
     theme::card(ui).show(ui, |ui| {
         ui.set_width(ui.available_width());
         theme::section(ui, icon::GAUGE, &t!("queue.budget"));
         let p = theme::palette(ui);
-        egui::Grid::new("queue-budget")
-            .num_columns(3)
-            .spacing([12.0, 6.0])
-            .show(ui, |ui| {
-                for (kind, running, limit, waiting) in slots(state, budget) {
-                    ui.label(super::budget::kind_label(kind));
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 3.0;
-                        for i in 0..limit.max(running) {
-                            let busy = i < running;
-                            ui.label(
-                                RichText::new(if busy {
-                                    icon::CIRCLE
-                                } else {
-                                    icon::CIRCLE_DASHED
-                                })
-                                .color(if busy {
-                                    p.accent
-                                } else {
-                                    p.text_weak
-                                }),
-                            );
-                        }
-                        theme::hint(ui, t!("queue.slots", busy = running, max = limit));
-                    });
-                    if waiting > 0 {
-                        ui.label(RichText::new(t!("queue.waits", n = waiting)).color(p.warning));
-                    } else {
-                        ui.label("");
-                    }
-                    ui.end_row();
-                }
-            });
+        theme::section(ui, icon::STACK, &t!("queue.pools"));
+        for (name, busy, limit, waiting) in rows(state) {
+            load_row(ui, p, &name, busy, limit, waiting);
+        }
+        ui.add_space(4.0);
+        theme::section(ui, icon::GLOBE, &t!("queue.tools"));
+        load_row(
+            ui,
+            p,
+            &t!("agent.web_search"),
+            state.web.busy,
+            state.web.limit,
+            state.web.waiting,
+        );
     });
     ui.add_space(4.0);
+}
+
+fn load_row(ui: &mut egui::Ui, p: Palette, name: &str, busy: u32, limit: u32, waiting: usize) {
+    ui.horizontal(|ui| {
+        ui.label(name);
+        ui.spacing_mut().item_spacing.x = 3.0;
+        for i in 0..limit.max(busy) {
+            let taken = i < busy;
+            ui.label(
+                RichText::new(if taken {
+                    icon::CIRCLE
+                } else {
+                    icon::CIRCLE_DASHED
+                })
+                .color(if taken { p.accent } else { p.text_weak }),
+            );
+        }
+        theme::hint(ui, t!("queue.slots", busy = busy, max = limit));
+        if waiting > 0 {
+            ui.label(RichText::new(t!("queue.waits", n = waiting)).color(p.warning));
+        }
+    });
 }
 
 #[cfg(test)]
@@ -1085,19 +1077,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn budget_in_use() {
+    fn the_load_lists_pools_and_the_web_tool() {
         let state = slots::Status {
-            running: vec![(WorkKind::Agent, 1), (WorkKind::WebSearch, 2)],
-            waiting: vec![(7, WorkKind::WebSearch), (8, WorkKind::Transcription)],
+            groups: vec![
+                slots::GroupLoad {
+                    name: "Single".into(),
+                    busy: 1,
+                    limit: 2,
+                    waiting: 0,
+                },
+                slots::GroupLoad {
+                    name: "Local".into(),
+                    busy: 0,
+                    limit: 1,
+                    waiting: 2,
+                },
+            ],
+            web: slots::ToolLoad {
+                busy: 2,
+                limit: 2,
+                waiting: 1,
+            },
         };
-        let budget = Budget::default();
-        let s = slots(&state, &budget);
-        assert_eq!(s.len(), WorkKind::ALL.len());
-        assert!(
-            s.contains(&(WorkKind::Agent, 1, 2, 0))
-                && s.contains(&(WorkKind::WebSearch, 2, 2, 1))
-                && s.contains(&(WorkKind::Transcription, 0, 1, 1)),
-            "{s:?}"
+        let s = rows(&state);
+        assert_eq!(
+            s,
+            [
+                ("Single".to_string(), 1, 2, 0),
+                ("Local".to_string(), 0, 1, 2)
+            ]
+        );
+        assert_eq!(
+            (state.web.busy, state.web.limit, state.web.waiting),
+            (2, 2, 1)
         );
     }
 

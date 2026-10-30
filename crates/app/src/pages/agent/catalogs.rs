@@ -185,13 +185,11 @@ impl Search {
                     let settings = job.services.settings.read().expect("settings lock").clone();
                     let found: Result<Found, String> = search::search_files(
                         job.services.engine.as_ref(),
-                        &job.services.slots,
                         &settings,
                         &job.services.ai_dir,
                         &sources,
                         &job.query,
                         CATALOG_HITS,
-                        true,
                     )
                     .map(|(hits, trace)| {
                         let hits = hits
@@ -854,6 +852,7 @@ pub fn dialogs(app: &mut App, ctx: &egui::Context) {
                 }
             });
         });
+        theme::mark_modal_rect(ctx, modal.response.rect);
         if modal.should_close() && decision.is_none() {
             decision = Some(false);
         }

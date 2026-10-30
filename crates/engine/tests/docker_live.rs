@@ -70,7 +70,8 @@ fn docker_chat_embed_and_speech_answer() {
     assert!(vectors[0].len() > 8, "short embedding {}", vectors[0].len());
     eprintln!("embedding dims: {}", vectors[0].len());
 
-    let wav = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/live-speech.wav");
+    let wav =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/live-speech.wav");
     let speech = engine
         .transcribe(
             &TranscribeRequest {

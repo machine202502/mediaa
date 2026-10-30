@@ -124,6 +124,228 @@ fn records_gif_and_webp_directly() {
 }
 
 #[test]
+fn segmented_parallel_webp_finishes_two_sources_without_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![pattern(96, 64), pattern(128, 72)],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let session = RecordingSession::start(req).unwrap();
+    std::thread::sleep(Duration::from_millis(2600));
+    let (event, warnings) = finish_with_timeout(session, StopAction::Save, Duration::from_secs(40));
+    let SessionEvent::Finished(paths) = event else {
+        panic!("{event:?}")
+    };
+    assert_eq!(paths.len(), 2, "{warnings:?}");
+    for path in &paths {
+        let info = probe(path).unwrap();
+        assert!(
+            info.duration_secs().is_some_and(|duration| duration > 1.5),
+            "{info:?}"
+        );
+        let decoder = image_webp::WebPDecoder::new(std::io::BufReader::new(
+            std::fs::File::open(path).unwrap(),
+        ))
+        .unwrap();
+        let frames = decoder.num_frames();
+        assert!(frames > 10, "{}: {frames} frames", path.display());
+    }
+    assert!(
+        warnings.iter().all(|warning| !warning.contains("WebP")),
+        "live encoding unexpectedly fell back: {warnings:?}"
+    );
+    assert!(!dir.path().join("work").exists());
+}
+
+#[test]
+fn segmented_fallback_encodes_two_sources_without_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("live-webp"), b"blocks the live encoder directory").unwrap();
+    let req = request(
+        dir.path(),
+        vec![pattern(96, 64), pattern(128, 72)],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let session = RecordingSession::start(req).unwrap();
+    std::thread::sleep(Duration::from_millis(1300));
+    let (event, warnings) = finish_with_timeout(session, StopAction::Save, Duration::from_secs(60));
+    let SessionEvent::Finished(paths) = event else {
+        panic!("{event:?}")
+    };
+    assert_eq!(paths.len(), 2, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.starts_with("WebpFallback")),
+        "the test must exercise the offline segmented path: {warnings:?}"
+    );
+    for path in &paths {
+        let info = probe(path).unwrap();
+        assert!(
+            info.duration_secs().is_some_and(|duration| duration > 0.8),
+            "{info:?}"
+        );
+    }
+}
+
+#[test]
+fn live_webp_handles_three_large_monitors_without_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            video_source("fake-monitor.webp", 1280, 720),
+            video_source("fake-monitor.webp", 1280, 720),
+            video_source("fake-monitor.webp", 1280, 720),
+        ],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let session = RecordingSession::start(req).unwrap();
+    std::thread::sleep(Duration::from_millis(2200));
+    let (event, warnings) = finish_with_timeout(session, StopAction::Save, Duration::from_secs(60));
+    let SessionEvent::Finished(paths) = event else {
+        panic!("{event:?}")
+    };
+    assert_eq!(paths.len(), 3, "{warnings:?}");
+    for path in &paths {
+        let info = probe(path).unwrap();
+        assert!(
+            info.duration_secs().is_some_and(|duration| duration > 1.4),
+            "{info:?}"
+        );
+    }
+}
+
+#[test]
+fn live_webp_handles_two_large_windows_without_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            video_source("fake-window.webp", 960, 540),
+            video_source("fake-window.webp", 960, 540),
+        ],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let session = RecordingSession::start(req).unwrap();
+    std::thread::sleep(Duration::from_millis(2200));
+    let (event, warnings) = finish_with_timeout(session, StopAction::Save, Duration::from_secs(60));
+    let SessionEvent::Finished(paths) = event else {
+        panic!("{event:?}")
+    };
+    assert_eq!(paths.len(), 2, "{warnings:?}");
+    for path in &paths {
+        let info = probe(path).unwrap();
+        assert!(
+            info.duration_secs().is_some_and(|duration| duration > 1.4),
+            "{info:?}"
+        );
+    }
+}
+
+#[test]
+fn one_failed_live_source_does_not_force_the_other_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("work/live-webp");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("source-1"), b"blocks only the second source").unwrap();
+    let log_start = super::log_position();
+    let req = request(
+        dir.path(),
+        vec![pattern(96, 64), pattern(128, 72)],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let session = RecordingSession::start(req).unwrap();
+    std::thread::sleep(Duration::from_millis(1600));
+    let (event, warnings) = finish_with_timeout(session, StopAction::Save, Duration::from_secs(60));
+    let SessionEvent::Finished(paths) = event else {
+        panic!("{event:?}")
+    };
+    assert_eq!(paths.len(), 2, "{warnings:?}");
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| warning.contains("live source 1")),
+        "{warnings:?}"
+    );
+    let logs = super::logs_since(log_start).join("\n");
+    assert!(logs.contains("stage=live source=1 failed"), "{logs}");
+    assert!(
+        logs.contains("stage=live source=0 merged=webp"),
+        "the healthy source must stay on the live path: {logs}"
+    );
+}
+
+#[test]
+fn both_failed_live_sources_fall_back_to_offline_webp() {
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("work/live-webp");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("source-0"), b"blocked").unwrap();
+    std::fs::write(live.join("source-1"), b"blocked").unwrap();
+    let log_start = super::log_position();
+    let req = request(
+        dir.path(),
+        vec![pattern(96, 64), pattern(128, 72)],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let session = RecordingSession::start(req).unwrap();
+    std::thread::sleep(Duration::from_millis(1600));
+    let (event, warnings) = finish_with_timeout(session, StopAction::Save, Duration::from_secs(60));
+    let SessionEvent::Finished(paths) = event else {
+        panic!("{event:?}")
+    };
+    assert_eq!(paths.len(), 2, "{warnings:?}");
+    for path in &paths {
+        let info = probe(path).unwrap();
+        assert!(
+            info.duration_secs().is_some_and(|duration| duration > 0.8),
+            "{info:?}"
+        );
+    }
+    let logs = super::logs_since(log_start).join("\n");
+    assert!(logs.contains("stage=live source=0 failed"), "{logs}");
+    assert!(logs.contains("stage=live source=1 failed"), "{logs}");
+    assert!(logs.contains("stage=offline-mkv"), "{logs}");
+}
+
+#[test]
+fn closing_one_video_source_finishes_without_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            video_source("fake-window.webp", 640, 360),
+            closing_video_source("fake-window.webp", 640, 360, 20),
+        ],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let session = RecordingSession::start(req).unwrap();
+    std::thread::sleep(Duration::from_millis(1800));
+    let (event, warnings) = finish_with_timeout(session, StopAction::Save, Duration::from_secs(60));
+    assert!(
+        matches!(
+            event,
+            SessionEvent::Finished(_)
+                | SessionEvent::Failed(_)
+                | SessionEvent::Cancelled
+                | SessionEvent::CaptureFailed(_)
+        ),
+        "{event:?} {warnings:?}"
+    );
+}
+
+#[test]
 fn webp_encoding_finishes_from_live_chunks_without_fallback() {
     let dir = tempfile::tempdir().unwrap();
     let req = request(

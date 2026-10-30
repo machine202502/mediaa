@@ -104,7 +104,7 @@ impl App {
     }
 
     pub fn start_region_screenshot(&mut self, ctx: &egui::Context, purpose: overlay::Purpose) {
-        self.start_region_screenshot_with_completion(ctx, purpose, false);
+        self.start_region_screenshot_mode(ctx, purpose, false, true, true);
     }
 
     pub(super) fn start_region_screenshot_with_completion(
@@ -112,6 +112,25 @@ impl App {
         ctx: &egui::Context,
         purpose: overlay::Purpose,
         after_completion: bool,
+    ) {
+        self.start_region_screenshot_mode(ctx, purpose, after_completion, false, false);
+    }
+
+    pub(super) fn start_region_screenshot_from_hotkey(
+        &mut self,
+        ctx: &egui::Context,
+        purpose: overlay::Purpose,
+    ) {
+        self.start_region_screenshot_mode(ctx, purpose, false, false, true);
+    }
+
+    fn start_region_screenshot_mode(
+        &mut self,
+        ctx: &egui::Context,
+        purpose: overlay::Purpose,
+        after_completion: bool,
+        restore: bool,
+        hide: bool,
     ) {
         if self.capture.overlay.is_some() {
             return;
@@ -123,7 +142,7 @@ impl App {
         if self.monitors.is_empty() {
             self.refresh_monitors();
         }
-        if ctx.input(|i| i.viewport().minimized == Some(true)) {
+        if hide && ctx.input(|i| i.viewport().minimized == Some(true)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         }
         self.schedule(
@@ -131,8 +150,9 @@ impl App {
             Pending::RegionScreenshot {
                 purpose,
                 after_completion,
+                restore,
             },
-            false,
+            hide,
         );
     }
 
@@ -162,14 +182,13 @@ impl App {
             .or_else(|| self.monitors.first().cloned());
         match monitor {
             Some(m) => {
-                let hide = self.settings.screenshot.hide_window;
                 self.schedule(
                     ctx,
                     Pending::FullscreenScreenshot {
                         monitor: m,
                         after_completion,
                     },
-                    hide,
+                    !after_completion,
                 );
             }
             None => self.error(t!("err.no_display")),
@@ -181,8 +200,7 @@ impl App {
             self.warning(t!("toast.finish_current"));
             return;
         }
-        let hide = self.settings.screenshot.hide_window;
-        self.schedule(ctx, Pending::WindowScreenshot(window_id), hide);
+        self.schedule(ctx, Pending::WindowScreenshot(window_id), true);
     }
 
     pub(super) fn queue_monitor_capture(
@@ -254,8 +272,23 @@ impl App {
                 self.error(t!("err.capture_timeout"));
                 return;
             }
-            self.restore_after_capture(ctx);
-            self.show_window(ctx);
+            match outcome.kind {
+                CaptureKind::Region { restore, .. } => {
+                    if restore {
+                        self.restore_after_capture(ctx);
+                        self.show_window(ctx);
+                    }
+                }
+                CaptureKind::Fullscreen { after_completion } => {
+                    if !after_completion {
+                        self.show_window(ctx);
+                    }
+                }
+                CaptureKind::Window | CaptureKind::OverlayMonitor { .. } => {
+                    self.restore_after_capture(ctx);
+                    self.show_window(ctx);
+                }
+            }
             self.error(t!("err.capture_timeout"));
             return;
         }
@@ -264,18 +297,19 @@ impl App {
                 CaptureKind::Region {
                     purpose,
                     after_completion,
+                    restore,
                     start,
                 },
                 Ok(first),
             ) => {
-                let after = self.settings.screenshot.after_capture;
+                let after = AfterCapture::CopyAndSave;
                 let purpose = match purpose {
                     overlay::Purpose::Area if !self.recording.is_idle() => {
                         overlay::Purpose::Screenshot
                     }
                     purpose => purpose,
                 };
-                if self.hidden_by_us {
+                if restore && self.hidden_by_us {
                     self.ghosted = self
                         .native_window
                         .is_some_and(|window| window.set_ghost(true));
@@ -291,6 +325,11 @@ impl App {
                     first,
                     after,
                     after_completion,
+                    restore,
+                    crate::overlay::SaveDefaults {
+                        dir: self.settings.media_dir.clone(),
+                        format: ImageFormat::Png,
+                    },
                 ));
                 ctx.request_repaint();
             }
@@ -298,16 +337,13 @@ impl App {
                 if !after_completion {
                     self.restore_after_capture(ctx);
                 }
-                let mut image = CapturedImage::whole(frame, self.settings.screenshot.after_capture);
+                let mut image = CapturedImage::whole(frame, AfterCapture::CopyAndSave);
                 image.after_completion = after_completion;
                 self.deliver_image(ctx, image);
             }
             (CaptureKind::Window, Ok(frame)) => {
                 self.restore_after_capture(ctx);
-                self.deliver_image(
-                    ctx,
-                    CapturedImage::whole(frame, self.settings.screenshot.after_capture),
-                );
+                self.deliver_image(ctx, CapturedImage::whole(frame, AfterCapture::CopyAndSave));
             }
             (CaptureKind::OverlayMonitor { index }, Ok(frame)) => {
                 if let Some(overlay) = self.capture.overlay.as_ref() {
@@ -315,12 +351,16 @@ impl App {
                     ctx.request_repaint();
                 }
             }
-            (CaptureKind::Region { .. }, Err(error)) => {
-                self.restore_after_capture(ctx);
+            (CaptureKind::Region { restore, .. }, Err(error)) => {
+                if restore {
+                    self.restore_after_capture(ctx);
+                }
                 self.error(t!("err.capture_failed_detail", error = error));
             }
-            (CaptureKind::Fullscreen { .. }, Err(error)) => {
-                self.show_window(ctx);
+            (CaptureKind::Fullscreen { after_completion }, Err(error)) => {
+                if !after_completion {
+                    self.show_window(ctx);
+                }
                 self.error(t!("err.capture_failed_detail", error = error));
             }
             (CaptureKind::Window, Err(error)) => {
@@ -343,10 +383,9 @@ impl App {
             self.warning(t!("toast.finish_current"));
             return;
         }
-        let copies_file =
-            after_completion && self.settings.after_completion == AfterCompletionAction::CopyFile;
+        let copies_file = after_completion;
         let save = action.saves() || after_completion;
-        let format = format.unwrap_or(self.settings.screenshot.format);
+        let format = format.unwrap_or(ImageFormat::Png);
         let path = save.then(|| {
             naming::media_path(
                 &self.settings.media_dir,
@@ -376,7 +415,9 @@ impl App {
         match screenshot {
             Ok(()) => {}
             Err(error) => {
-                self.show_window(ctx);
+                if !after_completion {
+                    self.show_window(ctx);
+                }
                 self.error(t!("err.save_failed", error = error));
                 return;
             }
@@ -394,7 +435,9 @@ impl App {
         let result = match outcome.result {
             Ok(result) => result,
             Err(_) => {
-                self.show_window(ctx);
+                if !outcome.after_completion {
+                    self.show_window(ctx);
+                }
                 self.error(t!("err.image_worker_stopped"));
                 return;
             }
@@ -409,29 +452,17 @@ impl App {
             self.lib.files_changed(std::slice::from_ref(path));
         }
         if outcome.after_completion {
-            match self.settings.after_completion {
-                AfterCompletionAction::OpenLibrary => {
-                    self.show_window(ctx);
-                    if !self.quit_when_idle {
-                        self.page = Page::Library;
-                    }
+            if let Some(error) = result.copy_file_error {
+                self.error(t!("err.copy_failed", error = error));
+                if !self.quit_when_idle {
+                    self.page = Page::Library;
                 }
-                AfterCompletionAction::CopyFile => {
-                    if let Some(error) = result.copy_file_error {
-                        self.show_window(ctx);
-                        self.error(t!("err.copy_failed", error = error));
-                        if !self.quit_when_idle {
-                            self.page = Page::Library;
-                        }
-                    } else if result.saved.is_none() {
-                        self.show_window(ctx);
-                        if !self.quit_when_idle {
-                            self.page = Page::Library;
-                        }
-                    } else if !self.hidden_by_us {
-                        self.success(t!("toast.shot_file_copied"));
-                    }
+            } else if result.saved.is_none() {
+                if !self.quit_when_idle {
+                    self.page = Page::Library;
                 }
+            } else if !self.hidden_by_us {
+                self.success(t!("toast.shot_file_copied"));
             }
         }
         let msg = match (
@@ -467,6 +498,7 @@ impl App {
             Pending::RegionScreenshot {
                 purpose,
                 after_completion,
+                restore,
             } => {
                 let start = self
                     .current_monitor_index(ctx)
@@ -480,6 +512,7 @@ impl App {
                     CaptureKind::Region {
                         purpose,
                         after_completion,
+                        restore,
                         start,
                     },
                     monitor.id,

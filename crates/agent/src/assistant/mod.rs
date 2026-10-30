@@ -16,8 +16,8 @@ pub use tools::{Recording, Tools};
 
 use crate::prompts;
 use crate::scope::Scope;
-use crate::slots::Slots;
 use crate::tools::{format_time, parse_time};
+use mediaa_core::slots::Slots;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -393,21 +393,31 @@ pub struct Waiter<'a> {
     pub grace: Duration,
 }
 
-pub fn provider_wait(status: &crate::slots::Status) -> Option<WaitReason> {
+pub fn provider_wait(
+    status: &mediaa_core::slots::Status,
+    group: Option<&str>,
+) -> Option<WaitReason> {
+    let group = group?;
     status
-        .waiting
+        .groups
         .iter()
-        .any(|(_, kind)| *kind == mediaa_core::agent::WorkKind::ProviderCalls)
+        .any(|known| known.name == group && known.waiting > 0)
         .then_some(WaitReason::ProviderSlot)
+}
+
+fn agent_group(settings: &mediaa_core::agent::AgentSettings) -> Option<String> {
+    let source = settings.models.agent.as_ref()?;
+    settings.place(&source.connection).map(str::to_string)
 }
 
 fn waiter(
     _scope: &Scope,
     slots: &Slots,
-    _settings: &mediaa_core::agent::AgentSettings,
+    settings: &mediaa_core::agent::AgentSettings,
 ) -> Box<dyn Fn() -> Option<WaitReason> + Send + Sync> {
     let slots = slots.clone();
-    Box::new(move || provider_wait(&slots.status()))
+    let group = agent_group(settings);
+    Box::new(move || provider_wait(&slots.status(), group.as_deref()))
 }
 
 fn for_model(
@@ -446,8 +456,7 @@ pub fn ask(
     let engine = scope.engine();
     let engine = engine.as_ref();
     let find = |q: &str, o: crate::search::Options, n: usize| {
-        crate::search::search_with(engine, slots, settings, ai_dir, file_id, q, n, o, true)
-            .map(|(h, _)| h)
+        crate::search::search_with(engine, settings, ai_dir, file_id, q, n, o).map(|(h, _)| h)
     };
     let events = Mutex::new(on_event);
     let scan_with = |extract: &dyn scan::Extract, instruction: &str| {
@@ -502,7 +511,7 @@ pub fn ask(
             &mut events_out,
         )
     };
-    with_brain(scope, slots, settings, run)
+    with_brain(scope, settings, run)
 }
 
 fn web_calls<'a>(
@@ -510,8 +519,7 @@ fn web_calls<'a>(
     settings: &'a mediaa_core::agent::AgentSettings,
     cancel: &'a AtomicBool,
 ) -> (Box<internet::WebSearch<'a>>, Box<internet::WebRead<'a>>) {
-    use mediaa_core::agent::WorkKind;
-    let lease = move || slots.request(WorkKind::WebSearch, true).wait(cancel);
+    let lease = move || slots.web().wait(cancel);
     (
         Box::new(move |q: &str, n: usize| {
             let _lease = lease()?;
@@ -526,7 +534,6 @@ fn web_calls<'a>(
 
 fn with_brain<R>(
     scope: &Scope,
-    slots: &Slots,
     settings: &mediaa_core::agent::AgentSettings,
     f: impl FnOnce(&dyn Brain, &dyn scan::Extract) -> anyhow::Result<R>,
 ) -> anyhow::Result<R> {
@@ -541,7 +548,6 @@ fn with_brain<R>(
     let brain = ChatBrain {
         engine: engine.as_ref(),
         source: source.clone(),
-        slots: slots.clone(),
         context,
         max_tokens: STEP_TOKENS,
         thinking,
@@ -580,9 +586,8 @@ pub fn ask_folder(
         })
         .collect();
     let across = |q: &str, o: crate::search::Options, n: usize| {
-        let (hits, _) = crate::search::search_files_with(
-            engine, slots, settings, ai_dir, &sources, q, n, o, true,
-        )?;
+        let (hits, _) =
+            crate::search::search_files_with(engine, settings, ai_dir, &sources, q, n, o)?;
         Ok(hits
             .into_iter()
             .filter_map(|h| {
@@ -594,18 +599,8 @@ pub fn ask_folder(
             .collect())
     };
     let one = |i: usize, q: &str, o: crate::search::Options, n: usize| {
-        crate::search::search_with(
-            engine,
-            slots,
-            settings,
-            ai_dir,
-            &items[i].file_id,
-            q,
-            n,
-            o,
-            true,
-        )
-        .map(|(h, _)| h)
+        crate::search::search_with(engine, settings, ai_dir, &items[i].file_id, q, n, o)
+            .map(|(h, _)| h)
     };
     let (web_search, web_read) = web_calls(slots, settings, cancel);
     let wait = waiter(scope, slots, settings);
@@ -619,7 +614,7 @@ pub fn ask_folder(
         .flat_map(|(i, it)| tools::whos(&it.recording, Some((i + 1) as u32)))
         .collect();
     let (history, question) = for_model(&speakers, history, question);
-    with_brain(scope, slots, settings, |brain, _| {
+    with_brain(scope, settings, |brain, _| {
         let max_chars = (brain.context() as usize) * 3 / 4;
         let web = settings
             .web
@@ -668,8 +663,7 @@ pub fn answer_step(
     let engine = scope.engine();
     let engine = engine.as_ref();
     let find = |q: &str, o: crate::search::Options, n: usize| {
-        crate::search::search_with(engine, slots, settings, ai_dir, file_id, q, n, o, true)
-            .map(|(h, _)| h)
+        crate::search::search_with(engine, settings, ai_dir, file_id, q, n, o).map(|(h, _)| h)
     };
     let events = Mutex::new(on_event);
     let scan_with = |extract: &dyn scan::Extract, instruction: &str| {
@@ -725,7 +719,7 @@ pub fn answer_step(
             &emit,
         )
     };
-    with_brain(scope, slots, settings, run)
+    with_brain(scope, settings, run)
 }
 
 #[allow(
@@ -755,9 +749,8 @@ pub fn answer_step_folder(
         })
         .collect();
     let across = |q: &str, o: crate::search::Options, n: usize| {
-        let (hits, _) = crate::search::search_files_with(
-            engine, slots, settings, ai_dir, &sources, q, n, o, true,
-        )?;
+        let (hits, _) =
+            crate::search::search_files_with(engine, settings, ai_dir, &sources, q, n, o)?;
         Ok(hits
             .into_iter()
             .filter_map(|h| {
@@ -769,18 +762,8 @@ pub fn answer_step_folder(
             .collect())
     };
     let one = |i: usize, q: &str, o: crate::search::Options, n: usize| {
-        crate::search::search_with(
-            engine,
-            slots,
-            settings,
-            ai_dir,
-            &items[i].file_id,
-            q,
-            n,
-            o,
-            true,
-        )
-        .map(|(h, _)| h)
+        crate::search::search_with(engine, settings, ai_dir, &items[i].file_id, q, n, o)
+            .map(|(h, _)| h)
     };
     let events = Mutex::new(on_event);
     let (web_search, web_read) = web_calls(slots, settings, cancel);
@@ -796,7 +779,7 @@ pub fn answer_step_folder(
         .collect();
     let (history, question) = for_model(&speakers, history, question);
     let emit = |e: &Event| (events.lock().expect("event sink"))(e);
-    with_brain(scope, slots, settings, |brain, _| {
+    with_brain(scope, settings, |brain, _| {
         let max_chars = (brain.context() as usize) * 3 / 4;
         let web = settings
             .web
@@ -2328,12 +2311,24 @@ mod tests {
 
     #[test]
     fn a_full_provider_slot_is_the_wait() {
-        let taken = crate::slots::Status {
-            running: vec![],
-            waiting: vec![(1, mediaa_core::agent::WorkKind::ProviderCalls)],
+        let taken = mediaa_core::slots::Status {
+            groups: vec![mediaa_core::slots::GroupLoad {
+                name: "Single".into(),
+                busy: 1,
+                limit: 1,
+                waiting: 1,
+            }],
+            ..Default::default()
         };
-        assert_eq!(provider_wait(&taken), Some(WaitReason::ProviderSlot));
-        assert_eq!(provider_wait(&crate::slots::Status::default()), None);
+        assert_eq!(
+            provider_wait(&taken, Some("Single")),
+            Some(WaitReason::ProviderSlot)
+        );
+        assert_eq!(provider_wait(&taken, Some("Other")), None);
+        assert_eq!(
+            provider_wait(&mediaa_core::slots::Status::default(), Some("Single")),
+            None
+        );
     }
 
     #[test]
@@ -3057,7 +3052,7 @@ mod tests {
     #[test]
     #[ignore]
     fn a_real_model_answers_from_the_recording() {
-        use mediaa_core::agent::{AgentSettings, Budget};
+        use mediaa_core::agent::AgentSettings;
         use mediaa_core::transcript::{self, Transcript};
         let ai =
             std::path::PathBuf::from(std::env::var_os("MEDIAA_TEST_AI").expect("MEDIAA_TEST_AI"));
@@ -3076,7 +3071,7 @@ mod tests {
         };
         let settings = AgentSettings::default();
         let engine = crate::live::engine();
-        let slots = Slots::new(Budget::default());
+        let slots = Slots::new();
         let question = "Какое дерево упоминается в записи и в какой момент?";
         let scope =
             Scope::begin(&ai, engine.clone(), "chat", "тест", &json!({}), Some(&id)).unwrap();
@@ -3114,7 +3109,7 @@ mod tests {
     #[test]
     #[ignore]
     fn bench_on_a_recording() {
-        use mediaa_core::agent::{AgentSettings, Budget};
+        use mediaa_core::agent::AgentSettings;
         use mediaa_core::transcript::{self, Transcript};
         let _ = env_logger::Builder::from_env(env_logger::Env::default()).try_init();
         let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k}"));
@@ -3148,11 +3143,11 @@ mod tests {
             }
         }
         let engine = crate::live::engine();
-        let slots = Slots::new(Budget::default());
+        let slots = Slots::new();
         let s = settings.clone();
         let current: std::sync::Arc<dyn Fn() -> AgentSettings + Send + Sync> =
             std::sync::Arc::new(move || s.clone());
-        let sched = crate::run::open_scheduler(&ai, &settings.budget).unwrap();
+        let sched = crate::run::open_scheduler(&ai).unwrap();
         crate::run::register_stages(
             &sched,
             &ai,

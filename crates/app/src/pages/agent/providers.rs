@@ -4,7 +4,7 @@ use crate::jobs::Job;
 use crate::theme;
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
-use mediaa_core::agent::{Connection, ConnectionKind, WebEngine, WebSettings};
+use mediaa_core::agent::{Connection, ConnectionKind};
 use rust_i18n::t;
 use std::collections::HashMap;
 
@@ -15,16 +15,16 @@ enum CheckState {
 
 pub struct ProvidersUi {
     checks: HashMap<String, CheckState>,
-    web_check: Option<CheckState>,
     add_kind: ConnectionKind,
+    pub(crate) contract: bool,
 }
 
 impl Default for ProvidersUi {
     fn default() -> Self {
         Self {
             checks: HashMap::new(),
-            web_check: None,
             add_kind: ConnectionKind::OpenRouter,
+            contract: false,
         }
     }
 }
@@ -53,13 +53,30 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     header(ui, &t!("agent.providers_title"), "");
     let mut changed = false;
     let mut remove = None;
+    let mut open_contract = false;
     ui.horizontal(|ui| {
         let mut picked = app.agent.providers.add_kind;
         egui::ComboBox::from_id_salt("add-provider")
             .selected_text(kind_label(picked))
             .show_ui(ui, |ui| {
                 for kind in ADD_KINDS {
-                    if ui
+                    if kind == ConnectionKind::Transcription {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .selectable_label(picked == kind, kind_label(kind))
+                                .clicked()
+                            {
+                                picked = kind;
+                            }
+                            if ui
+                                .add(egui::Button::new(RichText::new(icon::INFO)).frame(false))
+                                .on_hover_text(t!("settings.contract_title"))
+                                .clicked()
+                            {
+                                open_contract = true;
+                            }
+                        });
+                    } else if ui
                         .selectable_label(picked == kind, kind_label(kind))
                         .clicked()
                     {
@@ -76,12 +93,22 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             changed = true;
         }
     });
+    if open_contract {
+        app.agent.providers.contract = true;
+    }
     let ids: Vec<String> = app
         .settings
         .agent
         .connections
         .iter()
         .map(|connection| connection.id.clone())
+        .collect();
+    let groups: Vec<String> = app
+        .settings
+        .agent
+        .groups
+        .iter()
+        .map(|group| group.name.clone())
         .collect();
     for id in ids {
         let Some(index) = app
@@ -106,6 +133,31 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             theme::row(ui, &t!("agent.provider_name"), |ui| {
                 changed |= ui.text_edit_singleline(&mut connection.name).changed();
             });
+            theme::row(ui, &t!("agent.provider_pool"), |ui| {
+                let selected = connection.group.clone();
+                let label = if selected.is_empty() {
+                    t!("agent.provider_no_pool").into_owned()
+                } else {
+                    selected.clone()
+                };
+                egui::ComboBox::from_id_salt(("provider-group", &id))
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(selected.is_empty(), t!("agent.provider_no_pool"))
+                            .clicked()
+                        {
+                            connection.group.clear();
+                            changed = true;
+                        }
+                        for group in &groups {
+                            if ui.selectable_label(selected == *group, group).clicked() {
+                                connection.group = group.clone();
+                                changed = true;
+                            }
+                        }
+                    });
+            });
             changed |= fields(ui, connection, &mut app.agent.providers, &id);
         });
     }
@@ -116,11 +168,10 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
             .retain(|connection| connection.id != id);
         changed = true;
     }
-    ui.add_space(8.0);
-    changed |= web(ui, &mut app.settings.agent.web, &mut app.agent.providers);
     if changed {
         app.settings_changed();
     }
+    crate::pages::about::contract_window(ui.ctx(), &mut app.agent.providers.contract);
 }
 
 fn fields(
@@ -194,53 +245,4 @@ fn ollama(ui: &mut egui::Ui, connection: &Connection, state: &mut ProvidersUi, i
     if let Some(CheckState::Done(Ok(version))) = state.checks.get(id) {
         theme::hint(ui, version);
     }
-}
-
-fn web(ui: &mut egui::Ui, web: &mut WebSettings, state: &mut ProvidersUi) -> bool {
-    let mut changed = false;
-    theme::card(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        theme::section(ui, icon::GLOBE, &t!("agent.web_search"));
-        changed |= ui
-            .checkbox(&mut web.enabled, t!("agent.web_enabled"))
-            .changed();
-        theme::row(ui, &t!("agent.proxy"), |ui| {
-            changed |= ui.text_edit_singleline(&mut web.proxy).changed();
-        });
-        if matches!(web.engine, WebEngine::Brave | WebEngine::Tavily) {
-            theme::row(ui, &t!("agent.api_key"), |ui| {
-                changed |= ui
-                    .add(egui::TextEdit::singleline(&mut web.api_key).password(true))
-                    .changed();
-            });
-        }
-        if let Some(CheckState::Running(job)) = state.web_check.as_mut() {
-            if let Some(result) = job.poll() {
-                state.web_check = Some(CheckState::Done(
-                    result.unwrap_or_else(|error| Err(format!("{error:#}"))),
-                ));
-            }
-        }
-        if ui.button(t!("agent.check")).clicked() {
-            let web = web.clone();
-            state.web_check = Some(
-                Job::spawn("web-check", std::sync::Arc::default(), move || {
-                    mediaa_agent::web::search(&web, "MediaA", 3)
-                        .map(|hits| hits.len().to_string())
-                        .map_err(|error| format!("{error:#}"))
-                })
-                .map_or_else(
-                    |error| CheckState::Done(Err(format!("{error:#}"))),
-                    CheckState::Running,
-                ),
-            );
-        }
-        if let Some(CheckState::Done(result)) = &state.web_check {
-            match result {
-                Ok(count) => theme::hint(ui, t!("agent.provider_ok", n = count)),
-                Err(error) => theme::hint(ui, error),
-            }
-        }
-    });
-    changed
 }

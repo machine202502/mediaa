@@ -4,10 +4,11 @@ use crate::tray::TrayCommand;
 use eframe::egui;
 use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::Harness;
+use mediaa_core::agent::{Connection, ConnectionKind};
 use mediaa_core::formats::AudioFormat;
-use mediaa_core::settings::{AfterCapture, MicChoice, ScreenChoice, ThemePreference};
+use mediaa_core::settings::{MicChoice, ScreenChoice, ThemePreference};
 use mediaa_core::source::{FrameSource, SourceFactory};
-use mediaa_core::{AnimFormat, Frame, ImageFormat, OutputKind, Settings, VideoContainer};
+use mediaa_core::{AnimFormat, Frame, OutputKind, Settings, VideoContainer};
 use mediaa_media::convert::{StillFormat, Target};
 use mediaa_media::recorder::{RecordingRequest, RecordingSession, SessionEvent, SessionNotice};
 use mediaa_platform::screen::{MonitorId, MonitorInfo, WindowId, WindowInfo};
@@ -295,6 +296,24 @@ fn record_page_shows_and_selects_mocked_displays() {
 }
 
 #[test]
+fn starting_program_recording_hides_the_window_first() {
+    let _recording = recording_guard();
+    let mut harness = harness(Page::Record);
+    harness.run_steps(2);
+    harness.get_by_label_contains(&t!("record.start")).click();
+    harness.run_steps(1);
+    let app = harness.state().app.as_ref().unwrap();
+    assert!(matches!(
+        app.pending,
+        Some((_, Pending::BeginRecording(..)))
+    ));
+    assert!(
+        app.hidden_by_us,
+        "the window is hidden before the recording starts"
+    );
+}
+
+#[test]
 fn record_page_switches_to_mocked_windows_and_selects_one() {
     let mut harness = harness(Page::Record);
     harness.get_by_label(&t!("shot.window")).click();
@@ -550,7 +569,8 @@ fn ui_regression_snapshot_library_page() {
 #[test]
 fn ui_regression_snapshot_library_populated() {
     let dir = tempfile::tempdir().unwrap();
-    for (name, color) in [
+    let base = std::time::SystemTime::now();
+    for (index, (name, color)) in [
         (
             "Screenshot_with_a_deliberately_long_title_2026-01-02_10-00-00.png",
             [40, 90, 180, 255],
@@ -560,9 +580,19 @@ fn ui_regression_snapshot_library_populated() {
             "Recording_thumbnail_2026-01-01_09-00-00.png",
             [40, 150, 90, 255],
         ),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let path = dir.path().join(name);
         image::RgbaImage::from_pixel(320, 200, image::Rgba(color))
-            .save(dir.path().join(name))
+            .save(&path)
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(base - std::time::Duration::from_secs(3 - index as u64))
             .unwrap();
     }
     let mut selected = settings();
@@ -680,12 +710,10 @@ fn ui_regression_snapshot_settings_minimum() {
 }
 
 #[test]
-fn fullscreen_screenshot_uses_capture_button_format_and_saves() {
+fn fullscreen_screenshot_saves_png() {
     let dir = tempfile::tempdir().unwrap();
     let mut selected = settings();
     selected.media_dir = dir.path().to_path_buf();
-    selected.screenshot.after_capture = AfterCapture::Save;
-    selected.screenshot.hide_window = false;
     let mut harness = harness_with(
         Page::Screenshot,
         selected,
@@ -698,19 +726,6 @@ fn fullscreen_screenshot_uses_capture_button_format_and_saves() {
         harness.state().app.as_ref().unwrap().pending,
         Some((_, Pending::FullscreenScreenshot { .. }))
     ));
-    harness.get_by_label(ImageFormat::Webp.label()).click();
-    harness.run();
-    assert_eq!(
-        harness
-            .state()
-            .app
-            .as_ref()
-            .unwrap()
-            .settings
-            .screenshot
-            .format,
-        ImageFormat::Webp
-    );
 
     let ctx = harness.ctx.clone();
     let app = harness.state_mut().app.as_mut().unwrap();
@@ -720,7 +735,7 @@ fn fullscreen_screenshot_uses_capture_button_format_and_saves() {
     let outputs = std::fs::read_dir(dir.path())
         .unwrap()
         .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "webp"))
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
         .count();
     assert_eq!(outputs, 1);
     assert!(app.notices.items.last().is_some());
@@ -731,8 +746,6 @@ fn window_screenshot_uses_selected_window() {
     let dir = tempfile::tempdir().unwrap();
     let mut selected = settings();
     selected.media_dir = dir.path().to_path_buf();
-    selected.screenshot.after_capture = AfterCapture::Save;
-    selected.screenshot.hide_window = false;
     let mut harness = harness_with(
         Page::Screenshot,
         selected,
@@ -759,8 +772,7 @@ fn window_screenshot_uses_selected_window() {
 
 #[test]
 fn region_screenshot_opens_the_editor_with_mocked_frame() {
-    let mut selected = settings();
-    selected.screenshot.hide_window = false;
+    let selected = settings();
     let mut harness = harness_with(
         Page::Screenshot,
         selected,
@@ -786,6 +798,72 @@ fn region_screenshot_opens_the_editor_with_mocked_frame() {
     }
     assert!(app.capture.overlay.is_some());
     assert!(!app.capture.screenshot_busy());
+}
+
+#[test]
+fn finishing_a_ui_area_overlay_restores_the_window() {
+    let mut harness = harness_with(
+        Page::Screenshot,
+        settings(),
+        capture_catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.get_by_label(&t!("shot.area")).click();
+    harness.run();
+    assert!(matches!(
+        harness.state().app.as_ref().unwrap().pending,
+        Some((_, Pending::RegionScreenshot { restore: true, .. }))
+    ));
+
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    run_pending(app, &ctx);
+    for _ in 0..200 {
+        app.poll_capture(&ctx);
+        if app.capture.overlay.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let overlay = app.capture.overlay.as_ref().expect("region overlay");
+    overlay.set_test_outcome(crate::overlay::Outcome::Cancel);
+    app.hidden_by_us = true;
+    app.handle_overlay(&ctx);
+    assert!(app.capture.overlay.is_none());
+    assert!(!app.hidden_by_us, "the UI capture returns the window");
+}
+
+#[test]
+fn background_captures_do_not_restore_the_window() {
+    let mut harness = harness(Page::Screenshot);
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.start_region_screenshot_with_completion(&ctx, crate::overlay::Purpose::Area, true);
+    assert!(matches!(
+        app.pending,
+        Some((_, Pending::RegionScreenshot { restore: false, .. }))
+    ));
+    assert!(!app.hidden_by_us, "tray region selection keeps the window");
+
+    app.pending = None;
+    app.start_region_screenshot_from_hotkey(&ctx, crate::overlay::Purpose::Area);
+    assert!(matches!(
+        app.pending,
+        Some((_, Pending::RegionScreenshot { restore: false, .. }))
+    ));
+    assert!(app.hidden_by_us, "the hotkey capture hides the window");
+
+    app.pending = None;
+    app.hidden_by_us = false;
+    app.start_fullscreen_screenshot_with_completion(&ctx, None, true);
+    assert!(matches!(
+        app.pending,
+        Some((_, Pending::FullscreenScreenshot { .. }))
+    ));
+    assert!(
+        !app.hidden_by_us,
+        "the tray fullscreen capture keeps the window"
+    );
 }
 
 #[test]
@@ -885,11 +963,52 @@ fn stop_from_tray_uses_the_same_save_flow() {
     tray_tx.send(TrayCommand::StopAndSave).unwrap();
     app.handle_tray(&ctx);
     assert!(matches!(app.recording.saving_sound(), Some(true)));
+    app.hidden_by_us = true;
     finish_recording(app, &ctx);
+    assert!(
+        app.hidden_by_us,
+        "the tray stop keeps the window state unchanged"
+    );
     assert_eq!(
         std::fs::read_dir(dir.path().join("out")).unwrap().count(),
         1
     );
+    assert_eq!(
+        app.page,
+        Page::Library,
+        "the finished recording is copied and shown in the library"
+    );
+}
+
+#[test]
+fn tray_recording_does_not_touch_the_window() {
+    let _recording = recording_guard();
+    let mut harness = harness(Page::Record);
+    let (tray_tx, tray_rx) = crossbeam_channel::bounded(2);
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.tray_rx = Some(tray_rx);
+
+    tray_tx.send(TrayCommand::StartRecording).unwrap();
+    app.handle_tray(&ctx);
+    assert!(matches!(
+        app.pending,
+        Some((_, Pending::BeginRecording(..)))
+    ));
+    assert!(
+        !app.hidden_by_us,
+        "tray screen recording leaves the window alone"
+    );
+    assert!(app.recording_quiet);
+
+    app.pending = None;
+    tray_tx.send(TrayCommand::StartAudio).unwrap();
+    app.handle_tray(&ctx);
+    assert!(
+        !app.hidden_by_us,
+        "tray audio recording leaves the window alone"
+    );
+    assert!(app.recording_quiet);
 }
 
 #[test]
@@ -905,6 +1024,35 @@ fn active_recording_supports_pause_resume_and_save() {
     app.recording.test_recording(session, events);
     std::thread::sleep(std::time::Duration::from_millis(120));
     harness.run_steps(1);
+    assert!(
+        harness
+            .get_by_label(&t!("shot.area"))
+            .accesskit_node()
+            .is_disabled(),
+        "capture targets are disabled while recording"
+    );
+    assert!(
+        harness.query_by_label(&t!("record.format")).is_some(),
+        "recording settings stay visible while recording"
+    );
+    assert!(
+        harness.get_by_label("MP4").accesskit_node().is_disabled(),
+        "recording settings are disabled while recording"
+    );
+    assert!(
+        harness
+            .get_by_value(&t!("record.mic_auto"))
+            .accesskit_node()
+            .is_disabled(),
+        "nested recording controls are disabled while recording"
+    );
+    assert!(
+        harness
+            .get_by_label_contains(&t!("record.start"))
+            .accesskit_node()
+            .is_disabled(),
+        "the start button is disabled while recording"
+    );
     harness
         .get_all_by_label_contains(&t!("record.pause"))
         .last()
@@ -982,25 +1130,20 @@ fn settings_controls_change_application_state() {
     harness.run();
     harness.get_by_label(&t!("settings.close_to_tray")).click();
     harness.run();
-    harness
-        .get_by_label(&t!("settings.tray_click_open_window"))
-        .click();
+    harness.get_by_label(&t!("settings.tray_progress")).click();
     harness.run();
     harness
-        .get_by_label(&t!("settings.after_completion_copy"))
+        .get_by_label(&t!("settings.tray_click_open_window"))
         .click();
     harness.run();
 
     let settings = &harness.state().app.as_ref().unwrap().settings;
     assert_eq!(settings.theme, ThemePreference::Light);
     assert!(!settings.close_to_tray);
+    assert!(!settings.tray_progress);
     assert_eq!(
         settings.tray_left_click,
         mediaa_core::settings::TrayClickAction::OpenWindow
-    );
-    assert_eq!(
-        settings.after_completion,
-        mediaa_core::settings::AfterCompletionAction::CopyFile
     );
 }
 
@@ -1008,8 +1151,14 @@ fn settings_controls_change_application_state() {
 fn advanced_settings_toggles_update_application_state() {
     let mut harness = harness(Page::Settings);
     harness.run_steps(2);
+    assert!(
+        harness
+            .get_by_label(&t!("settings.start_in_tray"))
+            .accesskit_node()
+            .is_disabled(),
+        "tray start needs autostart"
+    );
     for label in [
-        t!("settings.start_in_tray"),
         t!("settings.stop_recording_on_left_click"),
         t!("settings.highlight_recording_region"),
     ] {
@@ -1018,7 +1167,7 @@ fn advanced_settings_toggles_update_application_state() {
     }
 
     let settings = &harness.state().app.as_ref().unwrap().settings;
-    assert!(settings.start_in_tray);
+    assert!(!settings.start_in_tray);
     assert!(!settings.stop_recording_on_left_click);
     assert!(!settings.highlight_recording_region);
 }
@@ -1236,6 +1385,201 @@ fn agent_pages_are_listed_in_the_sub_navigation() {
             "missing sub-navigation entry {label}"
         );
     }
+}
+
+#[test]
+fn the_options_page_shows_the_pools_and_refuses_a_bad_name() {
+    let mut harness = harness_with(
+        Page::Budget,
+        agent_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label_contains(&t!("budget.pools"))
+        .is_some());
+    assert!(harness
+        .query_by_label_contains(&t!("budget.tools"))
+        .is_some());
+    assert!(
+        harness.query_by_label_contains("Single").is_none(),
+        "no pool is created by default"
+    );
+    harness.get_by_label(&t!("budget.add")).click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label_contains(&t!("budget.pool_error"))
+            .is_some(),
+        "an empty name shows the error"
+    );
+}
+
+#[test]
+fn a_new_pool_can_be_added_from_the_options_page() {
+    let mut harness = harness_with(
+        Page::Budget,
+        agent_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|node| node.rect().width() > 100.0)
+        .expect("the pool name field is the wide input")
+        .click();
+    harness.run_steps(1);
+    harness.event(egui::Event::Text("Local".into()));
+    harness.run_steps(1);
+    harness.get_by_label(&t!("budget.add")).click();
+    harness.run_steps(2);
+    let agent = &harness.state().app.as_ref().unwrap().settings.agent;
+    assert!(
+        agent.groups.iter().any(|group| group.name == "Local"),
+        "the new pool is in the settings: {:?}",
+        agent.groups
+    );
+    assert!(
+        harness.query_by_label_contains("Local").is_some(),
+        "the list shows the new pool"
+    );
+}
+
+#[test]
+fn a_provider_pool_can_be_cleared_back_to_no_pool() {
+    let mut settings = agent_settings();
+    assert!(settings.agent.add_group("Local", 2));
+    let mut connection = Connection::new(ConnectionKind::OpenAiCompatible, "Local");
+    connection.group = "Local".into();
+    settings.agent.connections.push(connection);
+    let mut harness = harness_with(
+        Page::Providers,
+        settings,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness
+        .get_all_by_value("Local")
+        .last()
+        .expect("the pool combo shows the pool")
+        .click();
+    harness.run_steps(1);
+    harness.get_by_label(&t!("agent.provider_no_pool")).click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .settings
+            .agent
+            .connections[0]
+            .group
+            .is_empty(),
+        "the provider has no pool again"
+    );
+}
+
+#[test]
+fn deleting_a_pool_unattaches_its_provider() {
+    let mut settings = agent_settings();
+    assert!(settings.agent.add_group("Local", 2));
+    let mut connection = Connection::new(ConnectionKind::OpenAiCompatible, "Local");
+    connection.group = "Local".into();
+    settings.agent.connections.push(connection);
+    let mut harness = harness_with(Page::Budget, settings, catalog(), egui::vec2(1180.0, 900.0));
+    harness.run_steps(2);
+    harness
+        .get_all_by_label(egui_phosphor::regular::TRASH)
+        .next()
+        .expect("the Local pool has a delete button")
+        .click();
+    harness.run_steps(2);
+    let agent = &harness.state().app.as_ref().unwrap().settings.agent;
+    assert!(
+        agent.groups.iter().all(|group| group.name != "Local"),
+        "the pool is gone"
+    );
+    assert!(
+        agent.connections[0].group.is_empty(),
+        "the provider has no pool"
+    );
+}
+
+#[test]
+fn the_load_card_lists_the_pools_and_the_web_tool() {
+    let mut settings = agent_settings();
+    assert!(settings.agent.add_group("Local", 2));
+    let mut harness = harness_with(Page::Queue, settings, catalog(), egui::vec2(1180.0, 900.0));
+    harness.run_steps(1);
+    {
+        let app = harness.state_mut().app.as_mut().expect("the app is built");
+        app.agent.slots().configure(&app.settings.agent);
+    }
+    harness.run_steps(2);
+    assert!(
+        harness.query_by_label_contains("Local").is_some(),
+        "the load card shows the pool"
+    );
+    assert!(
+        harness.query_by_label_contains("Single").is_none(),
+        "no pool appears from nowhere"
+    );
+    assert!(harness
+        .query_by_label_contains(&t!("queue.tools"))
+        .is_some());
+    assert!(harness
+        .query_by_label_contains(&t!("agent.web_search"))
+        .is_some());
+}
+
+#[test]
+fn the_transcription_provider_has_the_contract_info() {
+    let mut harness = harness_with(
+        Page::Providers,
+        agent_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness.get_by_role(egui::accesskit::Role::ComboBox).click();
+    harness.run_steps(2);
+    harness
+        .get_all_by_label(egui_phosphor::regular::INFO)
+        .last()
+        .expect("the contract info in the provider menu")
+        .click();
+    harness.run_steps(1);
+    assert!(
+        harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .agent
+            .providers
+            .contract,
+        "the contract window opens from the provider menu"
+    );
+
+    harness.run_steps(2);
+    assert!(
+        !harness
+            .ctx
+            .memory(|memory| memory.allows_interaction(egui::LayerId::background())),
+        "the modal layer is active"
+    );
+    harness.get_by_label_contains(&t!("nav.catalogs")).click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().app.as_ref().unwrap().page,
+        Page::Providers,
+        "the modal blocks the rest of the interface"
+    );
 }
 
 #[cfg(windows)]

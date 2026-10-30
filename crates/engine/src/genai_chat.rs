@@ -196,10 +196,6 @@ pub fn embeddings(
             .exec_embed(target, EmbedRequest::from_texts(texts), None)
             .await
             .map_err(|error| EngineError::bad_request(format!("{error}")))?;
-        Ok(response
-            .vectors()
-            .into_iter()
-            .map(|vector| vector.clone())
-            .collect())
+        Ok(response.vectors().into_iter().cloned().collect())
     })
 }

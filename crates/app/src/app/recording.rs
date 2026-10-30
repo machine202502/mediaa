@@ -14,9 +14,11 @@ impl App {
 
     fn dispatch_recording_command(&mut self, ctx: &egui::Context, command: RecordingCommand) {
         match command {
-            RecordingCommand::Start { target, profile } => {
-                self.request_recording(ctx, target, profile)
-            }
+            RecordingCommand::Start {
+                target,
+                profile,
+                hide,
+            } => self.request_recording(ctx, target, profile, hide),
             RecordingCommand::Stop { action, source } => {
                 self.stop_recording_from_source(ctx, action, source)
             }
@@ -29,6 +31,7 @@ impl App {
         ctx: &egui::Context,
         target: RecordTarget,
         profile: RecordProfile,
+        hide: Option<bool>,
     ) {
         if !self.recording.is_idle() {
             return;
@@ -38,8 +41,9 @@ impl App {
             self.warning(t!("record.recovery_wait"));
             return;
         }
-        let hide =
-            !matches!(target, RecordTarget::Audio) && self.settings.profile(profile).0.hide_to_tray;
+        let hide = hide.unwrap_or_else(|| {
+            !matches!(target, RecordTarget::Audio) && self.settings.profile(profile).0.hide_to_tray
+        });
         self.schedule(ctx, Pending::BeginRecording(target, profile), hide);
     }
 
@@ -153,7 +157,9 @@ impl App {
             Ok(request) => request,
             Err(error) => {
                 self.recording.clear_region();
-                self.show_window(ctx);
+                if !self.recording_quiet {
+                    self.show_window(ctx);
+                }
                 self.error(t!("toast.recording_start_failed", error = error));
                 return;
             }
@@ -168,7 +174,9 @@ impl App {
         }
         if let Err(error) = self.recording.start(request, Instant::now(), page) {
             self.recording.clear_region();
-            self.show_window(ctx);
+            if !self.recording_quiet {
+                self.show_window(ctx);
+            }
             self.error(t!("toast.recording_start_failed", error = error));
         }
     }
@@ -183,6 +191,7 @@ impl App {
         action: StopAction,
         source: StopSource,
     ) {
+        self.recording_quiet = source == StopSource::Tray;
         if let Some(result) = self.recording.stop(action, source) {
             if action == StopAction::Save {
                 self.page = result.page;
@@ -213,17 +222,23 @@ impl App {
             } => {}
             RecordingStartEvent::Cancelled => {
                 if !self.quit_when_idle {
-                    self.show_window(ctx);
+                    if !self.recording_quiet {
+                        self.show_window(ctx);
+                    }
                     self.info(t!("toast.discarded"));
                 }
             }
             RecordingStartEvent::Failed { kind, message } => {
-                self.show_window(ctx);
+                if !self.recording_quiet {
+                    self.show_window(ctx);
+                }
                 self.start_recovery();
                 self.error_with_kind(kind, message);
             }
             RecordingStartEvent::WorkerStopped => {
-                self.show_window(ctx);
+                if !self.recording_quiet {
+                    self.show_window(ctx);
+                }
                 self.start_recovery();
                 self.error(t!("toast.recording_worker_stopped"));
             }
@@ -272,48 +287,40 @@ impl App {
                     self.recording.clear_region();
                     self.lib.files_changed(&paths);
                     let mut sound_deferred = false;
-                    let action_succeeded = match self.settings.after_completion {
-                        AfterCompletionAction::OpenLibrary => {
-                            self.show_window(ctx);
-                            let names: Vec<_> = paths
-                                .iter()
-                                .map(|path| {
-                                    path.file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .into_owned()
-                                })
-                                .collect();
-                            self.success(t!("toast.saved", names = names.join(", ")));
+                    let names: Vec<_> = paths
+                        .iter()
+                        .map(|path| {
+                            path.file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                        .collect();
+                    let success = t!("toast.saved", names = names.join(", ")).into_owned();
+                    let action_succeeded = match self
+                        .clipboard
+                        .handle()
+                        .copy_files(paths, Purpose::Recording { success, sound })
+                    {
+                        Ok(()) => {
+                            sound_deferred = sound;
                             if !self.quit_when_idle {
+                                if !self.recording_quiet {
+                                    self.show_window(ctx);
+                                }
                                 self.page = Page::Library;
                             }
                             true
                         }
-                        AfterCompletionAction::CopyFile => {
-                            match self.clipboard.handle().copy_files(
-                                paths,
-                                Purpose::Recording {
-                                    success: t!("toast.recording_copied").into_owned(),
-                                    sound,
-                                },
-                            ) {
-                                Ok(()) => {
-                                    sound_deferred = sound;
-                                    if !self.quit_when_idle {
-                                        self.page = Page::Library;
-                                    }
-                                    true
-                                }
-                                Err(error) => {
-                                    self.show_window(ctx);
-                                    self.error(t!("err.copy_failed", error = error));
-                                    if !self.quit_when_idle {
-                                        self.page = Page::Library;
-                                    }
-                                    false
-                                }
+                        Err(error) => {
+                            if !self.recording_quiet {
+                                self.show_window(ctx);
                             }
+                            self.error(t!("err.copy_failed", error = error));
+                            if !self.quit_when_idle {
+                                self.page = Page::Library;
+                            }
+                            false
                         }
                     };
                     if !sound_deferred
@@ -329,7 +336,9 @@ impl App {
                     }
                     self.recording.clear_region();
                     if !self.quit_when_idle {
-                        self.show_window(ctx);
+                        if !self.recording_quiet {
+                            self.show_window(ctx);
+                        }
                         self.info(t!("toast.discarded"));
                     }
                 }
@@ -347,7 +356,9 @@ impl App {
                         log::warn!("recording finalizer panicked after reporting failure");
                     }
                     self.recording.clear_region();
-                    self.show_window(ctx);
+                    if !self.recording_quiet {
+                        self.show_window(ctx);
+                    }
                     if recovery_files.is_empty() {
                         let detail = t!("toast.saving_failed", error = error).into_owned();
                         let summary = notice_summary(&detail, &t!("notice.error"));

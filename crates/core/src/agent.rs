@@ -1,5 +1,35 @@
 use serde::{Deserialize, Serialize};
 
+pub const GROUP_NAME_MAX: usize = 16;
+pub const GROUP_LIMIT_MAX: u32 = 16;
+pub const WEB_LIMIT_DEFAULT: u32 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Group {
+    pub name: String,
+    pub limit: u32,
+}
+
+impl Group {
+    pub fn new(name: impl Into<String>, limit: u32) -> Group {
+        Group {
+            name: name.into(),
+            limit: limit.clamp(1, GROUP_LIMIT_MAX),
+        }
+    }
+
+    pub fn valid_name(name: &str) -> bool {
+        let count = name.chars().count();
+        let mut chars = name.chars();
+        match chars.next() {
+            Some(first) if first.is_ascii_alphabetic() => {
+                (1..=GROUP_NAME_MAX).contains(&count) && chars.all(|c| c.is_ascii_alphanumeric())
+            }
+            _ => false,
+        }
+    }
+}
+
 pub const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 pub const DEEPSEEK_URL: &str = "https://api.deepseek.com";
 pub const HUGGING_FACE_ROUTER_URL: &str = "https://router.huggingface.co/v1";
@@ -52,6 +82,8 @@ pub struct Connection {
     pub api_key: String,
     #[serde(default)]
     pub proxy: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group: String,
 }
 
 impl Connection {
@@ -71,6 +103,7 @@ impl Connection {
             },
             api_key: String::new(),
             proxy: String::new(),
+            group: String::new(),
         }
     }
 
@@ -234,70 +267,6 @@ impl ModelChoices {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WorkKind {
-    Agent,
-    Transcription,
-    Indexing,
-    WebSearch,
-    ProviderCalls,
-}
-
-impl WorkKind {
-    pub const ALL: [WorkKind; 5] = [
-        WorkKind::Agent,
-        WorkKind::Transcription,
-        WorkKind::Indexing,
-        WorkKind::WebSearch,
-        WorkKind::ProviderCalls,
-    ];
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Budget {
-    pub agent: u32,
-    pub transcription: u32,
-    pub indexing: u32,
-    pub web_search: u32,
-    pub provider_calls: u32,
-}
-
-impl Default for Budget {
-    fn default() -> Self {
-        Self {
-            agent: 2,
-            transcription: 1,
-            indexing: 1,
-            web_search: 2,
-            provider_calls: 4,
-        }
-    }
-}
-
-impl Budget {
-    pub fn limit(&self, kind: WorkKind) -> u32 {
-        match kind {
-            WorkKind::Agent => self.agent,
-            WorkKind::Transcription => self.transcription,
-            WorkKind::Indexing => self.indexing,
-            WorkKind::WebSearch => self.web_search,
-            WorkKind::ProviderCalls => self.provider_calls,
-        }
-        .max(1)
-    }
-
-    pub fn limit_mut(&mut self, kind: WorkKind) -> &mut u32 {
-        match kind {
-            WorkKind::Agent => &mut self.agent,
-            WorkKind::Transcription => &mut self.transcription,
-            WorkKind::Indexing => &mut self.indexing,
-            WorkKind::WebSearch => &mut self.web_search,
-            WorkKind::ProviderCalls => &mut self.provider_calls,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AnalysisOptions {
@@ -351,13 +320,20 @@ impl AnalysisOptions {
 pub struct AgentSettings {
     pub connections: Vec<Connection>,
     pub models: ModelChoices,
-    pub budget: Budget,
+    #[serde(default)]
+    pub groups: Vec<Group>,
+    #[serde(default = "web_limit")]
+    pub web_limit: u32,
     pub web: WebSettings,
     pub analysis: AnalysisOptions,
     #[serde(default = "answers_checked")]
     pub verify_answers: bool,
     #[serde(skip)]
     pub ui_language: Option<String>,
+}
+
+fn web_limit() -> u32 {
+    WEB_LIMIT_DEFAULT
 }
 
 fn answers_checked() -> bool {
@@ -402,7 +378,8 @@ impl Default for AgentSettings {
         Self {
             connections: Vec::new(),
             models: ModelChoices::default(),
-            budget: Budget::default(),
+            groups: Vec::new(),
+            web_limit: WEB_LIMIT_DEFAULT,
             web: WebSettings::default(),
             analysis: AnalysisOptions::default(),
             verify_answers: true,
@@ -423,6 +400,36 @@ impl AgentSettings {
         self.connections
             .iter()
             .find(|connection| connection.id == id)
+    }
+
+    pub fn group(&self, name: &str) -> Option<&Group> {
+        self.groups.iter().find(|group| group.name == name)
+    }
+
+    pub fn add_group(&mut self, name: &str, limit: u32) -> bool {
+        if !Group::valid_name(name)
+            || !(1..=GROUP_LIMIT_MAX).contains(&limit)
+            || self.group(name).is_some()
+        {
+            return false;
+        }
+        self.groups.push(Group::new(name, limit));
+        true
+    }
+
+    pub fn remove_group(&mut self, name: &str) {
+        self.groups.retain(|group| group.name != name);
+        for connection in &mut self.connections {
+            if connection.group == name {
+                connection.group.clear();
+            }
+        }
+    }
+
+    pub fn place(&self, connection: &str) -> Option<&str> {
+        self.connection(connection)
+            .map(|connection| connection.group.trim())
+            .filter(|group| !group.is_empty())
     }
 }
 
@@ -509,12 +516,80 @@ mod tests {
     }
 
     #[test]
-    fn budget_limits_never_drop_to_zero() {
-        let mut budget = Budget::default();
-        *budget.limit_mut(WorkKind::WebSearch) = 0;
-        assert_eq!(budget.limit(WorkKind::WebSearch), 1);
-        let bare: Budget = toml::from_str("").unwrap();
-        assert_eq!(bare.provider_calls, 4);
+    fn empty_settings_have_no_groups_and_no_connections() {
+        let bare: AgentSettings = toml::from_str("").unwrap();
+        assert!(bare.groups.is_empty());
+        assert_eq!(bare.web_limit, WEB_LIMIT_DEFAULT);
+        assert!(bare.connections.is_empty());
+        assert!(AgentSettings::default().groups.is_empty());
+    }
+
+    #[test]
+    fn an_old_budget_table_is_ignored() {
+        let text = "[budget]\nagent = 3\nweb_search = 5\n\n[web]\nenabled = true\n";
+        let settings: AgentSettings = toml::from_str(text).unwrap();
+        assert!(settings.groups.is_empty());
+        assert_eq!(settings.web_limit, WEB_LIMIT_DEFAULT);
+    }
+
+    #[test]
+    fn a_connection_without_a_group_reads_as_empty() {
+        let mut connection = Connection::new(ConnectionKind::OpenAiCompatible, "Local");
+        assert!(connection.group.is_empty());
+        connection.group = "Single".into();
+        let text = toml::to_string(&connection).unwrap();
+        let back: Connection = toml::from_str(&text).unwrap();
+        assert_eq!(back.group, "Single");
+        let old: Connection =
+            toml::from_str("id = \"c1\"\nname = \"a\"\nkind = \"ollama\"\n").unwrap();
+        assert!(old.group.is_empty());
+    }
+
+    #[test]
+    fn group_names_are_short_latin_words() {
+        for name in ["A", "Single", "local", "g2", "abcdefghijklmnop"] {
+            assert!(Group::valid_name(name), "{name}");
+        }
+        for name in [
+            "",
+            "1group",
+            "with space",
+            "underscore_group",
+            "abcdefghijklmnopq",
+            "группа",
+            "a-b",
+            "a.b",
+        ] {
+            assert!(!Group::valid_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn groups_are_added_and_removed_by_name() {
+        let mut settings = AgentSettings::default();
+        assert!(settings.add_group("Local", 4));
+        assert!(!settings.add_group("Local", 2), "a duplicate is refused");
+        assert!(!settings.add_group("single", 0), "a bad name is refused");
+        assert_eq!(settings.group("Local"), Some(&Group::new("Local", 4)));
+        let mut connection = Connection::new(ConnectionKind::OpenAiCompatible, "Local");
+        connection.group = "Local".into();
+        settings.connections.push(connection);
+        settings.remove_group("Local");
+        assert!(settings.group("Local").is_none());
+        assert!(
+            settings.connections[0].group.is_empty(),
+            "the providers become unattached"
+        );
+    }
+
+    #[test]
+    fn an_unattached_provider_has_no_place() {
+        let mut settings = AgentSettings::default();
+        let connection = Connection::new(ConnectionKind::OpenAiCompatible, "Local");
+        settings.connections.push(connection);
+        assert_eq!(settings.place(&settings.connections[0].id), None);
+        settings.connections[0].group = "Single".into();
+        assert_eq!(settings.place(&settings.connections[0].id), Some("Single"));
     }
 
     #[test]

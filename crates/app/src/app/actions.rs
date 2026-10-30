@@ -11,7 +11,9 @@ impl App {
         }
         match std::mem::take(&mut self.startup) {
             StartupAction::None => {}
-            StartupAction::Area => self.start_region_screenshot(ctx, overlay::Purpose::Area),
+            StartupAction::Area => {
+                self.start_region_screenshot_from_hotkey(ctx, overlay::Purpose::Area)
+            }
             StartupAction::Fullscreen => self.start_fullscreen_screenshot(ctx, None),
             StartupAction::Tray => {
                 if self.tray.is_some() {
@@ -25,6 +27,11 @@ impl App {
         let Some(outcome) = self.capture.overlay.as_ref().and_then(|o| o.show(ctx)) else {
             return;
         };
+        let restore = self
+            .capture
+            .overlay
+            .as_ref()
+            .is_some_and(|overlay| overlay.restore());
         let outcome = match outcome {
             Outcome::CaptureMonitor { index, monitor } => {
                 self.queue_monitor_capture(ctx, CaptureKind::OverlayMonitor { index }, monitor.id);
@@ -63,6 +70,15 @@ impl App {
                     after_completion,
                 },
             ),
+            Outcome::Saved { path, size } => {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                self.lib.files_changed(std::slice::from_ref(&path));
+                self.success(t!("toast.shot_saved", size = size, name = name));
+            }
             Outcome::SelectedRegion { monitor, rect } => {
                 self.recording.ui.target = crate::features::recording::TargetKind::Region;
                 self.recording.ui.region = Some((monitor, rect));
@@ -70,15 +86,20 @@ impl App {
                 self.last_capture_page = Page::Record;
             }
             Outcome::RecordArea { monitor, rect } => {
+                self.recording_quiet = !restore;
                 self.dispatch_command(
                     ctx,
                     AppCommand::Recording(RecordingCommand::Start {
                         target: RecordTarget::Region(monitor, rect),
                         profile: RecordProfile::Region,
+                        hide: Some(false),
                     }),
                 );
             }
             Outcome::CaptureMonitor { .. } => {}
+        }
+        if restore {
+            self.show_window(ctx);
         }
     }
 
@@ -122,11 +143,11 @@ impl App {
     }
 
     fn has_other_active_work(&self) -> bool {
-        self.conversion.is_busy()
-            || self.recovery_job.is_some()
-            || self.lib.cleanup_active()
-            || self.capture.busy()
-            || self.clipboard.is_busy()
+        self.background_processing() || self.capture.busy() || self.clipboard.is_busy()
+    }
+
+    fn background_processing(&self) -> bool {
+        self.conversion.is_busy() || self.recovery_job.is_some() || self.lib.cleanup_active()
     }
 
     pub(crate) fn record_target_from_ui(&self) -> Result<RecordTarget, String> {
@@ -172,12 +193,14 @@ impl App {
     }
 
     pub fn start_recording_from_ui(&mut self, ctx: &egui::Context) {
+        self.recording_quiet = false;
         match self.record_target_from_ui() {
             Ok(t) => self.dispatch_command(
                 ctx,
                 AppCommand::Recording(RecordingCommand::Start {
                     target: t,
                     profile: RecordProfile::App,
+                    hide: None,
                 }),
             ),
             Err(e) if !e.is_empty() => self.error(e),
@@ -185,12 +208,19 @@ impl App {
         }
     }
 
-    pub fn start_audio_recording(&mut self, ctx: &egui::Context, profile: RecordProfile) {
+    pub fn start_audio_recording(
+        &mut self,
+        ctx: &egui::Context,
+        profile: RecordProfile,
+        hide: Option<bool>,
+    ) {
+        self.recording_quiet = hide == Some(false);
         self.dispatch_command(
             ctx,
             AppCommand::Recording(RecordingCommand::Start {
                 target: RecordTarget::Audio,
                 profile,
+                hide,
             }),
         );
     }
@@ -219,13 +249,15 @@ impl App {
         }
     }
 
-    fn start_hotkey_recording(&mut self, ctx: &egui::Context) {
+    fn start_hotkey_recording(&mut self, ctx: &egui::Context, hide: Option<bool>) {
+        self.recording_quiet = hide == Some(false);
         match self.hotkey_screen() {
             Some(m) => self.dispatch_command(
                 ctx,
                 AppCommand::Recording(RecordingCommand::Start {
                     target: RecordTarget::Screens(vec![m]),
                     profile: RecordProfile::Hotkey,
+                    hide,
                 }),
             ),
             None => self.error(t!("err.no_display")),
@@ -272,8 +304,10 @@ impl App {
                 TrayCommand::FullscreenScreenshot => {
                     self.start_fullscreen_screenshot_with_completion(ctx, None, true)
                 }
-                TrayCommand::StartRecording => self.start_hotkey_recording(ctx),
-                TrayCommand::StartAudio => self.start_audio_recording(ctx, RecordProfile::Hotkey),
+                TrayCommand::StartRecording => self.start_hotkey_recording(ctx, Some(false)),
+                TrayCommand::StartAudio => {
+                    self.start_audio_recording(ctx, RecordProfile::Hotkey, Some(false))
+                }
                 TrayCommand::PauseResume => {
                     self.dispatch_command(ctx, AppCommand::Recording(RecordingCommand::TogglePause))
                 }
@@ -308,14 +342,14 @@ impl App {
             };
             match action {
                 HotkeyAction::RegionScreenshot => {
-                    self.start_region_screenshot(ctx, overlay::Purpose::Area)
+                    self.start_region_screenshot_from_hotkey(ctx, overlay::Purpose::Area)
                 }
                 HotkeyAction::FullscreenScreenshot => self.start_fullscreen_screenshot(ctx, None),
                 HotkeyAction::StartVideo if self.recording.is_idle() => {
-                    self.start_hotkey_recording(ctx)
+                    self.start_hotkey_recording(ctx, None)
                 }
                 HotkeyAction::StartAudio if self.recording.is_idle() => {
-                    self.start_audio_recording(ctx, RecordProfile::Hotkey)
+                    self.start_audio_recording(ctx, RecordProfile::Hotkey, None)
                 }
                 HotkeyAction::StartVideo | HotkeyAction::StartAudio => {}
                 HotkeyAction::StopRecording => {
@@ -352,13 +386,13 @@ impl App {
     }
 
     pub(super) fn update_tray(&mut self) {
-        let state = if self.recording.is_idle() && self.has_other_active_work() {
+        let state = if self.recording.is_idle() && self.background_processing() {
             TrayState::Saving
         } else {
             recording_tray_state(&self.recording)
         };
         if let Some(t) = self.tray.as_mut() {
-            t.set_state(state);
+            t.set_state(state, self.settings.tray_progress);
         }
     }
 

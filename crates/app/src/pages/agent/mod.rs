@@ -17,7 +17,6 @@ pub mod timeline;
 pub mod topics;
 
 use mediaa_agent::run::{Feed, Streams};
-use mediaa_agent::slots::Slots;
 use mediaa_core::agent::AgentSettings;
 use mediaa_engine::Engine;
 use mediaa_queue::Scheduler;
@@ -26,6 +25,7 @@ use std::sync::{Arc, RwLock};
 
 #[derive(Default)]
 pub struct AgentUi {
+    pub budget: budget::BudgetUi,
     pub catalogs: catalogs::CatalogsUi,
     pub providers: providers::ProvidersUi,
     pub models: models::ModelsUi,
@@ -36,7 +36,6 @@ pub struct AgentUi {
 pub struct Services {
     pub ai_dir: PathBuf,
     pub engine: Arc<dyn Engine>,
-    pub slots: Slots,
     pub settings: Arc<RwLock<AgentSettings>>,
     pub sched: Arc<Scheduler>,
     pub streams: Arc<Streams>,

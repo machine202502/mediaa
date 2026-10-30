@@ -47,6 +47,16 @@ pub trait Engine: Send + Sync + 'static {
     ) -> Result<Vec<Vec<f32>>, EngineError>;
     fn models(&self, connection: &str) -> Result<Vec<ModelInfo>, EngineError>;
     fn check(&self, source: &ModelSource, role: ModelRole) -> Result<ModelCheck, EngineError>;
+    fn pull(
+        &self,
+        connection: &str,
+        model: &str,
+        on_progress: &mut dyn FnMut(u64, u64),
+        cancel: &AtomicBool,
+    ) -> Result<(), EngineError> {
+        let _ = (connection, model, on_progress, cancel);
+        Err(EngineError::unavailable("pulling a model is not supported"))
+    }
 }
 
 struct CachedAgent {
@@ -265,6 +275,17 @@ impl Engine for Connections {
             })
         }
     }
+
+    fn pull(
+        &self,
+        connection: &str,
+        model: &str,
+        on_progress: &mut dyn FnMut(u64, u64),
+        cancel: &AtomicBool,
+    ) -> Result<(), EngineError> {
+        let connection = self.connection(connection)?;
+        ollama::pull(&connection, model, on_progress, cancel)
+    }
 }
 
 impl Connections {
@@ -277,13 +298,4 @@ impl Connections {
         let connection = self.connection(id)?;
         ollama::serve(&ollama::program_path(&connection))
     }
-}
-
-pub fn pull(
-    connection: &Connection,
-    model: &str,
-    on_progress: &mut dyn FnMut(u64, u64),
-    cancel: &AtomicBool,
-) -> Result<(), EngineError> {
-    ollama::pull(connection, model, on_progress, cancel)
 }

@@ -1,8 +1,8 @@
 use super::super::tools::tests::recording;
 use super::super::{answer, ask, Brain, Message, Piece, Step, ToolSpec, Tools};
 use super::*;
-use crate::slots::Slots;
-use mediaa_core::agent::{AgentSettings, Budget};
+use mediaa_core::agent::AgentSettings;
+use mediaa_core::slots::Slots;
 use mediaa_engine::testing::FakeEngine;
 use mediaa_queue::Status as TaskStatus;
 use std::time::Duration;
@@ -54,7 +54,7 @@ fn an_answer_is_a_task_with_model_steps_and_tools_that_count_their_work() {
             settings.models.titles = Some(mediaa_core::agent::ModelSource::new("c", "titles"));
             settings
         },
-        Slots::new(Budget::default()),
+        Slots::new(),
     );
     let mut memory = Memory::default();
 

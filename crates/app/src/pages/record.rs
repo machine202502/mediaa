@@ -46,9 +46,13 @@ pub fn ui(
     let mut actions = Vec::new();
     let ctx = ui.ctx().clone();
     header(ui, &t!("record.title"), "");
+    let live = !recording.is_idle();
     if let Some(command) = status::live_status(recording, ui, &ctx) {
         actions.push(RecordUiAction::RecordingCommand(command));
         return actions;
+    }
+    if live {
+        ui.disable();
     }
 
     let w = super::tile_width(ui, 3);
@@ -199,9 +203,11 @@ pub fn profile_editor(
             theme::row(ui, "", |ui| {
                 mark(ui.checkbox(cursor, t!("record.cursor")).changed());
             });
-            theme::row(ui, "", |ui| {
-                mark(ui.checkbox(hide, t!("record.hide_to_tray")).changed());
-            });
+            if profile == RecordProfile::App {
+                theme::row(ui, "", |ui| {
+                    mark(ui.checkbox(hide, t!("record.hide_to_tray")).changed());
+                });
+            }
         },
         |ui| match kind {
             OutputKind::Audio(_) => {}
