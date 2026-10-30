@@ -33,6 +33,7 @@ pub use request::*;
 struct ControlState {
     paused: bool,
     stopping: bool,
+    stopped_at: Option<Duration>,
 }
 
 #[derive(Default)]
@@ -100,10 +101,16 @@ impl Control {
     }
 
     fn stop(&self) {
+        let at = self.capture_time();
         let mut state = self.state.lock();
         state.stopping = true;
+        state.stopped_at = Some(at);
         drop(state);
         self.cv.notify_all();
+    }
+
+    fn stopped_at(&self) -> Option<Duration> {
+        self.state.lock().stopped_at
     }
 
     fn wait(&self, timeout: Duration) -> bool {
@@ -454,10 +461,13 @@ impl RecordingSession {
                         f,
                         ready_tx,
                         gate2,
+                        events.clone(),
+                        req.show_no_signal,
                     );
                     if let Err(e) = &r {
                         log::error!("capture {i} failed: {e:#}");
                         let _ = events.send(SessionEvent::CaptureFailed(format!("{e:#}")));
+                        ctl.stop();
                     }
                     r
                 })?;
@@ -477,20 +487,25 @@ impl RecordingSession {
                     });
                 }
                 SourceReady::Failed(error) => {
+                    fatal_error = Some(StartFailure::Message(error.clone()));
                     errors.push(error);
                     if let Err((preserve, error)) = reap_capture(join, limits.capture_stop_timeout)
                     {
                         preserve_work_dir |= preserve;
                         errors.push(error);
                     }
+                    break;
                 }
                 SourceReady::Exited => {
-                    errors.push("capture thread exited".into());
+                    let error = "capture thread exited".to_string();
+                    fatal_error = Some(StartFailure::Message(error.clone()));
+                    errors.push(error);
                     if let Err((preserve, error)) = reap_capture(join, limits.capture_stop_timeout)
                     {
                         preserve_work_dir |= preserve;
                         errors.push(error);
                     }
+                    break;
                 }
                 SourceReady::TimedOut => {
                     let error = "capture source did not become ready";

@@ -2,7 +2,34 @@ use super::*;
 use crate::features::recording::{RecordTarget, RecordingEvent, RecordingStartEvent, StopSource};
 use crate::services::clipboard::Purpose;
 use mediaa_core::limits::DEFAULT_VIDEO_AUDIO_KBPS;
-use mediaa_core::settings::AnimSettings;
+use mediaa_core::settings::{AnimSettings, RecordSettings};
+
+fn allow_unavailable_sources(profile: RecordProfile, record: &RecordSettings) -> bool {
+    profile != RecordProfile::Region && record.allow_unavailable_sources
+}
+
+fn unavailable_target(target: &RecordTarget) -> Option<(String, bool)> {
+    use mediaa_platform::screen::{self, MonitorState, WindowState};
+    match target {
+        RecordTarget::Audio => None,
+        RecordTarget::Screens(monitors) => monitors.iter().find_map(|monitor| {
+            (screen::monitor_state(monitor.id) == MonitorState::Disconnected)
+                .then(|| (monitor.label(), true))
+        }),
+        RecordTarget::Region(monitor, _) => (screen::monitor_state(monitor.id)
+            == MonitorState::Disconnected)
+            .then(|| (monitor.label(), true)),
+        RecordTarget::Windows(windows) => windows.iter().find_map(|window| {
+            match screen::window_status(window.id, window.pid, &window.app) {
+                WindowState::Available => None,
+                WindowState::Minimized => Some((window.label(), true)),
+                WindowState::Hidden | WindowState::Missing | WindowState::Mismatch => {
+                    Some((window.label(), false))
+                }
+            }
+        }),
+    }
+}
 
 impl App {
     pub(crate) fn dispatch_command(&mut self, ctx: &egui::Context, command: AppCommand) {
@@ -56,11 +83,24 @@ impl App {
         if !self.recording.is_idle() || self.recovery_job.is_some() {
             return;
         }
+        if let Some((name, allowed)) = unavailable_target(&target) {
+            let allow = allow_unavailable_sources(profile, self.settings.profile(profile).0);
+            if !allowed || !allow {
+                self.recording.clear_region();
+                if !self.recording_quiet {
+                    self.show_window(ctx);
+                }
+                self.error(t!("toast.target_unavailable", name = name));
+                return;
+            }
+            self.warning(t!("toast.source_allowed", name = name));
+        }
         if self.mic_devices.is_empty() {
             self.refresh_mics();
         }
         let default_mic = self.default_mic_device.clone();
         let (record, quality) = self.settings.profile(profile);
+        let allow_unavailable = allow_unavailable_sources(profile, record);
         let fps = record.fps;
         let max_height = record.max_height();
         let animation = AnimSettings::for_recording(fps, max_height, quality);
@@ -72,20 +112,60 @@ impl App {
                 .iter()
                 .map(|monitor| {
                     let id = monitor.id;
-                    Box::new(move || screen::monitor_source(id, None, cursor)) as SourceFactory
+                    let size = (monitor.width, monitor.height);
+                    Box::new(move || {
+                        if allow_unavailable
+                            && mediaa_platform::screen::monitor_state(id)
+                                == mediaa_platform::screen::MonitorState::Disconnected
+                        {
+                            mediaa_platform::screen::deferred_monitor_source(id, size, None, cursor)
+                        } else {
+                            screen::monitor_source(id, None, cursor)
+                        }
+                    }) as SourceFactory
                 })
                 .collect(),
             RecordTarget::Region(monitor, rect) => {
                 let (id, rect) = (monitor.id, *rect);
                 vec![Box::new(move || {
-                    screen::monitor_source(id, Some(rect), cursor)
+                    if allow_unavailable
+                        && mediaa_platform::screen::monitor_state(id)
+                            == mediaa_platform::screen::MonitorState::Disconnected
+                    {
+                        mediaa_platform::screen::deferred_monitor_source(
+                            id,
+                            (rect.w as u32, rect.h as u32),
+                            Some(rect),
+                            cursor,
+                        )
+                    } else {
+                        screen::monitor_source(id, Some(rect), cursor)
+                    }
                 })]
             }
             RecordTarget::Windows(windows) => windows
                 .iter()
                 .map(|window| {
                     let id = window.id;
-                    Box::new(move || screen::window_source(id, cursor)) as SourceFactory
+                    let pid = window.pid;
+                    let app = window.app.clone();
+                    let size = (window.width, window.height);
+                    Box::new(move || {
+                        if allow_unavailable
+                            && mediaa_platform::screen::window_status(id, pid, &app)
+                                == mediaa_platform::screen::WindowState::Minimized
+                        {
+                            mediaa_platform::screen::deferred_window_source(
+                                id,
+                                size,
+                                pid,
+                                app.clone(),
+                                cursor,
+                            )
+                        } else {
+                            screen::window_source_checked(id, pid, &app, cursor)
+                        }
+                    }) as SourceFactory
                 })
                 .collect(),
         };
@@ -152,6 +232,7 @@ impl App {
         })
         .animation(animation)
         .webp_mode(record.webp_mode())
+        .no_signal(record.show_no_signal)
         .build()
         {
             Ok(request) => request,
@@ -268,6 +349,12 @@ impl App {
                 RecordingEvent::SessionEvent(SessionEvent::CaptureFailed(error)) => {
                     self.error(t!("toast.recording_stopped", error = error));
                     self.stop_recording_from_source(ctx, StopAction::Save, StopSource::Ui);
+                }
+                RecordingEvent::SessionEvent(SessionEvent::SourceLost(name)) => {
+                    self.warning(t!("toast.source_lost", name = name));
+                }
+                RecordingEvent::SessionEvent(SessionEvent::SourceRestored(name)) => {
+                    self.info(t!("toast.source_restored", name = name));
                 }
                 RecordingEvent::SessionEvent(
                     SessionEvent::Warning(_)
@@ -408,5 +495,62 @@ impl App {
         {
             true
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mediaa_platform::screen::{CaptureWindowId, MonitorId, MonitorInfo, WindowInfo};
+
+    #[test]
+    fn an_unavailable_window_aborts_the_whole_target() {
+        let window = WindowInfo {
+            id: CaptureWindowId::new(0),
+            title: "Closed window".into(),
+            app: String::new(),
+            pid: 0,
+            width: 800,
+            height: 600,
+        };
+        assert_eq!(
+            unavailable_target(&RecordTarget::Windows(vec![window])),
+            Some(("Closed window".into(), false))
+        );
+    }
+
+    #[test]
+    fn region_never_allows_unavailable_sources() {
+        let mut settings = mediaa_core::Settings::default();
+        settings.region_record.allow_unavailable_sources = true;
+        assert!(!allow_unavailable_sources(
+            RecordProfile::Region,
+            &settings.region_record
+        ));
+        settings.record.allow_unavailable_sources = true;
+        assert!(allow_unavailable_sources(
+            RecordProfile::App,
+            &settings.record
+        ));
+    }
+
+    #[test]
+    fn a_disconnected_monitor_can_be_deferred() {
+        let monitor = MonitorInfo {
+            id: MonitorId::new(u32::MAX),
+            device: "gone".into(),
+            index: 0,
+            name: "Gone monitor".into(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            primary: false,
+        };
+        assert_eq!(
+            unavailable_target(&RecordTarget::Screens(vec![monitor])),
+            Some(("Gone monitor (1920×1080)".into(), true))
+        );
     }
 }

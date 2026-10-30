@@ -51,7 +51,8 @@ const CACHE_SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
 #[cfg(test)]
 type TestMonitorCapture = Arc<dyn Fn(screen::MonitorId) -> Result<Frame, String> + Send + Sync>;
 #[cfg(test)]
-type TestWindowCapture = Arc<dyn Fn(screen::WindowId) -> Result<Frame, String> + Send + Sync>;
+type TestWindowCapture =
+    Arc<dyn Fn(screen::CaptureWindowId) -> Result<Frame, String> + Send + Sync>;
 
 pub struct App {
     pub settings: Settings,

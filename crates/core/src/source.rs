@@ -5,6 +5,9 @@ pub trait FrameSource {
     fn name(&self) -> String;
     fn size(&self) -> (u32, u32);
     fn grab(&mut self) -> anyhow::Result<Frame>;
+    fn available(&self) -> bool {
+        true
+    }
 }
 
 pub trait AudioSource: Send {
@@ -16,4 +19,4 @@ pub trait AudioSource: Send {
     fn stop(&mut self);
 }
 
-pub type SourceFactory = Box<dyn FnOnce() -> anyhow::Result<Box<dyn FrameSource>> + Send>;
+pub type SourceFactory = Box<dyn Fn() -> anyhow::Result<Box<dyn FrameSource>> + Send>;

@@ -1,5 +1,19 @@
 use super::*;
 
+fn last_webp_pixel(path: &Path) -> [u8; 4] {
+    let mut decoder =
+        image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()))
+            .unwrap();
+    let size = decoder.output_buffer_size().unwrap();
+    let mut buffer = vec![0; size];
+    let mut pixel = [0; 4];
+    for _ in 0..decoder.num_frames() {
+        decoder.read_image(&mut buffer).unwrap();
+        pixel.copy_from_slice(&buffer[..4]);
+    }
+    pixel
+}
+
 #[test]
 fn sources_starting_at_different_times_have_equal_duration() {
     let dir = tempfile::tempdir().unwrap();
@@ -377,6 +391,26 @@ fn live_webp_handles_two_large_windows_without_hanging() {
 }
 
 #[test]
+fn a_source_that_fails_before_start_aborts_the_whole_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let failing: SourceFactory = Box::new(|| anyhow::bail!("window is minimized"));
+    let req = request(
+        dir.path(),
+        vec![failing, pattern(96, 64)],
+        vec![],
+        OutputKind::Video(VideoContainer::Mp4),
+    );
+    let Err(error) = RecordingSession::start(req) else {
+        panic!("recording started although a source was unavailable")
+    };
+    assert!(format!("{error:#}").contains("window is minimized"));
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("out")).unwrap().count(),
+        0
+    );
+}
+
+#[test]
 fn one_failed_live_source_does_not_force_the_other_offline() {
     let dir = tempfile::tempdir().unwrap();
     let live = dir.path().join("work/live-webp");
@@ -442,6 +476,163 @@ fn both_failed_live_sources_fall_back_to_offline_webp() {
     assert!(logs.contains("stage=live source=0 failed"), "{logs}");
     assert!(logs.contains("stage=live source=1 failed"), "{logs}");
     assert!(logs.contains("stage=offline-mkv"), "{logs}");
+}
+
+#[test]
+fn a_hidden_window_is_replaced_with_the_no_signal_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![hidden_pattern(64, 48), pattern(96, 64)],
+        vec![],
+        OutputKind::Video(VideoContainer::Mkv),
+    );
+    let paths = record(dir.path(), req, 1.2);
+    assert_eq!(paths.len(), 2);
+    let durations: Vec<f64> = paths
+        .iter()
+        .map(|path| probe(path).unwrap().duration_secs().unwrap_or(0.0))
+        .collect();
+    assert!(
+        durations.iter().all(|duration| *duration > 0.8),
+        "{durations:?}"
+    );
+}
+
+#[test]
+fn the_no_signal_card_is_written_into_the_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![hidden_pattern(64, 48), pattern(96, 64)],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let paths = record(dir.path(), req, 1.0);
+    let hidden = last_webp_pixel(&paths[0]);
+    let live = last_webp_pixel(&paths[1]);
+    assert!(
+        hidden[0] > 100 && hidden[1] > 100 && hidden[2] > 100,
+        "expected the light no-signal card for the hidden source, got {hidden:?}"
+    );
+    assert!(
+        live[0] < 100,
+        "the live source must not be replaced by the TV card: {live:?}"
+    );
+}
+
+#[test]
+fn disabling_the_no_signal_card_keeps_the_last_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            fading_pattern(64, 48, 3, [220, 20, 30, 255]),
+            pattern(96, 64),
+        ],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    )
+    .no_signal(false);
+    let paths = record(dir.path(), req, 1.0);
+    let pixel = last_webp_pixel(&paths[0]);
+    assert!(
+        pixel[0] > 100 && pixel[1] < 100,
+        "expected the last red frame, got {pixel:?}"
+    );
+}
+
+#[test]
+fn a_lost_source_is_filled_with_a_placeholder_for_the_whole_track() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![failing_pattern(64, 48, 5), pattern(96, 64)],
+        vec![],
+        OutputKind::Video(VideoContainer::Mkv),
+    );
+    let paths = record(dir.path(), req, 1.2);
+    assert_eq!(paths.len(), 2);
+    let durations: Vec<f64> = paths
+        .iter()
+        .map(|path| probe(path).unwrap().duration_secs().unwrap_or(0.0))
+        .collect();
+    assert!(
+        durations.iter().all(|duration| *duration > 0.8),
+        "{durations:?}"
+    );
+    assert!(
+        (durations[0] - durations[1]).abs() <= 1.0 / 20.0 + 0.01,
+        "the lost source must still have the full duration: {durations:?}"
+    );
+}
+
+#[test]
+fn a_source_can_be_lost_and_restored_during_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![recovering_pattern(64, 48, 5), pattern(96, 64)],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let session = RecordingSession::start(req).unwrap();
+    let events = session.events();
+    let lost = events.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(matches!(lost, SessionEvent::SourceLost(_)), "{lost:?}");
+    let restored = events.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(
+        matches!(restored, SessionEvent::SourceRestored(_)),
+        "{restored:?}"
+    );
+    let (event, warnings) = finish_with_timeout(session, StopAction::Save, Duration::from_secs(60));
+    let SessionEvent::Finished(paths) = event else {
+        panic!("{event:?} {warnings:?}")
+    };
+    assert_eq!(paths.len(), 2);
+    assert!(probe(&paths[0]).unwrap().duration_secs().unwrap_or(0.0) > 0.5);
+}
+
+#[test]
+fn a_resized_window_keeps_the_initial_canvas() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            resized_recovering_pattern(64, 48, 5, 96, 64),
+            pattern(96, 64),
+        ],
+        vec![],
+        OutputKind::Video(VideoContainer::Mkv),
+    );
+    let paths = record(dir.path(), req, 1.2);
+    assert_eq!(probe(&paths[0]).unwrap().width, 64);
+    assert_eq!(probe(&paths[0]).unwrap().height, 48);
+    assert_eq!(
+        probe(&paths[1]).unwrap().width,
+        96,
+        "the second source keeps its own canvas"
+    );
+    assert_eq!(probe(&paths[1]).unwrap().height, 64);
+}
+
+#[test]
+fn one_failing_live_source_saves_the_remaining_animation() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request(
+        dir.path(),
+        vec![
+            failing_pattern(640, 360, 8),
+            video_source("fake-window.webp", 640, 360),
+        ],
+        vec![],
+        OutputKind::Anim(AnimFormat::Webp),
+    );
+    let paths = record(dir.path(), req, 1.2);
+    assert_eq!(paths.len(), 2);
+    assert!(paths
+        .iter()
+        .all(|path| probe(path).unwrap().duration_secs().is_some()));
 }
 
 #[test]

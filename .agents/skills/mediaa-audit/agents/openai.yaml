@@ -1,4 +1,0 @@
-interface:
-  display_name: "MediaA Technical Audit"
-  short_description: "Rational audit of architecture, code and delivery"
-  default_prompt: "Use $mediaa-audit to identify material implementation, architecture, LLM-workflow and build risks in MediaA."

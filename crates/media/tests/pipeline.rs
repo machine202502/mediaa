@@ -1,3 +1,4 @@
+use ez_ffmpeg::frame_export::{FrameExtractor, PixelLayout};
 use mediaa_core::audio::AudioSink;
 use mediaa_core::formats::{AnimFormat, MediaKind, OutputKind, VideoContainer};
 use mediaa_core::paths::{MediaDir, WorkDir};
@@ -16,7 +17,7 @@ use mediaa_webp_pipeline::PipelineTuning;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static LOGS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
 
@@ -192,11 +193,182 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
+struct Mp4Source {
+    frames: Arc<Vec<Frame>>,
+    width: u32,
+    height: u32,
+    index: usize,
+    name: String,
+}
+
+impl Mp4Source {
+    fn new(file: PathBuf, width: u32, height: u32) -> anyhow::Result<Self> {
+        let frames = FrameExtractor::new(file.to_string_lossy().into_owned())
+            .pixel(PixelLayout::Rgba32)
+            .width(width & !1)
+            .frames()?
+            .map(|frame| {
+                let frame = frame?;
+                Ok(Frame::new(frame.width(), frame.height(), frame.into_vec()))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        anyhow::ensure!(!frames.is_empty(), "{} has no video frames", file.display());
+        Ok(Self {
+            frames: Arc::new(frames),
+            width,
+            height,
+            index: 0,
+            name: format!("Video {}x{} ({})", width, height, file.display()),
+        })
+    }
+}
+
+impl FrameSource for Mp4Source {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+    fn grab(&mut self) -> anyhow::Result<Frame> {
+        let frame = self.frames[self.index % self.frames.len()].clone();
+        self.index += 1;
+        Ok(frame)
+    }
+}
+
+fn mp4_source(name: &str, width: u32, height: u32) -> SourceFactory {
+    let file = fixture(name);
+    Box::new(move || {
+        Ok(Box::new(Mp4Source::new(file.clone(), width, height)?) as Box<dyn FrameSource>)
+    })
+}
+
+fn timed_mp4_source(
+    name: &str,
+    width: u32,
+    height: u32,
+    hidden: Option<std::ops::Range<Duration>>,
+    resize: Option<(Duration, u32, u32)>,
+) -> SourceFactory {
+    let file = fixture(name);
+    Box::new(move || {
+        Ok(Box::new(TimedWindow {
+            inner: Box::new(Mp4Source::new(file.clone(), width, height)?),
+            started: Instant::now(),
+            hidden: hidden.clone(),
+            resize,
+            close_at: None,
+        }) as Box<dyn FrameSource>)
+    })
+}
+
+fn closing_mp4_source(name: &str, width: u32, height: u32, close_at: Duration) -> SourceFactory {
+    let file = fixture(name);
+    let first = Arc::new(AtomicBool::new(true));
+    Box::new(move || {
+        if !first.swap(false, Ordering::SeqCst) {
+            anyhow::bail!("window closed");
+        }
+        Ok(Box::new(TimedWindow {
+            inner: Box::new(Mp4Source::new(file.clone(), width, height)?),
+            started: Instant::now(),
+            hidden: None,
+            resize: None,
+            close_at: Some(close_at),
+        }) as Box<dyn FrameSource>)
+    })
+}
+
 fn video_source(name: &str, width: u32, height: u32) -> SourceFactory {
     let file = fixture(name);
     Box::new(move || {
         Ok(Box::new(VideoSource::new(file.clone(), width, height, None)) as Box<dyn FrameSource>)
     })
+}
+
+struct DeferredPattern {
+    width: u32,
+    height: u32,
+    started: Instant,
+    delay: Duration,
+    frame: Frame,
+}
+
+impl FrameSource for DeferredPattern {
+    fn name(&self) -> String {
+        format!("Deferred {}x{}", self.width, self.height)
+    }
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+    fn available(&self) -> bool {
+        self.started.elapsed() >= self.delay
+    }
+    fn grab(&mut self) -> anyhow::Result<Frame> {
+        Ok(self.frame.clone())
+    }
+}
+
+fn deferred_pattern(width: u32, height: u32, delay: Duration) -> SourceFactory {
+    let frame = Frame::new(
+        width,
+        height,
+        (0..width * height)
+            .flat_map(|i| {
+                let x = (i % width) * 255 / width;
+                [x as u8, 80, 120, 255]
+            })
+            .collect(),
+    );
+    Box::new(move || {
+        Ok(Box::new(DeferredPattern {
+            width,
+            height,
+            started: Instant::now(),
+            delay,
+            frame: frame.clone(),
+        }) as Box<dyn FrameSource>)
+    })
+}
+
+struct TimedWindow {
+    inner: Box<dyn FrameSource>,
+    started: Instant,
+    hidden: Option<std::ops::Range<Duration>>,
+    resize: Option<(Duration, u32, u32)>,
+    close_at: Option<Duration>,
+}
+
+impl FrameSource for TimedWindow {
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn size(&self) -> (u32, u32) {
+        self.inner.size()
+    }
+    fn available(&self) -> bool {
+        let elapsed = self.started.elapsed();
+        !self
+            .hidden
+            .as_ref()
+            .is_some_and(|range| range.contains(&elapsed))
+    }
+    fn grab(&mut self) -> anyhow::Result<Frame> {
+        if self
+            .close_at
+            .is_some_and(|close| self.started.elapsed() >= close)
+        {
+            anyhow::bail!("window closed");
+        }
+        let frame = self.inner.grab()?;
+        match self.resize {
+            Some((after, width, height)) if self.started.elapsed() >= after => {
+                Ok(frame.resized(width, height))
+            }
+            _ => Ok(frame),
+        }
+    }
 }
 
 fn closing_video_source(name: &str, width: u32, height: u32, frames: usize) -> SourceFactory {
@@ -237,6 +409,134 @@ impl FrameSource for Still {
         }
         Ok(Frame::new(self.w, self.h, data))
     }
+}
+
+struct FailingPattern {
+    inner: Pattern,
+    remaining: usize,
+}
+impl FrameSource for FailingPattern {
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn size(&self) -> (u32, u32) {
+        self.inner.size()
+    }
+    fn grab(&mut self) -> anyhow::Result<Frame> {
+        if self.remaining == 0 {
+            anyhow::bail!("window was closed");
+        }
+        self.remaining -= 1;
+        self.inner.grab()
+    }
+}
+
+fn failing_pattern(w: u32, h: u32, frames: usize) -> SourceFactory {
+    Box::new(move || {
+        Ok(Box::new(FailingPattern {
+            inner: Pattern { w, h, n: 0 },
+            remaining: frames,
+        }) as Box<dyn FrameSource>)
+    })
+}
+
+struct HiddenPattern {
+    inner: Pattern,
+}
+
+impl FrameSource for HiddenPattern {
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn size(&self) -> (u32, u32) {
+        self.inner.size()
+    }
+    fn available(&self) -> bool {
+        false
+    }
+    fn grab(&mut self) -> anyhow::Result<Frame> {
+        self.inner.grab()
+    }
+}
+
+fn hidden_pattern(w: u32, h: u32) -> SourceFactory {
+    Box::new(move || {
+        Ok(Box::new(HiddenPattern {
+            inner: Pattern { w, h, n: 0 },
+        }) as Box<dyn FrameSource>)
+    })
+}
+
+struct FadingPattern {
+    width: u32,
+    height: u32,
+    remaining: usize,
+    color: [u8; 4],
+}
+
+impl FrameSource for FadingPattern {
+    fn name(&self) -> String {
+        "Fading source".into()
+    }
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+    fn available(&self) -> bool {
+        self.remaining > 0
+    }
+    fn grab(&mut self) -> anyhow::Result<Frame> {
+        self.remaining = self.remaining.saturating_sub(1);
+        Ok(Frame::filled(self.width, self.height, self.color))
+    }
+}
+
+fn fading_pattern(w: u32, h: u32, frames: usize, color: [u8; 4]) -> SourceFactory {
+    Box::new(move || {
+        Ok(Box::new(FadingPattern {
+            width: w,
+            height: h,
+            remaining: frames,
+            color,
+        }) as Box<dyn FrameSource>)
+    })
+}
+
+fn recovering_pattern(w: u32, h: u32, frames: usize) -> SourceFactory {
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    Box::new(move || {
+        if !first.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            Ok(Box::new(FailingPattern {
+                inner: Pattern { w, h, n: 0 },
+                remaining: frames,
+            }) as Box<dyn FrameSource>)
+        } else {
+            Ok(Box::new(Pattern { w, h, n: 0 }) as Box<dyn FrameSource>)
+        }
+    })
+}
+
+fn resized_recovering_pattern(
+    w: u32,
+    h: u32,
+    frames: usize,
+    next_w: u32,
+    next_h: u32,
+) -> SourceFactory {
+    let first = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    Box::new(move || {
+        if !first.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            Ok(Box::new(FailingPattern {
+                inner: Pattern { w, h, n: 0 },
+                remaining: frames,
+            }) as Box<dyn FrameSource>)
+        } else {
+            Ok(Box::new(Pattern {
+                w: next_w,
+                h: next_h,
+                n: 0,
+            }) as Box<dyn FrameSource>)
+        }
+    })
 }
 
 fn pattern(w: u32, h: u32) -> SourceFactory {
@@ -403,7 +703,8 @@ fn finish(session: RecordingSession, action: StopAction) -> (SessionEvent, Vec<S
             .recv_timeout(Duration::from_secs(60))
             .expect("terminal event")
         {
-            SessionEvent::Warning(w) => warnings.push(w),
+            SessionEvent::Warning(w) | SessionEvent::SourceLost(w) => warnings.push(w),
+            SessionEvent::SourceRestored(w) => warnings.push(format!("restored: {w}")),
             SessionEvent::Notice(notice) => warnings.push(format!("{notice:?}")),
             other => return (other, warnings),
         }
@@ -472,3 +773,6 @@ mod audio;
 mod conversion;
 #[path = "pipeline/video.rs"]
 mod video;
+
+#[path = "pipeline/scenarios.rs"]
+mod scenarios;

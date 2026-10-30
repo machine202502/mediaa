@@ -195,7 +195,11 @@ impl App {
         }
     }
 
-    pub fn start_window_screenshot(&mut self, ctx: &egui::Context, window_id: screen::WindowId) {
+    pub fn start_window_screenshot(
+        &mut self,
+        ctx: &egui::Context,
+        window_id: screen::CaptureWindowId,
+    ) {
         if self.image_io_busy() {
             self.warning(t!("toast.finish_current"));
             return;
@@ -224,7 +228,7 @@ impl App {
         &mut self,
         ctx: &egui::Context,
         kind: CaptureKind,
-        window: screen::WindowId,
+        window: screen::CaptureWindowId,
     ) {
         #[cfg(test)]
         let capture = self.window_capture.clone();

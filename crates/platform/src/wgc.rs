@@ -1,4 +1,4 @@
-use crate::screen::{MonitorId, WindowId};
+use crate::screen::{CaptureWindowId, MonitorId};
 use anyhow::{anyhow, Context as _};
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
@@ -67,6 +67,7 @@ impl GraphicsCaptureApiHandler for Handler {
 pub struct WgcSource {
     name: String,
     size: (u32, u32),
+    window: Option<isize>,
     latest: Arc<Latest>,
     last: Option<Frame>,
     fresh: u64,
@@ -87,12 +88,17 @@ impl WgcSource {
         Self::start(monitor, name, size, region, cursor)
     }
 
-    pub fn window(window_id: WindowId, name: String, cursor: bool) -> anyhow::Result<Self> {
+    pub fn window(window_id: CaptureWindowId, name: String, cursor: bool) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            crate::screen::window_available(window_id),
+            "window is minimized or hidden"
+        );
         let window =
             Window::from_raw_hwnd(window_id.get() as i32 as isize as *mut std::ffi::c_void);
         let mut s = Self::start(window, name, (0, 0), None, cursor)?;
         let first = s.wait_first()?;
         s.size = (first.width & !1, first.height & !1);
+        s.window = Some(window_id.get() as isize);
         anyhow::ensure!(
             s.size.0 >= 16 && s.size.1 >= 16,
             "window is too small to record"
@@ -100,7 +106,7 @@ impl WgcSource {
         Ok(s)
     }
 
-    pub fn window_frame(window_id: WindowId) -> anyhow::Result<Frame> {
+    pub fn window_frame(window_id: CaptureWindowId) -> anyhow::Result<Frame> {
         let window =
             Window::from_raw_hwnd(window_id.get() as i32 as isize as *mut std::ffi::c_void);
         Self::start(window, String::new(), (0, 0), None, false)?.wait_first()
@@ -140,6 +146,7 @@ impl WgcSource {
         let mut s = Self {
             name,
             size,
+            window: None,
             latest,
             last: None,
             fresh: 0,
@@ -173,6 +180,18 @@ impl FrameSource for WgcSource {
 
     fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    fn available(&self) -> bool {
+        if let Some(window) = self.window {
+            use windows_sys::Win32::Foundation::HWND;
+            use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
+            let hwnd = window as HWND;
+            return unsafe { IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 };
+        }
+        self.control
+            .as_ref()
+            .is_none_or(|control| !control.is_finished())
     }
 
     fn grab(&mut self) -> anyhow::Result<Frame> {

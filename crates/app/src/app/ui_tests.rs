@@ -11,7 +11,7 @@ use mediaa_core::source::{FrameSource, SourceFactory};
 use mediaa_core::{AnimFormat, Frame, OutputKind, Settings, VideoContainer};
 use mediaa_media::convert::{StillFormat, Target};
 use mediaa_media::recorder::{RecordingRequest, RecordingSession, SessionEvent, SessionNotice};
-use mediaa_platform::screen::{MonitorId, MonitorInfo, WindowId, WindowInfo};
+use mediaa_platform::screen::{CaptureWindowId, MonitorId, MonitorInfo, WindowInfo};
 use rust_i18n::t;
 use std::path::PathBuf;
 
@@ -98,7 +98,7 @@ fn secondary_monitor() -> MonitorInfo {
 
 fn window() -> WindowInfo {
     WindowInfo {
-        id: WindowId::new(7),
+        id: CaptureWindowId::new(7),
         title: "Quarterly planning — a deliberately long document title".into(),
         app: "Browser".into(),
         pid: 42,
@@ -109,7 +109,7 @@ fn window() -> WindowInfo {
 
 fn second_window() -> WindowInfo {
     WindowInfo {
-        id: WindowId::new(8),
+        id: CaptureWindowId::new(8),
         title: "Chat".into(),
         app: "Messenger".into(),
         pid: 43,
@@ -337,7 +337,7 @@ fn record_page_switches_to_mocked_windows_and_selects_one() {
         .recording
         .ui
         .windows
-        .contains(&WindowId::new(7)));
+        .contains(&CaptureWindowId::new(7)));
     assert!(!harness
         .get_by_label_contains(&t!("record.start"))
         .accesskit_node()
@@ -753,9 +753,11 @@ fn window_screenshot_uses_selected_window() {
         egui::vec2(1180.0, 900.0),
     );
     harness
-        .get_all_by_label(&t!("shot.capture_window"))
-        .next()
-        .expect("a mocked window")
+        .get_by_label(&format!(
+            "{}  {}",
+            egui_phosphor::regular::CAMERA,
+            window().label()
+        ))
         .click();
     harness.run();
     assert!(matches!(
@@ -1167,11 +1169,25 @@ fn settings_controls_change_application_state() {
 
     let settings = &harness.state().app.as_ref().unwrap().settings;
     assert_eq!(settings.theme, ThemePreference::Light);
-    assert!(!settings.close_to_tray);
+    assert!(settings.close_to_tray);
     assert!(!settings.tray_progress);
     assert_eq!(
         settings.tray_left_click,
         mediaa_core::settings::TrayClickAction::OpenWindow
+    );
+}
+
+#[test]
+fn the_no_signal_card_toggle_is_per_recording_profile() {
+    let mut harness = harness(Page::Record);
+    harness.run_steps(2);
+    harness.get_by_label(&t!("record.show_no_signal")).click();
+    harness.run();
+    let settings = &harness.state().app.as_ref().unwrap().settings;
+    assert!(!settings.record.show_no_signal);
+    assert!(
+        settings.hotkey_record.show_no_signal,
+        "the hotkey profile must keep its own value"
     );
 }
 

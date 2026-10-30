@@ -1,4 +1,0 @@
-interface:
-  display_name: "MediaA Complexity Audit"
-  short_description: "Find unjustified complexity worth removing"
-  default_prompt: "Use $mediaa-complexity to find overengineering in MediaA and propose only proportionate simplifications."

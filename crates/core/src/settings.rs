@@ -98,6 +98,8 @@ pub struct RecordSettings {
     pub record_cursor: bool,
     pub output_height: u32,
     pub hide_to_tray: bool,
+    pub show_no_signal: bool,
+    pub allow_unavailable_sources: bool,
     pub segmented_webp: bool,
     pub parallel_webp: bool,
 }
@@ -122,6 +124,8 @@ impl Default for RecordSettings {
             record_cursor: true,
             output_height: 2160,
             hide_to_tray: true,
+            show_no_signal: true,
+            allow_unavailable_sources: false,
             segmented_webp: true,
             parallel_webp: true,
         }
@@ -326,7 +330,7 @@ impl Default for Settings {
             agent: crate::agent::AgentSettings::default(),
             launch_at_login: false,
             start_in_tray: false,
-            close_to_tray: true,
+            close_to_tray: false,
             tray_left_click: TrayClickAction::default(),
             tray_progress: true,
             animated_previews: true,
@@ -491,14 +495,14 @@ mod tests {
     }
 
     #[test]
-    fn closing_the_window_hides_to_the_tray_by_default() {
-        assert!(Settings::default().close_to_tray);
+    fn closing_the_window_does_not_hide_to_the_tray_by_default() {
+        assert!(!Settings::default().close_to_tray);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.toml");
         std::fs::write(&path, "theme = \"light\"\n").unwrap();
         assert!(
-            Settings::load_from(&path).close_to_tray,
-            "an old file without the key keeps the default"
+            !Settings::load_from(&path).close_to_tray,
+            "an old file without the key gets the new disabled default"
         );
         std::fs::write(&path, "close_to_tray = false\n").unwrap();
         assert!(!Settings::load_from(&path).close_to_tray);
@@ -520,6 +524,9 @@ mod tests {
         let settings = Settings::default();
         assert!(settings.animated_previews);
         assert!(settings.full_preview_videos);
+        assert!(settings.record.show_no_signal);
+        assert!(settings.hotkey_record.show_no_signal);
+        assert!(settings.region_record.show_no_signal);
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
@@ -672,8 +679,11 @@ mod tests {
                 && r.record_cursor
         );
         assert!(r.segmented_webp && r.parallel_webp);
+        assert!(!r.allow_unavailable_sources);
         assert_eq!((r.fps, r.video_quality, r.output_height), (60, 100, 2160));
         let s = Settings::default();
+        assert!(!s.hotkey_record.allow_unavailable_sources);
+        assert!(!s.region_record.allow_unavailable_sources);
         assert_eq!(
             s.hotkey_record.output,
             OutputKind::Video(VideoContainer::Mkv)

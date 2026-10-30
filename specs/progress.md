@@ -100,3 +100,10 @@
 | UI-13 | 30.10.26 19:10 | Возврат окна после записи зависит от источника старта, не от источника остановки | готово | [recording-stop-window-source.md](tasks/recording-stop-window-source.md) |
 | REC-6 | 30.10.26 19:30 | Общий старт capture-потоков и финальная обрезка выходов под минимальную длительность | готово | [multi-source-duration.md](tasks/multi-source-duration.md) |
 | UI-14 | 30.10.26 20:10 | `unused`/`dead_code` запрещены на уровне workspace, все crate наследуют lint-настройки | готово | [deny-unused.md](tasks/deny-unused.md) |
+| REC-8 | 30.10.26 23:45 | Старые скиллы удалены; добавлен mediaa-video-tests с метриками, таблицей и ссылками на документы | готово | [video-tests-skill.md](tasks/video-tests-skill.md) |
+| REC-9 | 31.10.26 00:35 | Разрешение записи свёрнутых окон и отключённых мониторов, идентичность окна, deferred-источник, тесты | готово | [unavailable-sources.md](tasks/unavailable-sources.md) |
+| UI-15 | 31.10.26 00:45 | «Скрывать в трей при закрытии окна» выключено по умолчанию | готово | [close-to-tray-default.md](tasks/close-to-tray-default.md) |
+| UI-16 | 31.10.26 00:55 | Строки окон в Capture такие же кликабельные, как строки дисплеев | готово | [capture-window-rows.md](tasks/capture-window-rows.md) |
+| UI-17 | 31.10.26 01:05 | Постоянная кнопка «Отмена» в overlay выбора области | готово | [region-cancel-button.md](tasks/region-cancel-button.md) |
+| UI-18 | 31.10.26 01:10 | Убрана подпись под кнопкой «Начать запись» | готово | [record-start-no-hint.md](tasks/record-start-no-hint.md) |
+| REC-7 | 30.10.26 23:20 | TV fake, настройки, 30-секундные MP4-сценарии на разных размерах и сравнительные MP4-документы в target (не закоммичено) | тесты | [mp4-video-snapshots.md](tasks/mp4-video-snapshots.md) |

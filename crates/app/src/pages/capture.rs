@@ -1,16 +1,16 @@
 use super::{header, tile};
 use crate::theme;
-use eframe::egui::{self, RichText};
+use eframe::egui;
 use egui_phosphor::regular as icon;
 use mediaa_core::Settings;
-use mediaa_platform::screen::{MonitorInfo, WindowId, WindowInfo};
+use mediaa_platform::screen::{CaptureWindowId, MonitorInfo, WindowInfo};
 use rust_i18n::t;
 
 pub enum CaptureUiAction {
     RefreshCatalogs,
     StartRegion,
     StartFullscreen(Option<MonitorInfo>),
-    StartWindow(WindowId),
+    StartWindow(CaptureWindowId),
 }
 
 pub fn ui(
@@ -112,14 +112,15 @@ pub fn ui(
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for w in windows {
-                    ui.horizontal(|ui| {
-                        if theme::icon_button(ui, icon::CAMERA, &t!("shot.capture_window"))
-                            .clicked()
-                        {
-                            capture = Some(w.id);
-                        }
-                        ui.add(egui::Label::new(RichText::new(w.label())).truncate());
-                    });
+                    if ui
+                        .add(
+                            theme::secondary(icon::CAMERA, &w.label())
+                                .min_size(egui::vec2(ui.available_width(), 28.0)),
+                        )
+                        .clicked()
+                    {
+                        capture = Some(w.id);
+                    }
                 }
             });
         if let Some(id) = capture {

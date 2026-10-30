@@ -145,13 +145,15 @@ pub fn profile_editor(
     };
     let (r, anim) = settings.profile_mut(profile);
     let kind = r.output;
-    let (output, height, fps, quality, hide, cursor) = (
+    let (output, height, fps, quality, hide, cursor, no_signal, unavailable) = (
         &mut r.output,
         &mut r.output_height,
         &mut r.fps,
         &mut r.video_quality,
         &mut r.hide_to_tray,
         &mut r.record_cursor,
+        &mut r.show_no_signal,
+        &mut r.allow_unavailable_sources,
     );
     let (record_audio, microphone, system_audio, every_file) = (
         &mut r.record_audio,
@@ -203,6 +205,22 @@ pub fn profile_editor(
             theme::row(ui, "", |ui| {
                 mark(ui.checkbox(cursor, t!("record.cursor")).changed());
             });
+            theme::row(ui, "", |ui| {
+                mark(
+                    ui.checkbox(no_signal, t!("record.show_no_signal"))
+                        .on_hover_text(t!("record.show_no_signal_hint"))
+                        .changed(),
+                );
+            });
+            if profile != RecordProfile::Region {
+                theme::row(ui, "", |ui| {
+                    mark(
+                        ui.checkbox(unavailable, t!("record.allow_unavailable_sources"))
+                            .on_hover_text(t!("record.allow_unavailable_sources_hint"))
+                            .changed(),
+                    );
+                });
+            }
             if profile == RecordProfile::App {
                 theme::row(ui, "", |ui| {
                     mark(ui.checkbox(hide, t!("record.hide_to_tray")).changed());
@@ -557,6 +575,11 @@ pub fn start_bar(
             theme::primary(ui, icon::RECORD, &t!("record.start")).min_size(egui::vec2(220.0, 36.0));
         let available = target.is_ok() && !recovery_active;
         let mut resp = ui.add_enabled(available, btn);
+        if let Err(why) = &target {
+            if !why.is_empty() {
+                resp = resp.on_disabled_hover_text(why.as_str());
+            }
+        }
         if recovery_active {
             resp = resp.on_disabled_hover_text(t!("record.recovery_wait"));
         }
@@ -566,11 +589,6 @@ pub fn start_bar(
         }
         if resp.clicked() {
             start = true;
-        }
-        if let Err(why) = &target {
-            if !why.is_empty() {
-                theme::hint(ui, why.as_str());
-            }
         }
     });
     start

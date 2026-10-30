@@ -515,10 +515,36 @@ impl State {
         self.paint(&painter, map, screen);
         self.text_editor(ui, map);
         self.keyboard(&ctx);
+        self.cancel_button(&ctx, screen);
         if self.outcome.is_none() {
             self.toolbars(&ctx, map, screen);
         }
         self.reveal(&ctx);
+    }
+
+    fn cancel_button(&mut self, ctx: &egui::Context, screen: ERect) {
+        if self.editor.usable_selection().is_some() {
+            return;
+        }
+        egui::Area::new(egui::Id::new("overlay-cancel"))
+            .fixed_pos(screen.center() + egui::vec2(-52.0, 30.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                if ui
+                    .add(
+                        egui::Button::new(format!(
+                            "{}  {}",
+                            egui_phosphor::regular::X,
+                            t!("common.cancel")
+                        ))
+                        .min_size(egui::vec2(104.0, 30.0)),
+                    )
+                    .on_hover_text("Esc")
+                    .clicked()
+                {
+                    self.outcome = Some(Outcome::Cancel);
+                }
+            });
     }
 
     fn reveal(&mut self, ctx: &egui::Context) {
@@ -1295,6 +1321,47 @@ mod tests {
             egui::pos2(790.0, 590.0),
         );
         harness.snapshot("region-editor-edge-selection");
+    }
+
+    #[test]
+    fn cancel_button_works_before_a_selection() {
+        let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::RecordRegion);
+        harness.run_steps(2);
+        harness
+            .get_by_label(&format!(
+                "{}  {}",
+                egui_phosphor::regular::X,
+                rust_i18n::t!("common.cancel")
+            ))
+            .click();
+        harness.run_steps(2);
+        assert!(matches!(
+            harness.state().as_ref().unwrap().state.lock().outcome,
+            Some(Outcome::Cancel)
+        ));
+    }
+
+    #[test]
+    fn cancel_button_works_after_a_selection() {
+        let mut harness = overlay_harness(vec![monitor(1, 0, 800, true)], Purpose::Screenshot);
+        harness.run_steps(2);
+        drag(
+            &mut harness,
+            egui::pos2(80.0, 70.0),
+            egui::pos2(300.0, 240.0),
+        );
+        harness
+            .get_by_label(&format!(
+                "{}  {}",
+                egui_phosphor::regular::X,
+                rust_i18n::t!("common.cancel")
+            ))
+            .click();
+        harness.run_steps(2);
+        assert!(matches!(
+            harness.state().as_ref().unwrap().state.lock().outcome,
+            Some(Outcome::Cancel)
+        ));
     }
 
     #[test]
