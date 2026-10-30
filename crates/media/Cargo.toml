@@ -24,3 +24,6 @@ thiserror.workspace = true
 [dev-dependencies]
 hound.workspace = true
 mediaa-storage.workspace = true
+
+[lints]
+workspace = true

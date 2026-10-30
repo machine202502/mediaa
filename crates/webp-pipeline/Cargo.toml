@@ -11,3 +11,6 @@ crossbeam-channel.workspace = true
 log.workspace = true
 mediaa-core.workspace = true
 tempfile.workspace = true
+
+[lints]
+workspace = true

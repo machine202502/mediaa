@@ -23,3 +23,6 @@ futures = "0.3.34"
 [dev-dependencies]
 tempfile.workspace = true
 tiny_http = "0.12"
+
+[lints]
+workspace = true

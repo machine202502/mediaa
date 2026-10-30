@@ -20,6 +20,10 @@ edition = "2021"
 license = "MIT"
 rust-version = "1.95"
 
+[workspace.lints.rust]
+unused = "deny"
+dead_code = "deny"
+
 [workspace.dependencies]
 mediaa-core = { path = "crates/core" }
 mediaa-storage = { path = "crates/storage" }

@@ -37,3 +37,6 @@ env_logger.workspace = true
 
 [build-dependencies]
 minijinja-embed = "2"
+
+[lints]
+workspace = true

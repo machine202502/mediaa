@@ -99,3 +99,4 @@
 | UI-12 | 30.10.26 18:55 | Анимированный индикатор генерации превью в карточках и просмотрщике | готово | [preview-loader.md](tasks/preview-loader.md) |
 | UI-13 | 30.10.26 19:10 | Возврат окна после записи зависит от источника старта, не от источника остановки | готово | [recording-stop-window-source.md](tasks/recording-stop-window-source.md) |
 | REC-6 | 30.10.26 19:30 | Общий старт capture-потоков и финальная обрезка выходов под минимальную длительность | готово | [multi-source-duration.md](tasks/multi-source-duration.md) |
+| UI-14 | 30.10.26 20:10 | `unused`/`dead_code` запрещены на уровне workspace, все crate наследуют lint-настройки | готово | [deny-unused.md](tasks/deny-unused.md) |
