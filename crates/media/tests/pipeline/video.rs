@@ -1,15 +1,11 @@
 use super::*;
 
 fn last_webp_pixel(path: &Path) -> [u8; 4] {
-    let mut decoder =
-        image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()))
-            .unwrap();
-    let size = decoder.output_buffer_size().unwrap();
-    let mut buffer = vec![0; size];
+    let mut reader = mediaa_webp::Reader::open(path).unwrap();
     let mut pixel = [0; 4];
-    for _ in 0..decoder.num_frames() {
-        decoder.read_image(&mut buffer).unwrap();
-        pixel.copy_from_slice(&buffer[..4]);
+    for _ in 0..reader.frame_count() {
+        let frame = reader.read_frame().unwrap();
+        pixel.copy_from_slice(&frame.data[..4]);
     }
     pixel
 }
@@ -136,16 +132,15 @@ fn a_slow_source_is_trimmed_to_the_shared_duration() {
 
 #[test]
 fn static_build_has_required_codecs() {
-    use ez_ffmpeg::capabilities as caps;
     for name in ["libx264", "libx264rgb", "aac", "gif", "libwebp_anim"] {
         assert!(
-            caps::is_encoder_available(name),
+            mediaa_ffmpeg::caps::encoder_available(name),
             "{name} encoder missing from the FFmpeg build"
         );
     }
     for name in ["palettegen", "paletteuse", "amix"] {
         assert!(
-            caps::is_filter_available(name),
+            mediaa_ffmpeg::caps::filter_available(name),
             "{name} filter missing from the FFmpeg build"
         );
     }
@@ -484,15 +479,11 @@ fn webp_encoding_finishes_from_live_chunks_without_fallback() {
     let info = probe(&paths[0]).unwrap();
     let duration = info.duration_secs().expect("WebP duration");
     assert!((1.9..2.8).contains(&duration), "{info:?}");
-    let decoder = image_webp::WebPDecoder::new(std::io::BufReader::new(
-        std::fs::File::open(&paths[0]).unwrap(),
-    ))
-    .unwrap();
+    let frames = mediaa_webp::Reader::open(&paths[0]).unwrap().frame_count();
     let expected = duration * 10.0;
     assert!(
-        (decoder.num_frames() as f64 - expected).abs() <= 3.0,
-        "{} frames, expected about {expected}",
-        decoder.num_frames()
+        (frames as f64 - expected).abs() <= 3.0,
+        "{frames} frames, expected about {expected}",
     );
     assert!(!dir.path().join("work").exists());
 }

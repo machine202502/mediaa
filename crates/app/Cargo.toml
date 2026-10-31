@@ -16,6 +16,7 @@ mediaa-core.workspace = true
 mediaa-storage.workspace = true
 mediaa-render.workspace = true
 mediaa-media.workspace = true
+mediaa-ffmpeg.workspace = true
 mediaa-platform.workspace = true
 mediaa-engine.workspace = true
 mediaa-agent.workspace = true

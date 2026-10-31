@@ -4,9 +4,9 @@ use super::{
     RecordingSession, RecordingStartCancelled, SourceReady, SourceReadyResult, TimedJoin,
 };
 use chrono::{Local, TimeZone};
-use ez_ffmpeg::{FfmpegContext, Input, Output};
 use mediaa_core::formats::{OutputKind, VideoContainer};
 use mediaa_core::settings::{AnimSettings, WebpMode};
+use mediaa_ffmpeg::{job, Input, JobBuilder, Output};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -294,20 +294,20 @@ fn chunk_concat_keeps_both_parts_in_order() {
     let mut chunks = Vec::new();
     for (index, color) in ["red", "blue"].into_iter().enumerate() {
         let path = dir.path().join(format!("part-{index}.mkv"));
-        let context = FfmpegContext::builder()
-            .input(Input::from(format!("color=c={color}:s=64x48:r=10:d=0.4")).set_format("lavfi"))
+        let context = JobBuilder::new()
+            .input(Input::from_url(format!("color=c={color}:s=64x48:r=10:d=0.4")).format("lavfi"))
             .filter_desc("[0:v]format=bgr0[v]")
             .output(
-                Output::from(path.to_string_lossy().into_owned())
-                    .set_format("matroska")
-                    .set_video_codec("libx264rgb")
-                    .set_video_codec_opt("preset", "ultrafast")
-                    .set_video_codec_opt("qp", "0")
-                    .add_stream_map("[v]"),
+                Output::new(&path)
+                    .format("matroska")
+                    .video_codec("libx264rgb")
+                    .video_opt("preset", "ultrafast")
+                    .video_opt("qp", "0")
+                    .stream_map("[v]"),
             )
             .build()
             .unwrap();
-        crate::job::run(context, None, &mut |_| {}, &AtomicBool::new(false)).unwrap();
+        job::run(context, None, &mut |_| {}, &AtomicBool::new(false)).unwrap();
         chunks.push(path);
     }
     let combined = dir.path().join("combined.mkv");

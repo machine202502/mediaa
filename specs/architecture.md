@@ -99,16 +99,18 @@ Windows Graphics Capture, X11/MIT-SHM и Wayland/PipeWire отличаются �
 
 Восстанавливает незавершённые пользовательские источники после сбоя.
 
-### 3.2. `animation_backends`, `webp_decode`
+### 3.2. `animation_backends`
 
-Кодируют анимацию одним полным проходом Direct: WebP через FFmpeg/libwebp, GIF через
-FFmpeg. Фильтры и WebP-части приходят из `mediaa-webp`/`mediaa-gif`.
-`WebpMode::{Quality, Fast}` задаёт method и ограничения fps/высоты. Сегментного и
-live-WebP больше нет.
+`animation_backends` только выбирает форматный крейт: GIF кодирует `mediaa-gif`, WebP —
+`mediaa-webp`. Форматные крейты владеют графом, output-опциями и декодированием WebP; `media`
+не строит для анимации собственный FFmpeg job. Animated WebP в GIF идёт через поток кадров
+`mediaa-webp`, потому что FFmpeg декодирует только статичный кадр WebP.
+`WebpMode::{Quality, Fast}` задаёт effort. Сегментного и live-WebP больше нет.
 
 ### 3.3. `convert`, `filters`
 
-Строят FFmpeg-фильтры и выполняют пользовательские конвертации.
+`convert` собирает FFmpeg job через `mediaa-ffmpeg` и выполняет пользовательские конвертации.
+`filters` содержит только строки фильтров для видео, аудио и preview.
 
 ### 3.4. `info`, `preview`, `preview_cache`, `thumbnail`
 
@@ -121,12 +123,14 @@ FFmpeg execution/cancel живёт в отдельном `mediaa-ffmpeg`.
 
 ## 4. Форматные крейты
 
-- `mediaa-ffmpeg` — запуск/отмена FFmpeg, общий слой для форматов.
-- `mediaa-webp` — WebP-граф, normalize/validate/trim, merge animated WebP.
-- `mediaa-gif` — GIF-граф, палитра и dither.
+- `mediaa-ffmpeg` — единственный владелец `ez-ffmpeg`: job builder/start/wait, probe,
+  frame export, push-источник, PCM-декодирование, capabilities и отмена.
+- `mediaa-webp` — WebP-граф, декодер (`Reader`), поток кадров, кодирование,
+  normalize/validate/trim/merge animated WebP.
+- `mediaa-gif` — GIF-граф, кодирование и trim.
 
-`mediaa-media` не содержит сегментного pipeline; форматные операции вызываются через
-эти крейты.
+`mediaa-media` не импортирует `ez-ffmpeg` или `image-webp`; форматные операции вызываются
+через эти крейты.
 
 ## 5. `storage` — библиотека и кэши
 
@@ -298,8 +302,8 @@ core
   <- storage
   <- platform
   <- mediaa-ffmpeg
-  <- mediaa-webp
-  <- mediaa-gif
+  <- mediaa-webp <- mediaa-ffmpeg
+  <- mediaa-gif <- mediaa-ffmpeg
   <- media <- mediaa-ffmpeg, mediaa-webp, mediaa-gif
   <- engine
   <- queue

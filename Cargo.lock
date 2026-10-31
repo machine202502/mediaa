@@ -3745,6 +3745,7 @@ dependencies = [
  "mediaa-agent",
  "mediaa-core",
  "mediaa-engine",
+ "mediaa-ffmpeg",
  "mediaa-media",
  "mediaa-platform",
  "mediaa-queue",
@@ -3862,13 +3863,16 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ez-ffmpeg",
+ "mediaa-core",
 ]
 
 [[package]]
 name = "mediaa-gif"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "mediaa-core",
+ "mediaa-ffmpeg",
 ]
 
 [[package]]
@@ -3878,10 +3882,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "crossbeam-channel",
- "ez-ffmpeg",
  "hound",
  "image",
- "image-webp",
  "log",
  "mediaa-core",
  "mediaa-ffmpeg",
@@ -3969,7 +3971,10 @@ name = "mediaa-webp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "image",
+ "image-webp",
  "mediaa-core",
+ "mediaa-ffmpeg",
  "tempfile",
 ]
 

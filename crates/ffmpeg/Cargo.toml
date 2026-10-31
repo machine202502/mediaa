@@ -8,6 +8,7 @@ build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true
+mediaa-core.workspace = true
 ez-ffmpeg = { version = "0.19", features = ["static"] }
 
 [lints]

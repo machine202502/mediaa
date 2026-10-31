@@ -1,4 +1,4 @@
-use ez_ffmpeg::{FfmpegContext, FramePushSource, Output};
+use mediaa_ffmpeg::{push_source, JobBuilder, Output};
 use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {
@@ -13,20 +13,17 @@ fn main() -> anyhow::Result<()> {
     let max_h = args.get(2).copied();
     let preset = std::env::var("PRESET").unwrap_or_else(|_| "veryfast".into());
     let out = std::env::temp_dir().join("mediaa-encode-bench.mkv");
-    let (src, mut handle) = FramePushSource::builder(w, h)
-        .pixel_format("rgba")
-        .time_base(1, 60)
-        .build()?;
+    let (src, mut handle) = push_source(w, h, "rgba", (1, 60))?;
     let graph = mediaa_media::filters::scratch_graph("yuv420p", max_h);
-    let output = Output::from(out.to_string_lossy().into_owned())
-        .set_format("matroska")
-        .add_stream_map("[v]")
-        .set_video_codec("libx264")
-        .set_video_codec_opt("preset", preset.clone())
-        .set_video_codec_opt("crf", "16");
-    let job = FfmpegContext::builder()
-        .input(src)
-        .filter_desc(graph)
+    let output = Output::new(&out)
+        .format("matroska")
+        .stream_map("[v]")
+        .video_codec("libx264")
+        .video_opt("preset", preset.clone())
+        .video_opt("crf", "16");
+    let job = JobBuilder::new()
+        .push_input(src)
+        .filter_desc(&graph)
         .output(output)
         .build()?
         .start()?;

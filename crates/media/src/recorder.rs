@@ -1,9 +1,8 @@
-use crate::animation_backends::{self, AnimationEncodeRequest};
+﻿use crate::animation_backends::{self, AnimationEncodeRequest};
 use crate::convert;
 use crate::filters;
 use crate::filters::Effort;
 use crossbeam_channel::{Receiver, Sender};
-use ez_ffmpeg::{FfmpegContext, FramePushSource, Input, Output};
 use mediaa_core::atomic_file::AtomicFile;
 use mediaa_core::audio::{AudioTrack, Clock};
 use mediaa_core::formats::{AnimFormat, OutputKind};
@@ -13,6 +12,7 @@ use mediaa_core::pacer::{SessionClock, SlotTracker};
 use mediaa_core::paths::{MediaDir, WorkDir};
 use mediaa_core::settings::{AnimSettings, WebpMode};
 use mediaa_core::source::{AudioSource, SourceFactory};
+use mediaa_ffmpeg::{job, Input, JobBuilder, Output};
 use parking_lot::{Condvar, Mutex};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -157,7 +157,7 @@ fn equalize_outputs(
                     OutputKind::Anim(AnimFormat::Webp) => {
                         mediaa_webp::trim_part(path, min)?;
                     }
-                    OutputKind::Anim(AnimFormat::Gif) => trim_gif(path, min, cancel)?,
+                    OutputKind::Anim(AnimFormat::Gif) => mediaa_gif::trim(path, min, cancel)?,
                     OutputKind::Video(container) => trim_video(path, min, container, cancel)?,
                     OutputKind::Audio(_) => continue,
                 }
@@ -177,22 +177,6 @@ fn equalize_outputs(
     Ok(())
 }
 
-fn trim_gif(path: &Path, max_duration_us: i64, cancel: &AtomicBool) -> anyhow::Result<()> {
-    let pending = AtomicFile::new(path)?;
-    let seconds = max_duration_us as f64 / 1_000_000.0;
-    let output = Output::from(pending.path().to_string_lossy().into_owned())
-        .set_format("gif")
-        .set_format_opt("t", format!("{seconds:.6}"))
-        .add_stream_map("0:v");
-    let context = FfmpegContext::builder()
-        .input(Input::from(path.to_string_lossy().into_owned()))
-        .output(output)
-        .build()?;
-    crate::job::run(context, None, &mut |_| {}, cancel)?;
-    pending.commit_replace()?;
-    Ok(())
-}
-
 fn trim_video(
     path: &Path,
     max_duration_us: i64,
@@ -201,15 +185,16 @@ fn trim_video(
 ) -> anyhow::Result<()> {
     let pending = AtomicFile::new(path)?;
     let seconds = max_duration_us as f64 / 1_000_000.0;
-    let output = Output::from(pending.path().to_string_lossy().into_owned())
-        .set_format(container.muxer())
-        .add_stream_map_with_copy("0")
-        .set_format_opt("t", format!("{seconds:.6}"));
-    let context = FfmpegContext::builder()
-        .input(Input::from(path.to_string_lossy().into_owned()))
-        .output(output)
+    let context = JobBuilder::new()
+        .input(Input::new(path))
+        .output(
+            Output::new(pending.path())
+                .format(container.muxer())
+                .copy_stream_map("0")
+                .format_opt("t", format!("{seconds:.6}")),
+        )
         .build()?;
-    crate::job::run(context, None, &mut |_| {}, cancel)?;
+    job::run(context, None, &mut |_| {}, cancel)?;
     pending.commit_replace()?;
     Ok(())
 }
@@ -674,7 +659,7 @@ impl RecordingSession {
         }
         if cancel.load(Ordering::Relaxed) {
             return Err(FinalizeFailure {
-                error: anyhow::Error::from(crate::job::Cancelled),
+                error: anyhow::Error::from(job::Cancelled),
                 recovery_files: Vec::new(),
                 keep_work_dir: true,
             });
@@ -728,7 +713,7 @@ impl RecordingSession {
                     .work_dir
                     .join(format!("video-{}-combined.mkv", video.index));
                 if let Err(error) = concat_chunks(&video.files, &combined, cancel) {
-                    if crate::job::is_cancelled(&error) {
+                    if job::is_cancelled(&error) {
                         return Err(error.into());
                     }
                     let recovery_files =
@@ -798,7 +783,7 @@ impl RecordingSession {
             .and_then(|()| pending.commit().map(|_| ()));
             if let Err(error) = encoded {
                 log::error!("stage=failed: {error:#}");
-                let recovery_files = if crate::job::is_cancelled(&error) {
+                let recovery_files = if job::is_cancelled(&error) {
                     Vec::new()
                 } else {
                     preserve_recordings(&videos, &self.out_dir, &self.title, self.started)

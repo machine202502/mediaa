@@ -9,25 +9,23 @@ fn scratch_output(
     size: (u32, u32),
     fps: u32,
 ) -> (String, Output) {
-    let out = Output::from(path.to_string_lossy().into_owned())
-        .set_format("matroska")
-        .add_stream_map("[v]");
+    let out = Output::new(path).format("matroska").stream_map("[v]");
     match kind {
         OutputKind::Video(_) => (
             filters::scratch_graph("yuv420p", max_height),
-            out.set_video_codec("libx264")
-                .set_video_codec_opt("preset", {
+            out.video_codec("libx264")
+                .video_opt("preset", {
                     let (w, h) = filters::scaled_size(size.0, size.1, max_height);
                     filters::live_preset(w, h, fps)
                 })
-                .set_video_codec_opt("crf", filters::crf_for_quality(quality).to_string()),
+                .video_opt("crf", filters::crf_for_quality(quality).to_string()),
         ),
         OutputKind::Audio(_) => unreachable!("audio recordings have no picture to encode"),
         OutputKind::Anim(_) => {
             let out = out
-                .set_video_codec("libx264rgb")
-                .set_video_codec_opt("preset", "ultrafast")
-                .set_video_codec_opt("qp", "0");
+                .video_codec("libx264rgb")
+                .video_opt("preset", "ultrafast")
+                .video_opt("qp", "0");
             (filters::scratch_graph("bgr0", max_height), out)
         }
     }
@@ -51,14 +49,11 @@ pub(super) fn capture_loop(
     let setup = (|| -> anyhow::Result<_> {
         let source = factory()?;
         let (w, h) = source.size();
-        let (push_source, handle) = FramePushSource::builder(w, h)
-            .pixel_format("rgba")
-            .time_base(1, fps as i32)
-            .build()?;
+        let (push_source, handle) = mediaa_ffmpeg::push_source(w, h, "rgba", (1, fps as i32))?;
         let (graph, output) = scratch_output(&scratch, kind, quality, max_height, (w, h), fps);
-        let scheduler = FfmpegContext::builder()
-            .input(push_source)
-            .filter_desc(graph)
+        let scheduler = JobBuilder::new()
+            .push_input(push_source)
+            .filter_desc(&graph)
             .output(output)
             .build()?
             .start()?;
@@ -205,7 +200,7 @@ pub(super) fn capture_loop(
         }
     }
     handle.finish();
-    scheduler.wait().map_err(anyhow::Error::from)?;
+    scheduler.wait()?;
     result?;
     Ok(vec![scratch])
 }

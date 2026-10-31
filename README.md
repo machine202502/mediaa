@@ -57,9 +57,9 @@ crates/
   storage/        background SQLite index writer, caches, library watcher and thumbnail atlas
   render/         annotations and overlay layout (tiny-skia, fonts)
   media/          recording, muxing, conversion, previews and thumbnails
-  ffmpeg/         shared FFmpeg execution and cancellation
-  webp/           WebP animation graphs, normalize, validate, trim and merge
-  gif/            GIF graphs, palette and dither
+  ffmpeg/         FFmpeg jobs, probing, frame export, push input and cancellation
+  webp/           WebP decode/encode, animation graphs, normalize, validate, trim and merge
+  gif/            GIF encode, trim, graphs, palette and dither
   platform/       OS capture, audio I/O, clipboard/files, cursor and window integration
   engine/         external model connections: OpenAI-compatible HTTP, Ollama and user commands
   agent/          chat loop, tools, indexing, transcription, speaker names, providers and secrets

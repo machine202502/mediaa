@@ -1,4 +1,3 @@
-use ez_ffmpeg::stream_info::{find_all_stream_infos, StreamInfo};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -26,17 +25,18 @@ impl MediaInfo {
     }
 }
 
-pub fn probe_webp(
-    decoder: &image_webp::WebPDecoder<impl std::io::BufRead + std::io::Seek>,
-) -> MediaInfo {
-    let (width, height) = decoder.dimensions();
-    let duration_ms = decoder.loop_duration();
+pub fn has_sound(path: &Path) -> anyhow::Result<bool> {
+    Ok(probe(path)?.has_audio())
+}
+
+pub(crate) fn from_webp(info: mediaa_webp::Info) -> MediaInfo {
+    let duration_us = (info.duration_ms as i64 * 1000).max(0);
     MediaInfo {
-        duration_us: Some(duration_ms as i64 * 1000).filter(|d| *d > 0),
-        width,
-        height,
-        fps: if duration_ms > 0 {
-            f64::from(decoder.num_frames()) * 1000.0 / duration_ms as f64
+        duration_us: Some(duration_us).filter(|duration| *duration > 0),
+        width: info.width,
+        height: info.height,
+        fps: if duration_us > 0 {
+            f64::from(info.frames) * 1_000_000.0 / duration_us as f64
         } else {
             0.0
         },
@@ -46,44 +46,21 @@ pub fn probe_webp(
     }
 }
 
-pub fn has_sound(path: &Path) -> anyhow::Result<bool> {
-    Ok(probe(path)?.has_audio())
-}
-
 pub fn probe(path: &Path) -> anyhow::Result<MediaInfo> {
     if mediaa_core::formats::is_webp_path(path) {
-        let reader = crate::webp_decode::WebpReader::open(path)?;
+        let reader = mediaa_webp::Reader::open(path)?;
         if reader.is_animated() {
-            return Ok(reader.info());
+            return Ok(from_webp(reader.info()));
         }
     }
-    let url = path.to_string_lossy().into_owned();
-    let mut info = MediaInfo {
-        duration_us: ez_ffmpeg::container_info::get_duration_us(url.clone())
-            .ok()
-            .filter(|d| *d > 0),
-        ..MediaInfo::default()
-    };
-    for stream in find_all_stream_infos(url)? {
-        match stream {
-            StreamInfo::Video {
-                width,
-                height,
-                fps,
-                codec_name,
-                ..
-            } if info.video_codec.is_none() => {
-                info.width = width.max(0) as u32;
-                info.height = height.max(0) as u32;
-                info.fps = fps;
-                info.video_codec = Some(codec_name);
-            }
-            StreamInfo::Audio { codec_name, .. } => {
-                info.audio_streams += 1;
-                info.audio_codec.get_or_insert(codec_name);
-            }
-            _ => {}
-        }
-    }
-    Ok(info)
+    let probed = mediaa_ffmpeg::probe::probe(path)?;
+    Ok(MediaInfo {
+        duration_us: probed.duration_us,
+        width: probed.width,
+        height: probed.height,
+        fps: probed.fps,
+        video_codec: probed.video_codec,
+        audio_codec: probed.audio_codec,
+        audio_streams: probed.audio_streams,
+    })
 }

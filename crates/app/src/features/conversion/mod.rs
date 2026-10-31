@@ -224,7 +224,7 @@ impl ConversionController {
                 &worker_cancel,
             ) {
                 Ok(()) => ConversionTaskResult::Completed,
-                Err(error) if mediaa_media::job::is_cancelled(&error) => {
+                Err(error) if mediaa_ffmpeg::job::is_cancelled(&error) => {
                     ConversionTaskResult::Cancelled
                 }
                 Err(error) => ConversionTaskResult::Failed {

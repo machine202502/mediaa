@@ -2,14 +2,13 @@ use crate::animation_backends::{self, AnimationEncodeRequest};
 use crate::error::invalid_input;
 use crate::filters;
 use crate::info::{probe, MediaInfo};
-use crate::job;
-use ez_ffmpeg::{FfmpegContext, Input, Output};
 use mediaa_core::atomic_file::AtomicFile;
 use mediaa_core::formats::{self, AnimFormat, AudioFormat, MediaKind, VideoContainer};
 use mediaa_core::limits::{AUDIO_KBPS, DEFAULT_MUSIC_AUDIO_KBPS};
 use mediaa_core::naming;
 use mediaa_core::paths::{MediaDir, OutputPath, SourcePath};
 use mediaa_core::settings::AnimSettings;
+use mediaa_ffmpeg::{job, Input, JobBuilder, JobContext, Output, PushSource};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
@@ -203,12 +202,8 @@ pub fn output_path(
     ))
 }
 
-fn url(p: &Path) -> String {
-    p.to_string_lossy().into_owned()
-}
-
 fn run_tracked(
-    ctx: FfmpegContext,
+    ctx: JobContext,
     total_us: Option<i64>,
     on_progress: &mut dyn FnMut(Option<f32>),
     cancel: &AtomicBool,
@@ -229,96 +224,86 @@ fn bitrate(kbps: u32) -> String {
 }
 
 fn video_output(out: Output, format: VideoFormat, s: &ConvertSettings, audio: bool) -> Output {
-    let out = out.set_format(format.muxer()).add_stream_map("[v]");
+    let out = out.format(format.muxer()).stream_map("[v]");
     let out = match s.max_fps {
-        Some(fps) => out.set_framerate_max(fps as i32, 1),
+        Some(fps) => out.max_fps(fps as i32, 1),
         None => out,
     };
     let out = match format {
         VideoFormat::Mp4 | VideoFormat::Mov | VideoFormat::Mkv => out
-            .set_video_codec("libx264")
-            .set_video_codec_opt("preset", s.effort.x264_preset())
-            .set_video_codec_opt("crf", filters::crf_for_quality(s.quality).to_string()),
+            .video_codec("libx264")
+            .video_opt("preset", s.effort.x264_preset())
+            .video_opt("crf", filters::crf_for_quality(s.quality).to_string()),
         VideoFormat::Webm => out
-            .set_video_codec("libvpx-vp9")
-            .set_video_codec_opt("crf", filters::vp9_crf(s.quality).to_string())
-            .set_video_codec_opt("b", "0")
-            .set_video_codec_opt("deadline", "good")
-            .set_video_codec_opt("cpu-used", s.effort.vp9_cpu_used())
-            .set_video_codec_opt("row-mt", "1"),
+            .video_codec("libvpx-vp9")
+            .video_opt("crf", filters::vp9_crf(s.quality).to_string())
+            .video_opt("b", "0")
+            .video_opt("deadline", "good")
+            .video_opt("cpu-used", s.effort.vp9_cpu_used())
+            .video_opt("row-mt", "1"),
         VideoFormat::Avi => {
             let out = out
-                .set_video_codec("mpeg4")
-                .set_video_qscale(filters::qscale(s.quality));
+                .video_codec("mpeg4")
+                .video_qscale(filters::qscale(s.quality));
             match s.effort {
                 Effort::Fastest | Effort::Fast => out,
-                Effort::Balanced => out.set_video_codec_opt("mbd", "rd"),
-                Effort::Max => out
-                    .set_video_codec_opt("mbd", "rd")
-                    .set_video_codec_opt("trellis", "1"),
+                Effort::Balanced => out.video_opt("mbd", "rd"),
+                Effort::Max => out.video_opt("mbd", "rd").video_opt("trellis", "1"),
             }
         }
     };
     let out = match format {
-        VideoFormat::Mp4 | VideoFormat::Mov => out.set_format_opt("movflags", "+faststart"),
+        VideoFormat::Mp4 | VideoFormat::Mov => out.format_opt("movflags", "+faststart"),
         _ => out,
     };
     if !audio {
         return out;
     }
-    let out = out
-        .add_stream_map("0:a")
-        .set_audio_bitrate(bitrate(s.audio_kbps));
-    let out = if s.mono {
-        out.set_audio_channels(1)
-    } else {
-        out
-    };
+    let out = out.stream_map("0:a").audio_bitrate(bitrate(s.audio_kbps));
+    let out = if s.mono { out.audio_channels(1) } else { out };
     match format {
-        VideoFormat::Mp4 | VideoFormat::Mov | VideoFormat::Mkv => out.set_audio_codec("aac"),
-        VideoFormat::Webm => out.set_audio_codec("libopus"),
-        VideoFormat::Avi => out.set_audio_codec("libmp3lame"),
+        VideoFormat::Mp4 | VideoFormat::Mov | VideoFormat::Mkv => out.audio_codec("aac"),
+        VideoFormat::Webm => out.audio_codec("libopus"),
+        VideoFormat::Avi => out.audio_codec("libmp3lame"),
     }
 }
 
 pub(crate) fn audio_output(out: Output, map: &str, format: AudioFormat, kbps: u32) -> Output {
-    let out = out.add_stream_map(map.to_string());
+    let out = out.stream_map(map);
     match format {
         AudioFormat::Mp3 => out
-            .set_format("mp3")
-            .set_audio_codec("libmp3lame")
-            .set_audio_bitrate(bitrate(kbps)),
+            .format("mp3")
+            .audio_codec("libmp3lame")
+            .audio_bitrate(bitrate(kbps)),
         AudioFormat::M4a => out
-            .set_format("ipod")
-            .set_audio_codec("aac")
-            .set_audio_bitrate(bitrate(kbps))
-            .set_format_opt("movflags", "+faststart"),
-        AudioFormat::Wav => out.set_format("wav").set_audio_codec("pcm_s16le"),
-        AudioFormat::Flac => out.set_format("flac").set_audio_codec("flac"),
+            .format("ipod")
+            .audio_codec("aac")
+            .audio_bitrate(bitrate(kbps))
+            .format_opt("movflags", "+faststart"),
+        AudioFormat::Wav => out.format("wav").audio_codec("pcm_s16le"),
+        AudioFormat::Flac => out.format("flac").audio_codec("flac"),
         AudioFormat::Ogg => out
-            .set_format("ogg")
-            .set_audio_codec("libopus")
-            .set_audio_bitrate(bitrate(kbps)),
+            .format("ogg")
+            .audio_codec("libopus")
+            .audio_bitrate(bitrate(kbps)),
     }
 }
 
 fn still_output(out: Output, format: StillFormat, s: &ConvertSettings) -> Output {
     let out = out
-        .set_format("image2")
-        .set_format_opt("update", "1")
-        .add_stream_map("[v]")
-        .set_max_video_frames(1);
+        .format("image2")
+        .format_opt("update", "1")
+        .stream_map("[v]")
+        .max_video_frames(1);
     match format {
         StillFormat::Jpeg => out
-            .set_video_codec("mjpeg")
-            .set_video_qscale(filters::qscale(s.quality)),
-        StillFormat::Png => out
-            .set_video_codec("png")
-            .set_video_codec_opt("compression_level", "1"),
+            .video_codec("mjpeg")
+            .video_qscale(filters::qscale(s.quality)),
+        StillFormat::Png => out.video_codec("png").video_opt("compression_level", "1"),
         StillFormat::Webp => out
-            .set_video_codec("libwebp")
-            .set_video_codec_opt("lossless", if s.webp_lossless { "1" } else { "0" })
-            .set_video_codec_opt(
+            .video_codec("libwebp")
+            .video_opt("lossless", if s.webp_lossless { "1" } else { "0" })
+            .video_opt(
                 "quality",
                 if s.webp_lossless {
                     "100".to_string()
@@ -326,11 +311,11 @@ fn still_output(out: Output, format: StillFormat, s: &ConvertSettings) -> Output
                     s.quality.min(100).to_string()
                 },
             )
-            .set_video_codec_opt("compression_level", s.effort.webp_level()),
-        StillFormat::Bmp => out.set_video_codec("bmp"),
+            .video_opt("compression_level", s.effort.webp_level().to_string()),
+        StillFormat::Bmp => out.video_codec("bmp"),
         StillFormat::Tiff => out
-            .set_video_codec("tiff")
-            .set_video_codec_opt("compression_algo", "deflate"),
+            .video_codec("tiff")
+            .video_opt("compression_algo", "deflate"),
     }
 }
 
@@ -344,48 +329,55 @@ fn still_pix_fmt(format: StillFormat, s: &ConvertSettings) -> &'static str {
     }
 }
 
+enum InputSource {
+    File(Box<Input>),
+    Push(PushSource),
+}
+
 fn build_context(
-    input: Input,
+    input: InputSource,
     output: &Path,
     target: Target,
     s: &ConvertSettings,
     info: &MediaInfo,
-) -> anyhow::Result<FfmpegContext> {
-    let builder = FfmpegContext::builder().input(input);
-    let out = Output::from(url(output));
+) -> anyhow::Result<JobContext> {
+    let builder = match input {
+        InputSource::File(input) => JobBuilder::new().input(*input),
+        InputSource::Push(source) => JobBuilder::new().push_input(source),
+    };
+    let out = Output::new(output);
     let ctx = match target {
         Target::Anim(_) => unreachable!("animation targets use AnimationEncoder"),
         Target::Video(format) => {
             let audio = info.has_audio() && !s.remove_audio;
             builder
-                .filter_desc(filters::convert_video_graph(s.max_height))
+                .filter_desc(&filters::convert_video_graph(s.max_height))
                 .output(video_output(out, format, s, audio))
                 .build()?
         }
         Target::Still(StillFormat::Png) if s.png_colors.is_some() => builder
-            .filter_desc(filters::palette_graph(
+            .filter_desc(&filters::palette_graph(
                 s.max_height,
                 s.png_colors.unwrap_or(256),
             ))
             .output(still_output(out, StillFormat::Png, s))
             .build()?,
         Target::Still(format) => builder
-            .filter_desc(filters::still_graph(s.max_height, still_pix_fmt(format, s)))
+            .filter_desc(&filters::still_graph(
+                s.max_height,
+                still_pix_fmt(format, s),
+            ))
             .output(still_output(out, format, s))
             .build()?,
         Target::Audio(format) => {
             let out = audio_output(out, "0:a", format, s.audio_kbps);
             let out = if format == AudioFormat::Flac {
-                out.set_audio_codec_opt("compression_level", s.effort.flac_level())
+                out.audio_opt("compression_level", s.effort.flac_level())
             } else {
                 out
             };
             builder
-                .output(if s.mono {
-                    out.set_audio_channels(1)
-                } else {
-                    out
-                })
+                .output(if s.mono { out.audio_channels(1) } else { out })
                 .build()?
         }
     };
@@ -462,18 +454,23 @@ fn convert_part(
     on_progress(None);
     let animated_webp = formats::is_webp_path(input) && formats::webp_is_animated(input)?;
     let encoded = if animated_webp {
-        animation_backends::webp_frames_input(input).and_then(|(source, info, producer)| {
-            let r = build_context(source.into(), output, target, settings, &info).and_then(|ctx| {
-                match target {
-                    Target::Video(_) | Target::Audio(_) => {
-                        run_tracked(ctx, info.duration_us, on_progress, cancel)
-                    }
-                    Target::Anim(_) => unreachable!("animation targets use AnimationEncoder"),
-                    Target::Still(_) => job::run(ctx, None, &mut |_| {}, cancel),
+        mediaa_webp::frame_stream(input).and_then(|stream| {
+            let info = crate::info::from_webp(stream.info);
+            let ctx = build_context(
+                InputSource::Push(stream.source),
+                output,
+                target,
+                settings,
+                &info,
+            )?;
+            match target {
+                Target::Video(_) | Target::Audio(_) => {
+                    run_tracked(ctx, info.duration_us, on_progress, cancel)?
                 }
-            });
-            r?;
-            producer.wait()
+                Target::Anim(_) => unreachable!("animation targets use AnimationEncoder"),
+                Target::Still(_) => job::run(ctx, None, &mut |_| {}, cancel)?,
+            }
+            stream.producer.wait()
         })
     } else {
         probe(input).and_then(|info| {
@@ -493,14 +490,20 @@ fn convert_part(
                 Some((start, len)) => (start, Some(len)),
                 None => (0, info.duration_us),
             };
-            let mut source = Input::from(url(input));
+            let mut source = Input::new(input);
             if start > 0 {
-                source = source.set_start_time_us(start);
+                source = source.start_us(start);
             }
             if let Some((_, len)) = window {
-                source = source.set_recording_time_us(len);
+                source = source.duration_us(len);
             }
-            let ctx = build_context(source, output, target, settings, &info)?;
+            let ctx = build_context(
+                InputSource::File(Box::new(source)),
+                output,
+                target,
+                settings,
+                &info,
+            )?;
             match target {
                 Target::Video(_) | Target::Audio(_) => run_tracked(ctx, total, on_progress, cancel),
                 Target::Anim(_) => unreachable!("animation targets use AnimationEncoder"),
@@ -562,17 +565,16 @@ pub(crate) fn encode_audio_recording(
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(!tracks.is_empty(), "no audio tracks");
-    let mut builder = FfmpegContext::builder();
+    let mut builder = JobBuilder::new();
     for t in tracks {
-        builder = builder.input(Input::from(url(t)));
+        builder = builder.input(Input::new(t));
     }
-    let out = audio_output(Output::from(url(output)), "[a]", format, kbps);
-    let total = ez_ffmpeg::container_info::get_duration_us(url(&tracks[0])).ok();
+    let out = audio_output(Output::new(output), "[a]", format, kbps);
+    let total = mediaa_ffmpeg::probe::duration_us(&tracks[0]);
     let result = builder
-        .filter_desc(filters::audio_only_mix_graph(tracks.len()))
+        .filter_desc(&filters::audio_only_mix_graph(tracks.len()))
         .output(out)
         .build()
-        .map_err(anyhow::Error::from)
         .and_then(|ctx| job::run(ctx, total, on_progress, cancel));
     if result.is_err() {
         let _ = std::fs::remove_file(output);
@@ -589,28 +591,27 @@ pub(crate) fn mux_recording(
     on_progress: &mut dyn FnMut(f32),
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
-    let mut builder = FfmpegContext::builder().input(Input::from(url(video)));
+    let mut builder = JobBuilder::new().input(Input::new(video));
     for track in audio_tracks {
-        builder = builder.input(Input::from(url(track)));
+        builder = builder.input(Input::new(track));
     }
-    let mut out = Output::from(url(output))
-        .set_format(container.muxer())
-        .add_stream_map_with_copy("0:v");
+    let mut out = Output::new(output)
+        .format(container.muxer())
+        .copy_stream_map("0:v");
     if container == VideoContainer::Mp4 {
-        out = out.set_format_opt("movflags", "+faststart");
+        out = out.format_opt("movflags", "+faststart");
     }
     if let Some(graph) = filters::audio_mix_graph(audio_tracks.len()) {
-        builder = builder.filter_desc(graph);
+        builder = builder.filter_desc(&graph);
         out = out
-            .add_stream_map("[a]")
-            .set_audio_codec("aac")
-            .set_audio_bitrate(bitrate(audio_kbps));
+            .stream_map("[a]")
+            .audio_codec("aac")
+            .audio_bitrate(bitrate(audio_kbps));
     }
-    let total = ez_ffmpeg::container_info::get_duration_us(url(video)).ok();
+    let total = mediaa_ffmpeg::probe::duration_us(video);
     let result = builder
         .output(out)
         .build()
-        .map_err(anyhow::Error::from)
         .and_then(|ctx| job::run(ctx, total, on_progress, cancel));
     if result.is_err() {
         let _ = std::fs::remove_file(output);

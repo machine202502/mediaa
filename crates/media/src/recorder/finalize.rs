@@ -19,19 +19,16 @@ pub(super) fn concat_chunks(
     }
     std::fs::write(&list, entries)
         .map_err(|error| anyhow::anyhow!("write concat list {}: {error}", list.display()))?;
-    let input = Input::from(path_arg(&list))
-        .set_format("concat")
-        .set_format_opt("safe", "0");
-    let result = FfmpegContext::builder()
+    let input = Input::new(&list).format("concat").format_opt("safe", "0");
+    let result = JobBuilder::new()
         .input(input)
         .output(
-            Output::from(path_arg(output))
-                .set_format("matroska")
-                .add_stream_map_with_copy("0:v"),
+            Output::new(output)
+                .format("matroska")
+                .copy_stream_map("0:v"),
         )
         .build()
-        .map_err(anyhow::Error::from)
-        .and_then(|context| crate::job::run(context, None, &mut |_| {}, cancel));
+        .and_then(|context| job::run(context, None, &mut |_| {}, cancel));
     let _ = std::fs::remove_file(&list);
     if result.is_err() {
         let _ = std::fs::remove_file(output);
@@ -45,10 +42,6 @@ fn concat_path(path: &Path) -> String {
         .replace('\'', "'\\''")
 }
 
-fn path_arg(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
 pub(super) fn finish_session(
     session: RecordingSession,
     action: StopAction,
@@ -59,7 +52,7 @@ pub(super) fn finish_session(
     let (event, keep_work_dir) = if action == StopAction::Save {
         match session.finalize(&cancel) {
             Ok(output) => (SessionEvent::Finished(output.paths), output.keep_work_dir),
-            Err(failure) if crate::job::is_cancelled(&failure.error) => {
+            Err(failure) if job::is_cancelled(&failure.error) => {
                 (SessionEvent::Cancelled, failure.keep_work_dir)
             }
             Err(failure) => {

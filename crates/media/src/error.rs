@@ -1,4 +1,4 @@
-use crate::job;
+use mediaa_ffmpeg::job;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaErrorKind {
@@ -121,7 +121,7 @@ pub fn classify_media_error(error: &anyhow::Error) -> MediaErrorKind {
 #[cfg(test)]
 mod tests {
     use super::{classify_media_error, invalid_input, timed_out, MediaErrorKind};
-    use crate::job::Cancelled;
+    use mediaa_ffmpeg::job::Cancelled;
 
     #[test]
     fn media_errors_are_classified_without_text_matching() {

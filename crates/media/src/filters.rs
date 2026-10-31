@@ -1,6 +1,4 @@
 use mediaa_core::limits::{GIF_COLORS, VIDEO_QUALITY};
-pub use mediaa_gif::gif_graph;
-pub use mediaa_webp::webp_graph;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Effort {
@@ -32,12 +30,12 @@ impl Effort {
         }
     }
 
-    pub(crate) fn webp_level(self) -> &'static str {
+    pub(crate) fn webp_level(self) -> u8 {
         match self {
-            Effort::Fastest => "0",
-            Effort::Fast => "2",
-            Effort::Balanced => "4",
-            Effort::Max => "6",
+            Effort::Fastest => 0,
+            Effort::Fast => 2,
+            Effort::Balanced => 4,
+            Effort::Max => 6,
         }
     }
 
@@ -148,7 +146,6 @@ fn audio_mix_graph_range(n: usize, first: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mediaa_core::settings::{AnimSettings, GifDither};
 
     #[test]
     fn conversion_graphs_and_scales() {
@@ -192,50 +189,6 @@ mod tests {
             assert!(c <= prev);
             prev = c;
         }
-    }
-
-    #[test]
-    fn gif_graph_default() {
-        let g = gif_graph(&AnimSettings::default());
-        assert_eq!(
-            g,
-            "[0:v]fps=15,scale=w=-1:h='min(480,ih)':flags=lanczos,split[a][b];[a]palettegen=max_colors=256:stats_mode=diff[p];\
-             [b][p]paletteuse=dither=sierra2:diff_mode=rectangle[v]",
-            "480p by default"
-        );
-    }
-
-    #[test]
-    fn gif_graph_with_scaling_and_bayer() {
-        let a = AnimSettings {
-            fps: 10,
-            max_height: 360,
-            gif_colors: 64,
-            gif_dither: GifDither::Bayer,
-            ..AnimSettings::default()
-        };
-        let g = gif_graph(&a);
-        assert!(
-            g.starts_with("[0:v]fps=10,scale=w=-1:h='min(360,ih)':flags=lanczos,split"),
-            "{g}"
-        );
-        assert!(g.contains("max_colors=64"));
-        assert!(g.contains("dither=bayer:bayer_scale=3"));
-        assert!(g.ends_with("[v]"));
-    }
-
-    #[test]
-    fn webp_graph_variants() {
-        let original = AnimSettings {
-            max_height: 0,
-            ..AnimSettings::default()
-        };
-        assert_eq!(webp_graph(&original), "[0:v]fps=15[v]");
-        assert_eq!(
-            webp_graph(&AnimSettings::default()),
-            "[0:v]fps=15,scale=w=-1:h='min(480,ih)':flags=lanczos[v]",
-            "480p by default"
-        );
     }
 
     #[test]

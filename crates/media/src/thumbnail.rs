@@ -1,6 +1,6 @@
-use ez_ffmpeg::frame_export::{FrameExtractor, PixelLayout};
 use mediaa_core::formats::MediaKind;
 use mediaa_core::Frame;
+use mediaa_ffmpeg::{frames, FrameRequest};
 use std::path::Path;
 
 pub fn thumbnail(path: &Path, kind: MediaKind, max_size: u32) -> anyhow::Result<Frame> {
@@ -29,17 +29,18 @@ pub fn thumbnail(path: &Path, kind: MediaKind, max_size: u32) -> anyhow::Result<
                 .to_rgba8(),
         ));
     }
-    let frame = FrameExtractor::new(source.to_string_lossy().into_owned())
-        .pixel(PixelLayout::Rgba32)
-        .width(max_size & !1)
-        .max_frames(1)
-        .frames()?
+    let mut reader = frames(
+        source,
+        FrameRequest {
+            width: Some(max_size & !1),
+            max_frames: Some(1),
+            ..FrameRequest::default()
+        },
+    )?;
+    let timed = reader
         .next()
         .ok_or_else(|| anyhow::anyhow!("no frames in {}", path.display()))??;
-    let (w, h) = (frame.width(), frame.height());
-    let img = image::RgbaImage::from_raw(w, h, frame.into_vec())
-        .ok_or_else(|| anyhow::anyhow!("bad frame buffer"))?;
-    let img = image::DynamicImage::ImageRgba8(img)
+    let img = image::DynamicImage::ImageRgba8(timed.frame.into_image())
         .thumbnail(max_size, max_size)
         .to_rgba8();
     Ok(Frame::from_image(img))

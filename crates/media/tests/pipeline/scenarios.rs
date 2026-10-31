@@ -134,16 +134,7 @@ fn write_comparative_doc(test: &str, columns: &[DocColumn]) {
 }
 
 fn decode_mp4(path: &Path, width: u32) -> Vec<Frame> {
-    FrameExtractor::new(path.to_string_lossy().into_owned())
-        .pixel(PixelLayout::Rgba32)
-        .width(width & !1)
-        .frames()
-        .unwrap()
-        .map(|frame| {
-            let frame = frame.unwrap();
-            Frame::new(frame.width(), frame.height(), frame.into_vec())
-        })
-        .collect()
+    video_frames(path, width).unwrap()
 }
 
 fn signature(frame: &Frame) -> Vec<u8> {

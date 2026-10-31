@@ -196,18 +196,14 @@ fn webp_conversion_uses_activity_instead_of_fake_percentage() {
     .unwrap();
     assert!(!progress.is_empty());
     assert!(progress.iter().all(Option::is_none), "{progress:?}");
-    let decoder = image_webp::WebPDecoder::new(std::io::BufReader::new(
-        std::fs::File::open(&output).unwrap(),
-    ))
-    .unwrap();
+    let frames = mediaa_webp::Reader::open(&output).unwrap().frame_count();
     let info = probe(&output).unwrap();
     let duration = info.duration_secs().unwrap();
     assert!((0.9..1.8).contains(&duration), "{info:?}");
     let expected_frames = duration * 10.0;
     assert!(
-        (decoder.num_frames() as f64 - expected_frames).abs() <= 2.0,
-        "{} vs {expected_frames}",
-        decoder.num_frames()
+        (frames as f64 - expected_frames).abs() <= 2.0,
+        "{frames} vs {expected_frames}",
     );
 }
 
@@ -273,7 +269,7 @@ fn cancelled_conversion_removes_partial_output() {
         &cancel,
     )
     .unwrap_err();
-    assert!(mediaa_media::job::is_cancelled(&err), "{err:#}");
+    assert!(mediaa_ffmpeg::job::is_cancelled(&err), "{err:#}");
     assert!(!out.exists());
 }
 

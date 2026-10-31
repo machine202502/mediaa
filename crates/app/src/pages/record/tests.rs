@@ -72,7 +72,7 @@ fn manual_video_edits_switch_the_preset_to_custom() {
     );
     harness.run_steps(2);
     assert!(harness
-        .query_by_label(&t!("record.preset").to_string())
+        .query_by_label(t!("record.preset").as_ref())
         .is_some());
     assert_eq!(
         harness.state().record.preset(&harness.state().anim),
@@ -156,7 +156,7 @@ fn animation_preset_applies_webp_mode_and_limits() {
     );
     harness.run_steps(2);
     assert!(harness
-        .query_by_label(&t!("record.preset").to_string())
+        .query_by_label(t!("record.preset").as_ref())
         .is_some());
     assert_eq!(
         harness

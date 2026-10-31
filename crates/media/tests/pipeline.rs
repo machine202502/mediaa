@@ -1,10 +1,10 @@
-use ez_ffmpeg::frame_export::{FrameExtractor, PixelLayout};
 use mediaa_core::audio::AudioSink;
 use mediaa_core::formats::{AnimFormat, MediaKind, OutputKind, VideoContainer};
 use mediaa_core::paths::{MediaDir, WorkDir};
 use mediaa_core::settings::{AnimSettings, WebpMode};
 use mediaa_core::source::{AudioSource, FrameSource, SourceFactory};
 use mediaa_core::{naming, Frame};
+use mediaa_ffmpeg::{frames, FrameRequest};
 use mediaa_media::convert::{self, ConvertSettings, Target};
 use mediaa_media::info::probe;
 use mediaa_media::recorder::{
@@ -57,8 +57,7 @@ struct VideoSource {
     height: u32,
     close_after: Option<usize>,
     grabs: usize,
-    decoder: Option<image_webp::WebPDecoder<std::io::BufReader<std::fs::File>>>,
-    buffer: Vec<u8>,
+    reader: Option<mediaa_webp::Reader>,
     frame: u32,
     frames: u32,
     source_width: u32,
@@ -73,8 +72,7 @@ impl VideoSource {
             height,
             close_after,
             grabs: 0,
-            decoder: None,
-            buffer: Vec::new(),
+            reader: None,
             frame: 0,
             frames: 0,
             source_width: 480,
@@ -83,36 +81,27 @@ impl VideoSource {
     }
 
     fn reopen(&mut self) -> anyhow::Result<()> {
-        let decoder = image_webp::WebPDecoder::new(std::io::BufReader::new(std::fs::File::open(
-            &self.file,
-        )?))?;
-        let (width, height) = decoder.dimensions();
-        self.source_width = width;
-        self.source_height = height;
-        self.buffer = vec![
-            0;
-            decoder
-                .output_buffer_size()
-                .ok_or_else(|| anyhow::anyhow!("WebP is too large"))?
-        ];
-        self.frames = decoder.num_frames().max(1);
+        let reader = mediaa_webp::Reader::open(&self.file)?;
+        let info = reader.info();
+        self.source_width = info.width;
+        self.source_height = info.height;
+        self.frames = info.frames.max(1);
         self.frame = 0;
-        self.decoder = Some(decoder);
+        self.reader = Some(reader);
         Ok(())
     }
 
-    fn next_frame(&mut self) -> anyhow::Result<&[u8]> {
-        if self.decoder.is_none() {
+    fn next_frame(&mut self) -> anyhow::Result<Vec<u8>> {
+        if self.reader.is_none() {
             self.reopen()?;
         }
-        let decoder = self.decoder.as_mut().unwrap();
-        let delay = decoder.read_frame(&mut self.buffer)?;
-        let _ = delay;
+        let reader = self.reader.as_mut().unwrap();
+        let data = reader.read_frame()?.data.to_vec();
         self.frame += 1;
         if self.frame >= self.frames {
-            self.decoder = None;
+            self.reader = None;
         }
-        Ok(&self.buffer)
+        Ok(data)
     }
 }
 
@@ -135,7 +124,7 @@ impl FrameSource for VideoSource {
             anyhow::bail!("window closed");
         }
         self.grabs += 1;
-        let source = self.next_frame()?.to_vec();
+        let source = self.next_frame()?;
         let (sw, sh) = (self.source_width, self.source_height);
         let mut data = Vec::with_capacity((self.width * self.height * 4) as usize);
         for y in 0..self.height {
@@ -164,17 +153,21 @@ struct Mp4Source {
     name: String,
 }
 
+fn video_frames(path: &Path, width: u32) -> anyhow::Result<Vec<Frame>> {
+    frames(
+        path,
+        FrameRequest {
+            width: Some(width & !1),
+            ..FrameRequest::default()
+        },
+    )?
+    .map(|frame| Ok(frame?.frame))
+    .collect()
+}
+
 impl Mp4Source {
     fn new(file: PathBuf, width: u32, height: u32) -> anyhow::Result<Self> {
-        let frames = FrameExtractor::new(file.to_string_lossy().into_owned())
-            .pixel(PixelLayout::Rgba32)
-            .width(width & !1)
-            .frames()?
-            .map(|frame| {
-                let frame = frame?;
-                Ok(Frame::new(frame.width(), frame.height(), frame.into_vec()))
-            })
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let frames = video_frames(&file, width)?;
         anyhow::ensure!(!frames.is_empty(), "{} has no video frames", file.display());
         Ok(Self {
             frames: Arc::new(frames),

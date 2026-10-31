@@ -111,3 +111,8 @@
 | UI-19 | 31.10.26 11:15 | Единые пресеты записи: видео 3, анимация 2, аудио 3; Custom виртуальный; настройки хранятся отдельно по форматам | готово | [webp-speed-presets.md](tasks/webp-speed-presets.md) |
 | ARCH-12 | 31.10.26 11:15 | Созданы mediaa-ffmpeg, mediaa-webp, mediaa-gif; webp-pipeline и zengif удалены | готово | [format-crates.md](tasks/format-crates.md) |
 | GIF-1 | 31.10.26 03:10 | Замерен текущий GIF и zengif; zengif на полном экране в 2–7× медленнее, не внедрён | отказ | [webp-speed-presets.md](tasks/webp-speed-presets.md) |
+| CONV-1 | 31.10.26 12:56 | План пакетной конвертации: одна цель на пачку, матрица совместимости, sequential queue, retry, отмена, без оценки | ожидание | [multi-file-conversion.md](tasks/multi-file-conversion.md) |
+| LIB-1 | 31.10.26 13:05 | План массовых операций: выделение по дням, rename/delete в корзину/copy/send to convert, отчёт без retry; библиотека не следит за конвертацией | ожидание | [library-bulk-actions.md](tasks/library-bulk-actions.md) |
+| ARCH-13 | 31.10.26 13:15 | FFmpeg/GIF/WebP закрыты форматными крейтами; `media` больше не импортирует `ez-ffmpeg` и `image-webp` | готово | [format-crates.md](tasks/format-crates.md) |
+| SET-1 | 31.10.26 13:20 | План простых/расширенных настроек: простой режим по умолчанию, инвентаризация всех полей, переключатель и snapshots | ожидание | [simple-advanced-settings.md](tasks/simple-advanced-settings.md) |
+| PLAT-1 | 31.10.26 13:40 | План чистой границы платформы: убрать Cpal*/Wgc*/X11*/StreamSource и OS-модули из публичного API, добавить архитектурный тест | ожидание | [platform-boundary.md](tasks/platform-boundary.md) |

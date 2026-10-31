@@ -6,7 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 mediaa-core.workspace = true
+mediaa-ffmpeg.workspace = true
 
 [lints]
 workspace = true

@@ -1,10 +1,8 @@
 use crate::info::probe;
-use crate::job;
-use crate::webp_decode::WebpReader;
-use ez_ffmpeg::core::context::output::VSyncMethod;
-use ez_ffmpeg::{FfmpegContext, FramePushSource, Input, Output};
 use mediaa_core::atomic_file::AtomicFile;
 use mediaa_core::paths::CachePath;
+use mediaa_ffmpeg::{job, push_source, Input, JobBuilder, Output, VSync};
+use mediaa_webp::Reader;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::UNIX_EPOCH;
@@ -234,9 +232,9 @@ fn encode_video(
     };
     let graph = preview_graph(fps, max_height);
     let output = preview_output(target);
-    let context = FfmpegContext::builder()
-        .input(Input::from(source.to_string_lossy().into_owned()))
-        .filter_desc(graph)
+    let context = JobBuilder::new()
+        .input(Input::new(source))
+        .filter_desc(&graph)
         .output(output)
         .build()?;
     job::run(context, info.duration_us, &mut |_| {}, cancel)
@@ -250,28 +248,30 @@ fn encode_webp(
     kind: PreviewKind,
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
-    let mut reader = WebpReader::open(source)?;
-    let (width, height) = reader.dimensions();
-    let alpha = reader.has_alpha();
-    let delay = reader.duration_ms();
-    let fps = (u64::from(reader.frame_count()) * 1000)
+    let mut reader = Reader::open(source)?;
+    let info = reader.info();
+    let (width, height) = (info.width, info.height);
+    let delay = info.duration_ms;
+    let fps = (u64::from(info.frames) * 1000)
         .checked_div(delay)
         .unwrap_or(u64::from(max_fps))
         .min(u64::from(max_fps))
         .max(1) as u32;
-    let (source, mut frames) = FramePushSource::builder(width, height)
-        .pixel_format(if alpha { "rgba" } else { "rgb24" })
-        .time_base(1, 1000)
-        .build()?;
-    let context = FfmpegContext::builder()
-        .input(source)
-        .filter_desc(preview_graph(fps, max_height))
+    let (source, mut frames) = push_source(
+        width,
+        height,
+        if info.has_alpha { "rgba" } else { "rgb24" },
+        (1, 1000),
+    )?;
+    let context = JobBuilder::new()
+        .push_input(source)
+        .filter_desc(&preview_graph(fps, max_height))
         .output(preview_output(target))
         .build()?;
     let scheduler = context.start()?;
     let mut pts = 0i64;
-    let animated = reader.is_animated();
-    let count = reader.frame_count().max(1);
+    let animated = info.animated;
+    let count = info.frames.max(1);
     for _ in 0..count {
         if cancel.load(Ordering::Relaxed) || !kind.enabled() {
             scheduler.abort();
@@ -288,7 +288,7 @@ fn encode_webp(
         pts += i64::from(duration);
     }
     frames.finish();
-    scheduler.wait().map_err(Into::into)
+    scheduler.wait()
 }
 
 fn preview_graph(fps: u32, max_height: u32) -> String {
@@ -298,14 +298,14 @@ fn preview_graph(fps: u32, max_height: u32) -> String {
 }
 
 fn preview_output(target: &Path) -> Output {
-    Output::from(target.to_string_lossy().into_owned())
-        .set_format("mp4")
-        .set_format_opt("movflags", "+faststart")
-        .set_video_codec("libx264")
-        .set_video_codec_opt("preset", "ultrafast")
-        .set_video_codec_opt("crf", "26")
-        .set_vsync_method(VSyncMethod::VsyncCfr)
-        .add_stream_map("[v]")
+    Output::new(target)
+        .format("mp4")
+        .format_opt("movflags", "+faststart")
+        .video_codec("libx264")
+        .video_opt("preset", "ultrafast")
+        .video_opt("crf", "26")
+        .vsync(VSync::Cfr)
+        .stream_map("[v]")
 }
 
 #[cfg(test)]
