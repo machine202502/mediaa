@@ -1,0 +1,12 @@
+[package]
+name = "mediaa-gif"
+description = "GIF filter graph and palette settings for MediaA"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mediaa-core.workspace = true
+
+[lints]
+workspace = true

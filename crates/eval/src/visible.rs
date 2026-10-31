@@ -90,10 +90,10 @@ mod tests {
 
     #[test]
     fn labels_become_the_names_the_chat_chips_show() {
-        let rec = recording(&[(0, "Антон")], &[0, 1], "Запись");
+        let rec = recording(&[(0, "Иван")], &[0, 1], "Запись");
         assert_eq!(
             shown("сказал @s1 и @s2, повторил @s1.", &rec),
-            "сказал @Антон и @Говорящий 2, повторил @Антон."
+            "сказал @Иван и @Говорящий 2, повторил @Иван."
         );
         assert_eq!(
             shown("сказал @s1", &recording(&[], &[0], "")),
@@ -103,17 +103,17 @@ mod tests {
 
     #[test]
     fn a_name_typed_in_the_text_stays_typed() {
-        let named = recording(&[(0, "Олег")], &[0], "");
-        assert_eq!(shown("привет @Антон", &named), "привет @Антон");
-        assert_eq!(shown("@Антон, скажи", &named), "@Антон, скажи");
+        let named = recording(&[(0, "Михаил")], &[0], "");
+        assert_eq!(shown("привет @Иван", &named), "привет @Иван");
+        assert_eq!(shown("@Иван, скажи", &named), "@Иван, скажи");
     }
 
     #[test]
     fn a_folder_label_finds_the_name_and_the_recording_title() {
-        let rec = recording(&[(0, "Антон"), (1, "Анна")], &[0, 1], "Планёрка");
+        let rec = recording(&[(0, "Иван"), (1, "Анна")], &[0, 1], "Планёрка");
         assert_eq!(
             shown("см. @s2#3 и @s1#7", &rec),
-            "см. @Анна (Планёрка) и @Антон (Планёрка)"
+            "см. @Анна (Планёрка) и @Иван (Планёрка)"
         );
         assert_eq!(
             shown("см. @s2#3", &recording(&[], &[1], "Планёрка")),
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn a_label_inside_an_address_is_not_a_mention() {
-        let rec = recording(&[(0, "Антон")], &[0], "");
+        let rec = recording(&[(0, "Иван")], &[0], "");
         assert_eq!(shown("пиши a@s1.ru", &rec), "пиши a@s1.ru");
     }
 }

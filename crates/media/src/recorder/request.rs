@@ -79,7 +79,7 @@ impl RecordingRequest {
                 audio_layout: AudioLayout::FirstFileOnly,
                 audio_kbps: DEFAULT_VIDEO_AUDIO_KBPS,
                 anim: AnimSettings::default(),
-                webp_mode: WebpMode::Direct,
+                webp_mode: WebpMode::Quality,
                 show_no_signal: true,
                 out_dir,
                 work_dir,
@@ -178,7 +178,7 @@ impl RecordingRequestBuilder {
             return Err(invalid_input("recording source limits are invalid"));
         }
         if !matches!(self.request.output, OutputKind::Anim(AnimFormat::Webp)) {
-            self.request.webp_mode = WebpMode::Direct;
+            self.request.webp_mode = WebpMode::Quality;
         }
         if matches!(self.request.output, OutputKind::Audio(_)) {
             self.request.audio_layout = AudioLayout::EveryFile;

@@ -6,8 +6,8 @@ use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
 use mediaa_core::limits::{FPS, GIF_COLORS, VIDEO_QUALITY};
 use mediaa_core::settings::{
-    AnimSettings, AnimationQuality, GifDither, MicChoice, RecordProfile, ANIM_HEIGHTS,
-    OUTPUT_HEIGHTS,
+    AnimSettings, AnimationQuality, GifDither, MicChoice, RecordPreset, RecordProfile,
+    ANIM_HEIGHTS, OUTPUT_HEIGHTS,
 };
 use mediaa_core::Settings;
 use mediaa_core::{AnimFormat, OutputKind};
@@ -145,6 +145,15 @@ pub fn profile_editor(
     };
     let (r, anim) = settings.profile_mut(profile);
     let kind = r.output;
+    let presets = r.preset_options();
+    let current_preset = r.preset(anim);
+    let pending_preset = std::cell::Cell::new(None);
+    let pending_output = std::cell::Cell::new(None);
+    let default_animation = if profile == RecordProfile::Region {
+        RecordPreset::Fast
+    } else {
+        RecordPreset::Quality
+    };
     let (output, height, fps, quality, hide, cursor, no_signal, unavailable) = (
         &mut r.output,
         &mut r.output_height,
@@ -161,7 +170,6 @@ pub fn profile_editor(
         &mut r.system_audio,
         &mut r.audio_in_every_file,
     );
-    let (segmented_webp, parallel_webp) = (&mut r.segmented_webp, &mut r.parallel_webp);
     theme::split_card(
         ui,
         |ui| {
@@ -171,8 +179,24 @@ pub fn profile_editor(
                     .into_iter()
                     .map(|k| (k, k.label().to_string()))
                     .collect();
-                mark(theme::segmented(ui, output, &opts));
+                let mut chosen = *output;
+                if theme::segmented(ui, &mut chosen, &opts) && chosen != *output {
+                    pending_output.set(Some(chosen));
+                    changed.set(true);
+                }
             });
+            if !presets.is_empty() {
+                theme::row(ui, &t!("record.preset"), |ui| {
+                    if let Some(preset) = super::preset_combo(
+                        ui,
+                        egui::Id::new(("rec-preset", salt)),
+                        current_preset,
+                        presets,
+                    ) {
+                        pending_preset.set(Some(preset));
+                    }
+                });
+            }
             theme::row(ui, &t!("record.resolution"), |ui| {
                 mark(resolution_picker(
                     ui,
@@ -270,26 +294,18 @@ pub fn profile_editor(
             OutputKind::Anim(fmt) => {
                 theme::section(ui, icon::GIF, &t!("record.animation"));
                 mark(quality_options(ui, anim, Some(fmt)));
-                if fmt == AnimFormat::Webp {
-                    theme::row(ui, "", |ui| {
-                        mark(
-                            ui.checkbox(segmented_webp, t!("record.segmented_webp"))
-                                .changed(),
-                        );
-                    });
-                    theme::row(ui, "", |ui| {
-                        ui.add_enabled_ui(*segmented_webp, |ui| {
-                            mark(
-                                ui.checkbox(parallel_webp, t!("record.parallel_webp"))
-                                    .changed(),
-                            );
-                        });
-                    });
-                }
             }
         },
     );
     *refresh_mics = refresh.get();
+    if let Some(output) = pending_output.get() {
+        r.switch_output(output, anim, default_animation);
+        changed.set(true);
+    }
+    if let Some(preset) = pending_preset.get() {
+        r.apply_preset(preset, anim);
+        changed.set(true);
+    }
     changed.get()
 }
 

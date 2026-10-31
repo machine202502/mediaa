@@ -5,52 +5,15 @@ use mediaa_core::paths::{MediaDir, WorkDir};
 use mediaa_core::settings::{AnimSettings, WebpMode};
 use mediaa_core::source::{AudioSource, FrameSource, SourceFactory};
 use mediaa_core::{naming, Frame};
-use mediaa_media::animation_backends::{
-    self, AnimationEncodeRequest, AnimationOrigin, WebpSegmentation,
-};
-use mediaa_media::convert::{self, ConvertSettings, Effort, Target};
+use mediaa_media::convert::{self, ConvertSettings, Target};
 use mediaa_media::info::probe;
 use mediaa_media::recorder::{
     AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction,
 };
-use mediaa_webp_pipeline::PipelineTuning;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-static LOGS: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
-
-struct CaptureLogger;
-
-impl log::Log for CaptureLogger {
-    fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
-        true
-    }
-
-    fn log(&self, record: &log::Record<'_>) {
-        if let Some(logs) = LOGS.get() {
-            logs.lock().unwrap().push(record.args().to_string());
-        }
-    }
-
-    fn flush(&self) {}
-}
-
-static CAPTURE_LOGGER: CaptureLogger = CaptureLogger;
-
-fn log_position() -> usize {
-    let logs = LOGS.get_or_init(|| std::sync::Mutex::new(Vec::new()));
-    let _ = log::set_logger(&CAPTURE_LOGGER);
-    log::set_max_level(log::LevelFilter::Info);
-    logs.lock().unwrap().len()
-}
-
-fn logs_since(position: usize) -> Vec<String> {
-    LOGS.get()
-        .map(|logs| logs.lock().unwrap()[position..].to_vec())
-        .unwrap_or_default()
-}
 
 struct Pattern {
     w: u32,
@@ -381,36 +344,6 @@ fn closing_video_source(name: &str, width: u32, height: u32, frames: usize) -> S
     })
 }
 
-struct Still {
-    w: u32,
-    h: u32,
-}
-
-impl FrameSource for Still {
-    fn name(&self) -> String {
-        format!("Still {}x{}", self.w, self.h)
-    }
-
-    fn size(&self) -> (u32, u32) {
-        (self.w, self.h)
-    }
-
-    fn grab(&mut self) -> anyhow::Result<Frame> {
-        let mut data = Vec::with_capacity((self.w * self.h * 4) as usize);
-        for y in 0..self.h {
-            for x in 0..self.w {
-                data.extend_from_slice(&[
-                    (x * 255 / self.w) as u8,
-                    (y * 255 / self.h) as u8,
-                    90,
-                    255,
-                ]);
-            }
-        }
-        Ok(Frame::new(self.w, self.h, data))
-    }
-}
-
 struct FailingPattern {
     inner: Pattern,
     remaining: usize,
@@ -579,10 +512,6 @@ fn slow_pattern(w: u32, h: u32, delay: Duration) -> SourceFactory {
     })
 }
 
-fn still(w: u32, h: u32) -> SourceFactory {
-    Box::new(move || Ok(Box::new(Still { w, h }) as Box<dyn FrameSource>))
-}
-
 struct Sine {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -685,7 +614,7 @@ fn request_with_layout(
         max_height: 0,
         ..AnimSettings::default()
     })
-    .webp_mode(WebpMode::SegmentedParallel)
+    .webp_mode(WebpMode::Fast)
     .build()
     .unwrap()
 }

@@ -955,7 +955,7 @@ pub(crate) mod tests {
             title: "Планёрка".into(),
             duration: 600.0,
             diarized: true,
-            names: BTreeMap::from([(0, "Дана".into())]),
+            names: BTreeMap::from([(0, "Дина".into())]),
             replies: vec![
                 reply(0, 10.0, "Отчёт отправляем в пятницу."),
                 reply(1, 30.0, "Графики будут к четвергу."),
@@ -983,7 +983,7 @@ pub(crate) mod tests {
         let card = recording().card();
         assert!(card.contains("«Планёрка», 10:00 long (medium)"), "{card}");
         assert!(
-            card.contains("Speakers: @s1 (the user calls them Дана), @s2."),
+            card.contains("Speakers: @s1 (the user calls them Дина), @s2."),
             "{card}"
         );
         assert!(card.contains("1. [0:00–10:00] Отчёт и бюджет — Сроки отчёта, бюджет."));
@@ -1356,7 +1356,7 @@ pub(crate) mod tests {
             Some(1),
             "the recording number is ignored on one recording"
         );
-        assert_eq!(speaker_of(&rec, "Дана"), None, "a name is not a label");
+        assert_eq!(speaker_of(&rec, "Дина"), None, "a name is not a label");
         assert_eq!(speaker_of(&rec, "@s9"), None, "no such speaker");
         let named = std::sync::Mutex::new(Vec::new());
         let rename = |s: u32, n: &str| {
@@ -1372,11 +1372,11 @@ pub(crate) mod tests {
         let out = tools
             .run(
                 "rename_speakers",
-                &json!({"names": [{"speaker": "@s2", "name": " Олег "}]}),
+                &json!({"names": [{"speaker": "@s2", "name": " Михаил "}]}),
             )
             .unwrap();
-        assert_eq!(out.text, "Named: @s2 → Олег.");
-        assert_eq!(*named.lock().unwrap(), [(1, "Олег".to_string())]);
+        assert_eq!(out.text, "Named: @s2 → Михаил.");
+        assert_eq!(*named.lock().unwrap(), [(1, "Михаил".to_string())]);
         assert!(tools
             .run(
                 "rename_speakers",

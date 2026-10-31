@@ -912,12 +912,7 @@ fn recording_format_buttons_update_the_output_kind() {
             output
         );
     }
-    assert!(harness
-        .query_by_label(&t!("record.segmented_webp"))
-        .is_some());
-    assert!(harness
-        .query_by_label(&t!("record.parallel_webp"))
-        .is_some());
+    assert!(harness.query_by_label(&t!("record.preset")).is_some());
 }
 
 #[test]

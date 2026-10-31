@@ -107,3 +107,7 @@
 | UI-17 | 31.10.26 01:05 | Постоянная кнопка «Отмена» в overlay выбора области | готово | [region-cancel-button.md](tasks/region-cancel-button.md) |
 | UI-18 | 31.10.26 01:10 | Убрана подпись под кнопкой «Начать запись» | готово | [record-start-no-hint.md](tasks/record-start-no-hint.md) |
 | REC-7 | 30.10.26 23:20 | TV fake, настройки, 30-секундные MP4-сценарии на разных размерах и сравнительные MP4-документы в target (не закоммичено) | тесты | [mp4-video-snapshots.md](tasks/mp4-video-snapshots.md) |
+| REC-10 | 31.10.26 03:10 | Удалены сегментированный и live-WebP; Direct Quality/Fast, Fastest method 0; Fast в среднем 2,3× быстрее, полный экран 4,1–4,5× | готово | [webp-speed-presets.md](tasks/webp-speed-presets.md) |
+| UI-19 | 31.10.26 11:15 | Единые пресеты записи: видео 3, анимация 2, аудио 3; Custom виртуальный; настройки хранятся отдельно по форматам | готово | [webp-speed-presets.md](tasks/webp-speed-presets.md) |
+| ARCH-12 | 31.10.26 11:15 | Созданы mediaa-ffmpeg, mediaa-webp, mediaa-gif; webp-pipeline и zengif удалены | готово | [format-crates.md](tasks/format-crates.md) |
+| GIF-1 | 31.10.26 03:10 | Замерен текущий GIF и zengif; zengif на полном экране в 2–7× медленнее, не внедрён | отказ | [webp-speed-presets.md](tasks/webp-speed-presets.md) |

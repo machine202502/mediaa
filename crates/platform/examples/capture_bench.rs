@@ -94,7 +94,7 @@ fn main() -> anyhow::Result<()> {
         .audio_layout(AudioLayout::EveryFile)
         .audio_kbps(192)
         .animation(AnimSettings::default())
-        .webp_mode(WebpMode::SegmentedParallel)
+        .webp_mode(WebpMode::Fast)
         .build()?,
     )?;
     let _tone = std::env::var_os("AUDIO")

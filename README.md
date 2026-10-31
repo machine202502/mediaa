@@ -56,9 +56,11 @@ crates/
   core/           models, rules and file primitives: settings, geometry, formats, limits, paths, atomic publication
   storage/        background SQLite index writer, caches, library watcher and thumbnail atlas
   render/         annotations and overlay layout (tiny-skia, fonts)
-  media/          FFmpeg via ez-ffmpeg: recording, muxing, conversion, previews and thumbnails
+  media/          recording, muxing, conversion, previews and thumbnails
+  ffmpeg/         shared FFmpeg execution and cancellation
+  webp/           WebP animation graphs, normalize, validate, trim and merge
+  gif/            GIF graphs, palette and dither
   platform/       OS capture, audio I/O, clipboard/files, cursor and window integration
-  webp-pipeline/  budgeted parallel animated-WebP scheduler and segment merge
   engine/         external model connections: OpenAI-compatible HTTP, Ollama and user commands
   agent/          chat loop, tools, indexing, transcription, speaker names, providers and secrets
   queue/          persistent task queue: composites, resource pools, chunked runs

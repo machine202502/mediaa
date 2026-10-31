@@ -673,7 +673,7 @@ mod tests {
                     title: "Ищу".into(),
                     tool: "search".into(),
                     args: json!({"query": "имя"}),
-                    result: "Назаров".into(),
+                    result: "Иван".into(),
                     status: StepStatus::Found,
                 }),
             ),
@@ -681,7 +681,7 @@ mod tests {
         assert_eq!(events[1]["turn"], 1);
         assert_eq!(events[1]["tool"], "search");
         assert_eq!(events[1]["args"]["query"], "имя");
-        assert_eq!(events[1]["result"], "Назаров");
+        assert_eq!(events[1]["result"], "Иван");
         assert_eq!(events[1]["status"], "found");
         assert_eq!(shown_answer(&events, "Итог."), "Раздел [1:40].\n\nИтог.");
         assert_eq!(shown_answer(&[], ""), "");

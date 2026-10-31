@@ -1981,12 +1981,12 @@ mod tests {
         let _ = env_logger::Builder::from_env(env_logger::Env::default()).try_init();
         let engine = crate::live::engine();
         let model = "agent".to_string();
-        let text = "[00:00] Дана: Давайте по отчёту для заказчика. Олег, где мы?\n\
-                    [00:05] Олег: Цифры за квартал собраны, не хватает графиков по продажам.\n\
-                    [00:12] Дана: Графики сделает Ира до четверга. Отчёт отправляем в пятницу утром, решено.\n\
+        let text = "[00:00] Дина: Давайте по отчёту для заказчика. Михаил, где мы?\n\
+                    [00:05] Михаил: Цифры за квартал собраны, не хватает графиков по продажам.\n\
+                    [00:12] Дина: Графики сделает Ира до четверга. Отчёт отправляем в пятницу утром, решено.\n\
                     [00:20] Ира: Хорошо, сделаю. А презентацию для созвона кто готовит?\n\
-                    [00:26] Дана: Пока не знаю, обсудим в понедельник.\n\
-                    [00:30] Олег: Я ещё проверю цифры по региону Север, там были вопросы.";
+                    [00:26] Дина: Пока не знаю, обсудим в понедельник.\n\
+                    [00:30] Михаил: Я ещё проверю цифры по региону Север, там были вопросы.";
         let w = Window {
             start: 0.0,
             end: 35.0,
@@ -2029,12 +2029,12 @@ mod tests {
         let w = Window {
             start: 600.0,
             end: 1200.0,
-            text: "[10:00] Дана: начнём.".into(),
+            text: "[10:00] Дина: начнём.".into(),
         };
         let p = prompt(&w, 1, 3, Some("Планы на квартал"), "English");
         assert!(p.starts_with("Part 2 of 3 of one topic of the recording (10:00 – 20:00).\nWrite everything in English.\n"), "{p}");
         assert!(p.contains("The previous part of this topic was about: Планы на квартал\nDescribe what this part adds; do not repeat the previous part."), "{p}");
-        assert!(p.contains("[10:00] Дана: начнём."));
+        assert!(p.contains("[10:00] Дина: начнём."));
         let first = prompt(&w, 0, 1, Some("Планы на квартал"), "English");
         assert!(
             first.starts_with(
@@ -3042,11 +3042,11 @@ mod tests {
 
         let fake = FakeEngine::new();
         fake.chat_answers(&[&sections_json(
-            r#"[{"time":"0:05","text":"обсудили сроки отчёта"},{"time":"0:14","text":"Олег проверит цифры"},{"time":"5:00","text":"Олег проверит цифры"}]"#,
+            r#"[{"time":"0:05","text":"обсудили сроки отчёта"},{"time":"0:14","text":"Михаил проверит цифры"},{"time":"5:00","text":"Михаил проверит цифры"}]"#,
         )]);
         let replies = [
             saying(10.0, "Мы обсудили сроки отчёта"),
-            saying(20.0, "Олег проверит цифры"),
+            saying(20.0, "Михаил проверит цифры"),
         ];
         let cancel = AtomicBool::new(false);
         let ask = Ask {
@@ -3075,7 +3075,7 @@ mod tests {
             [Some(10.0), Some(20.0), None]
         );
         assert_eq!(
-            sections[0].items[2].text, "Олег проверит цифры",
+            sections[0].items[2].text, "Михаил проверит цифры",
             "the item stays without its time"
         );
     }

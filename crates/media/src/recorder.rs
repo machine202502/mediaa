@@ -1,8 +1,7 @@
-use crate::animation_backends::{self, AnimationEncodeRequest, AnimationOrigin, WebpSegmentation};
+use crate::animation_backends::{self, AnimationEncodeRequest};
 use crate::convert;
 use crate::filters;
 use crate::filters::Effort;
-use crate::live_webp::{LiveResult, LiveWebp};
 use crossbeam_channel::{Receiver, Sender};
 use ez_ffmpeg::{FfmpegContext, FramePushSource, Input, Output};
 use mediaa_core::atomic_file::AtomicFile;
@@ -14,7 +13,6 @@ use mediaa_core::pacer::{SessionClock, SlotTracker};
 use mediaa_core::paths::{MediaDir, WorkDir};
 use mediaa_core::settings::{AnimSettings, WebpMode};
 use mediaa_core::source::{AudioSource, SourceFactory};
-use mediaa_webp_pipeline::{PipelineTuning, DEFAULT_MAX_WORKERS};
 use parking_lot::{Condvar, Mutex};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -22,7 +20,6 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-static NEXT_WEBP_TRACE: AtomicU64 = AtomicU64::new(1);
 type SourceReadyResult = (String, (u32, u32));
 type SourceReadyReceiver = Receiver<Result<SourceReadyResult, anyhow::Error>>;
 
@@ -128,47 +125,10 @@ struct Capture {
     join: JoinHandle<anyhow::Result<Vec<PathBuf>>>,
 }
 
-#[derive(Debug, Clone)]
-struct LivePaths {
-    dir: PathBuf,
-    template: PathBuf,
-    list: PathBuf,
-}
-
 struct RecordedVideo {
     index: usize,
     name: String,
     files: Vec<PathBuf>,
-}
-
-fn new_webp_trace_id() -> String {
-    format!(
-        "webp-{}-{:04}",
-        std::process::id(),
-        NEXT_WEBP_TRACE.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
-fn encode_with_linear_fallback(
-    requested: WebpMode,
-    encode: &mut dyn FnMut(WebpSegmentation) -> anyhow::Result<()>,
-    warn: &mut dyn FnMut(String),
-) -> anyhow::Result<()> {
-    match requested {
-        WebpMode::Segmented | WebpMode::SegmentedParallel => {
-            match encode(WebpSegmentation::Segmented) {
-                Err(error) if !crate::job::is_cancelled(&error) => {
-                    let warning = format!(
-                        "segmented WebP failed; falling back to linear encoding: {error:#}"
-                    );
-                    warn(warning);
-                    encode(WebpSegmentation::Direct)
-                }
-                result => result,
-            }
-        }
-        WebpMode::Direct => encode(WebpSegmentation::Direct),
-    }
 }
 
 fn equalize_outputs(
@@ -184,30 +144,35 @@ fn equalize_outputs(
         durations.push(
             crate::info::probe(path)?
                 .duration_us
-                .filter(|duration| *duration > 0)
-                .ok_or_else(|| anyhow::anyhow!("{} has no duration", path.display()))?,
+                .filter(|duration| *duration > 0),
         );
     }
-    let Some(min) = durations.iter().copied().min() else {
+    let Some(min) = durations.iter().flatten().copied().min() else {
         return Ok(());
     };
     for (path, duration) in paths.iter().zip(durations) {
-        if duration <= min {
-            continue;
-        }
-        match output {
-            OutputKind::Anim(AnimFormat::Webp) => {
-                mediaa_webp_pipeline::trim_part(path, min)?;
+        match duration {
+            Some(duration) if duration > min => {
+                match output {
+                    OutputKind::Anim(AnimFormat::Webp) => {
+                        mediaa_webp::trim_part(path, min)?;
+                    }
+                    OutputKind::Anim(AnimFormat::Gif) => trim_gif(path, min, cancel)?,
+                    OutputKind::Video(container) => trim_video(path, min, container, cancel)?,
+                    OutputKind::Audio(_) => continue,
+                }
+                log::info!(
+                    "trimmed output {} by {} us to a shared duration",
+                    path.display(),
+                    duration - min
+                );
             }
-            OutputKind::Anim(AnimFormat::Gif) => trim_gif(path, min, cancel)?,
-            OutputKind::Video(container) => trim_video(path, min, container, cancel)?,
-            OutputKind::Audio(_) => continue,
+            None if output == OutputKind::Anim(AnimFormat::Webp) => {
+                mediaa_webp::normalize_part(path, min)?;
+                log::info!("normalized still WebP {} to {min} us", path.display());
+            }
+            _ => {}
         }
-        log::info!(
-            "trimmed output {} by {} us to a shared duration",
-            path.display(),
-            duration - min
-        );
     }
     Ok(())
 }
@@ -305,7 +270,6 @@ fn reap_capture(
 
 struct CaptureShutdown {
     videos: Vec<RecordedVideo>,
-    live: Option<LiveResult>,
     failures: Vec<String>,
 }
 
@@ -319,8 +283,6 @@ pub struct RecordingSession {
     audio_kbps: u32,
     anim: AnimSettings,
     webp_mode: WebpMode,
-    live_webp: Option<LiveWebp>,
-    webp_trace: Option<String>,
     progress: RecordingProgress,
     out_dir: MediaDir,
     work_dir: WorkDir,
@@ -402,15 +364,6 @@ impl RecordingSession {
             }
         }
 
-        let live_enabled = matches!(req.output, OutputKind::Anim(AnimFormat::Webp))
-            && req.webp_mode == WebpMode::SegmentedParallel;
-        let webp_trace =
-            matches!(req.output, OutputKind::Anim(AnimFormat::Webp)).then(new_webp_trace_id);
-        if let Some(trace) = &webp_trace {
-            log::info!("[{trace}] stage=requested mode={:?}", req.webp_mode);
-        }
-        let mut live_lists = Vec::new();
-        let mut live_sizes = Vec::new();
         let mut captures = Vec::new();
         let gate = Arc::new(StartGate::default());
         let mut errors = Vec::new();
@@ -422,17 +375,6 @@ impl RecordingSession {
                 break;
             }
             let scratch = req.work_dir.join(format!("video-{i}.mkv"));
-            let live = (live_enabled).then(|| {
-                let dir = req.work_dir.join(format!("video-{i}-chunks"));
-                LivePaths {
-                    template: dir.join("chunk-%06d.mkv"),
-                    list: dir.join("chunks.txt"),
-                    dir,
-                }
-            });
-            if let Some(live) = &live {
-                live_lists.push(live.list.clone());
-            }
             let frames = Arc::new(AtomicU64::new(0));
             let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
             let ctl = control.clone();
@@ -444,7 +386,6 @@ impl RecordingSession {
             );
             let (s, f) = (scratch.clone(), frames.clone());
             let events = events_tx.clone();
-            let live2 = live.clone();
             let gate2 = gate.clone();
             let join = std::thread::Builder::new()
                 .name(format!("capture-{i}"))
@@ -456,7 +397,6 @@ impl RecordingSession {
                         kind,
                         quality,
                         max_h,
-                        live2,
                         s,
                         f,
                         ready_tx,
@@ -478,7 +418,7 @@ impl RecordingSession {
                 limits.ready_poll_interval,
             ) {
                 SourceReady::Ready(name, size) => {
-                    live_sizes.push(size);
+                    let _ = size;
                     captures.push(Capture {
                         index: i,
                         name,
@@ -538,35 +478,6 @@ impl RecordingSession {
         }
         gate.open();
 
-        let live_webp =
-            if live_enabled && fatal_error.is_none() && !start_cancel.load(Ordering::Relaxed) {
-                let root = req.work_dir.join("live-webp");
-                match LiveWebp::start(
-                    live_lists,
-                    root,
-                    req.anim.clone(),
-                    PipelineTuning {
-                        max_workers: DEFAULT_MAX_WORKERS,
-                        ..PipelineTuning::default()
-                    },
-                    webp_trace.clone().expect("live WebP trace"),
-                    live_sizes
-                        .into_iter()
-                        .fold((1, 1), |(width, height), (w, h)| {
-                            (width.max(w), height.max(h))
-                        }),
-                ) {
-                    Ok(live) => Some(live),
-                    Err(error) => {
-                        let trace = webp_trace.as_deref().unwrap_or("webp");
-                        log::warn!("[{trace}] stage=live unavailable: {error:#}");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
         let session = RecordingSession {
             control,
             captures,
@@ -577,8 +488,6 @@ impl RecordingSession {
             audio_kbps: req.audio_kbps,
             anim: req.anim,
             webp_mode: req.webp_mode,
-            live_webp,
-            webp_trace,
             progress: RecordingProgress::default(),
             out_dir: req.out_dir,
             work_dir: req.work_dir,
@@ -658,17 +567,15 @@ impl RecordingSession {
         action: StopAction,
         cancel: Arc<AtomicBool>,
     ) -> anyhow::Result<JoinHandle<()>> {
-        let webp_trace = self.webp_trace.clone();
         let session = Arc::new(Mutex::new(Some(self)));
         let worker_session = session.clone();
         let worker_cancel = cancel.clone();
-        let worker_trace = webp_trace.clone();
         let spawn = std::thread::Builder::new()
             .name("finalize".into())
             .spawn(move || {
                 let session = worker_session.lock().take();
                 if let Some(session) = session {
-                    finish_session(session, action, worker_cancel, worker_trace);
+                    finish_session(session, action, worker_cancel);
                 }
             });
         match spawn {
@@ -676,18 +583,14 @@ impl RecordingSession {
             Err(error) => {
                 let session = session.lock().take();
                 if let Some(session) = session {
-                    finish_session(session, action, cancel, webp_trace);
+                    finish_session(session, action, cancel);
                 }
                 Err(error.into())
             }
         }
     }
 
-    fn shutdown(
-        &mut self,
-        finish_live: bool,
-        finalize_cancel: Option<Arc<AtomicBool>>,
-    ) -> CaptureShutdown {
+    fn shutdown(&mut self) -> CaptureShutdown {
         self.control.stop();
         let mut done = Vec::new();
         let mut failures = Vec::new();
@@ -729,17 +632,9 @@ impl RecordingSession {
             a.stop();
         }
         self.audio.clear();
-        let live = self.live_webp.take().map(|live| {
-            if finish_live {
-                live.finish(finalize_cancel.expect("finalization cancellation flag"))
-            } else {
-                live.cancel()
-            }
-        });
         done.sort_by_key(|video| video.index);
         CaptureShutdown {
             videos: done,
-            live,
             failures,
         }
     }
@@ -761,7 +656,7 @@ impl RecordingSession {
     }
 
     fn discard_with_work_dir(mut self, remove_work_dir: bool) {
-        self.shutdown(false, None);
+        self.shutdown();
         let _ = self.finish_tracks();
         if remove_work_dir {
             let _ = std::fs::remove_dir_all(&self.work_dir);
@@ -771,9 +666,8 @@ impl RecordingSession {
     fn finalize(mut self, cancel: &Arc<AtomicBool>) -> Result<FinalizeOutput, FinalizeFailure> {
         let CaptureShutdown {
             mut videos,
-            live,
             failures,
-        } = self.shutdown(true, Some(cancel.clone()));
+        } = self.shutdown();
         let keep_work_dir = !failures.is_empty();
         for failure in &failures {
             let _ = self.events_tx.send(SessionEvent::Warning(failure.clone()));
@@ -826,109 +720,9 @@ impl RecordingSession {
                 keep_work_dir,
             });
         }
-        let trace = self.webp_trace.as_deref();
-        if let Some(trace) = trace {
-            log::info!("[{trace}] stage=finalize mode={:?}", self.webp_mode);
-        }
-        if live.as_ref().is_some_and(|result| result.timed_out) {
-            let recovery_files =
-                preserve_recordings(&videos, &self.out_dir, &self.title, self.started);
-            return Err(FinalizeFailure {
-                error: crate::error::timed_out("live WebP did not stop in time"),
-                recovery_files,
-                keep_work_dir: true,
-            });
-        }
-        let live_requested = matches!(self.output, OutputKind::Anim(AnimFormat::Webp))
-            && self.webp_mode == WebpMode::SegmentedParallel;
-        let mut webp_fallback = false;
-        let mut webp_fallback_detail = Vec::new();
-        let mut live_ok = vec![false; videos.len()];
-        let mut live_outputs: Vec<Option<PathBuf>> = vec![None; videos.len()];
-        if live_requested && live.is_none() {
-            let trace = trace.unwrap_or("webp");
-            log::warn!("[{trace}] stage=live not-started; converting the MKV after recording");
-            webp_fallback_detail.push("live: not started".into());
-            webp_fallback = true;
-        }
-        if let Some(result) = &live {
-            for (source, error) in result.errors.iter().enumerate() {
-                if let Some(error) = error {
-                    let trace = trace.unwrap_or("webp");
-                    log::warn!(
-                        "[{trace}] stage=live source={source} failed; converting this source offline: {error}"
-                    );
-                    webp_fallback_detail.push(format!("live source {source}: {error}"));
-                    webp_fallback = true;
-                }
-            }
-            if live_requested && result.timed_out {
-                webp_fallback_detail.push("live: stopped in time".into());
-                webp_fallback = true;
-            } else if live_requested {
-                for (i, video) in videos.iter().enumerate() {
-                    let source = video.index;
-                    let has_error = result
-                        .errors
-                        .get(source)
-                        .is_some_and(|error| error.is_some());
-                    let parts = result.parts.get(source);
-                    if has_error || parts.is_none_or(Vec::is_empty) {
-                        if !has_error {
-                            webp_fallback_detail
-                                .push(format!("live source {source}: incomplete parts"));
-                            webp_fallback = true;
-                        }
-                        continue;
-                    }
-                    let title = linked_title(&self.title, i, videos.len(), &video.name, false);
-                    let out = naming::media_path(&self.out_dir, &title, self.started, "webp");
-                    self.progress.set(None);
-                    let pending = AtomicFile::new(&out)?;
-                    if let Err(error) = mediaa_webp_pipeline::merge_parts(
-                        parts.expect("checked above"),
-                        pending.path(),
-                    )
-                    .and_then(|()| pending.commit().map(|_| ()))
-                    {
-                        webp_fallback_detail.push(format!("live source {source} merge: {error:#}"));
-                        webp_fallback = true;
-                        continue;
-                    }
-                    if crate::preview_cache::full_previews_enabled() {
-                        if let Err(error) =
-                            crate::preview_cache::ensure_proxy_for(&out, &out, cancel)
-                        {
-                            log::warn!("preview proxy {}: {error:#}", out.display());
-                        }
-                    }
-                    if let Some(trace) = trace {
-                        log::info!("[{trace}] stage=live source={source} merged=webp");
-                    }
-                    live_ok[i] = true;
-                    live_outputs[i] = Some(out);
-                }
-            }
-        }
-        if !videos.is_empty() && live_ok.iter().all(|ok| *ok) {
-            if let Some(trace) = trace {
-                log::info!("[{trace}] stage=live complete; merged=webp");
-            }
-            let paths: Vec<_> = live_outputs.into_iter().flatten().collect();
-            equalize_outputs(&paths, self.output, cancel)?;
-            return Ok(FinalizeOutput {
-                paths,
-                keep_work_dir,
-            });
-        }
-
-        if let Some(trace) = trace {
-            log::info!("[{trace}] stage=offline-mkv");
-        }
-        for (i, video) in videos.iter_mut().enumerate() {
-            if live_ok[i] {
-                continue;
-            }
+        log::info!("stage=finalize mode={:?}", self.webp_mode);
+        log::info!("stage=offline-mkv");
+        for video in &mut videos {
             if video.files.len() > 1 {
                 let combined = self
                     .work_dir
@@ -949,11 +743,8 @@ impl RecordingSession {
             }
         }
         let total = videos.len() as f32;
-        let mut outputs = live_outputs;
+        let mut outputs: Vec<Option<PathBuf>> = vec![None; videos.len()];
         for (i, video) in videos.iter().enumerate() {
-            if live_ok[i] {
-                continue;
-            }
             let scratch = &video.files[0];
             let with_audio = !wavs.is_empty()
                 && match self.audio_layout {
@@ -988,53 +779,25 @@ impl RecordingSession {
                     let mut animation_progress = |p: Option<f32>| {
                         animation_progress_state.set(p);
                     };
-                    let scheduling = PipelineTuning {
-                        max_workers: if self.webp_mode == WebpMode::SegmentedParallel {
-                            DEFAULT_MAX_WORKERS
-                        } else {
-                            1
-                        },
-                        ..PipelineTuning::default()
+                    let effort = match self.webp_mode {
+                        WebpMode::Quality => Effort::Balanced,
+                        WebpMode::Fast => Effort::Fastest,
                     };
-                    let request = |segmentation| AnimationEncodeRequest {
+                    let request = AnimationEncodeRequest {
                         input: scratch,
                         output: pending.path(),
                         window: None,
                         format,
                         settings: &self.anim,
-                        effort: Effort::Balanced,
-                        origin: AnimationOrigin::Recording,
-                        segmentation,
-                        scheduling: scheduling.clone(),
+                        effort,
                         threads: None,
-                        trace_id: trace,
                     };
-                    let mut encode = |segmentation: WebpSegmentation| {
-                        if let Some(trace) = trace {
-                            log::info!("[{trace}] stage={segmentation:?}");
-                        }
-                        animation_backends::encode(
-                            &request(segmentation),
-                            &mut animation_progress,
-                            cancel,
-                        )
-                    };
-                    let mut warn = |warning: String| {
-                        let trace = trace.unwrap_or("webp");
-                        log::warn!(
-                            "[{trace}] stage=offline-segment failed; linear fallback: {warning}"
-                        );
-                        webp_fallback_detail.push(warning);
-                        webp_fallback = true;
-                    };
-                    encode_with_linear_fallback(self.webp_mode, &mut encode, &mut warn)
+                    animation_backends::encode(&request, &mut animation_progress, cancel)
                 }
             }
             .and_then(|()| pending.commit().map(|_| ()));
             if let Err(error) = encoded {
-                if let Some(trace) = trace {
-                    log::error!("[{trace}] stage=failed: {error:#}");
-                }
+                log::error!("stage=failed: {error:#}");
                 let recovery_files = if crate::job::is_cancelled(&error) {
                     Vec::new()
                 } else {
@@ -1055,21 +818,7 @@ impl RecordingSession {
             }
             outputs[i] = Some(out);
         }
-        if webp_fallback {
-            let trace_id = self
-                .webp_trace
-                .clone()
-                .unwrap_or_else(|| "webp".to_string());
-            log::info!("[{trace_id}] stage=complete fallback=true");
-            let _ = self
-                .events_tx
-                .send(SessionEvent::Notice(SessionNotice::WebpFallback {
-                    trace_id,
-                    detail: webp_fallback_detail.join("\n"),
-                }));
-        } else if let Some(trace) = trace {
-            log::info!("[{trace}] stage=complete fallback=false");
-        }
+        log::info!("stage=complete");
         let paths: Vec<_> = outputs.into_iter().flatten().collect();
         equalize_outputs(&paths, self.output, cancel)?;
         Ok(FinalizeOutput {

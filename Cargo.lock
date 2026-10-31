@@ -3857,6 +3857,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mediaa-ffmpeg"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ez-ffmpeg",
+]
+
+[[package]]
+name = "mediaa-gif"
+version = "0.1.0"
+dependencies = [
+ "mediaa-core",
+]
+
+[[package]]
 name = "mediaa-media"
 version = "0.1.0"
 dependencies = [
@@ -3869,9 +3884,11 @@ dependencies = [
  "image-webp",
  "log",
  "mediaa-core",
+ "mediaa-ffmpeg",
+ "mediaa-gif",
  "mediaa-render",
  "mediaa-storage",
- "mediaa-webp-pipeline",
+ "mediaa-webp",
  "oxipng",
  "parking_lot",
  "tempfile",
@@ -3948,12 +3965,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "mediaa-webp-pipeline"
+name = "mediaa-webp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "crossbeam-channel",
- "log",
  "mediaa-core",
  "tempfile",
 ]

@@ -3,6 +3,7 @@ use crate::features::recording::{RecordTarget, RecordingEvent, RecordingStartEve
 use crate::services::clipboard::Purpose;
 use mediaa_core::limits::DEFAULT_VIDEO_AUDIO_KBPS;
 use mediaa_core::settings::{AnimSettings, RecordSettings};
+use mediaa_core::{AnimFormat, OutputKind};
 
 fn allow_unavailable_sources(profile: RecordProfile, record: &RecordSettings) -> bool {
     profile != RecordProfile::Region && record.allow_unavailable_sources
@@ -101,8 +102,12 @@ impl App {
         let default_mic = self.default_mic_device.clone();
         let (record, quality) = self.settings.profile(profile);
         let allow_unavailable = allow_unavailable_sources(profile, record);
-        let fps = record.fps;
-        let max_height = record.max_height();
+        let webp = matches!(record.output, OutputKind::Anim(AnimFormat::Webp));
+        let (fps, max_height) = if webp {
+            (record.animation_fps(), record.animation_height())
+        } else {
+            (record.fps, record.max_height())
+        };
         let animation = AnimSettings::for_recording(fps, max_height, quality);
         let cursor = record.record_cursor;
         self.recording.set_region_for_target(&target);

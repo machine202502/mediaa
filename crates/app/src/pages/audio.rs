@@ -3,7 +3,7 @@ use crate::theme;
 use eframe::egui;
 use egui_phosphor::regular as icon;
 use mediaa_core::formats::AudioFormat;
-use mediaa_core::settings::{AudioRecordSettings, MicChoice, AUDIO_BITRATES};
+use mediaa_core::settings::{AudioRecordSettings, MicChoice, RecordPreset, AUDIO_BITRATES};
 use mediaa_core::Settings;
 use rust_i18n::t;
 
@@ -50,6 +50,8 @@ pub fn audio_editor(
     let changed = std::cell::Cell::new(false);
     let mark = |c: bool| changed.set(changed.get() | c);
     let mut refresh_mics = false;
+    let current_preset = a.preset();
+    let pending_preset = std::cell::Cell::new(None);
     let (format, kbps, microphone, system_audio) = (
         &mut a.format,
         &mut a.kbps,
@@ -66,6 +68,16 @@ pub fn audio_editor(
                     .map(|f| (*f, f.label().to_string()))
                     .collect();
                 mark(theme::segmented(ui, format, &opts));
+            });
+            theme::row(ui, &t!("record.preset"), |ui| {
+                if let Some(preset) = super::preset_combo(
+                    ui,
+                    egui::Id::new(("audio-preset", salt)),
+                    current_preset,
+                    &RecordPreset::AUDIO,
+                ) {
+                    pending_preset.set(Some(preset));
+                }
             });
             if !format.lossless() {
                 theme::row(ui, &t!("audio.bitrate"), |ui| {
@@ -108,6 +120,10 @@ pub fn audio_editor(
             });
         },
     );
+    if let Some(preset) = pending_preset.get() {
+        a.apply_preset(preset);
+        changed.set(true);
+    }
     (changed.get(), refresh_mics)
 }
 

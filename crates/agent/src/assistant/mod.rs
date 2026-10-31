@@ -3430,7 +3430,7 @@ mod tests {
         let rec = tools::tests::recording();
         let speakers = tools::whos(&rec, None);
         let history = [Turn {
-            question: "а @Дана?".into(),
+            question: "а @Дина?".into(),
             answer: "уже @s1".into(),
         }];
         let (history, question) = for_model(&speakers, &history, "и @Говорящий 2");
@@ -3441,7 +3441,7 @@ mod tests {
             "an answer already stores labels"
         );
         let folder = tools::whos(&rec, Some(3));
-        assert_eq!(mediaa_core::speakers::to_model("@Дана", &folder), "@s1#3");
+        assert_eq!(mediaa_core::speakers::to_model("@Дина", &folder), "@s1#3");
         assert_eq!(mediaa_core::speakers::to_model("@s1", &speakers), "@s1");
     }
 

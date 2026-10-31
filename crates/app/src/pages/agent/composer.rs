@@ -950,12 +950,12 @@ mod tests {
         field.insert_quote(0, &quote);
         field.relabel(|label| {
             if label == "@s1" {
-                "Олег".into()
+                "Михаил".into()
             } else {
                 label.trim_start_matches('@').into()
             }
         });
-        assert!(field.text.starts_with("@Олег 1:40–2:29 "));
+        assert!(field.text.starts_with("@Михаил 1:40–2:29 "));
         assert!(
             field.to_message().contains("@s1"),
             "the stored label does not follow the rename"

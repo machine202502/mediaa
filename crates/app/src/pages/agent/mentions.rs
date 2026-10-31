@@ -224,22 +224,22 @@ mod tests {
     #[test]
     fn labels_render_as_the_current_name_and_a_rename_is_just_another_roster() {
         let named = Roster {
-            speakers: vec![who(0, "Антон"), who(1, "")],
+            speakers: vec![who(0, "Иван"), who(1, "")],
         };
         assert_eq!(
             named.runs("сказал @s1 и @s2"),
             vec![
                 ("сказал ".into(), false),
-                ("@Антон".into(), true),
+                ("@Иван".into(), true),
                 (" и ".into(), false),
                 (format!("@{}", t!("studio.speaker", n = 2)), true)
             ]
         );
         let renamed = Roster {
-            speakers: vec![who(0, "Олег")],
+            speakers: vec![who(0, "Михаил")],
         };
-        assert_eq!(renamed.render("@s1"), "@Олег");
-        assert_eq!(renamed.render("привет @Антон"), "привет @Антон");
+        assert_eq!(renamed.render("@s1"), "@Михаил");
+        assert_eq!(renamed.render("привет @Иван"), "привет @Иван");
     }
 
     #[test]

@@ -164,7 +164,7 @@ fn frame_payload(
     Ok(payload)
 }
 
-pub(crate) fn normalize_animation(path: &Path, duration_us: i64) -> anyhow::Result<()> {
+pub fn normalize_animation(path: &Path, duration_us: i64) -> anyhow::Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let chunks = parse_chunks(&bytes, path)?;
     if chunks.iter().any(|chunk| &chunk.id == b"ANMF") {
@@ -192,7 +192,7 @@ pub(crate) fn normalize_animation(path: &Path, duration_us: i64) -> anyhow::Resu
     std::fs::write(path, output).with_context(|| format!("write {}", path.display()))
 }
 
-pub(crate) fn validate_animation(path: &Path) -> anyhow::Result<()> {
+pub fn validate_animation(path: &Path) -> anyhow::Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let chunks = parse_chunks(&bytes, path)?;
     canvas(&chunks, path)?;
@@ -205,7 +205,7 @@ pub(crate) fn validate_animation(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn trim_animation(path: &Path, max_duration_us: i64) -> anyhow::Result<()> {
+pub fn trim_animation(path: &Path, max_duration_us: i64) -> anyhow::Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let chunks = parse_chunks(&bytes, path)?;
     let max_ms = u32::try_from(max_duration_us.max(0).saturating_add(999) / 1_000)
@@ -256,7 +256,7 @@ pub(crate) fn trim_animation(path: &Path, max_duration_us: i64) -> anyhow::Resul
     std::fs::write(path, output).with_context(|| format!("write {}", path.display()))
 }
 
-pub(crate) fn merge_animation(parts: &[PathBuf], output: &Path) -> anyhow::Result<()> {
+pub fn merge_animation(parts: &[PathBuf], output: &Path) -> anyhow::Result<()> {
     anyhow::ensure!(!parts.is_empty(), "no WebP segments to merge");
     let first = std::fs::read(&parts[0]).with_context(|| format!("read {}", parts[0].display()))?;
     let first_chunks = parse_chunks(&first, &parts[0])?;
@@ -315,7 +315,7 @@ pub(crate) fn merge_animation(parts: &[PathBuf], output: &Path) -> anyhow::Resul
 }
 
 #[cfg(test)]
-pub(crate) fn synthetic_animation(frame: u8) -> Vec<u8> {
+pub fn synthetic_animation(frame: u8) -> Vec<u8> {
     fn chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(id);
@@ -339,7 +339,7 @@ pub(crate) fn synthetic_animation(frame: u8) -> Vec<u8> {
 }
 
 #[cfg(test)]
-pub(crate) fn synthetic_still(width: u32, height: u32, frame: u8) -> Vec<u8> {
+pub fn synthetic_still(width: u32, height: u32, frame: u8) -> Vec<u8> {
     fn chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(id);
@@ -364,7 +364,7 @@ pub(crate) fn synthetic_still(width: u32, height: u32, frame: u8) -> Vec<u8> {
 }
 
 #[cfg(test)]
-pub(crate) fn synthetic_transparent_still(width: u32, height: u32, frame: u8) -> Vec<u8> {
+pub fn synthetic_transparent_still(width: u32, height: u32, frame: u8) -> Vec<u8> {
     let still = synthetic_still(width, height, frame);
     let mut alpha = Vec::new();
     alpha.extend_from_slice(b"ALPH");

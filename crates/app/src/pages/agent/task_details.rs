@@ -927,16 +927,16 @@ mod tests {
         t.kind = "speaker-names".into();
         t.status = TaskStatus::Done;
         t.result = Some(json!({
-            "names": [{ "speaker": "@s1", "name": "Антон", "score": 3.0 }],
-            "evidence": [{ "speaker": "@s1", "name": "Антон", "how": "self", "time": "0:05", "text": "Меня зовут Антон.", "sure": "high" }],
+            "names": [{ "speaker": "@s1", "name": "Иван", "score": 3.0 }],
+            "evidence": [{ "speaker": "@s1", "name": "Иван", "how": "self", "time": "0:05", "text": "Меня зовут Иван.", "sure": "high" }],
             "read_secs": 720.0,
             "total_secs": 1620.0,
             "stopped_early": true,
         }));
         let facts = facts_of(&t, &t.stats, 5_000, "ru");
-        assert_eq!(facts.names, "@s1 — Антон");
+        assert_eq!(facts.names, "@s1 — Иван");
         assert!(
-            facts.evidence.contains("[0:05]") && facts.evidence.contains("Меня зовут Антон."),
+            facts.evidence.contains("[0:05]") && facts.evidence.contains("Меня зовут Иван."),
             "{}",
             facts.evidence
         );

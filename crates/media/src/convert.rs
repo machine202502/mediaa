@@ -1,4 +1,4 @@
-use crate::animation_backends::{self, AnimationEncodeRequest, AnimationOrigin, WebpSegmentation};
+use crate::animation_backends::{self, AnimationEncodeRequest};
 use crate::error::invalid_input;
 use crate::filters;
 use crate::info::{probe, MediaInfo};
@@ -251,7 +251,7 @@ fn video_output(out: Output, format: VideoFormat, s: &ConvertSettings, audio: bo
                 .set_video_codec("mpeg4")
                 .set_video_qscale(filters::qscale(s.quality));
             match s.effort {
-                Effort::Fast => out,
+                Effort::Fastest | Effort::Fast => out,
                 Effort::Balanced => out.set_video_codec_opt("mbd", "rd"),
                 Effort::Max => out
                     .set_video_codec_opt("mbd", "rd")
@@ -447,11 +447,7 @@ fn convert_part(
                 format,
                 settings: &settings.anim,
                 effort: settings.effort,
-                origin: AnimationOrigin::Conversion,
-                segmentation: WebpSegmentation::Direct,
-                scheduling: Default::default(),
                 threads: None,
-                trace_id: None,
             },
             on_progress,
             cancel,

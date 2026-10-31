@@ -3,26 +3,15 @@ use mediaa_core::Frame;
 
 fn scratch_output(
     path: &Path,
-    live: Option<&LivePaths>,
     kind: OutputKind,
     quality: u8,
     max_height: Option<u32>,
     size: (u32, u32),
     fps: u32,
 ) -> (String, Output) {
-    let out = match live {
-        Some(live) => Output::from(live.template.to_string_lossy().into_owned())
-            .set_format("segment")
-            .set_format_opt("segment_format", "matroska")
-            .set_format_opt("segment_time", "1")
-            .set_format_opt("segment_list", live.list.to_string_lossy().into_owned())
-            .set_format_opt("segment_list_type", "flat")
-            .set_format_opt("reset_timestamps", "1")
-            .add_stream_map("[v]"),
-        None => Output::from(path.to_string_lossy().into_owned())
-            .set_format("matroska")
-            .add_stream_map("[v]"),
-    };
+    let out = Output::from(path.to_string_lossy().into_owned())
+        .set_format("matroska")
+        .add_stream_map("[v]");
     match kind {
         OutputKind::Video(_) => (
             filters::scratch_graph("yuv420p", max_height),
@@ -39,13 +28,6 @@ fn scratch_output(
                 .set_video_codec("libx264rgb")
                 .set_video_codec_opt("preset", "ultrafast")
                 .set_video_codec_opt("qp", "0");
-            let out = if live.is_some() {
-                out.set_video_codec_opt("g", fps.to_string())
-                    .set_video_codec_opt("keyint_min", fps.to_string())
-                    .set_video_codec_opt("sc_threshold", "0")
-            } else {
-                out
-            };
             (filters::scratch_graph("bgr0", max_height), out)
         }
     }
@@ -59,7 +41,6 @@ pub(super) fn capture_loop(
     kind: OutputKind,
     quality: u8,
     max_height: Option<u32>,
-    live: Option<LivePaths>,
     scratch: PathBuf,
     frames: Arc<AtomicU64>,
     ready: Sender<anyhow::Result<(String, (u32, u32))>>,
@@ -68,24 +49,13 @@ pub(super) fn capture_loop(
     show_no_signal: bool,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let setup = (|| -> anyhow::Result<_> {
-        if let Some(live) = &live {
-            std::fs::create_dir_all(&live.dir)?;
-        }
         let source = factory()?;
         let (w, h) = source.size();
         let (push_source, handle) = FramePushSource::builder(w, h)
             .pixel_format("rgba")
             .time_base(1, fps as i32)
             .build()?;
-        let (graph, output) = scratch_output(
-            &scratch,
-            live.as_ref(),
-            kind,
-            quality,
-            max_height,
-            (w, h),
-            fps,
-        );
+        let (graph, output) = scratch_output(&scratch, kind, quality, max_height, (w, h), fps);
         let scheduler = FfmpegContext::builder()
             .input(push_source)
             .filter_desc(graph)
@@ -237,10 +207,7 @@ pub(super) fn capture_loop(
     handle.finish();
     scheduler.wait().map_err(anyhow::Error::from)?;
     result?;
-    match live {
-        Some(live) => chunk_files(&live),
-        None => Ok(vec![scratch]),
-    }
+    Ok(vec![scratch])
 }
 
 fn no_signal(size: (u32, u32)) -> Frame {
@@ -251,33 +218,6 @@ fn no_signal(size: (u32, u32)) -> Frame {
         pixel[3] = 255;
     }
     frame.resized(size.0, size.1)
-}
-
-fn chunk_files(live: &LivePaths) -> anyhow::Result<Vec<PathBuf>> {
-    if let Ok(text) = std::fs::read_to_string(&live.list) {
-        let files: Vec<_> = text
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(|line| {
-                let path = PathBuf::from(line.trim());
-                if path.is_absolute() {
-                    path
-                } else {
-                    live.dir.join(path)
-                }
-            })
-            .collect();
-        if !files.is_empty() {
-            return Ok(files);
-        }
-    }
-    let mut files = std::fs::read_dir(&live.dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "mkv"))
-        .collect::<Vec<_>>();
-    files.sort();
-    Ok(files)
 }
 
 pub(super) enum StartFailure {

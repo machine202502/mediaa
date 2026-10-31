@@ -949,89 +949,91 @@ mod tests {
     #[test]
     fn every_way_must_hold_in_the_text() {
         let dialog = [
-            reply(0.0, 2.0, 0, "Меня зовут Антон."),
-            reply(10.0, 12.0, 1, "Антон, ты где?"),
+            reply(0.0, 2.0, 0, "Меня зовут Иван."),
+            reply(10.0, 12.0, 1, "Иван, ты где?"),
             reply(13.0, 14.0, 0, "Я здесь."),
-            reply(30.0, 32.0, 2, "Это Антон, наш новый коллега."),
+            reply(30.0, 32.0, 2, "Это Иван, наш новый коллега."),
             reply(34.0, 35.0, 0, "Спасибо."),
-            reply(50.0, 52.0, 1, "Антон в отпуске, пишите @anton_dev."),
+            reply(50.0, 52.0, 1, "Иван в отпуске, пишите @speaker_dev."),
         ];
         assert_eq!(
-            check(&raw("@s1", "Антон", "self", "0:00", "high"), &dialog),
+            check(&raw("@s1", "Иван", "self", "0:00", "high"), &dialog),
             Some(Evidence {
                 speaker: 0,
-                name: "Антон".into(),
+                name: "Иван".into(),
                 how: How::SelfName,
                 time: 0.0,
-                text: "Меня зовут Антон.".into(),
+                text: "Меня зовут Иван.".into(),
                 sure: true,
             })
         );
-        let addressed = check(&raw("@s1", "Антон", "addressed", "0:10", "high"), &dialog).unwrap();
+        let addressed = check(&raw("@s1", "Иван", "addressed", "0:10", "high"), &dialog).unwrap();
         assert_eq!(
             (addressed.speaker, addressed.how, addressed.time),
             (0, How::Addressed, 10.0)
         );
-        let introduced =
-            check(&raw("@s1", "Антон", "introduced", "0:30", "high"), &dialog).unwrap();
+        let introduced = check(&raw("@s1", "Иван", "introduced", "0:30", "high"), &dialog).unwrap();
         assert_eq!((introduced.how, introduced.time), (How::Introduced, 30.0));
         let nicknamed = [
-            reply(0.0, 2.0, 1, "Это @anton_dev, наш админ."),
+            reply(0.0, 2.0, 1, "Это @speaker_dev, наш админ."),
             reply(3.0, 4.0, 0, "Да, это я."),
         ];
         let nickname = check(
-            &raw("@s1", "anton_dev", "nickname", "0:00", "low"),
+            &raw("@s1", "speaker_dev", "nickname", "0:00", "low"),
             &nicknamed,
         )
         .unwrap();
         assert_eq!(
             (nickname.name.as_str(), nickname.how, nickname.sure),
-            ("anton_dev", How::Nickname, false)
+            ("speaker_dev", How::Nickname, false)
         );
-        let own_nickname = [reply(0.0, 2.0, 0, "Пишите мне в @anton_dev.")];
+        let own_nickname = [reply(0.0, 2.0, 0, "Пишите мне в @speaker_dev.")];
         assert!(check(
-            &raw("@s1", "anton_dev", "nickname", "0:00", "high"),
+            &raw("@s1", "speaker_dev", "nickname", "0:00", "high"),
             &own_nickname
         )
         .is_some());
         assert_eq!(
-            check(&raw("@s1", "anton_dev", "nickname", "0:50", "low"), &dialog),
+            check(
+                &raw("@s1", "speaker_dev", "nickname", "0:50", "low"),
+                &dialog
+            ),
             None
         );
 
         assert_eq!(
-            check(&raw("@s2", "Антон", "self", "0:00", "high"), &dialog),
+            check(&raw("@s2", "Иван", "self", "0:00", "high"), &dialog),
             None
         );
         assert_eq!(
-            check(&raw("@s1", "Антон", "self", "5:00", "high"), &dialog),
+            check(&raw("@s1", "Иван", "self", "5:00", "high"), &dialog),
             None
         );
         let talked = [
-            reply(0.0, 2.0, 1, "Антон в отпуске."),
+            reply(0.0, 2.0, 1, "Иван в отпуске."),
             reply(3.0, 4.0, 2, "Понятно."),
         ];
         assert_eq!(
-            check(&raw("@s1", "Антон", "addressed", "0:00", "high"), &talked),
+            check(&raw("@s1", "Иван", "addressed", "0:00", "high"), &talked),
             None
         );
         assert_eq!(
-            check(&raw("@s1", "Антон", "introduced", "0:00", "high"), &talked),
+            check(&raw("@s1", "Иван", "introduced", "0:00", "high"), &talked),
             None
         );
         assert_eq!(
             check(
-                &raw("@s1", "anton_dev", "nickname", "0:00", "high"),
+                &raw("@s1", "speaker_dev", "nickname", "0:00", "high"),
                 &dialog
             ),
             None
         );
         assert_eq!(
-            check(&raw("Антон", "Антон", "self", "0:00", "high"), &dialog),
+            check(&raw("Иван", "Иван", "self", "0:00", "high"), &dialog),
             None
         );
         assert_eq!(
-            check(&raw("@s1", "Антон", "guessed", "0:00", "high"), &dialog),
+            check(&raw("@s1", "Иван", "guessed", "0:00", "high"), &dialog),
             None
         );
         assert_eq!(
@@ -1039,10 +1041,7 @@ mod tests {
             None
         );
         assert_eq!(
-            check(
-                &raw("@s1", "Антон\nПетров", "self", "0:00", "high"),
-                &dialog
-            ),
+            check(&raw("@s1", "Иван\nПетров", "self", "0:00", "high"), &dialog),
             None
         );
         assert_eq!(
@@ -1053,23 +1052,23 @@ mod tests {
             check(&raw("@s1", " @S12 ", "self", "0:00", "high"), &dialog),
             None
         );
-        assert!(check(&raw("@s1", "Антон", "self", "0:02", "high"), &dialog).is_some());
+        assert!(check(&raw("@s1", "Иван", "self", "0:02", "high"), &dialog).is_some());
     }
 
     #[test]
     fn a_report_about_another_part_is_not_evidence() {
         let dialog = [
-            reply(0.0, 2.0, 0, "Меня зовут Антон."),
-            reply(300.0, 302.0, 1, "Меня зовут Дана."),
+            reply(0.0, 2.0, 0, "Меня зовут Иван."),
+            reply(300.0, 302.0, 1, "Меня зовут Дина."),
         ];
         let window = Window {
             index: 0,
             start: 0.0,
             end: 240.0,
         };
-        let near = check(&raw("@s1", "Антон", "self", "0:00", "high"), &dialog).unwrap();
+        let near = check(&raw("@s1", "Иван", "self", "0:00", "high"), &dialog).unwrap();
         assert!(shown(&near, &window));
-        let far = check(&raw("@s2", "Дана", "self", "5:00", "high"), &dialog).unwrap();
+        let far = check(&raw("@s2", "Дина", "self", "5:00", "high"), &dialog).unwrap();
         assert!(
             !shown(&far, &window),
             "the model never saw this line in this window"
@@ -1079,50 +1078,42 @@ mod tests {
     #[test]
     fn a_name_in_another_alphabet_takes_the_spelling_of_the_line() {
         let dialog = [
-            reply(0.0, 5.0, 0, "Так и скажите: Назаров, ты забанен. Это был Антон Назаров, и начните уже зарабатывать больше."),
-            reply(10.0, 12.0, 1, "Антон Назаров, расскажи."),
+            reply(0.0, 5.0, 0, "Так и скажите: Иван, ты забанен. Это был Иван Тестов, и начните уже зарабатывать больше."),
+            reply(10.0, 12.0, 1, "Иван Тестов, расскажи."),
             reply(13.0, 15.0, 0, "Рассказываю."),
         ];
-        let self_name = check(
-            &raw("@s1", "Anton Nazarov", "self", "0:00", "high"),
-            &dialog,
-        )
-        .unwrap();
+        let self_name = check(&raw("@s1", "Ivan Testov", "self", "0:00", "high"), &dialog).unwrap();
         assert_eq!(
             (self_name.name.as_str(), self_name.how),
-            ("Антон Назаров", How::SelfName)
+            ("Иван Тестов", How::SelfName)
         );
         let addressed = check(
-            &raw("@s1", "Anton Nazarov", "addressed", "0:10", "high"),
+            &raw("@s1", "Ivan Testov", "addressed", "0:10", "high"),
             &dialog,
         )
         .unwrap();
-        assert_eq!(addressed.name, "Антон Назаров");
-        let same = check(
-            &raw("@s1", "Антон Назаров", "self", "0:00", "high"),
-            &dialog,
-        )
-        .unwrap();
-        assert_eq!(same.name, "Антон Назаров");
-        let other = [reply(0.0, 2.0, 0, "Меня зовут Антон.")];
+        assert_eq!(addressed.name, "Иван Тестов");
+        let same = check(&raw("@s1", "Иван Тестов", "self", "0:00", "high"), &dialog).unwrap();
+        assert_eq!(same.name, "Иван Тестов");
+        let other = [reply(0.0, 2.0, 0, "Меня зовут Иван.")];
         assert_eq!(
-            check(&raw("@s1", "Anton Nazarov", "self", "0:00", "high"), &other)
+            check(&raw("@s1", "Ivan Testov", "self", "0:00", "high"), &other)
                 .unwrap()
                 .name,
-            "Anton Nazarov"
+            "Ivan Testov"
         );
     }
 
     #[test]
     fn weights_threshold_and_the_two_times_rule() {
         let many = [
-            evidence(0, "Антон", How::SelfName, true),
-            evidence(0, "Антон", How::Addressed, true),
+            evidence(0, "Иван", How::SelfName, true),
+            evidence(0, "Иван", How::Addressed, true),
         ];
         assert_eq!(aggregate(&many, &BTreeMap::new()).len(), 1);
         assert_eq!(
             aggregate(
-                &[evidence(0, "Антон", How::SelfName, true)],
+                &[evidence(0, "Иван", How::SelfName, true)],
                 &BTreeMap::new()
             )
             .len(),
@@ -1130,7 +1121,7 @@ mod tests {
         );
         assert_eq!(
             aggregate(
-                &[evidence(0, "Антон", How::Nickname, true)],
+                &[evidence(0, "Иван", How::Nickname, true)],
                 &BTreeMap::new()
             )
             .len(),
@@ -1138,7 +1129,7 @@ mod tests {
         );
         assert_eq!(
             aggregate(
-                &[evidence(0, "Антон", How::SelfName, false)],
+                &[evidence(0, "Иван", How::SelfName, false)],
                 &BTreeMap::new()
             )
             .len(),
@@ -1147,8 +1138,8 @@ mod tests {
         assert_eq!(
             aggregate(
                 &[
-                    evidence(0, "Антон", How::SelfName, false),
-                    evidence(0, "Антон", How::Introduced, true)
+                    evidence(0, "Иван", How::SelfName, false),
+                    evidence(0, "Иван", How::Introduced, true)
                 ],
                 &BTreeMap::new()
             )
@@ -1156,8 +1147,8 @@ mod tests {
             1
         );
         let two = [
-            evidence(0, "Антон", How::SelfName, true),
-            evidence(0, "Олег", How::Addressed, true),
+            evidence(0, "Иван", How::SelfName, true),
+            evidence(0, "Михаил", How::Addressed, true),
         ];
         assert_eq!(
             aggregate(&two, &BTreeMap::new()).len(),
@@ -1165,24 +1156,24 @@ mod tests {
             "3 against 2 is not twice"
         );
         let lead = [
-            evidence(0, "Антон", How::SelfName, true),
-            evidence(0, "Олег", How::Nickname, true),
+            evidence(0, "Иван", How::SelfName, true),
+            evidence(0, "Михаил", How::Nickname, true),
         ];
         let accepted = aggregate(&lead, &BTreeMap::new());
         assert_eq!(
             (accepted.len(), accepted[0].name.as_str(), accepted[0].score),
-            (1, "Антон", 3.0)
+            (1, "Иван", 3.0)
         );
         let variants = [
-            evidence(0, "Антон", How::SelfName, true),
-            evidence(0, " антон ", How::SelfName, true),
+            evidence(0, "Иван", How::SelfName, true),
+            evidence(0, " иван ", How::SelfName, true),
         ];
         let accepted = aggregate(&variants, &BTreeMap::new());
         assert_eq!((accepted.len(), accepted[0].score), (1, 6.0));
         let both = [
-            evidence(0, "Антон", How::SelfName, true),
-            evidence(0, "Антон", How::Introduced, true),
-            evidence(1, "Антон", How::SelfName, true),
+            evidence(0, "Иван", How::SelfName, true),
+            evidence(0, "Иван", How::Introduced, true),
+            evidence(1, "Иван", How::SelfName, true),
         ];
         let accepted = aggregate(&both, &BTreeMap::new());
         assert_eq!(
@@ -1190,18 +1181,18 @@ mod tests {
                 .iter()
                 .map(|a| (a.speaker, a.name.as_str()))
                 .collect::<Vec<_>>(),
-            [(0, "Антон")]
+            [(0, "Иван")]
         );
         assert_eq!(accepted[0].evidence.len(), 2);
     }
 
     #[test]
     fn the_users_names_are_never_changed_or_reused() {
-        let manual = BTreeMap::from([(0, "Антон".to_string())]);
+        let manual = BTreeMap::from([(0, "Иван".to_string())]);
         let evidence = [
-            evidence(0, "Олег", How::SelfName, true),
-            evidence(1, "Антон", How::SelfName, true),
-            evidence(1, "Дана", How::SelfName, true),
+            evidence(0, "Михаил", How::SelfName, true),
+            evidence(1, "Иван", How::SelfName, true),
+            evidence(1, "Дина", How::SelfName, true),
         ];
         let accepted = aggregate(&evidence, &manual);
         assert_eq!(
@@ -1209,7 +1200,7 @@ mod tests {
                 .iter()
                 .map(|a| (a.speaker, a.name.as_str()))
                 .collect::<Vec<_>>(),
-            [(1, "Дана")]
+            [(1, "Дина")]
         );
     }
 
@@ -1220,7 +1211,7 @@ mod tests {
             reply(70.0, 75.0, 1, "короткая"),
         ];
         assert_eq!(main_speakers(&dialog), BTreeSet::from([0]));
-        let named = [evidence(0, "Антон", How::SelfName, true)];
+        let named = [evidence(0, "Иван", How::SelfName, true)];
         assert!(all_main_named(&dialog, &named, &BTreeMap::new()));
         assert!(!all_main_named(&dialog, &[], &BTreeMap::new()));
         let dialog = [reply(0.0, 90.0, 0, "речь"), reply(90.0, 100.0, 1, "ещё")];
@@ -1235,19 +1226,19 @@ mod tests {
         assert!(all_main_named(
             &dialog,
             &named,
-            &BTreeMap::from([(1, "Дана".to_string())])
+            &BTreeMap::from([(1, "Дина".to_string())])
         ));
     }
 
     #[test]
     fn the_prompt_lists_the_names_found_so_far() {
-        let manual = BTreeMap::from([(1, "Дана".to_string())]);
-        let known = known_names(&[evidence(0, "Антон", How::SelfName, true)], &manual);
+        let manual = BTreeMap::from([(1, "Дина".to_string())]);
+        let known = known_names(&[evidence(0, "Иван", How::SelfName, true)], &manual);
         assert_eq!(
             known,
             [
-                json!({ "label": "@s1", "name": "Антон" }),
-                json!({ "label": "@s2", "name": "Дана" })
+                json!({ "label": "@s1", "name": "Иван" }),
+                json!({ "label": "@s2", "name": "Дина" })
             ]
         );
     }
@@ -1311,8 +1302,8 @@ mod tests {
         crate::run::drain(sched, Duration::from_secs(60));
     }
 
-    const NAMES_BOTH: &str = r#"{"evidence":[{"speaker":"@s1","name":"Антон","how":"self","time":"0:00","sure":"high"},{"speaker":"@s2","name":"Дана","how":"self","time":"0:20","sure":"high"}]}"#;
-    const NAMES_FIRST: &str = r#"{"evidence":[{"speaker":"@s1","name":"Антон","how":"self","time":"0:00","sure":"high"}]}"#;
+    const NAMES_BOTH: &str = r#"{"evidence":[{"speaker":"@s1","name":"Иван","how":"self","time":"0:00","sure":"high"},{"speaker":"@s2","name":"Дина","how":"self","time":"0:20","sure":"high"}]}"#;
+    const NAMES_FIRST: &str = r#"{"evidence":[{"speaker":"@s1","name":"Иван","how":"self","time":"0:00","sure":"high"}]}"#;
 
     #[test]
     fn names_land_in_the_transcript_as_automatic() {
@@ -1330,8 +1321,8 @@ mod tests {
         assert_eq!(
             result["names"],
             json!([
-                { "speaker": "@s1", "name": "Антон", "score": 3.0 },
-                { "speaker": "@s2", "name": "Дана", "score": 3.0 },
+                { "speaker": "@s1", "name": "Иван", "score": 3.0 },
+                { "speaker": "@s2", "name": "Дина", "score": 3.0 },
             ])
         );
         assert_eq!(result["stopped_early"], json!(true));
@@ -1339,7 +1330,7 @@ mod tests {
 
         let t = Transcript::open(&ai, &transcript::file_id(&media).unwrap()).unwrap();
         let entries = t.speaker_entries().unwrap();
-        assert_eq!(entries[&0].name, "Антон");
+        assert_eq!(entries[&0].name, "Иван");
         assert_eq!(entries[&0].source, NameSource::Auto);
         assert_eq!(entries[&0].evidence.len(), 1);
         assert_eq!(
@@ -1349,9 +1340,9 @@ mod tests {
             ),
             (0.0, "self")
         );
-        assert_eq!(entries[&1].name, "Дана");
+        assert_eq!(entries[&1].name, "Дина");
         t.rename_speaker(0, "Антоша").unwrap();
-        assert!(!t.set_auto_name(0, "Антон", &[]).unwrap());
+        assert!(!t.set_auto_name(0, "Иван", &[]).unwrap());
         assert_eq!(t.speaker_names().unwrap()[&0], "Антоша");
     }
 
@@ -1585,7 +1576,7 @@ mod tests {
         let fake = FakeEngine::new();
         fake.chat_answers(&[
             r#"{"evidence":[{"speaker":"@s1","name":"Ан"#,
-            r#"{"evidence":[{"speaker":"@s2","name":"Антон","how":"self","time":"3:15","sure":"high"}]}"#,
+            r#"{"evidence":[{"speaker":"@s2","name":"Иван","how":"self","time":"3:15","sure":"high"}]}"#,
         ]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
         let sched = recording(&ai, &media, 10.0, (20.0, 5.0), engine.clone());
@@ -1621,14 +1612,14 @@ mod tests {
                 second.evidence[0].name.as_str(),
                 second.evidence[0].time
             ),
-            (1, "Антон", 195.0)
+            (1, "Иван", 195.0)
         );
         assert_eq!(fake.chats().len(), 2);
     }
 
     #[test]
     fn a_cut_answer_keeps_the_items_that_closed() {
-        let cut = r#"{"evidence":[{"speaker":"@s1","name":"Антон","how":"self","time":"0:00","sure":"high"},{"speaker":"@s2","name":"Ан"#;
+        let cut = r#"{"evidence":[{"speaker":"@s1","name":"Иван","how":"self","time":"0:00","sure":"high"},{"speaker":"@s2","name":"Ан"#;
         let raw = closed_evidence(cut);
         assert_eq!(raw.evidence.len(), 1);
         assert_eq!(
@@ -1636,9 +1627,9 @@ mod tests {
                 raw.evidence[0].speaker.as_str(),
                 raw.evidence[0].name.as_str()
             ),
-            ("@s1", "Антон")
+            ("@s1", "Иван")
         );
-        let whole = r#"{"evidence":[{"speaker":"@s1","name":"Антон","how":"self","time":"0:00","sure":"high"}]}"#;
+        let whole = r#"{"evidence":[{"speaker":"@s1","name":"Иван","how":"self","time":"0:00","sure":"high"}]}"#;
         assert_eq!(closed_evidence(whole).evidence.len(), 1);
         assert!(closed_evidence(r#"{"evidence":[{"speaker""#)
             .evidence
@@ -1652,7 +1643,7 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         let fake = FakeEngine::new();
         fake.chat_answers(&[
-            r#"{"evidence":[{"speaker":"@s1","name":"Антон","how":"self","time":"0:00","sure":"high"},{"speaker":"@s2","name":"Ан"#,
+            r#"{"evidence":[{"speaker":"@s1","name":"Иван","how":"self","time":"0:00","sure":"high"},{"speaker":"@s2","name":"Ан"#,
             r#"{"evidence":[]}"#,
         ]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
@@ -1677,7 +1668,7 @@ mod tests {
         assert_eq!(cursor.evidence.len(), 1);
         assert_eq!(
             (cursor.evidence[0].speaker, cursor.evidence[0].name.as_str()),
-            (0, "Антон")
+            (0, "Иван")
         );
     }
 
@@ -1694,7 +1685,7 @@ mod tests {
         let media = tmp.path().join("talk.wav");
         std::fs::write(&media, b"x").unwrap();
         let mut t = Transcript::open(&ai, &transcript::file_id(&media).unwrap()).unwrap();
-        let address = reply(395.0, 400.0, 1, "Антон, расскажи, как ты подтвердил опыт.");
+        let address = reply(395.0, 400.0, 1, "Иван, расскажи, как ты подтвердил опыт.");
         let answer = reply(425.0, 435.0, 0, "Я работал в трёх компаниях.");
         t.set_replies(&[reply(0.0, 2.0, 1, "Начало."), address.clone(), answer])
             .unwrap();
@@ -1718,7 +1709,7 @@ mod tests {
         fake.chat_answers(&[
             r#"{"evidence":[]}"#,
             r#"{"evidence":[]}"#,
-            r#"{"evidence":[{"speaker":"@s1","name":"Антон","how":"addressed","time":"6:35","sure":"high"}]}"#,
+            r#"{"evidence":[{"speaker":"@s1","name":"Иван","how":"addressed","time":"6:35","sure":"high"}]}"#,
         ]);
         let engine: Arc<dyn Engine> = Arc::new(fake.clone());
         let sched = crate::run::open_scheduler(&ai).unwrap();
@@ -1753,7 +1744,7 @@ mod tests {
         let chats = fake.chats();
         assert_eq!(chats.len(), 3);
         assert!(
-            chats[1].texts[1].contains("[6:35] @s2: Антон, расскажи"),
+            chats[1].texts[1].contains("[6:35] @s2: Иван, расскажи"),
             "{}",
             chats[1].texts[1]
         );
@@ -1762,7 +1753,7 @@ mod tests {
             "the answer is past the end of the window"
         );
         assert!(
-            chats[2].texts[1].contains("[6:35] @s2: Антон, расскажи"),
+            chats[2].texts[1].contains("[6:35] @s2: Иван, расскажи"),
             "{}",
             chats[2].texts[1]
         );
@@ -1777,8 +1768,8 @@ mod tests {
             .expect("the addressed report is evidence");
         assert_eq!(
             (found.speaker, found.name.as_str(), found.how, found.time),
-            (0, "Антон", How::Addressed, 395.0)
+            (0, "Иван", How::Addressed, 395.0)
         );
-        assert_eq!(found.text, "Антон, расскажи, как ты подтвердил опыт.");
+        assert_eq!(found.text, "Иван, расскажи, как ты подтвердил опыт.");
     }
 }

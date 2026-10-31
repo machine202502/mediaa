@@ -69,7 +69,7 @@ fn records_real_screen_area_to_mp4() {
         .video(15, 60, None)
         .audio_layout(AudioLayout::EveryFile)
         .audio_kbps(192)
-        .webp_mode(WebpMode::SegmentedParallel)
+        .webp_mode(WebpMode::Fast)
         .build()
         .unwrap(),
     )

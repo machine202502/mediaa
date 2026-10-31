@@ -14,7 +14,7 @@ use crate::{i18n, theme};
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke};
 use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
-use mediaa_core::settings::{RecordProfile, ThemePreference};
+use mediaa_core::settings::{RecordPreset, RecordProfile, ThemePreference};
 use mediaa_media::recorder::StopAction;
 use rust_i18n::t;
 use std::time::Duration;
@@ -25,6 +25,36 @@ pub enum Section {
     Capture,
     Convert,
     Agent,
+}
+
+pub(crate) fn preset_combo(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    current: Option<RecordPreset>,
+    presets: &[RecordPreset],
+) -> Option<RecordPreset> {
+    let label = |preset: RecordPreset| match preset {
+        RecordPreset::Quality => t!("record.preset_quality"),
+        RecordPreset::Medium => t!("record.preset_medium"),
+        RecordPreset::Fast => t!("record.preset_fast"),
+    };
+    let selected = current
+        .map(label)
+        .unwrap_or_else(|| t!("record.preset_custom"));
+    let mut picked = None;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for preset in presets {
+                if ui
+                    .selectable_label(current == Some(*preset), label(*preset))
+                    .clicked()
+                {
+                    picked = Some(*preset);
+                }
+            }
+        });
+    picked
 }
 
 impl Page {

@@ -23,7 +23,7 @@ use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use mediaa_core::settings::{AfterCapture, RecordProfile, ScreenChoice, TrayClickAction};
 use mediaa_core::source::{AudioSource, SourceFactory};
-use mediaa_core::{library, naming, paths, Frame, ImageFormat, OutputKind, Settings};
+use mediaa_core::{library, naming, paths, Frame, ImageFormat, Settings};
 use mediaa_media::recorder::{
     recover_incomplete_sessions, AudioLayout, RecordingRequest, RecoveryReport, SessionEvent,
     SessionFailure, SessionNotice, StopAction,
@@ -231,8 +231,8 @@ impl App {
         if let Some(mode) = mediaa_core::dev::notices_mode() {
             app.notices.push(
                 NoticeLevel::Error,
-                "Не удалось сохранить WebP — исходники сохранены".into(),
-                "WebP encoding failed after 6 attempts: part-000076.webp has no VP8X chunk.\nБыл выполнен переход на линейную конвертацию.".into(),
+                t!("dev.webp_notice_summary").into_owned(),
+                t!("dev.webp_notice_detail").into_owned(),
                 Some("webp-33868-0001".into()),
                 vec![
                     "C:\\Users\\wmachine\\Documents\\MediaA\\Recording part 1.mkv".into(),
@@ -609,7 +609,7 @@ fn tray_click_stops_recording(enabled: bool, recording: bool) -> bool {
 }
 
 #[cfg(test)]
-fn recording_completion_sound(_output: OutputKind, source: StopSource) -> bool {
+fn recording_completion_sound(_output: mediaa_core::OutputKind, source: StopSource) -> bool {
     matches!(source, StopSource::Tray | StopSource::Hotkey)
 }
 

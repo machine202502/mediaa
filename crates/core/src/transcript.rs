@@ -542,10 +542,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             [Some(0), Some(1), Some(1)]
         );
-        t.rename_speaker(1, " Дана ").unwrap();
+        t.rename_speaker(1, " Дина ").unwrap();
         assert_eq!(
             t.speaker_names().unwrap().get(&1).map(String::as_str),
-            Some("Дана")
+            Some("Дина")
         );
         drop(t);
 
@@ -574,18 +574,18 @@ mod tests {
         let t = Transcript::open(dir.path(), "f").unwrap();
         let evidence = [NameEvidence {
             start: 12.0,
-            text: "Меня зовут Антон.".into(),
+            text: "Меня зовут Иван.".into(),
             how: "self".into(),
         }];
-        assert!(t.set_auto_name(0, " Антон ", &evidence).unwrap());
+        assert!(t.set_auto_name(0, " Иван ", &evidence).unwrap());
         let entries = t.speaker_entries().unwrap();
-        assert_eq!(entries[&0].name, "Антон");
+        assert_eq!(entries[&0].name, "Иван");
         assert_eq!(entries[&0].source, NameSource::Auto);
         assert_eq!(entries[&0].evidence, evidence);
-        assert_eq!(t.speaker_names().unwrap()[&0], "Антон");
+        assert_eq!(t.speaker_names().unwrap()[&0], "Иван");
 
         t.rename_speaker(0, "Антоша").unwrap();
-        assert!(!t.set_auto_name(0, "Антон", &evidence).unwrap());
+        assert!(!t.set_auto_name(0, "Иван", &evidence).unwrap());
         let entries = t.speaker_entries().unwrap();
         assert_eq!(
             (entries[&0].name.as_str(), entries[&0].source),
@@ -594,15 +594,15 @@ mod tests {
         assert!(entries[&0].evidence.is_empty());
 
         t.rename_speaker(0, "").unwrap();
-        t.set_auto_name(0, "Антон", &evidence).unwrap();
-        t.set_auto_name(0, "Антон Петров", &[]).unwrap();
-        assert_eq!(t.speaker_names().unwrap()[&0], "Антон Петров");
+        t.set_auto_name(0, "Иван", &evidence).unwrap();
+        t.set_auto_name(0, "Пётр Примеров", &[]).unwrap();
+        assert_eq!(t.speaker_names().unwrap()[&0], "Пётр Примеров");
 
-        t.rename_speaker(1, "Дана").unwrap();
+        t.rename_speaker(1, "Дина").unwrap();
         t.clear_auto_names().unwrap();
         assert_eq!(
             t.speaker_names().unwrap(),
-            BTreeMap::from([(1, "Дана".to_string())])
+            BTreeMap::from([(1, "Дина".to_string())])
         );
 
         assert!(!t.set_auto_name(2, "   ", &[]).unwrap());

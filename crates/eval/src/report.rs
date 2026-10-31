@@ -751,7 +751,7 @@ mod tests {
                 questions: &["Как зовут?".into()],
                 events: &events,
                 answers: &["@s1 сказал [1:40].".into()],
-                shown: &["@Антон сказал [1:40].".into()],
+                shown: &["@Иван сказал [1:40].".into()],
                 turns: &[turn],
                 stats: &stats,
                 model_steps: &[ModelSteps {
@@ -775,7 +775,7 @@ mod tests {
             .contains("@s1"));
         assert!(std::fs::read_to_string(dir.path().join("answer_shown.txt"))
             .unwrap()
-            .contains("@Антон"));
+            .contains("@Иван"));
         let timings: serde_json::Value = serde_json::from_str(
             &std::fs::read_to_string(dir.path().join("timings.json")).unwrap(),
         )

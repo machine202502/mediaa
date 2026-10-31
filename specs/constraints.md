@@ -110,7 +110,6 @@
 - FFmpeg process abort/OOM не превращается в обычный `Result` через `catch_unwind`.
 - OOM или resource failure нельзя определять по тексту сообщения. Без typed signal неизвестная
   ошибка сохраняет прежний bounded retry.
-- `MemoryBudget` — расчётная защита сегментов, а не измерение или жёсткий лимит RSS.
 
 ## Record timing и файлы
 

@@ -510,22 +510,22 @@ mod tests {
         assert_eq!(parse_label("@s0"), None);
         assert_eq!(parse_label("@s1#0"), None);
         assert_eq!(parse_label("Говорящий 1"), None);
-        assert_eq!(parse_label("Антон"), None);
+        assert_eq!(parse_label("Иван"), None);
         assert_eq!(parse_label("1"), None);
     }
 
     #[test]
     fn names_become_labels_and_back() {
-        let speakers = vec![who(0, "Антон"), who(1, "")];
+        let speakers = vec![who(0, "Иван"), who(1, "")];
         assert_eq!(
-            to_model("спроси @Антон и @Говорящий 2", &speakers),
+            to_model("спроси @Иван и @Говорящий 2", &speakers),
             "спроси @s1 и @s2"
         );
         assert_eq!(
             to_model("ask @Speaker 2 please", &speakers),
             "ask @s2 please"
         );
-        assert_eq!(to_model("@антон, @s1", &speakers), "@s1, @s1");
+        assert_eq!(to_model("@иван, @s1", &speakers), "@s1, @s1");
         assert_eq!(
             to_model("почта a@anton.ru и @s1", &speakers),
             "почта a@anton.ru и @s1"
@@ -544,7 +544,7 @@ mod tests {
             shown,
             vec![
                 "сказал ".to_string(),
-                "@Антон:true".to_string(),
+                "@Иван:true".to_string(),
                 " и ".to_string(),
                 "@Говорящий 2:true".to_string()
             ]
@@ -553,22 +553,22 @@ mod tests {
 
     #[test]
     fn a_rename_changes_only_the_live_label() {
-        let before = vec![who(0, "Антон")];
-        assert_eq!(to_model("привет @Антон", &before), "привет @s1");
-        let after = vec![who(0, "Олег")];
+        let before = vec![who(0, "Иван")];
+        assert_eq!(to_model("привет @Иван", &before), "привет @s1");
+        let after = vec![who(0, "Михаил")];
         let live = pieces("привет @s1", &after, unnamed);
         assert_eq!(
             live,
             vec![
                 Piece::Text("привет "),
                 Piece::Mention {
-                    text: "@Олег".into(),
+                    text: "@Михаил".into(),
                     live: true
                 }
             ]
         );
-        let typed = pieces("привет @Антон", &after, unnamed);
-        assert_eq!(typed, vec![Piece::Text("привет @Антон")]);
+        let typed = pieces("привет @Иван", &after, unnamed);
+        assert_eq!(typed, vec![Piece::Text("привет @Иван")]);
     }
 
     #[test]
@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn completion_inserts_and_moves_with_the_caret() {
         let speakers = [
-            who(0, "Антон"),
+            who(0, "Иван"),
             who(1, "Анна"),
             folder(0, 3, "Борис", "Планёрка"),
         ];
@@ -619,9 +619,9 @@ mod tests {
         assert_eq!(matching(&speakers[..2], "", unnamed), vec![0, 1]);
         assert_eq!(matching(&speakers[2..], "план", unnamed), vec![0]);
         assert_eq!(matching(&speakers[2..], "s1#3", unnamed), vec![0]);
-        let (text, caret) = insert("привет @ан!", 13, "ан", "@Антон");
-        assert_eq!(text, "привет @Антон !");
-        assert_eq!(caret, "привет @Антон ".len());
+        let (text, caret) = insert("привет @ан!", 13, "ан", "@Иван");
+        assert_eq!(text, "привет @Иван !");
+        assert_eq!(caret, "привет @Иван ".len());
         let (text, _) = insert("привет @s", 13, "s", "@s1#3");
         assert_eq!(text, "привет @s1#3 ");
 

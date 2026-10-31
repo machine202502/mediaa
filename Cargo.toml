@@ -11,7 +11,9 @@ members = [
     "crates/queue",
     "crates/eval",
     "crates/app",
-    "crates/webp-pipeline",
+    "crates/ffmpeg",
+    "crates/webp",
+    "crates/gif",
 ]
 
 [workspace.package]
@@ -30,7 +32,9 @@ mediaa-storage = { path = "crates/storage" }
 mediaa-render = { path = "crates/render" }
 mediaa-platform = { path = "crates/platform" }
 mediaa-media = { path = "crates/media" }
-mediaa-webp-pipeline = { path = "crates/webp-pipeline" }
+mediaa-ffmpeg = { path = "crates/ffmpeg" }
+mediaa-webp = { path = "crates/webp" }
+mediaa-gif = { path = "crates/gif" }
 mediaa-engine = { path = "crates/engine" }
 mediaa-agent = { path = "crates/agent" }
 mediaa-queue = { path = "crates/queue" }
@@ -75,7 +79,11 @@ opt-level = 0
 opt-level = 0
 [profile.dev-check.package.mediaa-media]
 opt-level = 0
-[profile.dev-check.package.mediaa-webp-pipeline]
+[profile.dev-check.package.mediaa-ffmpeg]
+opt-level = 0
+[profile.dev-check.package.mediaa-webp]
+opt-level = 0
+[profile.dev-check.package.mediaa-gif]
 opt-level = 0
 
 [profile.test-fast]

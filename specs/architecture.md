@@ -76,7 +76,8 @@ Windows Graphics Capture, X11/MIT-SHM и Wayland/PipeWire отличаются �
 
 ## 3. `media` — медиа-операции
 
-Крейт зависит от `core` и `webp-pipeline`. Он не знает о страницах UI.
+Крейт зависит от `core`, `mediaa-ffmpeg`, `mediaa-webp` и `mediaa-gif`. Он не знает
+о страницах UI.
 
 ### 3.1. `recorder`
 
@@ -84,7 +85,7 @@ Windows Graphics Capture, X11/MIT-SHM и Wayland/PipeWire отличаются �
 
 #### 3.1.1. `recorder/request`
 
-Валидирует `RecordingRequest`, профиль записи, WebP runtime mode и limits.
+Валидирует `RecordingRequest`, профиль записи и limits.
 
 #### 3.1.2. `recorder/capture`
 
@@ -92,16 +93,18 @@ Windows Graphics Capture, X11/MIT-SHM и Wayland/PipeWire отличаются �
 
 #### 3.1.3. `recorder/finalize`
 
-Преобразует исходники в итоговые файлы, связывает аудио, выполняет WebP fallback и recovery.
+Преобразует исходники в итоговые файлы, связывает аудио и выполняет recovery.
 
 #### 3.1.4. `recorder/recovery`
 
 Восстанавливает незавершённые пользовательские источники после сбоя.
 
-### 3.2. `animation_backends`, `webp_decode`, `live_webp`
+### 3.2. `animation_backends`, `webp_decode`
 
-Выбирают Direct/Segmented encoder, читают анимационный WebP и выполняют live WebP path.
-`SegmentFailure` различает permanent и retryable сбой сегментного pipeline.
+Кодируют анимацию одним полным проходом Direct: WebP через FFmpeg/libwebp, GIF через
+FFmpeg. Фильтры и WebP-части приходят из `mediaa-webp`/`mediaa-gif`.
+`WebpMode::{Quality, Fast}` задаёт method и ограничения fps/высоты. Сегментного и
+live-WebP больше нет.
 
 ### 3.3. `convert`, `filters`
 
@@ -111,30 +114,19 @@ Windows Graphics Capture, X11/MIT-SHM и Wayland/PipeWire отличаются �
 
 Определяют медиа metadata, hover-preview, proxy и thumbnail operations.
 
-### 3.5. `job`, `error`
+### 3.5. `error`
 
-`job` управляет FFmpeg execution/cancel. `error` классифицирует ошибки, от которых зависит
-пользовательское действие или recovery.
+`error` классифицирует ошибки, от которых зависит пользовательское действие или recovery.
+FFmpeg execution/cancel живёт в отдельном `mediaa-ffmpeg`.
 
-## 4. `webp-pipeline`
+## 4. Форматные крейты
 
-Крейт зависит от `core` и отвечает только за сегментное кодирование animated WebP.
+- `mediaa-ffmpeg` — запуск/отмена FFmpeg, общий слой для форматов.
+- `mediaa-webp` — WebP-граф, normalize/validate/trim, merge animated WebP.
+- `mediaa-gif` — GIF-граф, палитра и dither.
 
-### 4.1. Планирование
-
-Делит временную шкалу на сегменты, рассчитывает frames и tuning parameters.
-
-### 4.2. `scheduler`
-
-Запускает bounded workers, повторы и degradation при доказанной resource failure.
-
-### 4.3. `memory`
-
-Проверяет per-segment и aggregate budget. Это расчётная защита, не измерение RSS FFmpeg.
-
-### 4.4. `webp_parts`
-
-Нормализует, валидирует и объединяет animated WebP с сохранением timing/alpha.
+`mediaa-media` не содержит сегментного pipeline; форматные операции вызываются через
+эти крейты.
 
 ## 5. `storage` — библиотека и кэши
 
@@ -303,10 +295,12 @@ Locale-ключи должны совпадать во всех языковых
 ```text
 core
   <- render
-  <- webp-pipeline
   <- storage
   <- platform
-  <- media <- webp-pipeline
+  <- mediaa-ffmpeg
+  <- mediaa-webp
+  <- mediaa-gif
+  <- media <- mediaa-ffmpeg, mediaa-webp, mediaa-gif
   <- engine
   <- queue
   <- agent <- engine, queue

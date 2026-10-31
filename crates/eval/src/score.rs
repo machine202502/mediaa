@@ -318,11 +318,11 @@ mod tests {
     #[test]
     fn a_speaker_label_is_scored_as_the_name_the_user_sees() {
         let mut rec = recording(100.0, 110.0);
-        rec.names.insert(0, "Антон".into());
+        rec.names.insert(0, "Иван".into());
         rec.names.insert(1, "Анна".into());
         let spec = spec(
             vec![
-                fact("Антон", &["Антон"]),
+                fact("Иван", &["Иван"]),
                 fact("Анна", &["Анна"]),
                 fact("не назван", &["не назван"]),
             ],
@@ -341,7 +341,7 @@ mod tests {
     #[test]
     fn forbidden_text_is_matched_after_the_labels_are_replaced() {
         let mut rec = recording(0.0, 10.0);
-        rec.names.insert(0, "Антон".into());
+        rec.names.insert(0, "Иван".into());
         let raw_label = spec(vec![], vec![], &["@s1"]);
         let turn = scored(&raw_label, "@s1 сказал", &rec);
         assert!(turn.forbidden.is_empty(), "{turn:?}");

@@ -13,6 +13,18 @@ impl std::fmt::Display for Cancelled {
 
 impl std::error::Error for Cancelled {}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_is_typed_and_detected() {
+        let error: anyhow::Error = Cancelled.into();
+        assert!(is_cancelled(&error));
+        assert_eq!(error.to_string(), "cancelled");
+    }
+}
+
 pub fn is_cancelled(err: &anyhow::Error) -> bool {
     err.downcast_ref::<Cancelled>().is_some()
 }

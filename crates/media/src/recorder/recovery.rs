@@ -45,22 +45,6 @@ fn recovery_candidates(session: &Path) -> Vec<RecoveryCandidate> {
             video_indices.insert(index);
         }
     }
-    if let Ok(entries) = std::fs::read_dir(session) {
-        for entry in entries.flatten() {
-            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                if let Some(index) = entry
-                    .file_name()
-                    .to_str()
-                    .and_then(|name| name.strip_prefix("video-"))
-                    .and_then(|name| name.strip_suffix("-chunks"))
-                    .and_then(|value| value.parse::<usize>().ok())
-                {
-                    video_indices.insert(index);
-                }
-            }
-        }
-    }
-
     let mut candidates = Vec::new();
     for index in video_indices {
         let scratch = session.join(format!("video-{index}.mkv"));
@@ -69,16 +53,6 @@ fn recovery_candidates(session: &Path) -> Vec<RecoveryCandidate> {
                 source: scratch,
                 title: format!("Recovered recording video {}", index + 1),
             });
-            continue;
-        }
-        let chunks = session.join(format!("video-{index}-chunks"));
-        for (part, source) in sorted_files(&chunks).into_iter().enumerate() {
-            if source.extension().is_some_and(|value| value == "mkv") && usable_file(&source) {
-                candidates.push(RecoveryCandidate {
-                    source,
-                    title: format!("Recovered recording video {} part {}", index + 1, part + 1),
-                });
-            }
         }
     }
     for (index, source) in files
@@ -90,38 +64,6 @@ fn recovery_candidates(session: &Path) -> Vec<RecoveryCandidate> {
             source,
             title: format!("Recovered audio {}", index + 1),
         });
-    }
-    let has_video = candidates.iter().any(|candidate| {
-        candidate
-            .source
-            .extension()
-            .is_some_and(|value| value == "mkv")
-    });
-    if !has_video {
-        let live = session.join("live-webp");
-        for source in sorted_files(&live).into_iter().filter(|path| {
-            path.extension().is_some_and(|value| value == "webp") && usable_file(path)
-        }) {
-            candidates.push(RecoveryCandidate {
-                source,
-                title: "Recovered animation".into(),
-            });
-        }
-        if let Ok(entries) = std::fs::read_dir(&live) {
-            for dir in entries
-                .flatten()
-                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            {
-                for source in sorted_files(&dir.path()).into_iter().filter(|path| {
-                    path.extension().is_some_and(|value| value == "webp") && usable_file(path)
-                }) {
-                    candidates.push(RecoveryCandidate {
-                        source,
-                        title: "Recovered animation".into(),
-                    });
-                }
-            }
-        }
     }
     candidates
 }

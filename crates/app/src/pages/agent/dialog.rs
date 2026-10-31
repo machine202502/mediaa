@@ -1393,15 +1393,15 @@ mod tests {
     #[test]
     fn an_automatic_name_says_what_shows_it() {
         let auto = SpeakerName {
-            name: "Антон".into(),
+            name: "Иван".into(),
             source: NameSource::Auto,
             evidence: vec![NameEvidence {
                 start: 5.0,
-                text: "Меня зовут Антон.".into(),
+                text: "Меня зовут Иван.".into(),
                 how: "self".into(),
             }],
         };
-        assert_eq!(auto_evidence(&auto).unwrap(), "[0:05] Меня зовут Антон.");
+        assert_eq!(auto_evidence(&auto).unwrap(), "[0:05] Меня зовут Иван.");
         assert!(auto_evidence(&SpeakerName {
             source: NameSource::Manual,
             ..auto.clone()
@@ -1508,10 +1508,10 @@ mod tests {
                 first: 1.0
             }
         );
-        let mut names = BTreeMap::from([(0, "Аня".to_string())]);
-        names = apply_names(&names, &[(0, "  ".into()), (1, " Боб ".into())]);
+        let mut names = BTreeMap::from([(0, "Оля".to_string())]);
+        names = apply_names(&names, &[(0, "  ".into()), (1, " Боря ".into())]);
         assert!(!names.contains_key(&0), "an empty field removes the name");
-        assert_eq!(names.get(&1).map(String::as_str), Some("Боб"));
+        assert_eq!(names.get(&1).map(String::as_str), Some("Боря"));
     }
 
     #[test]

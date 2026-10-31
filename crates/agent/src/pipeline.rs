@@ -554,7 +554,7 @@ mod tests {
         drain(&sched);
         let t = Transcript::open(&ai, &id(&media)).unwrap();
         let replies = t.dialog().unwrap();
-        t.rename_speaker(0, "Дана").unwrap();
+        t.rename_speaker(0, "Дина").unwrap();
         let names = t.speaker_names().unwrap();
         drop(t);
         let speakers = replies.iter().filter_map(|r| r.speaker).collect::<Vec<_>>();

@@ -442,8 +442,8 @@ mod tests {
     #[test]
     fn times_are_tagged_and_citations_checked_per_recording() {
         assert_eq!(
-            tag_times("[0:10] Дана: [см.] и [1:00–2:00]", 2),
-            "[#2 0:10] Дана: [см.] и [#2 1:00–2:00]"
+            tag_times("[0:10] Дина: [см.] и [1:00–2:00]", 2),
+            "[#2 0:10] Дина: [см.] и [#2 1:00–2:00]"
         );
         let c = folder_citations("в [#1 0:10] и [#2 5:00–5:30], не [0:10]");
         assert_eq!(

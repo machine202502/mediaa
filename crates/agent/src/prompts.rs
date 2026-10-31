@@ -145,7 +145,7 @@ mod tests {
 
         let parts = [
             context! { number => 1, title => "Отчёт", summary => "Сроки.", decisions => ["Сдать в пятницу"], actions => Vec::<String>::new(), questions => Vec::<String>::new(), topics => ["сроки", "отчёт"] },
-            context! { number => 2, title => "Бюджет", summary => "Цифры.", decisions => Vec::<String>::new(), actions => ["Олег проверит"], questions => ["Когда созвон?"], topics => Vec::<String>::new() },
+            context! { number => 2, title => "Бюджет", summary => "Цифры.", decisions => Vec::<String>::new(), actions => ["Михаил проверит"], questions => ["Когда созвон?"], topics => Vec::<String>::new() },
         ];
         insta::assert_snapshot!(
             "outline_reduce_system",
@@ -158,7 +158,7 @@ mod tests {
         insta::assert_snapshot!("outline_reduce", reduce);
         assert!(
             reduce.contains("[1] Отчёт — Сроки.\nDecisions: Сдать в пятницу\n")
-                && reduce.contains("[2] Бюджет — Цифры.\nActions: Олег проверит\n"),
+                && reduce.contains("[2] Бюджет — Цифры.\nActions: Михаил проверит\n"),
             "{reduce}"
         );
         assert!(!reduce.contains("Part 2"), "empty lists leave no line");
@@ -174,12 +174,12 @@ mod tests {
 
         insta::assert_snapshot!("outline_pair_system", render("outline/pair_system.j2", ()));
         let first = context! { start => "0:00", end => "10:00", title => "Отчёт", summary => "Сроки.", decisions => ["Сдать в пятницу"], actions => Vec::<String>::new(), questions => Vec::<String>::new(), topics => ["сроки", "отчёт"] };
-        let second = context! { start => "10:00", end => "20:00", title => "Бюджет", summary => "Цифры.", decisions => Vec::<String>::new(), actions => ["Олег проверит"], questions => ["Когда созвон?"], topics => Vec::<String>::new() };
+        let second = context! { start => "10:00", end => "20:00", title => "Бюджет", summary => "Цифры.", decisions => Vec::<String>::new(), actions => ["Михаил проверит"], questions => ["Когда созвон?"], topics => Vec::<String>::new() };
         let pair = render("outline/pair.j2", context! { first, second });
         insta::assert_snapshot!("outline_pair", pair);
         assert!(pair.starts_with(
             "Two neighbouring chapters of the recording.\n\nChapter A (0:00 – 10:00):\nTitle: Отчёт\nSummary: Сроки.\nDecisions: Сдать в пятницу\nTopics: сроки; отчёт\n\n\
-             Chapter B (10:00 – 20:00):\nTitle: Бюджет\nSummary: Цифры.\nActions: Олег проверит\nQuestions: Когда созвон?\n\nIs chapter B the same subject as chapter A, continued?"
+             Chapter B (10:00 – 20:00):\nTitle: Бюджет\nSummary: Цифры.\nActions: Михаил проверит\nQuestions: Когда созвон?\n\nIs chapter B the same subject as chapter A, continued?"
         ), "{pair}");
         assert!(
             pair.ends_with("Write a JSON object:\nsame — true or false, as above."),
@@ -214,7 +214,7 @@ mod tests {
 
         let points = [
             context! { time => "0:10", text => "Сроки обсудили" },
-            context! { time => "0:20", text => "Олег проверит" },
+            context! { time => "0:20", text => "Михаил проверит" },
         ];
         let parts = [
             context! { start => "0:00", end => "5:00", title => "Сроки" },
@@ -226,7 +226,7 @@ mod tests {
         );
         insta::assert_snapshot!("outline_detail_points", assembled);
         assert!(
-            assembled.contains("It joins these subtopics: 0:00–5:00 Сроки; 5:00–10:00 Бюджет\n\nThe points said in the topic, in order (\"time text\"):\n0:10 Сроки обсудили\n0:20 Олег проверит\n"),
+            assembled.contains("It joins these subtopics: 0:00–5:00 Сроки; 5:00–10:00 Бюджет\n\nThe points said in the topic, in order (\"time text\"):\n0:10 Сроки обсудили\n0:20 Михаил проверит\n"),
             "{assembled}"
         );
         assert!(
@@ -315,9 +315,9 @@ mod tests {
     #[test]
     fn recording_card_tells_the_names_the_user_uses() {
         let speakers = [
-            context! { label => "@s1", name => "Дана" },
+            context! { label => "@s1", name => "Дина" },
             context! { label => "@s2", name => () },
-            context! { label => "@s3", name => "Пётр" },
+            context! { label => "@s3", name => "Стас" },
         ];
         let card = render(
             "agent/card_recording.j2",
@@ -325,7 +325,7 @@ mod tests {
         );
         assert_eq!(
             card,
-            "Recording: «Звонок», 5:00 long (short).\nSpeakers: @s1 (the user calls them Дана), @s2, @s3 (the user calls them Пётр).\nNo outline yet: use search and read.\n"
+            "Recording: «Звонок», 5:00 long (short).\nSpeakers: @s1 (the user calls them Дина), @s2, @s3 (the user calls them Стас).\nNo outline yet: use search and read.\n"
         );
         insta::assert_snapshot!("recording_card_names", card);
     }
@@ -451,9 +451,9 @@ mod tests {
         assert_eq!(
             render(
                 "results/recording/named.j2",
-                context! { done => [context! { speaker => "@s2", name => "Олег" }, context! { speaker => "@s1", name => "Анна" }] }
+                context! { done => [context! { speaker => "@s2", name => "Михаил" }, context! { speaker => "@s1", name => "Анна" }] }
             ),
-            "Named: @s2 → Олег, @s1 → Анна."
+            "Named: @s2 → Михаил, @s1 → Анна."
         );
         assert_eq!(
             render("results/recording/no_outline.j2", ()),
@@ -703,7 +703,7 @@ Write its title in Russian:"
         insta::assert_snapshot!("agent_verify_system", render("agent/verify_system.j2", ()));
         let full = render(
             "agent/verify.j2",
-            context! { question => "Когда?", draft => "В пятницу [0:10].", fragments => "[0:10] Дана: Отчёт в пятницу.", web => "https://example.org — закон" },
+            context! { question => "Когда?", draft => "В пятницу [0:10].", fragments => "[0:10] Дина: Отчёт в пятницу.", web => "https://example.org — закон" },
         );
         insta::assert_snapshot!("agent_verify", full);
         assert!(
@@ -715,7 +715,7 @@ Draft answer:
 В пятницу [0:10].
 
 What the recording says at the cited times:
-[0:10] Дана: Отчёт в пятницу.
+[0:10] Дина: Отчёт в пятницу.
 
 The web pages the draft cites:
 https://example.org — закон
@@ -755,17 +755,17 @@ Check the draft"
                 && system.ends_with("naming what is missing or wrong."),
             "{system}"
         );
-        let facts = ["Назаров", "три юриста"];
+        let facts = ["Иван", "три юриста"];
         let user = render(
             "eval/judge.j2",
-            context! { question => "Как зовут?", reference => "Антон Назаров.", facts, answer => "Его зовут Назаров [12:00]." },
+            context! { question => "Как зовут?", reference => "Иван Тестов.", facts, answer => "Его зовут Иван [12:00]." },
         );
         insta::assert_snapshot!("eval_judge", user);
         assert!(
             user.starts_with("Question:\nКак зовут?\n")
-                && user.contains("Антон Назаров.")
-                && user.contains("- Назаров\n- три юриста\n")
-                && user.ends_with("Assistant's answer:\nЕго зовут Назаров [12:00]."),
+                && user.contains("Иван Тестов.")
+                && user.contains("- Иван\n- три юриста\n")
+                && user.ends_with("Assistant's answer:\nЕго зовут Иван [12:00]."),
             "{user}"
         );
         let bare = render(
@@ -846,8 +846,8 @@ Check the draft"
         );
         let lines = || {
             vec![
-                "[0:05] @s1: Меня зовут Антон.".to_string(),
-                "[0:12] @s2: Привет, Антон.".to_string(),
+                "[0:05] @s1: Меня зовут Иван.".to_string(),
+                "[0:12] @s2: Привет, Иван.".to_string(),
             ]
         };
         let tail = "List the evidence of who is who in this part. For each item give the speaker label, the name, how the text shows it (self: the speaker names themself; addressed: someone calls the speaker by name and the speaker answers; introduced: someone introduces the speaker or gives them the floor; nickname: a nickname or username of the speaker), the time of the line that shows it, and how sure you are (high or low). Give at most 5 items, the clearest ones, and only about the speakers listed above. If this part shows nothing, give an empty list.";
@@ -857,19 +857,19 @@ Check the draft"
         );
         assert_eq!(
             none,
-            format!("Part of the recording 0:00 – 4:00. Speakers in it: @s1, @s2.\nTranscript:\n[0:05] @s1: Меня зовут Антон.\n[0:12] @s2: Привет, Антон.\n{tail}")
+            format!("Part of the recording 0:00 – 4:00. Speakers in it: @s1, @s2.\nTranscript:\n[0:05] @s1: Меня зовут Иван.\n[0:12] @s2: Привет, Иван.\n{tail}")
         );
         insta::assert_snapshot!("speaker_names", none);
         let known = [
-            context! { label => "@s1", name => "Антон" },
-            context! { label => "@s2", name => "Антон Петров" },
+            context! { label => "@s1", name => "Иван" },
+            context! { label => "@s2", name => "Пётр Примеров" },
         ];
         let some = render(
             "speakers/names.j2",
             context! { start => "0:00", end => "4:00", speakers => ["@s1", "@s2"], known => known, lines => lines() },
         );
         assert!(
-            some.starts_with("Part of the recording 0:00 – 4:00. Speakers in it: @s1, @s2.\nNames found so far (they may be wrong): @s1 — Антон; @s2 — Антон Петров.\nTranscript:\n"),
+            some.starts_with("Part of the recording 0:00 – 4:00. Speakers in it: @s1, @s2.\nNames found so far (they may be wrong): @s1 — Иван; @s2 — Пётр Примеров.\nTranscript:\n"),
             "{some}"
         );
         assert!(some.ends_with(tail), "{some}");

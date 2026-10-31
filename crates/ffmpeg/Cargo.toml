@@ -1,0 +1,14 @@
+[package]
+name = "mediaa-ffmpeg"
+description = "Shared FFmpeg execution and cancellation helpers for MediaA"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+ez-ffmpeg = { version = "0.19", features = ["static"] }
+
+[lints]
+workspace = true

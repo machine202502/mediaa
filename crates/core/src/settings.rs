@@ -2,6 +2,7 @@ use crate::formats::{AnimFormat, AudioFormat, OutputKind, VideoContainer};
 use crate::limits::{AUDIO_KBPS, DEFAULT_MUSIC_AUDIO_KBPS, FPS, GIF_COLORS, VIDEO_QUALITY};
 use crate::paths;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -100,15 +101,64 @@ pub struct RecordSettings {
     pub hide_to_tray: bool,
     pub show_no_signal: bool,
     pub allow_unavailable_sources: bool,
-    pub segmented_webp: bool,
-    pub parallel_webp: bool,
+    pub webp_mode: WebpMode,
+    #[serde(default)]
+    pub saved_formats: BTreeMap<String, FormatSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebpMode {
+    Quality,
+    Fast,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebpMode {
-    Direct,
-    Segmented,
-    SegmentedParallel,
+pub enum RecordPreset {
+    Quality,
+    Medium,
+    Fast,
+}
+
+impl RecordPreset {
+    pub const VIDEO: [Self; 3] = [Self::Quality, Self::Medium, Self::Fast];
+    pub const ANIMATION: [Self; 2] = [Self::Quality, Self::Fast];
+    pub const AUDIO: [Self; 3] = [Self::Quality, Self::Medium, Self::Fast];
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormatSnapshot {
+    pub fps: u32,
+    pub output_height: u32,
+    pub video_quality: u8,
+    pub webp_mode: WebpMode,
+    pub gif_colors: u32,
+    pub gif_dither: GifDither,
+    pub webp_quality: u8,
+}
+
+impl FormatSnapshot {
+    fn capture(record: &RecordSettings, anim: &AnimationQuality) -> Self {
+        Self {
+            fps: record.fps,
+            output_height: record.output_height,
+            video_quality: record.video_quality,
+            webp_mode: record.webp_mode,
+            gif_colors: anim.gif_colors,
+            gif_dither: anim.gif_dither,
+            webp_quality: anim.webp_quality,
+        }
+    }
+
+    fn apply(&self, record: &mut RecordSettings, anim: &mut AnimationQuality) {
+        record.fps = self.fps;
+        record.output_height = self.output_height;
+        record.video_quality = self.video_quality;
+        record.webp_mode = self.webp_mode;
+        anim.gif_colors = self.gif_colors;
+        anim.gif_dither = self.gif_dither;
+        anim.webp_quality = self.webp_quality;
+    }
 }
 
 impl Default for RecordSettings {
@@ -126,8 +176,8 @@ impl Default for RecordSettings {
             hide_to_tray: true,
             show_no_signal: true,
             allow_unavailable_sources: false,
-            segmented_webp: true,
-            parallel_webp: true,
+            webp_mode: WebpMode::Fast,
+            saved_formats: BTreeMap::new(),
         }
     }
 }
@@ -152,6 +202,27 @@ impl Default for AudioRecordSettings {
     }
 }
 
+impl AudioRecordSettings {
+    pub fn preset(&self) -> Option<RecordPreset> {
+        RecordPreset::AUDIO.into_iter().find(|preset| {
+            self.kbps
+                == match preset {
+                    RecordPreset::Quality => 256,
+                    RecordPreset::Medium => 192,
+                    RecordPreset::Fast => 128,
+                }
+        })
+    }
+
+    pub fn apply_preset(&mut self, preset: RecordPreset) {
+        self.kbps = match preset {
+            RecordPreset::Quality => 256,
+            RecordPreset::Medium => 192,
+            RecordPreset::Fast => 128,
+        };
+    }
+}
+
 pub const AUDIO_BITRATES: [u32; 5] = [96, 128, 192, 256, 320];
 
 pub const OUTPUT_HEIGHTS: [u32; 5] = [2160, 1440, 1080, 720, 480];
@@ -170,13 +241,151 @@ impl RecordSettings {
     }
 
     pub fn webp_mode(&self) -> WebpMode {
-        if !self.segmented_webp {
-            WebpMode::Direct
-        } else if self.parallel_webp {
-            WebpMode::SegmentedParallel
-        } else {
-            WebpMode::Segmented
+        self.webp_mode
+    }
+
+    pub fn animation_fps(&self) -> u32 {
+        match self.webp_mode {
+            WebpMode::Quality => self.fps,
+            WebpMode::Fast => self.fps.min(30),
         }
+    }
+
+    pub fn animation_height(&self) -> Option<u32> {
+        match self.webp_mode {
+            WebpMode::Quality => self.max_height(),
+            WebpMode::Fast => Some(self.max_height().unwrap_or(1080).min(1080)),
+        }
+    }
+
+    pub fn preset_options(&self) -> &'static [RecordPreset] {
+        match self.output {
+            OutputKind::Video(_) => &RecordPreset::VIDEO,
+            OutputKind::Anim(_) => &RecordPreset::ANIMATION,
+            OutputKind::Audio(_) => &[],
+        }
+    }
+
+    pub fn preset(&self, anim: &AnimationQuality) -> Option<RecordPreset> {
+        match self.output {
+            OutputKind::Video(_) => self.video_preset(),
+            OutputKind::Anim(AnimFormat::Webp) => self.animation_preset(anim),
+            OutputKind::Anim(AnimFormat::Gif) => self.gif_preset(anim),
+            OutputKind::Audio(_) => None,
+        }
+    }
+
+    pub fn apply_preset(&mut self, preset: RecordPreset, anim: &mut AnimationQuality) {
+        match self.output {
+            OutputKind::Video(_) => self.apply_video_preset(preset),
+            OutputKind::Anim(AnimFormat::Webp) => self.apply_animation_preset(preset, anim),
+            OutputKind::Anim(AnimFormat::Gif) => self.apply_gif_preset(preset, anim),
+            OutputKind::Audio(_) => {}
+        }
+    }
+
+    pub fn switch_output(
+        &mut self,
+        next: OutputKind,
+        anim: &mut AnimationQuality,
+        default_animation: RecordPreset,
+    ) {
+        if self.output == next {
+            return;
+        }
+        let previous = self.output.extension().to_string();
+        self.saved_formats
+            .insert(previous, FormatSnapshot::capture(self, anim));
+        self.output = next;
+        let key = next.extension().to_string();
+        if let Some(saved) = self.saved_formats.get(&key).cloned() {
+            saved.apply(self, anim);
+        } else {
+            let preset = match next {
+                OutputKind::Anim(_) => default_animation,
+                _ => RecordPreset::Quality,
+            };
+            self.apply_preset(preset, anim);
+        }
+    }
+
+    fn video_preset(&self) -> Option<RecordPreset> {
+        RecordPreset::VIDEO.into_iter().find(|preset| {
+            let (fps, height, quality) = video_preset_values(*preset);
+            self.fps == fps && self.output_height == height && self.video_quality == quality
+        })
+    }
+
+    fn animation_preset(&self, anim: &AnimationQuality) -> Option<RecordPreset> {
+        RecordPreset::ANIMATION.into_iter().find(|preset| {
+            let (fps, height, quality) = animation_preset_values(*preset);
+            self.fps == fps
+                && self.output_height == height
+                && anim.webp_quality == quality
+                && self.webp_mode == preset_webp_mode(*preset)
+        })
+    }
+
+    fn gif_preset(&self, anim: &AnimationQuality) -> Option<RecordPreset> {
+        RecordPreset::ANIMATION.into_iter().find(|preset| {
+            let (fps, height, colors, dither) = gif_preset_values(*preset);
+            self.fps == fps
+                && self.output_height == height
+                && anim.gif_colors == colors
+                && anim.gif_dither == dither
+        })
+    }
+
+    fn apply_video_preset(&mut self, preset: RecordPreset) {
+        let (fps, height, quality) = video_preset_values(preset);
+        self.fps = fps;
+        self.output_height = height;
+        self.video_quality = quality;
+    }
+
+    fn apply_animation_preset(&mut self, preset: RecordPreset, anim: &mut AnimationQuality) {
+        let (fps, height, quality) = animation_preset_values(preset);
+        self.fps = fps;
+        self.output_height = height;
+        self.webp_mode = preset_webp_mode(preset);
+        anim.webp_quality = quality;
+    }
+
+    fn apply_gif_preset(&mut self, preset: RecordPreset, anim: &mut AnimationQuality) {
+        let (fps, height, colors, dither) = gif_preset_values(preset);
+        self.fps = fps;
+        self.output_height = height;
+        anim.gif_colors = colors;
+        anim.gif_dither = dither;
+    }
+}
+
+fn video_preset_values(preset: RecordPreset) -> (u32, u32, u8) {
+    match preset {
+        RecordPreset::Quality => (60, 2160, 100),
+        RecordPreset::Medium => (60, 1440, 85),
+        RecordPreset::Fast => (30, 1080, 70),
+    }
+}
+
+fn animation_preset_values(preset: RecordPreset) -> (u32, u32, u8) {
+    match preset {
+        RecordPreset::Quality | RecordPreset::Medium => (30, 1080, 80),
+        RecordPreset::Fast => (30, 720, 80),
+    }
+}
+
+fn gif_preset_values(preset: RecordPreset) -> (u32, u32, u32, GifDither) {
+    match preset {
+        RecordPreset::Quality | RecordPreset::Medium => (30, 1080, 256, GifDither::Sierra2),
+        RecordPreset::Fast => (30, 720, 256, GifDither::Bayer),
+    }
+}
+
+fn preset_webp_mode(preset: RecordPreset) -> WebpMode {
+    match preset {
+        RecordPreset::Quality | RecordPreset::Medium => WebpMode::Quality,
+        RecordPreset::Fast => WebpMode::Fast,
     }
 }
 
@@ -318,11 +527,15 @@ impl Default for Settings {
             hotkey_anim: AnimationQuality::default(),
             region_record: RecordSettings {
                 output: OutputKind::Anim(AnimFormat::Webp),
-                fps: AnimSettings::default().fps,
-                output_height: AnimSettings::default().max_height,
+                fps: 30,
+                output_height: 720,
+                webp_mode: WebpMode::Fast,
                 ..RecordSettings::default()
             },
-            region_anim: AnimationQuality::default(),
+            region_anim: AnimationQuality {
+                gif_dither: GifDither::Bayer,
+                ..AnimationQuality::default()
+            },
             hotkey_screen: ScreenChoice::Primary,
             audio_record: AudioRecordSettings::default(),
             hotkey_audio: AudioRecordSettings::default(),
@@ -457,8 +670,6 @@ mod tests {
         s.stop_recording_on_left_click = false;
         s.highlight_recording_region = false;
         s.recording_region_outline_width = 17;
-        s.record.segmented_webp = false;
-        s.record.parallel_webp = false;
         s.launch_at_login = true;
         s.start_in_tray = true;
         s.save_to(&path).unwrap();
@@ -678,7 +889,7 @@ mod tests {
                 && r.audio_in_every_file
                 && r.record_cursor
         );
-        assert!(r.segmented_webp && r.parallel_webp);
+        assert_eq!(r.webp_mode, WebpMode::Fast);
         assert!(!r.allow_unavailable_sources);
         assert_eq!((r.fps, r.video_quality, r.output_height), (60, 100, 2160));
         let s = Settings::default();
@@ -700,12 +911,22 @@ mod tests {
         assert_eq!(s.region_record.output, OutputKind::Anim(AnimFormat::Webp));
         assert_eq!(
             (s.region_record.fps, s.region_record.output_height),
-            (15, 480)
+            (30, 720)
         );
         assert_eq!(
             s.region_anim.webp_quality,
             AnimationQuality::default().webp_quality
         );
+        assert_eq!(
+            s.region_record.preset(&s.region_anim),
+            Some(RecordPreset::Fast)
+        );
+        assert_eq!(s.record.preset(&s.anim), Some(RecordPreset::Quality));
+        assert_eq!(
+            s.hotkey_record.preset(&s.hotkey_anim),
+            Some(RecordPreset::Quality)
+        );
+        assert_eq!(s.audio_record.preset(), Some(RecordPreset::Quality));
         assert_eq!(s.hotkey_screen, ScreenChoice::Primary);
         let h = &s.hotkeys;
         assert!([
@@ -728,15 +949,234 @@ mod tests {
     }
 
     #[test]
-    fn webp_mode_preserves_the_disabled_parallel_preference() {
+    fn presets_apply_and_custom_is_virtual() {
         let mut record = RecordSettings::default();
-        assert_eq!(record.webp_mode(), WebpMode::SegmentedParallel);
-        record.segmented_webp = false;
-        assert_eq!(record.webp_mode(), WebpMode::Direct);
-        record.segmented_webp = true;
-        assert_eq!(record.webp_mode(), WebpMode::SegmentedParallel);
-        record.parallel_webp = false;
-        assert_eq!(record.webp_mode(), WebpMode::Segmented);
+        let mut anim = AnimationQuality::default();
+        assert_eq!(record.preset(&anim), Some(RecordPreset::Quality));
+
+        record.apply_preset(RecordPreset::Medium, &mut anim);
+        assert_eq!(
+            (record.fps, record.output_height, record.video_quality),
+            (60, 1440, 85)
+        );
+        assert_eq!(record.preset(&anim), Some(RecordPreset::Medium));
+
+        record.video_quality = 84;
+        assert_eq!(record.preset(&anim), None, "manual edit becomes Custom");
+
+        record.output = OutputKind::Anim(AnimFormat::Webp);
+        record.apply_preset(RecordPreset::Fast, &mut anim);
+        assert_eq!(record.preset(&anim), Some(RecordPreset::Fast));
+        assert_eq!(record.webp_mode, WebpMode::Fast);
+        record.fps = 60;
+        assert_eq!(record.preset(&anim), None);
+    }
+
+    #[test]
+    fn switching_formats_restores_their_own_settings() {
+        let mut record = RecordSettings::default();
+        let mut anim = AnimationQuality::default();
+        record.fps = 30;
+        record.output_height = 720;
+        record.video_quality = 70;
+        record.apply_preset(RecordPreset::Quality, &mut anim);
+        record.fps = 30;
+        record.output_height = 720;
+        record.video_quality = 70;
+
+        record.switch_output(
+            OutputKind::Video(VideoContainer::Mkv),
+            &mut anim,
+            RecordPreset::Quality,
+        );
+        assert_eq!(
+            (record.fps, record.output_height, record.video_quality),
+            (60, 2160, 100),
+            "a fresh format starts from its default preset"
+        );
+        record.fps = 30;
+        record.output_height = 1080;
+        record.video_quality = 80;
+
+        record.switch_output(
+            OutputKind::Video(VideoContainer::Mp4),
+            &mut anim,
+            RecordPreset::Quality,
+        );
+        assert_eq!(
+            (record.fps, record.output_height, record.video_quality),
+            (30, 720, 70)
+        );
+        record.switch_output(
+            OutputKind::Video(VideoContainer::Mkv),
+            &mut anim,
+            RecordPreset::Quality,
+        );
+        assert_eq!(
+            (record.fps, record.output_height, record.video_quality),
+            (30, 1080, 80)
+        );
+    }
+
+    #[test]
+    fn animations_keep_their_own_settings_per_format() {
+        let mut record = RecordSettings::default();
+        let mut anim = AnimationQuality::default();
+        record.output = OutputKind::Anim(AnimFormat::Webp);
+        record.apply_preset(RecordPreset::Fast, &mut anim);
+        assert_eq!((record.fps, record.output_height), (30, 720));
+
+        record.switch_output(
+            OutputKind::Anim(AnimFormat::Gif),
+            &mut anim,
+            RecordPreset::Fast,
+        );
+        assert_eq!(anim.gif_dither, GifDither::Bayer);
+        record.fps = 15;
+        record.output_height = 480;
+        anim.gif_colors = 64;
+
+        record.switch_output(
+            OutputKind::Anim(AnimFormat::Webp),
+            &mut anim,
+            RecordPreset::Quality,
+        );
+        assert_eq!(
+            (record.fps, record.output_height, record.webp_mode),
+            (30, 720, WebpMode::Fast)
+        );
+        record.switch_output(
+            OutputKind::Anim(AnimFormat::Gif),
+            &mut anim,
+            RecordPreset::Quality,
+        );
+        assert_eq!(
+            (record.fps, record.output_height, anim.gif_colors),
+            (15, 480, 64)
+        );
+    }
+
+    #[test]
+    fn preset_options_depend_on_the_format() {
+        let mut record = RecordSettings::default();
+        assert_eq!(record.preset_options(), &RecordPreset::VIDEO);
+        record.output = OutputKind::Anim(AnimFormat::Webp);
+        assert_eq!(record.preset_options(), &RecordPreset::ANIMATION);
+        record.output = OutputKind::Anim(AnimFormat::Gif);
+        assert_eq!(record.preset_options(), &RecordPreset::ANIMATION);
+        record.output = OutputKind::Audio(AudioFormat::Mp3);
+        assert!(record.preset_options().is_empty());
+    }
+
+    #[test]
+    fn every_video_preset_has_exact_values() {
+        let mut record = RecordSettings::default();
+        let mut anim = AnimationQuality::default();
+        for (preset, values) in [
+            (RecordPreset::Quality, (60, 2160, 100)),
+            (RecordPreset::Medium, (60, 1440, 85)),
+            (RecordPreset::Fast, (30, 1080, 70)),
+        ] {
+            record.apply_preset(preset, &mut anim);
+            assert_eq!(
+                (record.fps, record.output_height, record.video_quality),
+                values
+            );
+            assert_eq!(record.preset(&anim), Some(preset));
+        }
+    }
+
+    #[test]
+    fn animation_presets_cover_webp_and_gif() {
+        let mut record = RecordSettings::default();
+        let mut anim = AnimationQuality::default();
+        record.output = OutputKind::Anim(AnimFormat::Webp);
+        record.apply_preset(RecordPreset::Quality, &mut anim);
+        assert_eq!(
+            (record.fps, record.output_height, record.webp_mode),
+            (30, 1080, WebpMode::Quality)
+        );
+        record.apply_preset(RecordPreset::Fast, &mut anim);
+        assert_eq!(
+            (record.fps, record.output_height, record.webp_mode),
+            (30, 720, WebpMode::Fast)
+        );
+
+        record.output = OutputKind::Anim(AnimFormat::Gif);
+        record.apply_preset(RecordPreset::Quality, &mut anim);
+        assert_eq!(anim.gif_dither, GifDither::Sierra2);
+        record.apply_preset(RecordPreset::Fast, &mut anim);
+        assert_eq!(anim.gif_dither, GifDither::Bayer);
+    }
+
+    #[test]
+    fn saved_formats_survive_serialization() {
+        let mut record = RecordSettings::default();
+        let mut anim = AnimationQuality::default();
+        record.fps = 30;
+        record.output_height = 720;
+        record.video_quality = 70;
+        record.switch_output(
+            OutputKind::Video(VideoContainer::Mkv),
+            &mut anim,
+            RecordPreset::Quality,
+        );
+        record.fps = 30;
+        record.output_height = 1080;
+        record.video_quality = 80;
+
+        let text = toml::to_string(&record).unwrap();
+        let mut restored: RecordSettings = toml::from_str(&text).unwrap();
+        assert_eq!(
+            (restored.fps, restored.output_height, restored.video_quality),
+            (30, 1080, 80)
+        );
+        restored.switch_output(
+            OutputKind::Video(VideoContainer::Mp4),
+            &mut anim,
+            RecordPreset::Quality,
+        );
+        assert_eq!(
+            (restored.fps, restored.output_height, restored.video_quality),
+            (30, 720, 70)
+        );
+    }
+
+    #[test]
+    fn changing_preset_keeps_the_format() {
+        let mut record = RecordSettings::default();
+        let mut anim = AnimationQuality::default();
+        record.output = OutputKind::Anim(AnimFormat::Webp);
+        record.apply_preset(RecordPreset::Fast, &mut anim);
+        assert_eq!(record.output, OutputKind::Anim(AnimFormat::Webp));
+        record.apply_preset(RecordPreset::Quality, &mut anim);
+        assert_eq!(record.output, OutputKind::Anim(AnimFormat::Webp));
+    }
+
+    #[test]
+    fn audio_presets_match_bitrates() {
+        let mut audio = AudioRecordSettings::default();
+        audio.apply_preset(RecordPreset::Quality);
+        assert_eq!(audio.kbps, 256);
+        assert_eq!(audio.preset(), Some(RecordPreset::Quality));
+        audio.apply_preset(RecordPreset::Fast);
+        assert_eq!(audio.kbps, 128);
+        assert_eq!(audio.preset(), Some(RecordPreset::Fast));
+        audio.kbps = 160;
+        assert_eq!(audio.preset(), None);
+    }
+
+    #[test]
+    fn webp_presets_choose_fps_and_height() {
+        let mut record = RecordSettings::default();
+        assert_eq!(record.webp_mode(), WebpMode::Fast);
+        assert_eq!(record.animation_fps(), 30);
+        assert_eq!(record.animation_height(), Some(1080));
+        record.webp_mode = WebpMode::Quality;
+        assert_eq!(record.animation_fps(), 60);
+        assert_eq!(record.animation_height(), Some(2160));
+        record.output_height = 0;
+        assert_eq!(record.animation_height(), None);
     }
 
     #[test]

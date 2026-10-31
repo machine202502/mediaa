@@ -1,8 +1,10 @@
-use mediaa_core::limits::{FPS, GIF_COLORS, VIDEO_QUALITY};
-use mediaa_core::settings::{AnimSettings, GifDither};
+use mediaa_core::limits::{GIF_COLORS, VIDEO_QUALITY};
+pub use mediaa_gif::gif_graph;
+pub use mediaa_webp::webp_graph;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Effort {
+    Fastest,
     Fast,
     #[default]
     Balanced,
@@ -10,10 +12,11 @@ pub enum Effort {
 }
 
 impl Effort {
-    pub const ALL: [Effort; 3] = [Effort::Fast, Effort::Balanced, Effort::Max];
+    pub const ALL: [Effort; 4] = [Effort::Fastest, Effort::Fast, Effort::Balanced, Effort::Max];
 
     pub(crate) fn x264_preset(self) -> &'static str {
         match self {
+            Effort::Fastest => "ultrafast",
             Effort::Fast => "veryfast",
             Effort::Balanced => "medium",
             Effort::Max => "veryslow",
@@ -22,6 +25,7 @@ impl Effort {
 
     pub(crate) fn vp9_cpu_used(self) -> &'static str {
         match self {
+            Effort::Fastest => "6",
             Effort::Fast => "6",
             Effort::Balanced => "4",
             Effort::Max => "1",
@@ -30,6 +34,7 @@ impl Effort {
 
     pub(crate) fn webp_level(self) -> &'static str {
         match self {
+            Effort::Fastest => "0",
             Effort::Fast => "2",
             Effort::Balanced => "4",
             Effort::Max => "6",
@@ -38,6 +43,7 @@ impl Effort {
 
     pub(crate) fn flac_level(self) -> &'static str {
         match self {
+            Effort::Fastest => "2",
             Effort::Fast => "2",
             Effort::Balanced => "5",
             Effort::Max => "8",
@@ -46,7 +52,7 @@ impl Effort {
 
     pub(crate) fn png_preset(self) -> u8 {
         match self {
-            Effort::Fast => 1,
+            Effort::Fastest | Effort::Fast => 1,
             Effort::Balanced => 3,
             Effort::Max => 6,
         }
@@ -56,49 +62,6 @@ impl Effort {
 pub fn crf_for_quality(quality: u8) -> u32 {
     let q = VIDEO_QUALITY.clamp(u32::from(quality));
     40 - (q - 1) * 24 / 99
-}
-
-fn scale_step(max_height: Option<u32>) -> String {
-    match max_height {
-        Some(h) => format!(",scale=w=-1:h='min({h},ih)':flags=lanczos"),
-        None => String::new(),
-    }
-}
-
-fn dither_option(d: GifDither) -> &'static str {
-    match d {
-        GifDither::None => "none",
-        GifDither::Bayer => "bayer:bayer_scale=3",
-        GifDither::Sierra2 => "sierra2",
-        GifDither::FloydSteinberg => "floyd_steinberg",
-    }
-}
-
-pub fn gif_graph(a: &AnimSettings) -> String {
-    format!(
-        "[0:v]fps={fps}{scale},split[a][b];[a]palettegen=max_colors={colors}:stats_mode=diff[p];\
-         [b][p]paletteuse=dither={dither}:diff_mode=rectangle[v]",
-        fps = FPS.clamp(a.fps),
-        scale = scale_step(a.height_limit()),
-        colors = GIF_COLORS.clamp(a.gif_colors),
-        dither = dither_option(a.gif_dither),
-    )
-}
-
-pub fn webp_graph(a: &AnimSettings) -> String {
-    format!(
-        "[0:v]fps={}{}[v]",
-        FPS.clamp(a.fps),
-        scale_step(a.height_limit())
-    )
-}
-
-pub fn webp_segment_graph(a: &AnimSettings) -> String {
-    format!(
-        "[0:v]fps={}{},setpts=PTS-STARTPTS[v]",
-        FPS.clamp(a.fps),
-        scale_step(a.height_limit())
-    )
 }
 
 pub fn convert_video_graph(max_height: Option<u32>) -> String {
@@ -185,6 +148,7 @@ fn audio_mix_graph_range(n: usize, first: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mediaa_core::settings::{AnimSettings, GifDither};
 
     #[test]
     fn conversion_graphs_and_scales() {
@@ -271,10 +235,6 @@ mod tests {
             webp_graph(&AnimSettings::default()),
             "[0:v]fps=15,scale=w=-1:h='min(480,ih)':flags=lanczos[v]",
             "480p by default"
-        );
-        assert_eq!(
-            webp_segment_graph(&AnimSettings::default()),
-            "[0:v]fps=15,scale=w=-1:h='min(480,ih)':flags=lanczos,setpts=PTS-STARTPTS[v]"
         );
     }
 
