@@ -1,0 +1,20 @@
+Two neighbouring chapters of the recording.
+
+{% for name, topic in [("A", first), ("B", second)] %}
+Chapter {{ name }} ({{ topic.start }} – {{ topic.end }}):
+Title: {{ topic.title }}
+Summary: {{ topic.summary }}
+{% if topic.decisions %}Decisions: {{ topic.decisions | join("; ") }}
+{% endif %}
+{% if topic.actions %}Actions: {{ topic.actions | join("; ") }}
+{% endif %}
+{% if topic.questions %}Questions: {{ topic.questions | join("; ") }}
+{% endif %}
+{% if topic.topics %}Topics: {{ topic.topics | join("; ") }}
+{% endif %}
+
+{% endfor %}
+Is chapter B the same subject as chapter A, continued? Answer true when B goes on with the same question, object or story as A — told in other words, with more detail, or after a short aside. Answer false when B turns to something a reader would look for as its own chapter, even if it is related to A or the speakers are the same.
+
+Write a JSON object:
+same — true or false, as above.

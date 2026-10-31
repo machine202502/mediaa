@@ -1,0 +1,8 @@
+---
+source: crates/agent/src/prompts.rs
+expression: user
+---
+The first message of a chat:
+привет как дела
+
+Write its title in Russian: the subject of this message in 1 to 5 words, as a noun phrase, with the spelling fixed (a greeting is titled as a greeting). Title:

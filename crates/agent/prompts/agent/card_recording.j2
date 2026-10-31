@@ -1,0 +1,17 @@
+Recording: «{{ title }}», {{ length }} long ({% if minutes < 10 %}short{% elif minutes < 60 %}medium{% else %}long{% endif %}).
+{% if speakers %}
+Speakers: {% for s in speakers %}{{ s.label }}{% if s.name %} (the user calls them {{ s.name }}){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}.
+{% else %}
+Speakers were not told apart.
+{% endif %}
+{% if topics %}
+Topics (the map; outline with a topic number gives its breakdown):
+{% for t in topics %}
+{{ t.number }}. [{{ t.start }}–{{ t.end }}] {{ t.title }} — {{ t.summary }}
+{% endfor %}
+{% else %}
+No outline yet: use search and read.
+{% endif %}
+{% if position %}
+The user is at [{{ position }}] in playback.
+{% endif %}

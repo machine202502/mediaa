@@ -1,7 +1,7 @@
 mod cleanup;
 mod grid;
 mod hover_preview;
-mod player;
+pub(crate) mod player;
 pub(crate) mod thumbs;
 mod viewer;
 
@@ -61,6 +61,7 @@ pub struct LibraryController {
     renaming: Option<(PathBuf, String)>,
     hovered: Option<PathBuf>,
     hover_next: Option<PathBuf>,
+    previews_enabled: bool,
     previews: Previews,
     viewer: Option<Viewer>,
     dev_viewed: bool,
@@ -105,6 +106,7 @@ impl Default for LibraryController {
             renaming: None,
             hovered: None,
             hover_next: None,
+            previews_enabled: true,
             previews: Previews::default(),
             viewer: None,
             dev_viewed: false,
@@ -600,12 +602,17 @@ fn sort_label(s: Sort) -> String {
 }
 
 impl LibraryController {
+    pub(crate) fn stop_previews(&mut self) {
+        self.previews.stop();
+    }
+
     pub(crate) fn ui(
         &mut self,
         settings: &Settings,
         thumbs: &mut Thumbnails,
         ui: &mut egui::Ui,
     ) -> Vec<LibraryAction> {
+        self.previews_enabled = settings.animated_previews;
         let mut actions = Vec::new();
         if let Some((dir, names)) = self.poll(settings, ui.ctx()) {
             self.previews.retain(&dir, &names);

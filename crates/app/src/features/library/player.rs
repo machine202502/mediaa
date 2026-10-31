@@ -1,5 +1,5 @@
 use crate::latest_worker::LatestWorker;
-use crossbeam_channel::{Receiver, TryRecvError};
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
 use mediaa_core::Frame;
 use mediaa_media::preview::{decode_audio, preview_frames, PreviewFrame};
 use mediaa_platform::audio::AudioOut;
@@ -55,6 +55,7 @@ pub struct Player {
     audio_waiting: bool,
     audio_needs_alignment: bool,
     dragging: bool,
+    preview_pending: Option<Arc<AtomicBool>>,
 }
 
 impl Player {
@@ -83,9 +84,36 @@ impl Player {
             audio_waiting: false,
             audio_needs_alignment: false,
             dragging: false,
+            preview_pending: None,
         };
         if picture {
-            let worker_path = path.to_path_buf();
+            if mediaa_media::preview_cache::full_previews_enabled()
+                && mediaa_media::preview_cache::ready_proxy(path).is_none()
+            {
+                let pending = Arc::new(AtomicBool::new(true));
+                let proxy_path = path.to_path_buf();
+                let done = pending.clone();
+                let _ = std::thread::Builder::new()
+                    .name("viewer-proxy".into())
+                    .spawn(move || {
+                        let cancel = AtomicBool::new(false);
+                        if let Err(error) =
+                            mediaa_media::preview_cache::ensure_proxy(&proxy_path, &cancel)
+                        {
+                            log::debug!("viewer proxy {}: {error:#}", proxy_path.display());
+                        }
+                        done.store(false, Ordering::Relaxed);
+                    });
+                p.preview_pending = Some(pending);
+            }
+            let worker_path = mediaa_media::preview_cache::ready_proxy(path)
+                .map(|proxy| proxy.into_path())
+                .unwrap_or_else(|| path.to_path_buf());
+            log::info!(
+                "viewer video {} uses {}",
+                path.display(),
+                worker_path.display()
+            );
             let video_completed = p.video_completed.clone();
             match LatestWorker::start(
                 "viewer-video",
@@ -97,10 +125,7 @@ impl Player {
                         1.0 / 120.0,
                         request.start,
                         &cancel,
-                        &mut |frame| {
-                            let _ = frames.try_send((request.generation, frame));
-                            !cancel.load(Ordering::Relaxed)
-                        },
+                        &mut |frame| send_preview(&frames, &cancel, (request.generation, frame)),
                     );
                     if let Err(error) = result {
                         log::debug!("viewer video {}: {error:#}", worker_path.display());
@@ -185,6 +210,12 @@ impl Player {
         if let Some(worker) = &self.audio_worker {
             worker.cancel();
         }
+    }
+
+    pub fn preview_generating(&self) -> bool {
+        self.preview_pending
+            .as_ref()
+            .is_some_and(|pending| pending.load(Ordering::Relaxed))
     }
 
     pub fn position(&self) -> f64 {
@@ -434,10 +465,73 @@ impl Drop for Player {
     }
 }
 
+fn send_preview(
+    frames: &Sender<(u64, PreviewFrame)>,
+    cancel: &AtomicBool,
+    item: (u64, PreviewFrame),
+) -> bool {
+    let mut item = item;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        match frames.send_timeout(item, Duration::from_millis(20)) {
+            Ok(()) => return !cancel.load(Ordering::Relaxed),
+            Err(crossbeam_channel::SendTimeoutError::Timeout(returned)) => item = returned,
+            Err(crossbeam_channel::SendTimeoutError::Disconnected(_)) => return false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AudioMessage, Player};
+    use super::{send_preview, AudioMessage, Player};
+    use mediaa_core::Frame;
+    use mediaa_media::preview::PreviewFrame;
     use std::path::Path;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    fn preview(at: f64) -> PreviewFrame {
+        PreviewFrame {
+            at,
+            frame: Frame::filled(1, 1, [0, 0, 0, 255]),
+        }
+    }
+
+    #[test]
+    fn preview_sender_waits_for_room_instead_of_dropping_frames() {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert!(send_preview(&tx, &cancel, (1, preview(0.0))));
+
+        let (done_tx, done_rx) = crossbeam_channel::bounded(1);
+        let worker_tx = tx.clone();
+        let worker_cancel = cancel.clone();
+        let worker = std::thread::spawn(move || {
+            let sent = send_preview(&worker_tx, &worker_cancel, (1, preview(1.0)));
+            let _ = done_tx.send(sent);
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(80)).is_err(),
+            "the second frame must wait for the UI"
+        );
+        assert_eq!(rx.recv().unwrap().1.at, 0.0);
+        assert!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        assert_eq!(rx.recv().unwrap().1.at, 1.0);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn preview_generation_indicator_follows_the_background_flag() {
+        let mut player = Player::new(Path::new("missing.mp4"), 0.0, false, false);
+        let pending = Arc::new(AtomicBool::new(true));
+        player.preview_pending = Some(pending.clone());
+        assert!(player.preview_generating());
+        pending.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(!player.preview_generating());
+    }
 
     #[test]
     fn pending_audio_reserves_the_controls_and_can_fall_back_to_video() {

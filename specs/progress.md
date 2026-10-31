@@ -56,3 +56,58 @@
 | UX-AUDIT-1 | 26.10.26 07:00 | Закрыть приоритетные пробелы UX-тестов dynamic overlay, populated pages и responsive layout | готово | [ux-coverage-gaps.md](tasks/ux-coverage-gaps.md) |
 | UI-REGION-6 | 26.10.26 07:18 | Не допускать перекрытия selection size badge и активного text frame | готово | [region-size-badge-collision.md](tasks/region-size-badge-collision.md) |
 | SITE-1 | 26.10.26 07:24 | Создать маркетинговый сайт MediaA и Pages-деплой через GitHub Actions | готово | [site-marketing.md](tasks/site-marketing.md) |
+| AGENT-PORT-1 | 27.10.26 20:20 | Довести перенос агента до сборки, тестов и архитектурного соответствия main | готово | [agent-port.md](tasks/agent-port.md) |
+| BUILD-1 | 28.10.26 11:44 | Вернуть Windows-сборке генератор VS и static CRT toolchain, чтобы `run.ps1` снова собирал и запускал приложение | готово | [windows-build.md](tasks/windows-build.md) |
+| RUN-1 | 28.10.26 13:40 | Запускать собранный MediaA копией вне репозитория, чтобы SQLite в библиотеке открывался | готово | [dev-run-outside-workspace.md](tasks/dev-run-outside-workspace.md) |
+| AGENT-EXT-1 | 28.10.26 13:11 | Убрать встроенный инференс (llama.cpp, Vulkan, sherpa-onnx) и перевести модели агента на внешние подключения | готово | [agent-external-steps.md](tasks/agent-external-steps.md) |
+| AGENT-GEN-1 | 28.10.26 19:10 | Поля модели: контекст, размышления, флаги речи, диаризация ролика выключена по умолчанию | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-2 | 28.10.26 19:10 | Перевести чат и эмбеддинги на genai, реранк и проверку имени оставить своими | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-3 | 28.10.26 19:10 | Убрать команду и отдельный OpenAI, добавить провайдера расшифровки | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-4 | 28.10.26 19:10 | Контракт расшифровки: время слов, спикеры, отпечаток и два запроса OpenAI | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-5 | 28.10.26 19:10 | Убрать стадию «Говорящие» и склеивать слова со спикерами в одной расшифровке | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-6 | 28.10.26 19:10 | Экран моделей: контекст, глубина размышлений, галочки речи | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-7 | 28.10.26 19:10 | Анализ ролика: диаризация выключена, пока её не включили, и молчит при выключенной модели | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-8 | 28.10.26 19:10 | Обновить архитектуру, ограничения и руководство под genai и одну расшифровку | готово | [agent-genai.md](tasks/agent-genai.md) |
+| AGENT-GEN-9 | 28.10.26 19:10 | Полный прогон тестов и проверка diff после AGENT-GEN-8 | готово | [agent-genai.md](tasks/agent-genai.md) |
+| LIMIT-1 | 28.10.26 22:35 | Группы лимитов вместо бюджета и вкладка «Параметры» | готово | [limit-groups.md](tasks/limit-groups.md) |
+| LIMIT-2 | 29.10.26 01:55 | Пулы по умолчанию пусты, в интерфейсе «группа» переименована в «пул» | готово | [limit-groups.md](tasks/limit-groups.md) |
+| SHOT-1 | 29.10.26 02:10 | Скриншот области: выбор папки и формата в системном диалоге, оверлей закрывается после записи | готово | [screenshot-save-dialog.md](tasks/screenshot-save-dialog.md) |
+| HK-1 | 29.10.26 02:20 | Глобальные горячие клавиши выключены по умолчанию | готово | [hotkeys-off-by-default.md](tasks/hotkeys-off-by-default.md) |
+| SHOT-2 | 29.10.26 02:35 | Убрать опции «После снимка» и скрывать окно с задержкой перед снимком области | готово | [screenshot-options-removed.md](tasks/screenshot-options-removed.md) |
+| REC-1 | 29.10.26 02:50 | Завершённая запись всегда копируется в буфер и попадает в библиотеку; выбор убран | готово | [recording-completion-always-copies.md](tasks/recording-completion-always-copies.md) |
+| TRAY-1 | 29.10.26 03:00 | «При запуске открывать в трее» доступно только при автозапуске | готово | [tray-start-requires-autostart.md](tasks/tray-start-requires-autostart.md) |
+| TRAY-2 | 29.10.26 03:10 | Галочка «Скрывать в трей» только в записи из программы, с проверкой задержки и скрытия | готово | [hide-to-tray-option-scope.md](tasks/hide-to-tray-option-scope.md) |
+| SHOT-3 | 29.10.26 03:25 | «Копировать» и Enter в region overlay всегда сохраняют в библиотеку и копируют в буфер | готово | [copy-always-saves.md](tasks/copy-always-saves.md) |
+| UI-2 | 29.10.26 03:40 | Контракт расшифровки открывается из меню провайдеров, кнопка со страницы «О программе» убрана | готово | [transcription-contract-in-providers.md](tasks/transcription-contract-in-providers.md) |
+| TOOL-1 | 29.10.26 03:55 | run.ps1 сам сбрасывает кэш ffmpeg при сбое, снимает блокировку скриптов; добавлен run.cmd | готово | [self-healing-run-script.md](tasks/self-healing-run-script.md) |
+| TRAY-3 | 29.10.26 19:30 | Настройка «Показывать прогресс в трее», по умолчанию включена | готово | [tray-progress-toggle.md](tasks/tray-progress-toggle.md) |
+| UI-3 | 30.10.26 14:40 | UI-снимок области и выбор области записи возвращают окно после оверлея; трей и хоткей — нет | готово | [ui-capture-restores-window.md](tasks/ui-capture-restores-window.md) |
+| TRAY-4 | 30.10.26 14:55 | Запись экрана и аудио из трея не скрывает и не показывает окно | готово | [tray-recording-keeps-window.md](tasks/tray-recording-keeps-window.md) |
+| TRAY-5 | 30.10.26 15:10 | Любое действие трея, кроме «Открыть окно», не меняет состояние окна | готово | [tray-never-touches-window.md](tasks/tray-never-touches-window.md) |
+| REC-2 | 30.10.26 15:25 | Во время записи цели и настройки видны, но неактивны; иконка трея не показывает capture | готово | [recording-ui-lock.md](tasks/recording-ui-lock.md) |
+| UI-4 | 30.10.26 15:45 | Открытая модалка блокирует мышь, клавиатуру и уведомления, не затемняя фон | готово | [modal-input-block.md](tasks/modal-input-block.md) |
+| REC-3 | 30.10.26 16:05 | Устранено зависание параллельного сегментированного WebP при сохранении (bounded result channels) | готово | [webp-live-result-deadlock.md](tasks/webp-live-result-deadlock.md) |
+| REC-4 | 30.10.26 16:25 | Фикстуры-видео, тесты 3 мониторов/2 окон, per-source live fallback, закрытие окна, linear fallback | готово | [webp-multi-source-tests.md](tasks/webp-multi-source-tests.md) |
+| REC-5 | 30.10.26 16:40 | Preview для WebP строится из финального файла, без ошибок NAL при чтении промежуточного MKV | готово | [preview-proxy-nal-noise.md](tasks/preview-proxy-nal-noise.md) |
+| UI-5 | 30.10.26 16:55 | Просмотрщик декодирует с backpressure, без CPU-шторма и выброшенных кадров | готово | [viewer-frame-backpressure.md](tasks/viewer-frame-backpressure.md) |
+| UI-6 | 30.10.26 17:10 | WebP/GIF миниатюры и плеер не ждут MP4-прокси, генерация в фоне | готово | [lazy-animation-thumbnails.md](tasks/lazy-animation-thumbnails.md) |
+| UI-7 | 30.10.26 17:25 | Полные hover-превью через лёгкий 360p/15fps прокси, без декода оригинала | готово | [hover-preview-proxy.md](tasks/hover-preview-proxy.md) |
+| UI-8 | 30.10.26 17:45 | Настройки анимированных превью и полных видео-превью, очистка кэша при выключении | готово | [preview-options.md](tasks/preview-options.md) |
+| UI-9 | 30.10.26 18:05 | Фоновая очистка preview-прокси и атласов миниатюр старше 7 дней | готово | [cache-maintenance.md](tasks/cache-maintenance.md) |
+| UI-10 | 30.10.26 18:20 | Тесты настроек превью, hover, backpressure и очистки кэшей | готово | [preview-coverage.md](tasks/preview-coverage.md) |
+| UI-11 | 30.10.26 18:35 | Удаление обычного и hover-кэша вместе с медиафайлом, тест на сбой перемещения | готово | [delete-media-cache.md](tasks/delete-media-cache.md) |
+| UI-12 | 30.10.26 18:55 | Анимированный индикатор генерации превью в карточках и просмотрщике | готово | [preview-loader.md](tasks/preview-loader.md) |
+| UI-13 | 30.10.26 19:10 | Возврат окна после записи зависит от источника старта, не от источника остановки | готово | [recording-stop-window-source.md](tasks/recording-stop-window-source.md) |
+| REC-6 | 30.10.26 19:30 | Общий старт capture-потоков и финальная обрезка выходов под минимальную длительность | готово | [multi-source-duration.md](tasks/multi-source-duration.md) |
+| UI-14 | 30.10.26 20:10 | `unused`/`dead_code` запрещены на уровне workspace, все crate наследуют lint-настройки | готово | [deny-unused.md](tasks/deny-unused.md) |
+| REC-8 | 30.10.26 23:45 | Старые скиллы удалены; добавлен mediaa-video-tests с метриками, таблицей и ссылками на документы | готово | [video-tests-skill.md](tasks/video-tests-skill.md) |
+| REC-9 | 31.10.26 00:35 | Разрешение записи свёрнутых окон и отключённых мониторов, идентичность окна, deferred-источник, тесты | готово | [unavailable-sources.md](tasks/unavailable-sources.md) |
+| UI-15 | 31.10.26 00:45 | «Скрывать в трей при закрытии окна» выключено по умолчанию | готово | [close-to-tray-default.md](tasks/close-to-tray-default.md) |
+| UI-16 | 31.10.26 00:55 | Строки окон в Capture такие же кликабельные, как строки дисплеев | готово | [capture-window-rows.md](tasks/capture-window-rows.md) |
+| UI-17 | 31.10.26 01:05 | Постоянная кнопка «Отмена» в overlay выбора области | готово | [region-cancel-button.md](tasks/region-cancel-button.md) |
+| UI-18 | 31.10.26 01:10 | Убрана подпись под кнопкой «Начать запись» | готово | [record-start-no-hint.md](tasks/record-start-no-hint.md) |
+| REC-7 | 30.10.26 23:20 | TV fake, настройки, 30-секундные MP4-сценарии на разных размерах и сравнительные MP4-документы в target (не закоммичено) | тесты | [mp4-video-snapshots.md](tasks/mp4-video-snapshots.md) |
+| REC-10 | 31.10.26 03:10 | Удалены сегментированный и live-WebP; Direct Quality/Fast, Fastest method 0; Fast в среднем 2,3× быстрее, полный экран 4,1–4,5× | готово | [webp-speed-presets.md](tasks/webp-speed-presets.md) |
+| UI-19 | 31.10.26 11:15 | Единые пресеты записи: видео 3, анимация 2, аудио 3; Custom виртуальный; настройки хранятся отдельно по форматам | готово | [webp-speed-presets.md](tasks/webp-speed-presets.md) |
+| ARCH-12 | 31.10.26 11:15 | Созданы mediaa-ffmpeg, mediaa-webp, mediaa-gif; webp-pipeline и zengif удалены | готово | [format-crates.md](tasks/format-crates.md) |
+| GIF-1 | 31.10.26 03:10 | Замерен текущий GIF и zengif; zengif на полном экране в 2–7× медленнее, не внедрён | отказ | [webp-speed-presets.md](tasks/webp-speed-presets.md) |

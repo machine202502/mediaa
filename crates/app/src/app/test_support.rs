@@ -47,6 +47,11 @@ impl App {
             } else {
                 Page::Screenshot
             },
+            last_agent_page: if page.section() == Some(pages::Section::Agent) {
+                page
+            } else {
+                Page::Catalogs
+            },
             notices: Notices::default(),
             tray: None,
             tray_rx: None,
@@ -63,6 +68,7 @@ impl App {
             desktop_jobs: Vec::new(),
             pending: None,
             hidden_by_us: false,
+            recording_quiet: false,
             ghosted: false,
             recording: Default::default(),
             capture: Default::default(),
@@ -71,9 +77,14 @@ impl App {
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
             conversion: Default::default(),
+            agent: features::agent::AgentController::new(
+                std::sync::Arc::new(mediaa_engine::testing::FakeEngine::default()),
+                mediaa_core::slots::Slots::new(),
+            ),
             quit_when_idle: false,
             recovery_job: None,
             housekeeping_jobs: Vec::new(),
+            last_cache_sweep: std::time::Instant::now(),
             _instance: None,
             native_window: None,
             startup: StartupAction::None,

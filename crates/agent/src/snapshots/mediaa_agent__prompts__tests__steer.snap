@@ -1,0 +1,5 @@
+---
+source: crates/agent/src/prompts.rs
+expression: "render(\"nudges/steer.j2\", context! { text })"
+---
+The user added while you were working: «Ещё добавь про бюджет.». Take it into account from now on; if it changes what is asked, follow the new request.

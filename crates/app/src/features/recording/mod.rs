@@ -7,7 +7,7 @@ use mediaa_media::recorder::{
     RecordingProgress, RecordingRequest, RecordingSession, SessionEvent, StopAction,
 };
 use mediaa_platform::screen::MonitorInfo;
-use mediaa_platform::screen::{MonitorId, WindowId};
+use mediaa_platform::screen::{CaptureWindowId, MonitorId};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,7 +36,7 @@ pub(crate) struct RecordUi {
     pub target: TargetKind,
     pub monitors: BTreeSet<MonitorId>,
     pub region: Option<(MonitorInfo, Rect)>,
-    pub windows: BTreeSet<WindowId>,
+    pub windows: BTreeSet<CaptureWindowId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,6 +444,14 @@ impl RecordingController {
                 Ok(SessionEvent::CaptureFailed(error)) => {
                     result.push(RecordingEvent::SessionEvent(SessionEvent::CaptureFailed(
                         error,
+                    )));
+                }
+                Ok(SessionEvent::SourceLost(name)) => {
+                    result.push(RecordingEvent::SessionEvent(SessionEvent::SourceLost(name)));
+                }
+                Ok(SessionEvent::SourceRestored(name)) => {
+                    result.push(RecordingEvent::SessionEvent(SessionEvent::SourceRestored(
+                        name,
                     )));
                 }
                 Ok(SessionEvent::Finished(paths)) => {

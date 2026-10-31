@@ -8,24 +8,11 @@ use crossbeam_channel::RecvTimeoutError;
 use ez_ffmpeg::{FfmpegContext, FramePushSource, Input, Output};
 use mediaa_core::formats::{self, AnimFormat};
 use mediaa_core::settings::AnimSettings;
-use mediaa_webp_pipeline::{self, PipelineConfig, PipelineTuning, Segment, SegmentBackend};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 const WEBP_DECODE_STOP_TIMEOUT: Duration = Duration::from_secs(20);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AnimationOrigin {
-    Conversion,
-    Recording,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WebpSegmentation {
-    Direct,
-    Segmented,
-}
 
 pub struct AnimationEncodeRequest<'a> {
     pub input: &'a Path,
@@ -34,11 +21,7 @@ pub struct AnimationEncodeRequest<'a> {
     pub format: AnimFormat,
     pub settings: &'a AnimSettings,
     pub effort: Effort,
-    pub origin: AnimationOrigin,
-    pub segmentation: WebpSegmentation,
-    pub scheduling: PipelineTuning,
     pub threads: Option<u32>,
-    pub trace_id: Option<&'a str>,
 }
 
 pub trait AnimationEncoder: Send + Sync {
@@ -53,38 +36,15 @@ pub trait AnimationEncoder: Send + Sync {
 }
 
 pub struct FfmpegAnimationEncoder;
-pub struct SegmentedWebpEncoder;
 
 static FFMPEG: FfmpegAnimationEncoder = FfmpegAnimationEncoder;
-static SEGMENTED_WEBP: SegmentedWebpEncoder = SegmentedWebpEncoder;
-
-pub fn backend(
-    format: AnimFormat,
-    origin: AnimationOrigin,
-    segmented_webp: bool,
-) -> &'static dyn AnimationEncoder {
-    if format == AnimFormat::Webp && origin == AnimationOrigin::Recording && segmented_webp {
-        &SEGMENTED_WEBP
-    } else {
-        &FFMPEG
-    }
-}
 
 pub fn encode(
     request: &AnimationEncodeRequest<'_>,
     on_progress: &mut dyn FnMut(Option<f32>),
     cancel: &AtomicBool,
 ) -> anyhow::Result<()> {
-    encode_with(
-        backend(
-            request.format,
-            request.origin,
-            request.segmentation == WebpSegmentation::Segmented,
-        ),
-        request,
-        on_progress,
-        cancel,
-    )
+    encode_with(&FFMPEG, request, on_progress, cancel)
 }
 
 pub fn encode_with(
@@ -99,81 +59,6 @@ pub fn encode_with(
         let _ = std::fs::remove_file(request.output);
     }
     result
-}
-
-struct FfmpegSegmentBackend<'a> {
-    request: &'a AnimationEncodeRequest<'a>,
-    base_start_us: i64,
-}
-
-impl SegmentBackend for FfmpegSegmentBackend<'_> {
-    fn encode(&self, segment: &Segment, cancel: &AtomicBool) -> anyhow::Result<()> {
-        let source = Input::from(url(self.request.input))
-            .set_video_codec_opt("threads", "1")
-            .set_start_time_us(self.base_start_us + segment.start_us)
-            .set_recording_time_us(segment.len_us);
-        let out = webp_output(
-            Output::from(url(&segment.path)).add_stream_map("[v]"),
-            self.request.settings.webp_quality,
-            self.request.effort,
-            None,
-        );
-        let ctx = FfmpegContext::builder()
-            .input(source)
-            .filter_desc(filters::webp_segment_graph(self.request.settings))
-            .output(out)
-            .build()?;
-        job::run(ctx, None, &mut |_| {}, cancel)
-    }
-}
-
-impl AnimationEncoder for SegmentedWebpEncoder {
-    fn name(&self) -> &'static str {
-        "segmented-webp"
-    }
-
-    fn encode(
-        &self,
-        request: &AnimationEncodeRequest<'_>,
-        on_progress: &mut dyn FnMut(Option<f32>),
-        cancel: &AtomicBool,
-    ) -> anyhow::Result<()> {
-        let info = probe(request.input)?;
-        if !info.has_video() {
-            return Err(invalid_input(format!(
-                "{} has no picture",
-                request.input.display()
-            )));
-        }
-        let (base_start_us, total_us) = match request.window {
-            Some((start, len)) => (start, len),
-            None => (0, info.duration_us.unwrap_or(0)),
-        };
-        anyhow::ensure!(total_us > 0, "recorded WebP source has no duration");
-        let (width, height) = filters::scaled_size(
-            info.width.max(1),
-            info.height.max(1),
-            request.settings.height_limit(),
-        );
-        let config = PipelineConfig::new(
-            total_us,
-            request.settings.fps,
-            width,
-            height,
-            request.settings.webp_quality,
-        )
-        .with_tuning(&request.scheduling)
-        .with_trace_id(request.trace_id);
-        let backend = FfmpegSegmentBackend {
-            request,
-            base_start_us,
-        };
-        match mediaa_webp_pipeline::run(&config, &backend, request.output, on_progress, cancel) {
-            Ok(()) => Ok(()),
-            Err(error) if error.is_cancelled() => Err(job::Cancelled.into()),
-            Err(error) => Err(error.source),
-        }
-    }
 }
 
 impl AnimationEncoder for FfmpegAnimationEncoder {
@@ -350,12 +235,7 @@ mod tests {
             _cancel: &AtomicBool,
         ) -> anyhow::Result<()> {
             on_progress(Some(0.5));
-            let marker = if request.origin == AnimationOrigin::Recording {
-                1u8
-            } else {
-                0u8
-            };
-            Ok(std::fs::write(request.output, [marker])?)
+            Ok(std::fs::write(request.output, [1u8])?)
         }
     }
 
@@ -378,30 +258,6 @@ mod tests {
     }
 
     #[test]
-    fn webp_recording_uses_budgeted_segments_and_other_paths_stay_direct() {
-        assert_eq!(
-            backend(AnimFormat::Webp, AnimationOrigin::Recording, true).name(),
-            "segmented-webp"
-        );
-        assert_eq!(
-            backend(AnimFormat::Webp, AnimationOrigin::Recording, false).name(),
-            "ffmpeg"
-        );
-        assert_eq!(
-            backend(AnimFormat::Webp, AnimationOrigin::Conversion, true).name(),
-            "ffmpeg"
-        );
-        assert_eq!(
-            backend(AnimFormat::Gif, AnimationOrigin::Recording, true).name(),
-            "ffmpeg"
-        );
-        assert_eq!(
-            backend(AnimFormat::Gif, AnimationOrigin::Conversion, true).name(),
-            "ffmpeg"
-        );
-    }
-
-    #[test]
     fn custom_backend_receives_the_same_request_shape() {
         let dir = tempfile::tempdir().unwrap();
         let output = dir.path().join("out.gif");
@@ -413,11 +269,7 @@ mod tests {
             format: AnimFormat::Gif,
             settings: &settings,
             effort: Effort::Balanced,
-            origin: AnimationOrigin::Recording,
-            segmentation: WebpSegmentation::Direct,
-            scheduling: PipelineTuning::default(),
             threads: None,
-            trace_id: None,
         };
         let mut progress = Vec::new();
         encode_with(
@@ -443,11 +295,7 @@ mod tests {
             format: AnimFormat::Webp,
             settings: &settings,
             effort: Effort::Balanced,
-            origin: AnimationOrigin::Conversion,
-            segmentation: WebpSegmentation::Direct,
-            scheduling: PipelineTuning::default(),
             threads: None,
-            trace_id: None,
         };
         let error = encode_with(
             &FailingEncoder,

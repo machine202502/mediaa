@@ -2,13 +2,13 @@ use crate::latest_worker::LatestWorker;
 use crossbeam_channel::Receiver;
 use eframe::egui;
 use mediaa_media::preview::{preview_frames, preview_interval, PreviewFrame};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const WIDTH: u32 = 320;
 const MAX_FPS: f64 = 15.0;
-const MAX_FRAMES: u32 = 96;
+const MAX_FRAMES: u32 = 240;
 
 #[derive(Debug, Clone, Copy)]
 struct Pass {
@@ -47,6 +47,7 @@ fn passes(resume: f64) -> Vec<Pass> {
 
 pub struct HoverPreview {
     path: PathBuf,
+    ready: bool,
     frames: Vec<(f64, egui::TextureHandle)>,
     passes: Vec<Pass>,
     interval: f64,
@@ -56,11 +57,12 @@ pub struct HoverPreview {
 }
 
 impl HoverPreview {
-    fn start(path: &Path, duration: Option<f64>, resume: f64) -> Self {
+    fn start(path: &Path, duration: Option<f64>, resume: f64, ready: bool) -> Self {
+        let resume = resume.clamp(0.0, duration.unwrap_or(f64::INFINITY));
         let interval = preview_interval(duration, MAX_FPS, MAX_FRAMES);
-        let resume = resume.max(0.0);
         Self {
             path: path.to_path_buf(),
+            ready,
             frames: Vec::new(),
             passes: passes(resume),
             interval,
@@ -130,7 +132,11 @@ impl HoverPreview {
     }
 
     pub fn is_loading(&self) -> bool {
-        !self.covered(self.position()) && !self.passes.iter().all(|p| p.done)
+        self.ready && !self.covered(self.position()) && !self.passes.iter().all(|p| p.done)
+    }
+
+    pub fn is_generating(&self) -> bool {
+        !self.ready && self.origin.elapsed() < Duration::from_secs(300)
     }
 }
 
@@ -146,6 +152,7 @@ fn frame_at(times: &[f64], pos: f64) -> Option<usize> {
 pub struct Previews {
     current: Option<HoverPreview>,
     resume: HashMap<PathBuf, f64>,
+    requested: HashSet<PathBuf>,
     worker: Option<LatestWorker<Request>>,
     rx: Option<Receiver<Msg>>,
     generation: u64,
@@ -158,27 +165,48 @@ impl Previews {
         path: &Path,
         duration: Option<f64>,
     ) -> &mut HoverPreview {
-        let replace = self
-            .current
-            .as_ref()
-            .is_none_or(|p| p.path != path || (p.duration.is_none() && duration.is_some()));
+        let hover = mediaa_media::preview_cache::ready_hover_proxy(path);
+        let replace = self.current.as_ref().is_none_or(|p| {
+            p.path != path
+                || (p.duration.is_none() && duration.is_some())
+                || (!p.ready && hover.is_some())
+        });
         if replace {
             self.stop();
             let resume = self.resume.get(path).copied().unwrap_or(0.0);
             let interval = preview_interval(duration, MAX_FPS, MAX_FRAMES);
-            let preview = HoverPreview::start(path, duration, resume);
+            let source = hover
+                .clone()
+                .map(|proxy| proxy.into_path())
+                .unwrap_or_else(|| path.to_path_buf());
+            let ready = hover.is_some();
+            let preview = HoverPreview::start(path, duration, resume, ready);
             self.generation += 1;
             let generation = self.generation;
             if let Some(rx) = &self.rx {
                 while rx.try_recv().is_ok() {}
             }
-            if let Some(worker) = self.ensure_worker() {
-                worker.request(Request {
-                    generation,
-                    path: path.to_path_buf(),
-                    interval,
-                    passes: passes(resume),
-                });
+            if ready {
+                if let Some(worker) = self.ensure_worker() {
+                    worker.request(Request {
+                        generation,
+                        path: source,
+                        interval,
+                        passes: passes(resume),
+                    });
+                }
+            } else if self.requested.insert(path.to_path_buf()) {
+                let proxy_path = path.to_path_buf();
+                let _ = std::thread::Builder::new()
+                    .name("hover-proxy".into())
+                    .spawn(move || {
+                        let cancel = std::sync::atomic::AtomicBool::new(false);
+                        if let Err(error) =
+                            mediaa_media::preview_cache::ensure_hover_proxy(&proxy_path, &cancel)
+                        {
+                            log::debug!("hover proxy {}: {error:#}", proxy_path.display());
+                        }
+                    });
             }
             self.current = Some(preview);
         }
@@ -263,16 +291,16 @@ mod tests {
         let ctx = eframe::egui::Context::default();
         let mut previews = Previews::default();
         let (a, b) = (Path::new("missing-a.mp4"), Path::new("missing-b.mp4"));
-        previews.play(&ctx, a, Some(10.0)).seek(4.0);
+        previews.play(&ctx, a, Some(2.5)).seek(1.0);
         previews.stop();
-        previews.play(&ctx, b, Some(10.0)).seek(7.0);
-        let pos = previews.play(&ctx, a, Some(10.0)).position();
-        assert!((4.0..4.5).contains(&pos), "{pos}");
-        let pos = previews.play(&ctx, b, Some(10.0)).position();
-        assert!((7.0..7.5).contains(&pos), "{pos}");
+        previews.play(&ctx, b, Some(2.5)).seek(2.0);
+        let pos = previews.play(&ctx, a, Some(2.5)).position();
+        assert!((1.0..1.5).contains(&pos), "{pos}");
+        let pos = previews.play(&ctx, b, Some(2.5)).position();
+        assert!((2.0..2.5).contains(&pos), "{pos}");
         assert!(
             previews
-                .play(&ctx, Path::new("new.mp4"), Some(10.0))
+                .play(&ctx, Path::new("new.mp4"), Some(2.5))
                 .position()
                 < 0.5,
             "new clips start at 0"
@@ -288,14 +316,24 @@ mod tests {
         let pos = previews.play(&ctx, path, Some(600.0)).position();
         assert!(pos < 0.5, "{pos}");
         assert!(previews.current.as_ref().is_some_and(|preview| {
-            preview.duration == Some(600.0) && preview.interval >= 600.0 / 96.0
+            preview.duration == Some(600.0) && preview.interval >= 600.0 / 240.0
         }));
+    }
+
+    #[test]
+    fn missing_proxy_keeps_full_duration_without_a_spinner() {
+        use super::HoverPreview;
+        let pv = HoverPreview::start(Path::new("missing.webp"), Some(300.0), 0.0, false);
+        assert_eq!(pv.length(), 300.0);
+        assert!(!pv.is_loading(), "a still thumbnail is not a spinner");
+        assert!(pv.is_generating(), "the proxy is still being generated");
+        assert!(pv.frame().is_none());
     }
 
     #[test]
     fn only_decoded_stretches_count_as_ready() {
         use super::{HoverPreview, Pass};
-        let mut pv = HoverPreview::start(Path::new("missing.mp4"), Some(10.0), 4.0);
+        let mut pv = HoverPreview::start(Path::new("missing.mp4"), Some(10.0), 4.0, true);
         pv.interval = 0.1;
         pv.passes = vec![
             Pass {

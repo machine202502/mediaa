@@ -1,11 +1,8 @@
 use mediaa_core::formats::AnimFormat;
 use mediaa_core::settings::AnimSettings;
-use mediaa_media::animation_backends::{
-    self, AnimationEncodeRequest, AnimationOrigin, WebpSegmentation,
-};
+use mediaa_media::animation_backends::{self, AnimationEncodeRequest};
 use mediaa_media::convert::Effort;
 use mediaa_media::info::probe;
-use mediaa_webp_pipeline::PipelineTuning;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::time::Instant;
@@ -26,11 +23,6 @@ fn main() -> anyhow::Result<()> {
         .next()
         .and_then(|value| value.parse().ok())
         .unwrap_or(80);
-    let mode = args.next().unwrap_or_else(|| "both".into());
-    let budget_mb: u64 = args
-        .next()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(512);
     let settings = AnimSettings {
         fps,
         max_height,
@@ -38,41 +30,20 @@ fn main() -> anyhow::Result<()> {
         ..AnimSettings::default()
     };
     let dir = tempfile::tempdir()?;
-    for (origin, label) in match mode.as_str() {
-        "direct" => vec![(AnimationOrigin::Conversion, "direct")],
-        "segmented" => vec![(AnimationOrigin::Recording, "segmented")],
-        _ => vec![
-            (AnimationOrigin::Conversion, "direct"),
-            (AnimationOrigin::Recording, "segmented"),
-        ],
-    } {
+    for (effort, label) in [(Effort::Fastest, "fast"), (Effort::Balanced, "quality")] {
         let output = dir.path().join(format!("{label}.webp"));
-        let segmented = origin == AnimationOrigin::Recording;
         let request = AnimationEncodeRequest {
             input: Path::new(&input),
             output: &output,
             window: None,
             format: AnimFormat::Webp,
             settings: &settings,
-            effort: Effort::Balanced,
-            origin,
-            segmentation: if segmented {
-                WebpSegmentation::Segmented
-            } else {
-                WebpSegmentation::Direct
-            },
-            scheduling: PipelineTuning {
-                memory_bytes: budget_mb * 1024 * 1024,
-                max_workers: 8,
-                ..PipelineTuning::default()
-            },
+            effort,
             threads: None,
-            trace_id: None,
         };
         let started = Instant::now();
         let mut saw_percentage = false;
-        let result = animation_backends::encode_with(
-            animation_backends::backend(AnimFormat::Webp, origin, segmented),
+        let result = animation_backends::encode(
             &request,
             &mut |progress| saw_percentage |= progress.is_some(),
             &AtomicBool::new(false),

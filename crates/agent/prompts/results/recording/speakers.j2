@@ -1,0 +1,3 @@
+{% for s in speakers %}
+{{ "\n" if not loop.first else "" }}{{ s.name }}: talks {{ s.talk }} in {{ s.replies }} replies, first at [{{ s.first }}]
+{%- endfor %}

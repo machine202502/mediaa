@@ -6,8 +6,8 @@ use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
 use mediaa_core::limits::{FPS, GIF_COLORS, VIDEO_QUALITY};
 use mediaa_core::settings::{
-    AnimSettings, AnimationQuality, GifDither, MicChoice, RecordProfile, ANIM_HEIGHTS,
-    OUTPUT_HEIGHTS,
+    AnimSettings, AnimationQuality, GifDither, MicChoice, RecordPreset, RecordProfile,
+    ANIM_HEIGHTS, OUTPUT_HEIGHTS,
 };
 use mediaa_core::Settings;
 use mediaa_core::{AnimFormat, OutputKind};
@@ -46,9 +46,13 @@ pub fn ui(
     let mut actions = Vec::new();
     let ctx = ui.ctx().clone();
     header(ui, &t!("record.title"), "");
+    let live = !recording.is_idle();
     if let Some(command) = status::live_status(recording, ui, &ctx) {
         actions.push(RecordUiAction::RecordingCommand(command));
         return actions;
+    }
+    if live {
+        ui.disable();
     }
 
     let w = super::tile_width(ui, 3);
@@ -141,13 +145,24 @@ pub fn profile_editor(
     };
     let (r, anim) = settings.profile_mut(profile);
     let kind = r.output;
-    let (output, height, fps, quality, hide, cursor) = (
+    let presets = r.preset_options();
+    let current_preset = r.preset(anim);
+    let pending_preset = std::cell::Cell::new(None);
+    let pending_output = std::cell::Cell::new(None);
+    let default_animation = if profile == RecordProfile::Region {
+        RecordPreset::Fast
+    } else {
+        RecordPreset::Quality
+    };
+    let (output, height, fps, quality, hide, cursor, no_signal, unavailable) = (
         &mut r.output,
         &mut r.output_height,
         &mut r.fps,
         &mut r.video_quality,
         &mut r.hide_to_tray,
         &mut r.record_cursor,
+        &mut r.show_no_signal,
+        &mut r.allow_unavailable_sources,
     );
     let (record_audio, microphone, system_audio, every_file) = (
         &mut r.record_audio,
@@ -155,7 +170,6 @@ pub fn profile_editor(
         &mut r.system_audio,
         &mut r.audio_in_every_file,
     );
-    let (segmented_webp, parallel_webp) = (&mut r.segmented_webp, &mut r.parallel_webp);
     theme::split_card(
         ui,
         |ui| {
@@ -165,8 +179,24 @@ pub fn profile_editor(
                     .into_iter()
                     .map(|k| (k, k.label().to_string()))
                     .collect();
-                mark(theme::segmented(ui, output, &opts));
+                let mut chosen = *output;
+                if theme::segmented(ui, &mut chosen, &opts) && chosen != *output {
+                    pending_output.set(Some(chosen));
+                    changed.set(true);
+                }
             });
+            if !presets.is_empty() {
+                theme::row(ui, &t!("record.preset"), |ui| {
+                    if let Some(preset) = super::preset_combo(
+                        ui,
+                        egui::Id::new(("rec-preset", salt)),
+                        current_preset,
+                        presets,
+                    ) {
+                        pending_preset.set(Some(preset));
+                    }
+                });
+            }
             theme::row(ui, &t!("record.resolution"), |ui| {
                 mark(resolution_picker(
                     ui,
@@ -200,8 +230,26 @@ pub fn profile_editor(
                 mark(ui.checkbox(cursor, t!("record.cursor")).changed());
             });
             theme::row(ui, "", |ui| {
-                mark(ui.checkbox(hide, t!("record.hide_to_tray")).changed());
+                mark(
+                    ui.checkbox(no_signal, t!("record.show_no_signal"))
+                        .on_hover_text(t!("record.show_no_signal_hint"))
+                        .changed(),
+                );
             });
+            if profile != RecordProfile::Region {
+                theme::row(ui, "", |ui| {
+                    mark(
+                        ui.checkbox(unavailable, t!("record.allow_unavailable_sources"))
+                            .on_hover_text(t!("record.allow_unavailable_sources_hint"))
+                            .changed(),
+                    );
+                });
+            }
+            if profile == RecordProfile::App {
+                theme::row(ui, "", |ui| {
+                    mark(ui.checkbox(hide, t!("record.hide_to_tray")).changed());
+                });
+            }
         },
         |ui| match kind {
             OutputKind::Audio(_) => {}
@@ -246,26 +294,18 @@ pub fn profile_editor(
             OutputKind::Anim(fmt) => {
                 theme::section(ui, icon::GIF, &t!("record.animation"));
                 mark(quality_options(ui, anim, Some(fmt)));
-                if fmt == AnimFormat::Webp {
-                    theme::row(ui, "", |ui| {
-                        mark(
-                            ui.checkbox(segmented_webp, t!("record.segmented_webp"))
-                                .changed(),
-                        );
-                    });
-                    theme::row(ui, "", |ui| {
-                        ui.add_enabled_ui(*segmented_webp, |ui| {
-                            mark(
-                                ui.checkbox(parallel_webp, t!("record.parallel_webp"))
-                                    .changed(),
-                            );
-                        });
-                    });
-                }
             }
         },
     );
     *refresh_mics = refresh.get();
+    if let Some(output) = pending_output.get() {
+        r.switch_output(output, anim, default_animation);
+        changed.set(true);
+    }
+    if let Some(preset) = pending_preset.get() {
+        r.apply_preset(preset, anim);
+        changed.set(true);
+    }
     changed.get()
 }
 
@@ -551,6 +591,11 @@ pub fn start_bar(
             theme::primary(ui, icon::RECORD, &t!("record.start")).min_size(egui::vec2(220.0, 36.0));
         let available = target.is_ok() && !recovery_active;
         let mut resp = ui.add_enabled(available, btn);
+        if let Err(why) = &target {
+            if !why.is_empty() {
+                resp = resp.on_disabled_hover_text(why.as_str());
+            }
+        }
         if recovery_active {
             resp = resp.on_disabled_hover_text(t!("record.recovery_wait"));
         }
@@ -560,11 +605,6 @@ pub fn start_bar(
         }
         if resp.clicked() {
             start = true;
-        }
-        if let Err(why) = &target {
-            if !why.is_empty() {
-                theme::hint(ui, why.as_str());
-            }
         }
     });
     start

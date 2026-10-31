@@ -1,4 +1,5 @@
 pub mod about;
+pub mod agent;
 pub mod audio;
 pub mod capture;
 pub mod record;
@@ -13,7 +14,7 @@ use crate::{i18n, theme};
 use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke};
 use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
-use mediaa_core::settings::{RecordProfile, ThemePreference};
+use mediaa_core::settings::{RecordPreset, RecordProfile, ThemePreference};
 use mediaa_media::recorder::StopAction;
 use rust_i18n::t;
 use std::time::Duration;
@@ -23,6 +24,37 @@ pub enum Section {
     Library,
     Capture,
     Convert,
+    Agent,
+}
+
+pub(crate) fn preset_combo(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    current: Option<RecordPreset>,
+    presets: &[RecordPreset],
+) -> Option<RecordPreset> {
+    let label = |preset: RecordPreset| match preset {
+        RecordPreset::Quality => t!("record.preset_quality"),
+        RecordPreset::Medium => t!("record.preset_medium"),
+        RecordPreset::Fast => t!("record.preset_fast"),
+    };
+    let selected = current
+        .map(label)
+        .unwrap_or_else(|| t!("record.preset_custom"));
+    let mut picked = None;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(selected)
+        .show_ui(ui, |ui| {
+            for preset in presets {
+                if ui
+                    .selectable_label(current == Some(*preset), label(*preset))
+                    .clicked()
+                {
+                    picked = Some(*preset);
+                }
+            }
+        });
+    picked
 }
 
 impl Page {
@@ -31,6 +63,9 @@ impl Page {
             Page::Library => Some(Section::Library),
             Page::Screenshot | Page::Record | Page::RecordAudio => Some(Section::Capture),
             Page::Convert => Some(Section::Convert),
+            Page::Catalogs | Page::Providers | Page::Models | Page::Queue | Page::Budget => {
+                Some(Section::Agent)
+            }
             Page::Settings | Page::About => None,
         }
     }
@@ -47,6 +82,21 @@ fn sub_pages(section: Section) -> Vec<(Page, &'static str, String)> {
                 t!("nav.record_audio").into(),
             ),
         ],
+        Section::Agent => vec![
+            (
+                Page::Catalogs,
+                icon::TREE_STRUCTURE,
+                t!("nav.catalogs").into(),
+            ),
+            (Page::Queue, icon::QUEUE, t!("nav.queue").into()),
+            (Page::Budget, icon::GAUGE, t!("nav.budget").into()),
+            (
+                Page::Providers,
+                icon::PLUGS_CONNECTED,
+                t!("nav.providers").into(),
+            ),
+            (Page::Models, icon::CUBE, t!("nav.models").into()),
+        ],
         Section::Library | Section::Convert => Vec::new(),
     }
 }
@@ -54,6 +104,7 @@ fn sub_pages(section: Section) -> Vec<(Page, &'static str, String)> {
 pub fn shell(app: &mut App, ui: &mut egui::Ui) {
     let p = theme::palette(ui);
     let ctx = ui.ctx().clone();
+    theme::block_background_input(&ctx);
     egui::Panel::top("header")
         .resizable(false)
         .exact_size(46.0)
@@ -69,6 +120,7 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
         app.last_main_page = app.page;
         match section {
             Section::Capture => app.last_capture_page = app.page,
+            Section::Agent => app.last_agent_page = app.page,
             Section::Library | Section::Convert => {}
         }
         let pages = sub_pages(section);
@@ -86,7 +138,7 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    if matches!(app.page, Page::Record | Page::RecordAudio) && app.recording.is_idle() {
+    if matches!(app.page, Page::Record | Page::RecordAudio) {
         egui::Panel::bottom("record-start")
             .resizable(false)
             .frame(
@@ -95,6 +147,9 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                     .inner_margin(Margin::symmetric(18, 10)),
             )
             .show(ui, |ui| {
+                if !app.recording.is_idle() {
+                    ui.disable();
+                }
                 if app.page == Page::Record {
                     let target = app.record_target_from_ui().map(|_| ());
                     if record::start_bar(&app.settings, app.recovery_active(), &target, ui) {
@@ -102,10 +157,15 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                     }
                 } else {
                     if audio::start_bar(&app.settings, app.recovery_active(), ui) {
-                        app.start_audio_recording(ui.ctx(), RecordProfile::App);
+                        app.start_audio_recording(ui.ctx(), RecordProfile::App, None);
                     }
                 }
             });
+    }
+
+    if app.page == Page::Catalogs {
+        agent::catalogs::screen(app, ui);
+        return;
     }
 
     egui::CentralPanel::default()
@@ -123,7 +183,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                             capture::ui(&mut app.settings, &app.monitors, &app.windows, ui);
                         for action in actions {
                             match action {
-                                capture::CaptureUiAction::SettingsChanged => app.settings_changed(),
                                 capture::CaptureUiAction::RefreshCatalogs => {
                                     app.refresh_catalogs(ui.ctx())
                                 }
@@ -216,6 +275,11 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                             app.apply_conversion_ui_action(ui.ctx(), action);
                         }
                     }
+                    Page::Providers => agent::providers::ui(app, ui),
+                    Page::Models => agent::models::ui(app, ui),
+                    Page::Queue => agent::queue::ui(app, ui),
+                    Page::Budget => agent::budget::ui(app, ui),
+                    Page::Catalogs => {}
                     Page::Settings => settings::ui(app, ui),
                     Page::About => about::ui(app, ui),
                 });
@@ -248,6 +312,10 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                     Some(Section::Convert),
                     format!("{}  {}", icon::SHUFFLE, t!("section.convert")),
                 ),
+                (
+                    Some(Section::Agent),
+                    format!("{}  {}", icon::SPARKLE, t!("section.agent")),
+                ),
             ],
         );
         if section != before {
@@ -255,6 +323,7 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 Some(Section::Library) => Page::Library,
                 Some(Section::Capture) | None => app.last_capture_page,
                 Some(Section::Convert) => Page::Convert,
+                Some(Section::Agent) => app.last_agent_page,
             };
         }
 

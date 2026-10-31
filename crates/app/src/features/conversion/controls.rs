@@ -44,6 +44,7 @@ pub(super) fn effort_row(ui: &mut egui::Ui, effort: &mut Effort) {
             .iter()
             .map(|e| {
                 let label = match e {
+                    Effort::Fastest => t!("convert.effort_fastest"),
                     Effort::Fast => t!("convert.effort_fast"),
                     Effort::Balanced => t!("convert.effort_balanced"),
                     Effort::Max => t!("convert.effort_max"),

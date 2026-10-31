@@ -9,7 +9,9 @@ build = "build.rs"
 [dependencies]
 chrono.workspace = true
 mediaa-core.workspace = true
-mediaa-webp-pipeline.workspace = true
+mediaa-ffmpeg.workspace = true
+mediaa-webp.workspace = true
+mediaa-gif.workspace = true
 anyhow.workspace = true
 log.workspace = true
 crossbeam-channel.workspace = true
@@ -24,3 +26,7 @@ thiserror.workspace = true
 [dev-dependencies]
 hound.workspace = true
 mediaa-storage.workspace = true
+mediaa-render.workspace = true
+
+[lints]
+workspace = true

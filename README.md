@@ -4,13 +4,14 @@ Cross-platform screen capture tool written in Rust: Lightshot-style screenshots,
 recordings, audio recording and conversion between popular formats. The release is **one program**,
 `mediaa` (one executable, FFmpeg linked in statically).
 
-The window has three sections:
+The window has four sections:
 
 | Section | What it does |
 |---|---|
 | **Library** | Every screenshot, recording and conversion (images, videos, animations, audio) |
 | **Capture** | Screenshots, video recording (screen / area / windows), audio recording |
 | **Convert** | Video, animation, image and audio conversions |
+| **Agent** | Catalogs, local and remote models, queue, summaries, search and chat over recordings |
 
 ## Features
 
@@ -36,6 +37,11 @@ The window has three sections:
   (GIF, WebP) / audio; images (JPEG, PNG, WebP, BMP, TIFF); audio (MP3, M4A, WAV, FLAC, OGG).
   Quality / resolution / bitrate settings, sound removal, output name and folder (by default
   the library folder, set in Settings); progress and cancel.
+- **Agent** — catalogs over recordings, transcription and speaker names, summaries and topics,
+  search and chat. Models are external connections only (OpenRouter, OpenAI, DeepSeek, Ollama,
+  any OpenAI-compatible server, or a user command). What to install is in
+  [docs/agent-models.md](docs/agent-models.md). Keys stay in the OS keychain, never in
+  `settings.toml`.
 - **Global hotkeys** (configurable), **dark / light / system theme**, **languages**: English and
   Russian (system language by default). Closing the window hides the app to the **tray** (on by
   default, switchable in Settings); a left click starts an area screenshot by default, can open the
@@ -50,9 +56,15 @@ crates/
   core/           models, rules and file primitives: settings, geometry, formats, limits, paths, atomic publication
   storage/        background SQLite index writer, caches, library watcher and thumbnail atlas
   render/         annotations and overlay layout (tiny-skia, fonts)
-  media/          FFmpeg via ez-ffmpeg: recording, muxing, conversion, previews and thumbnails
+  media/          recording, muxing, conversion, previews and thumbnails
+  ffmpeg/         shared FFmpeg execution and cancellation
+  webp/           WebP animation graphs, normalize, validate, trim and merge
+  gif/            GIF graphs, palette and dither
   platform/       OS capture, audio I/O, clipboard/files, cursor and window integration
-  webp-pipeline/  budgeted parallel animated-WebP scheduler and segment merge
+  engine/         external model connections: OpenAI-compatible HTTP, Ollama and user commands
+  agent/          chat loop, tools, indexing, transcription, speaker names, providers and secrets
+  queue/          persistent task queue: composites, resource pools, chunked runs
+  eval/           quality runs of the agent over a set of cases
   app/            library facade, egui UI (eframe + wgpu), tray, hotkeys, i18n -> `mediaa`
 scripts/     build / run / test helpers for every platform (see below)
 vcpkg.json   static FFmpeg 8.1 (avcodec, avformat, avfilter, swscale, swresample, x264, libvpx, libwebp, opus, mp3lame, dav1d)
@@ -252,6 +264,8 @@ changed in Settings.
 |---|---|
 | Screenshots, recordings, conversions | `Documents/MediaA` (changeable in Settings) |
 | Library cache | `.cache/` in that folder: `library.db` (SQLite: file index with titles, sizes, dates, dimensions, durations, and thumbnail slots; every change is written by row) and thumbnail atlases `thumbs-N.jpg`; everything is rebuilt when missing |
+| Agent data | `.ai/` in that folder: `catalogs.db`, `chat.db`, `queue.db` and per-recording transcripts/outlines; changing the library folder starts a new `.ai` there |
+| Agent models | not stored by MediaA; the user runs Ollama, a server or a CLI and describes that connection |
 | Settings | Windows `%APPDATA%\MediaA\MediaA\config\settings.toml`, Linux `~/.config/mediaa`, macOS `~/Library/Application Support/dev.MediaA.MediaA` |
 | Logs, scratch files | the platform's local data dir (`…\MediaA\data\logs`) |
 

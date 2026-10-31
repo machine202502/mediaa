@@ -1,6 +1,24 @@
 use anyhow::{anyhow, Context};
 use mediaa_core::source::FrameSource;
 use mediaa_core::{Frame, Rect};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowState {
+    Available,
+    Minimized,
+    Hidden,
+    Missing,
+    Mismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitorState {
+    Available,
+    Disconnected,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MonitorId(u32);
@@ -16,9 +34,9 @@ impl MonitorId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct WindowId(u32);
+pub struct CaptureWindowId(u32);
 
-impl WindowId {
+impl CaptureWindowId {
     pub const fn new(value: u32) -> Self {
         Self(value)
     }
@@ -54,7 +72,7 @@ impl MonitorInfo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowInfo {
-    pub id: WindowId,
+    pub id: CaptureWindowId,
     pub title: String,
     pub app: String,
     pub pid: u32,
@@ -116,7 +134,7 @@ fn find_monitor(id: MonitorId) -> anyhow::Result<xcap::Monitor> {
         .ok_or_else(|| anyhow!("monitor {} is no longer connected", id.get()))
 }
 
-fn find_window(id: WindowId) -> anyhow::Result<xcap::Window> {
+fn find_window(id: CaptureWindowId) -> anyhow::Result<xcap::Window> {
     xcap::Window::all()?
         .into_iter()
         .find(|w| w.id().ok() == Some(id.get()))
@@ -143,7 +161,7 @@ pub fn windows() -> anyhow::Result<Vec<WindowInfo>> {
             continue;
         }
         list.push(WindowInfo {
-            id: WindowId::new(w.id()?),
+            id: CaptureWindowId::new(w.id()?),
             title,
             app: w.app_name().unwrap_or_default(),
             pid: w.pid().unwrap_or(0),
@@ -154,7 +172,62 @@ pub fn windows() -> anyhow::Result<Vec<WindowInfo>> {
     Ok(list)
 }
 
-pub fn capture_window(id: WindowId) -> anyhow::Result<Frame> {
+pub fn window_available(id: CaptureWindowId) -> bool {
+    window_status(id, 0, "").is_available()
+}
+
+pub fn window_status(id: CaptureWindowId, pid: u32, app: &str) -> WindowState {
+    let Ok(window) = find_window(id) else {
+        return WindowState::Missing;
+    };
+    if pid != 0 && window.pid().ok() != Some(pid) {
+        return WindowState::Mismatch;
+    }
+    if !app.is_empty() && window.app_name().ok().is_some_and(|name| name != app) {
+        return WindowState::Mismatch;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
+        let hwnd = id.get() as HWND;
+        if unsafe { IsWindowVisible(hwnd) } == 0 {
+            return WindowState::Hidden;
+        }
+        if unsafe { IsIconic(hwnd) } != 0 {
+            return WindowState::Minimized;
+        }
+        WindowState::Available
+    }
+    #[cfg(not(windows))]
+    {
+        if window.is_minimized().unwrap_or(true) {
+            WindowState::Minimized
+        } else {
+            WindowState::Available
+        }
+    }
+}
+
+impl WindowState {
+    pub fn is_available(self) -> bool {
+        self == Self::Available
+    }
+}
+
+pub fn monitor_state(id: MonitorId) -> MonitorState {
+    if find_monitor(id).is_ok() {
+        MonitorState::Available
+    } else {
+        MonitorState::Disconnected
+    }
+}
+
+pub fn monitor_available(id: MonitorId) -> bool {
+    monitor_state(id) == MonitorState::Available
+}
+
+pub fn capture_window(id: CaptureWindowId) -> anyhow::Result<Frame> {
     #[cfg(windows)]
     match crate::wgc::WgcSource::window_frame(id) {
         Ok(frame) => return Ok(frame),
@@ -164,6 +237,175 @@ pub fn capture_window(id: WindowId) -> anyhow::Result<Frame> {
         .capture_image()
         .context("window capture failed")?;
     Ok(Frame::from_image(img))
+}
+
+pub struct DeferredSource {
+    name: String,
+    size: (u32, u32),
+    probe: Arc<dyn Fn() -> bool + Send + Sync>,
+    factory: Arc<dyn Fn() -> anyhow::Result<Box<dyn FrameSource>> + Send + Sync>,
+    state: Arc<Mutex<DeferredState>>,
+    alive: Arc<AtomicBool>,
+}
+
+struct DeferredState {
+    latest: Option<Frame>,
+    last: Option<Frame>,
+    live: bool,
+    started: bool,
+}
+
+impl DeferredSource {
+    fn new(
+        name: String,
+        size: (u32, u32),
+        probe: Arc<dyn Fn() -> bool + Send + Sync>,
+        factory: Arc<dyn Fn() -> anyhow::Result<Box<dyn FrameSource>> + Send + Sync>,
+    ) -> anyhow::Result<Self> {
+        anyhow::ensure!(size.0 >= 16 && size.1 >= 16, "source is too small");
+        Ok(Self {
+            name,
+            size: (size.0 & !1, size.1 & !1),
+            probe,
+            factory,
+            state: Arc::new(Mutex::new(DeferredState {
+                latest: None,
+                last: None,
+                live: false,
+                started: false,
+            })),
+            alive: Arc::new(AtomicBool::new(true)),
+        })
+    }
+}
+
+impl Drop for DeferredSource {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::SeqCst);
+    }
+}
+
+fn deferred_worker(
+    name: String,
+    probe: Arc<dyn Fn() -> bool + Send + Sync>,
+    factory: Arc<dyn Fn() -> anyhow::Result<Box<dyn FrameSource>> + Send + Sync>,
+    state: Arc<Mutex<DeferredState>>,
+    alive: Arc<AtomicBool>,
+) {
+    let mut inner: Option<Box<dyn FrameSource>> = None;
+    while alive.load(Ordering::SeqCst) {
+        if inner.is_none() {
+            if (probe)() {
+                match factory() {
+                    Ok(source) => inner = Some(source),
+                    Err(error) => {
+                        log::warn!("deferred source {name} failed: {error:#}");
+                        std::thread::sleep(Duration::from_secs(1));
+                        continue;
+                    }
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+        }
+        if let Some(source) = inner.as_mut() {
+            if source.available() {
+                match source.grab() {
+                    Ok(frame) => {
+                        if let Ok(mut state) = state.lock() {
+                            state.last = Some(frame.clone());
+                            state.latest = Some(frame);
+                            state.live = true;
+                        }
+                    }
+                    Err(_) => {
+                        inner = None;
+                        if let Ok(mut state) = state.lock() {
+                            state.live = false;
+                        }
+                    }
+                }
+            } else if let Ok(mut state) = state.lock() {
+                state.live = false;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+impl FrameSource for DeferredSource {
+    fn name(&self) -> String {
+        self.name.clone()
+    }
+
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn available(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.started {
+            state.started = true;
+            let (name, probe, factory, shared, alive) = (
+                self.name.clone(),
+                self.probe.clone(),
+                self.factory.clone(),
+                self.state.clone(),
+                self.alive.clone(),
+            );
+            std::thread::spawn(move || deferred_worker(name, probe, factory, shared, alive));
+        }
+        state.live
+    }
+
+    fn grab(&mut self) -> anyhow::Result<Frame> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow!("deferred source is poisoned"))?;
+        if let Some(frame) = state.latest.take() {
+            return Ok(frame);
+        }
+        state
+            .last
+            .clone()
+            .context("deferred source has no frame yet")
+    }
+}
+
+pub fn deferred_window_source(
+    window_id: CaptureWindowId,
+    expected: (u32, u32),
+    pid: u32,
+    app: String,
+    with_cursor: bool,
+) -> anyhow::Result<Box<dyn FrameSource>> {
+    let probe =
+        Arc::new(move || matches!(window_status(window_id, pid, &app), WindowState::Available));
+    let factory = Arc::new(move || window_source(window_id, with_cursor));
+    Ok(Box::new(DeferredSource::new(
+        format!("Window {} (waiting)", window_id.get()),
+        expected,
+        probe,
+        factory,
+    )?))
+}
+
+pub fn deferred_monitor_source(
+    monitor_id: MonitorId,
+    expected: (u32, u32),
+    region: Option<Rect>,
+    with_cursor: bool,
+) -> anyhow::Result<Box<dyn FrameSource>> {
+    let probe = Arc::new(move || monitor_available(monitor_id));
+    let factory = Arc::new(move || monitor_source(monitor_id, region, with_cursor));
+    Ok(Box::new(DeferredSource::new(
+        format!("Monitor {} (waiting)", monitor_id.get()),
+        expected,
+        probe,
+        factory,
+    )?))
 }
 
 pub struct MonitorSource {
@@ -247,13 +489,15 @@ impl FrameSource for MonitorSource {
 
 pub struct WindowSource {
     window: xcap::Window,
+    id: CaptureWindowId,
     name: String,
     size: (u32, u32),
     with_cursor: bool,
 }
 
 impl WindowSource {
-    pub fn new(window_id: WindowId, with_cursor: bool) -> anyhow::Result<Self> {
+    pub fn new(window_id: CaptureWindowId, with_cursor: bool) -> anyhow::Result<Self> {
+        anyhow::ensure!(window_available(window_id), "window is minimized or hidden");
         let window = find_window(window_id)?;
         let first = window.capture_image().context("window capture failed")?;
         let size = (first.width() & !1, first.height() & !1);
@@ -264,6 +508,7 @@ impl WindowSource {
         Ok(Self {
             name: window.title().unwrap_or_else(|_| "Window".into()),
             window,
+            id: window_id,
             size,
             with_cursor,
         })
@@ -277,6 +522,20 @@ impl FrameSource for WindowSource {
 
     fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    fn available(&self) -> bool {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Foundation::HWND;
+            use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
+            let hwnd = self.id.get() as HWND;
+            unsafe { IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0 }
+        }
+        #[cfg(not(windows))]
+        {
+            !self.window.is_minimized().unwrap_or(false)
+        }
     }
 
     fn grab(&mut self) -> anyhow::Result<Frame> {
@@ -345,10 +604,24 @@ pub fn monitor_source(
     Ok(Box::new(src))
 }
 
-pub fn window_source(
-    window_id: WindowId,
+pub fn window_source_checked(
+    window_id: CaptureWindowId,
+    pid: u32,
+    app: &str,
     with_cursor: bool,
 ) -> anyhow::Result<Box<dyn FrameSource>> {
+    anyhow::ensure!(
+        window_status(window_id, pid, app).is_available(),
+        "window is closed, hidden or belongs to another process"
+    );
+    window_source(window_id, with_cursor)
+}
+
+pub fn window_source(
+    window_id: CaptureWindowId,
+    with_cursor: bool,
+) -> anyhow::Result<Box<dyn FrameSource>> {
+    anyhow::ensure!(window_available(window_id), "window is minimized or hidden");
     #[cfg(windows)]
     {
         let name = find_window(window_id)?
@@ -370,4 +643,76 @@ pub fn window_source(
         }
     }
     Ok(Box::new(WindowSource::new(window_id, with_cursor)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct FakeSource {
+        size: (u32, u32),
+        frame: Frame,
+    }
+
+    impl FrameSource for FakeSource {
+        fn name(&self) -> String {
+            "fake".into()
+        }
+        fn size(&self) -> (u32, u32) {
+            self.size
+        }
+        fn grab(&mut self) -> anyhow::Result<Frame> {
+            Ok(self.frame.clone())
+        }
+    }
+
+    #[test]
+    fn deferred_source_keeps_its_size_until_the_source_appears() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let builds = Arc::new(AtomicUsize::new(0));
+        let probe_ready = ready.clone();
+        let factory_ready = ready.clone();
+        let factory_builds = builds.clone();
+        let expected = (400, 300);
+        let mut source = DeferredSource::new(
+            "deferred".into(),
+            expected,
+            Arc::new(move || probe_ready.load(Ordering::SeqCst)),
+            Arc::new(move || {
+                anyhow::ensure!(factory_ready.load(Ordering::SeqCst), "not ready");
+                factory_builds.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FakeSource {
+                    size: expected,
+                    frame: Frame::new(400, 300, vec![0; 400 * 300 * 4]),
+                }) as Box<dyn FrameSource>)
+            }),
+        )
+        .unwrap();
+        assert_eq!(source.size(), expected);
+        assert!(!source.available());
+        assert_eq!(builds.load(Ordering::SeqCst), 0);
+        ready.store(true, Ordering::SeqCst);
+        for _ in 0..100 {
+            if source.available() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(source.available());
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+        assert_eq!(source.grab().unwrap().width, 400);
+    }
+
+    #[test]
+    fn unknown_window_and_monitor_are_unavailable() {
+        assert_eq!(
+            window_status(CaptureWindowId::new(0), 0, ""),
+            WindowState::Missing
+        );
+        assert_eq!(
+            monitor_state(MonitorId::new(u32::MAX)),
+            MonitorState::Disconnected
+        );
+    }
 }

@@ -1,10 +1,8 @@
 use super::{
-    concat_chunks, encode_with_linear_fallback, join_with_timeout, linked_title,
-    preserve_recordings, recover_incomplete_sessions, wait_for_source, AudioLayout,
-    RecordingLimits, RecordingRequest, RecordingSession, RecordingStartCancelled, SourceReady,
-    SourceReadyResult, TimedJoin,
+    concat_chunks, join_with_timeout, linked_title, preserve_recordings,
+    recover_incomplete_sessions, wait_for_source, AudioLayout, RecordingLimits, RecordingRequest,
+    RecordingSession, RecordingStartCancelled, SourceReady, SourceReadyResult, TimedJoin,
 };
-use crate::animation_backends::WebpSegmentation;
 use chrono::{Local, TimeZone};
 use ez_ffmpeg::{FfmpegContext, Input, Output};
 use mediaa_core::formats::{OutputKind, VideoContainer};
@@ -144,58 +142,6 @@ fn recording_limits_can_be_overridden_and_are_validated() {
 }
 
 #[test]
-fn segmented_failure_retries_only_the_direct_encoder() {
-    let mut calls = Vec::new();
-    let mut warnings = Vec::new();
-    encode_with_linear_fallback(
-        WebpMode::Segmented,
-        &mut |segmentation| {
-            calls.push(segmentation);
-            if segmentation == WebpSegmentation::Segmented {
-                anyhow::bail!("out of memory")
-            }
-            Ok(())
-        },
-        &mut |warning| warnings.push(warning),
-    )
-    .unwrap();
-    assert_eq!(
-        calls,
-        [WebpSegmentation::Segmented, WebpSegmentation::Direct]
-    );
-    assert_eq!(warnings.len(), 1);
-    assert!(warnings[0].contains("out of memory"));
-}
-
-#[test]
-fn cancel_and_linear_paths_do_not_retry() {
-    let mut cancelled_calls = Vec::new();
-    let error = encode_with_linear_fallback(
-        WebpMode::SegmentedParallel,
-        &mut |segmentation| {
-            cancelled_calls.push(segmentation);
-            Err(crate::job::Cancelled.into())
-        },
-        &mut |_| panic!("cancelled encoding must not warn"),
-    )
-    .unwrap_err();
-    assert!(crate::job::is_cancelled(&error));
-    assert_eq!(cancelled_calls, [WebpSegmentation::Segmented]);
-
-    let mut linear_calls = Vec::new();
-    encode_with_linear_fallback(
-        WebpMode::Direct,
-        &mut |segmentation| {
-            linear_calls.push(segmentation);
-            Ok(())
-        },
-        &mut |_| panic!("linear encoding has no fallback"),
-    )
-    .unwrap();
-    assert_eq!(linear_calls, [WebpSegmentation::Direct]);
-}
-
-#[test]
 fn failed_finalize_keeps_source_recordings_in_the_library() {
     let dir = tempfile::tempdir().unwrap();
     let work = dir.path().join("work");
@@ -263,16 +209,13 @@ fn startup_recovery_moves_incomplete_session_sources_into_the_library() {
     let work = dir.path().join("work");
     let out = dir.path().join("out");
     let session = work.join("20261025-060000-42");
-    let chunks = session.join("video-0-chunks");
-    std::fs::create_dir_all(&chunks).unwrap();
-    std::fs::write(session.join("video-0-combined.mkv"), b"intermediate").unwrap();
+    std::fs::create_dir_all(&session).unwrap();
+    std::fs::write(session.join("video-0.mkv"), b"video").unwrap();
     std::fs::write(session.join("audio-0.wav"), b"audio").unwrap();
-    std::fs::write(chunks.join("chunk-000000.mkv"), b"first").unwrap();
-    std::fs::write(chunks.join("chunk-000001.mkv"), b"second").unwrap();
 
     let report = recover_incomplete_sessions(&work, &out);
     assert!(report.failures.is_empty(), "{:?}", report.failures);
-    assert_eq!(report.files.len(), 3);
+    assert_eq!(report.files.len(), 2);
     assert!(!session.exists());
     let contents: Vec<_> = report
         .files
@@ -280,8 +223,7 @@ fn startup_recovery_moves_incomplete_session_sources_into_the_library() {
         .map(|path| std::fs::read(path).unwrap())
         .collect();
     assert!(contents.contains(&b"audio".to_vec()));
-    assert!(contents.contains(&b"first".to_vec()));
-    assert!(contents.contains(&b"second".to_vec()));
+    assert!(contents.contains(&b"video".to_vec()));
     assert!(report.files.iter().all(|path| path.starts_with(&out)));
 }
 
@@ -301,7 +243,7 @@ fn canceled_start_returns_without_touching_the_work_directory() {
     .audio_layout(AudioLayout::EveryFile)
     .audio_kbps(192)
     .animation(AnimSettings::default())
-    .webp_mode(WebpMode::SegmentedParallel)
+    .webp_mode(WebpMode::Fast)
     .build()
     .unwrap();
     let error = RecordingSession::start_with_cancel(request, &AtomicBool::new(true))

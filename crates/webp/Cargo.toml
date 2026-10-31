@@ -1,0 +1,16 @@
+[package]
+name = "mediaa-webp"
+description = "WebP animation graph, validation, trimming and normalization for MediaA"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+mediaa-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -68,7 +68,39 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 ui.ctx().open_url(egui::OpenUrl::new_tab(REPOSITORY_URL));
             }
         });
+        ui.add_space(8.0);
     });
+}
+
+pub(crate) fn contract_window(ctx: &egui::Context, open: &mut bool) {
+    if !*open {
+        return;
+    }
+    theme::modal_backdrop(ctx);
+    let response = egui::Window::new(t!("settings.contract_title"))
+        .id(egui::Id::new("speech-contract-window"))
+        .order(egui::Order::Foreground)
+        .open(open)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(560.0)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_min_width(480.0);
+            egui::ScrollArea::vertical()
+                .max_height(440.0)
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(t!("settings.contract_body")).wrap());
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(t!("settings.contract_example")).monospace(),
+                        )
+                        .wrap(),
+                    );
+                });
+        });
+    theme::mark_modal(ctx, &response);
 }
 
 fn section_help(ui: &mut egui::Ui, icon: &str, title: &str, help: &str) {

@@ -21,11 +21,9 @@ use crate::{pages, theme};
 use command::{AppCommand, RecordingCommand};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
-use mediaa_core::settings::{
-    AfterCapture, AfterCompletionAction, RecordProfile, ScreenChoice, TrayClickAction,
-};
+use mediaa_core::settings::{AfterCapture, RecordProfile, ScreenChoice, TrayClickAction};
 use mediaa_core::source::{AudioSource, SourceFactory};
-use mediaa_core::{library, naming, paths, Frame, ImageFormat, OutputKind, Settings};
+use mediaa_core::{library, naming, paths, Frame, ImageFormat, Settings};
 use mediaa_media::recorder::{
     recover_incomplete_sessions, AudioLayout, RecordingRequest, RecoveryReport, SessionEvent,
     SessionFailure, SessionNotice, StopAction,
@@ -48,11 +46,13 @@ const HIDE_DELAY: Duration = Duration::from_millis(300);
 const CATALOG_TIMEOUT: Duration = Duration::from_secs(15);
 const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(600);
 const SETTINGS_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
+const CACHE_SWEEP_EVERY: Duration = Duration::from_secs(30 * 60);
 
 #[cfg(test)]
 type TestMonitorCapture = Arc<dyn Fn(screen::MonitorId) -> Result<Frame, String> + Send + Sync>;
 #[cfg(test)]
-type TestWindowCapture = Arc<dyn Fn(screen::WindowId) -> Result<Frame, String> + Send + Sync>;
+type TestWindowCapture =
+    Arc<dyn Fn(screen::CaptureWindowId) -> Result<Frame, String> + Send + Sync>;
 
 pub struct App {
     pub settings: Settings,
@@ -61,6 +61,7 @@ pub struct App {
     pub page: Page,
     pub last_capture_page: Page,
     pub last_main_page: Page,
+    pub last_agent_page: Page,
     notices: Notices,
     tray: Option<Tray>,
     tray_rx: Option<Receiver<TrayCommand>>,
@@ -77,6 +78,7 @@ pub struct App {
     desktop_jobs: Vec<crate::jobs::Job<()>>,
     pending: Option<(Instant, Pending)>,
     hidden_by_us: bool,
+    recording_quiet: bool,
     ghosted: bool,
     pub(crate) recording: features::recording::RecordingController,
     pub(crate) capture: features::capture::CaptureController,
@@ -85,9 +87,11 @@ pub struct App {
     pub lib: features::library::LibraryController,
     pub thumbs: Thumbnails,
     pub(crate) conversion: features::conversion::ConversionController,
+    pub agent: features::agent::AgentController,
     quit_when_idle: bool,
     recovery_job: Option<crate::jobs::Job<RecoveryReport>>,
     housekeeping_jobs: Vec<crate::jobs::Job<()>>,
+    last_cache_sweep: Instant,
     _instance: Option<SingleInstance>,
     native_window: Option<NativeWindow>,
     startup: StartupAction,
@@ -133,7 +137,10 @@ impl App {
     ) -> Self {
         let ctx = &cc.egui_ctx;
         theme::install(ctx);
-        let settings = Settings::load();
+        let mut settings = Settings::load();
+        mediaa_agent::secrets::load(&mut settings.agent);
+        mediaa_media::preview_cache::set_animated_previews_enabled(settings.animated_previews);
+        mediaa_media::preview_cache::set_full_previews_enabled(settings.full_preview_videos);
         let clipboard = ClipboardService::new(ctx.clone());
         let previews = mediaa_media::preview_cache::previews_dir(&settings.media_dir);
         let mut output_dirs = vec![settings.media_dir.clone(), settings.convert_dir()];
@@ -162,6 +169,10 @@ impl App {
             .as_mut()
             .map(|h| h.apply(&settings.hotkeys))
             .unwrap_or_default();
+        let slots = mediaa_core::slots::Slots::new();
+        let connections = std::sync::Arc::new(mediaa_engine::Connections::new(
+            settings.agent.connections.clone(),
+        ));
 
         let mut app = Self {
             settings,
@@ -170,6 +181,7 @@ impl App {
             page: Page::Screenshot,
             last_capture_page: Page::Screenshot,
             last_main_page: Page::Screenshot,
+            last_agent_page: Page::Catalogs,
             notices: Notices::default(),
             tray,
             tray_rx,
@@ -186,6 +198,7 @@ impl App {
             desktop_jobs: Vec::new(),
             pending: None,
             hidden_by_us: false,
+            recording_quiet: false,
             ghosted: false,
             recording: Default::default(),
             capture: Default::default(),
@@ -194,9 +207,11 @@ impl App {
             lib: Default::default(),
             thumbs: Thumbnails::new(ctx),
             conversion: Default::default(),
+            agent: features::agent::AgentController::with_connections(connections, slots),
             quit_when_idle: false,
             recovery_job: None,
             housekeeping_jobs: Vec::new(),
+            last_cache_sweep: Instant::now(),
             _instance: instance,
             native_window: cc
                 .window_handle()
@@ -216,8 +231,8 @@ impl App {
         if let Some(mode) = mediaa_core::dev::notices_mode() {
             app.notices.push(
                 NoticeLevel::Error,
-                "Не удалось сохранить WebP — исходники сохранены".into(),
-                "WebP encoding failed after 6 attempts: part-000076.webp has no VP8X chunk.\nБыл выполнен переход на линейную конвертацию.".into(),
+                t!("dev.webp_notice_summary").into_owned(),
+                t!("dev.webp_notice_detail").into_owned(),
                 Some("webp-33868-0001".into()),
                 vec![
                     "C:\\Users\\wmachine\\Documents\\MediaA\\Recording part 1.mkv".into(),
@@ -257,6 +272,9 @@ impl App {
             if let Some(pages::Section::Capture) = p.section() {
                 app.last_capture_page = p;
             }
+            if let Some(pages::Section::Agent) = p.section() {
+                app.last_agent_page = p;
+            }
         }
         let stale_previews = previews;
         match crate::jobs::Job::spawn("startup-cleanup", Arc::default(), move || {
@@ -279,6 +297,27 @@ impl App {
 
     pub fn settings_changed(&mut self) {
         self.settings_dirty = Some(Instant::now());
+    }
+
+    pub fn preview_options_changed(&mut self) {
+        let animated = self.settings.animated_previews;
+        let full = self.settings.full_preview_videos;
+        mediaa_media::preview_cache::set_animated_previews_enabled(animated);
+        mediaa_media::preview_cache::set_full_previews_enabled(full);
+        self.lib.stop_previews();
+        if !animated || !full {
+            let removed = mediaa_media::preview_cache::clear_previews(
+                &self.settings.media_dir,
+                !animated,
+                !full,
+            );
+            log::info!(
+                "preview cache cleared animated={} full={} files={removed}",
+                !animated,
+                !full
+            );
+        }
+        self.settings_changed();
     }
 
     pub fn refresh_monitors(&mut self) {
@@ -441,6 +480,29 @@ impl eframe::App for App {
                 true
             }
         });
+        if self.last_cache_sweep.elapsed() >= CACHE_SWEEP_EVERY {
+            self.last_cache_sweep = Instant::now();
+            let media_dir = self.settings.media_dir.clone();
+            let ctx = ctx.clone();
+            match crate::jobs::Job::spawn("cache-sweep", Arc::default(), move || {
+                let report = features::cache_maintenance::sweep(
+                    &media_dir,
+                    std::time::SystemTime::now(),
+                    features::cache_maintenance::CACHE_TTL,
+                );
+                if report.previews > 0 || report.atlas_pages > 0 {
+                    log::info!(
+                        "cache sweep removed previews={} atlas_pages={}",
+                        report.previews,
+                        report.atlas_pages
+                    );
+                }
+                ctx.request_repaint();
+            }) {
+                Ok(job) => self.housekeeping_jobs.push(job),
+                Err(error) => log::warn!("cache sweep: {error}"),
+            }
+        }
         features::library::poll_cleanup(self, ctx);
         self.update_tray();
         self.show_recording_region(ctx);
@@ -477,6 +539,11 @@ impl eframe::App for App {
                 ctx.request_repaint_after(SETTINGS_SAVE_DELAY + Duration::from_millis(50));
             }
         }
+        let ai_dir = mediaa_core::catalogs::ai_dir(&self.settings.media_dir);
+        let language = crate::i18n::current();
+        let active = self.page.section() == Some(pages::Section::Agent);
+        self.agent
+            .tick(&ai_dir, &self.settings.agent, &language, active, ctx);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -485,8 +552,9 @@ impl eframe::App for App {
         self.prewarm_region_overlay(&ctx);
         self.handle_overlay(&ctx);
         pages::shell(self, ui);
+        let interactive = ctx.memory(|memory| memory.allows_interaction(ui.layer_id()));
         if !self.lib.viewer_open() {
-            self.show_notices(&ctx);
+            self.show_notices(&ctx, interactive);
         }
     }
 
@@ -541,7 +609,7 @@ fn tray_click_stops_recording(enabled: bool, recording: bool) -> bool {
 }
 
 #[cfg(test)]
-fn recording_completion_sound(_output: OutputKind, source: StopSource) -> bool {
+fn recording_completion_sound(_output: mediaa_core::OutputKind, source: StopSource) -> bool {
     matches!(source, StopSource::Tray | StopSource::Hotkey)
 }
 
@@ -570,6 +638,11 @@ pub fn page_from_args(args: &[String]) -> Option<Page> {
         "audio" => Some(Page::RecordAudio),
         "library" => Some(Page::Library),
         "convert" => Some(Page::Convert),
+        "catalogs" => Some(Page::Catalogs),
+        "providers" => Some(Page::Providers),
+        "models" => Some(Page::Models),
+        "queue" => Some(Page::Queue),
+        "budget" => Some(Page::Budget),
         "settings" => Some(Page::Settings),
         "about" => Some(Page::About),
         _ => None,
@@ -580,7 +653,7 @@ pub fn page_from_args(args: &[String]) -> Option<Page> {
 mod tests;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod ui_tests;

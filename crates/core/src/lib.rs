@@ -1,5 +1,8 @@
+pub mod agent;
 pub mod atomic_file;
 pub mod audio;
+pub mod catalogs;
+pub mod chat;
 pub mod dev;
 pub mod formats;
 pub mod frame;
@@ -9,10 +12,16 @@ pub mod library;
 pub mod limits;
 pub mod logging;
 pub mod naming;
+pub mod outline;
 pub mod pacer;
 pub mod paths;
+pub mod pulse;
+pub mod retrieval;
 pub mod settings;
+pub mod slots;
 pub mod source;
+pub mod speakers;
+pub mod transcript;
 
 pub use formats::{AnimFormat, ImageFormat, MediaKind, OutputKind, VideoContainer};
 pub use frame::Frame;

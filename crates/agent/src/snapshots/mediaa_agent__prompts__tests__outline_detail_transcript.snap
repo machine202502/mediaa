@@ -1,0 +1,15 @@
+---
+source: crates/agent/src/prompts.rs
+expression: short
+---
+One topic of the recording (0:00 – 10:00).
+The topic: Отчёт — Сроки.
+Write everything in Russian.
+
+Transcript of the topic, one line per sentence, "[time] @label: text" (each speaker is a label: @s1, @s2…; write the label wherever you mean that speaker):
+[0:10] Анна: Сроки.
+
+Break the topic down for a reader who already knows the summary above and wants the details. First ask yourself what a reader needs to take away from this topic, and choose 2 to 6 sections that fit it, with your own short titles. For example (only if they fit): the essence; the steps or the tips one by one (if the speaker gives advice or a method — each tip as its own item); the reasons; how it went; the arguments of each side; examples; risks; what was decided; who will do what; open questions. Do not repeat the summary. Each item is one concrete thought with its specifics (names, numbers, what exactly to do), not a vague phrase.
+
+Write a JSON object:
+sections — each with title; kind — "steps" when the items are an order of actions, "list" for separate points, "text" for one short paragraph in a single item; items — each with text and time — the time of the line it comes from (m:ss, as written above; leave it out when no single line says it).

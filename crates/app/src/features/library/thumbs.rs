@@ -34,7 +34,6 @@ enum Msg {
 }
 
 enum ProxyMsg {
-    Ensure(PathBuf),
     Forget(mediaa_core::paths::CachePath),
 }
 
@@ -77,39 +76,21 @@ impl Thumbnails {
         if let Err(error) = std::thread::Builder::new()
             .name("preview-proxies".into())
             .spawn(move || {
-                let mut seen = HashSet::new();
                 while let Ok(msg) = proxy_rx.recv() {
                     match msg {
-                        ProxyMsg::Ensure(path) => {
-                            let proxy = mediaa_media::preview_cache::proxy_path(&path);
-                            if !seen.insert(proxy.clone()) {
-                                continue;
+                        ProxyMsg::Forget(path) => match std::fs::remove_file(&path) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => {
+                                log::debug!("remove preview proxy {}: {error}", path.display())
                             }
-                            let cancel = std::sync::atomic::AtomicBool::new(false);
-                            if let Err(error) =
-                                mediaa_media::preview_cache::ensure_proxy(&path, &cancel)
-                            {
-                                seen.remove(&proxy);
-                                log::debug!("preview proxy {}: {error:#}", path.display());
-                            }
-                        }
-                        ProxyMsg::Forget(path) => {
-                            seen.remove(&path);
-                            match std::fs::remove_file(&path) {
-                                Ok(()) => {}
-                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                                Err(error) => {
-                                    log::debug!("remove preview proxy {}: {error}", path.display())
-                                }
-                            }
-                        }
+                        },
                     }
                 }
             })
         {
             log::warn!("preview proxy thread: {error}");
         }
-        let proxy_sender = proxy_tx.clone();
         let ctx = ctx.clone();
         if let Err(error) = std::thread::Builder::new()
             .name("thumbnails".into())
@@ -131,11 +112,6 @@ impl Thumbnails {
                             kind,
                             need_details,
                         } => {
-                            if matches!(kind, MediaKind::Animation)
-                                && mediaa_media::preview_cache::ready_proxy(&key.0).is_none()
-                            {
-                                let _ = proxy_sender.try_send(ProxyMsg::Ensure(key.0.clone()));
-                            }
                             let name = file_name(&key.0);
                             let c = cache_for(&mut cache, key.0.parent().unwrap_or(Path::new(".")));
                             let frame = c.get(&name, size, key.1).or_else(|| {

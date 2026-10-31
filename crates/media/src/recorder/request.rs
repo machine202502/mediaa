@@ -31,6 +31,7 @@ pub struct RecordingRequest {
     pub(super) audio_kbps: u32,
     pub(super) anim: AnimSettings,
     pub(super) webp_mode: WebpMode,
+    pub(super) show_no_signal: bool,
     pub(super) out_dir: MediaDir,
     pub(super) work_dir: WorkDir,
     pub(super) title: String,
@@ -78,7 +79,8 @@ impl RecordingRequest {
                 audio_layout: AudioLayout::FirstFileOnly,
                 audio_kbps: DEFAULT_VIDEO_AUDIO_KBPS,
                 anim: AnimSettings::default(),
-                webp_mode: WebpMode::Direct,
+                webp_mode: WebpMode::Quality,
+                show_no_signal: true,
                 out_dir,
                 work_dir,
                 title,
@@ -93,6 +95,11 @@ impl RecordingRequest {
 
     pub fn set_max_height(&mut self, max_height: Option<u32>) {
         self.max_height = max_height;
+    }
+
+    pub fn no_signal(mut self, enabled: bool) -> Self {
+        self.show_no_signal = enabled;
+        self
     }
 }
 
@@ -116,6 +123,11 @@ impl RecordingRequestBuilder {
 
     pub fn animation(mut self, settings: AnimSettings) -> Self {
         self.request.anim = settings;
+        self
+    }
+
+    pub fn no_signal(mut self, enabled: bool) -> Self {
+        self.request.show_no_signal = enabled;
         self
     }
 
@@ -166,7 +178,7 @@ impl RecordingRequestBuilder {
             return Err(invalid_input("recording source limits are invalid"));
         }
         if !matches!(self.request.output, OutputKind::Anim(AnimFormat::Webp)) {
-            self.request.webp_mode = WebpMode::Direct;
+            self.request.webp_mode = WebpMode::Quality;
         }
         if matches!(self.request.output, OutputKind::Audio(_)) {
             self.request.audio_layout = AudioLayout::EveryFile;
@@ -222,6 +234,8 @@ impl RecordingProgress {
 pub enum SessionEvent {
     Warning(String),
     Notice(SessionNotice),
+    SourceLost(String),
+    SourceRestored(String),
     CaptureFailed(String),
     Finished(Vec<PathBuf>),
     Cancelled,

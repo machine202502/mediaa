@@ -4,9 +4,7 @@ use crate::{hotkeys, i18n, theme};
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
 
-use mediaa_core::settings::{
-    AfterCompletionAction, RecordProfile, ScreenChoice, ThemePreference, TrayClickAction,
-};
+use mediaa_core::settings::{RecordProfile, ScreenChoice, ThemePreference, TrayClickAction};
 use mediaa_platform::screen::MonitorInfo;
 use rust_i18n::t;
 
@@ -14,6 +12,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     header(ui, &t!("settings.title"), "");
     let changed = std::cell::Cell::new(false);
+    let mut previews_changed = false;
 
     let mut open_dir = None;
     let mut autostart_error = None;
@@ -83,6 +82,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     match mediaa_platform::startup::configure(mode) {
                         Ok(()) => {
                             app.settings.launch_at_login = enabled;
+                            if !enabled {
+                                app.settings.start_in_tray = false;
+                            }
                             changed.set(true);
                         }
                         Err(error) => autostart_error = Some(format!("{error:#}")),
@@ -90,9 +92,13 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
             theme::row(ui, "", |ui| {
+                let launch = app.settings.launch_at_login;
                 let mut enabled = app.settings.start_in_tray;
                 if ui
-                    .checkbox(&mut enabled, t!("settings.start_in_tray"))
+                    .add_enabled(
+                        launch,
+                        egui::Checkbox::new(&mut enabled, t!("settings.start_in_tray")),
+                    )
                     .changed()
                 {
                     let update = if app.settings.launch_at_login {
@@ -114,19 +120,30 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
             });
-            theme::section(ui, icon::RECORD, &t!("settings.after_completion"));
-            theme::row(ui, &t!("settings.after_completion_action"), |ui| {
-                let opts = [
-                    (
-                        AfterCompletionAction::OpenLibrary,
-                        t!("settings.after_completion_library").to_string(),
-                    ),
-                    (
-                        AfterCompletionAction::CopyFile,
-                        t!("settings.after_completion_copy").to_string(),
-                    ),
-                ];
-                if theme::segmented(ui, &mut app.settings.after_completion, &opts) {
+            theme::section(ui, icon::FILM_STRIP, &t!("settings.previews"));
+            theme::row(ui, "", |ui| {
+                if ui
+                    .checkbox(
+                        &mut app.settings.animated_previews,
+                        t!("settings.animated_previews"),
+                    )
+                    .on_hover_text(t!("settings.animated_previews_hint"))
+                    .changed()
+                {
+                    previews_changed = true;
+                    changed.set(true);
+                }
+            });
+            theme::row(ui, "", |ui| {
+                if ui
+                    .checkbox(
+                        &mut app.settings.full_preview_videos,
+                        t!("settings.full_preview_videos"),
+                    )
+                    .on_hover_text(t!("settings.full_preview_videos_hint"))
+                    .changed()
+                {
+                    previews_changed = true;
                     changed.set(true);
                 }
             });
@@ -154,6 +171,18 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                         &mut app.settings.stop_recording_on_left_click,
                         t!("settings.stop_recording_on_left_click"),
                     )
+                    .changed()
+                {
+                    changed.set(true);
+                }
+            });
+            theme::row(ui, "", |ui| {
+                if ui
+                    .checkbox(
+                        &mut app.settings.tray_progress,
+                        t!("settings.tray_progress"),
+                    )
+                    .on_hover_text(t!("settings.tray_progress_hint"))
                     .changed()
                 {
                     changed.set(true);
@@ -445,6 +474,9 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         app.refresh_catalogs(ui.ctx());
     }
 
+    if previews_changed {
+        app.preview_options_changed();
+    }
     if changed.get() {
         app.settings_changed();
     }

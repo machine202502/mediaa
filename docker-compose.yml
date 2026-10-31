@@ -1,0 +1,10 @@
+services:
+  mediaa-models:
+    build: .
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+      - "8293:8293"
+    environment:
+      MEDIAA_SPEECH_KEY: mediaa
+      MEDIAA_IDLE_SECONDS: "120"

@@ -120,6 +120,7 @@ fn cleanup_one(
     report: &mut CleanupReport,
 ) {
     let proxy = mediaa_media::preview_cache::proxy_path(&item.path);
+    let hover = mediaa_media::preview_cache::hover_proxy_path(&item.path);
     match move_to_trash(&item.path) {
         Ok(()) => {
             report.removed.push(RemovedItem {
@@ -127,12 +128,14 @@ fn cleanup_one(
                 size,
                 proxy: proxy.clone(),
             });
-            if let Err(error) = std::fs::remove_file(&proxy) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    report.failures.push(CleanupFailure {
-                        path: item.path.clone(),
-                        error: format!("preview: {error}"),
-                    });
+            for cache in [&proxy, &hover] {
+                if let Err(error) = std::fs::remove_file(cache) {
+                    if error.kind() != std::io::ErrorKind::NotFound {
+                        report.failures.push(CleanupFailure {
+                            path: item.path.clone(),
+                            error: format!("preview: {error}"),
+                        });
+                    }
                 }
             }
         }

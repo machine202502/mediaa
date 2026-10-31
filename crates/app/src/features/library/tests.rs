@@ -315,8 +315,10 @@ fn cleanup_continues_after_a_failed_move_and_removes_ready_proxies() {
     for item in &items {
         std::fs::write(&item.path, b"media").unwrap();
         let proxy = mediaa_media::preview_cache::proxy_path(&item.path);
+        let hover = mediaa_media::preview_cache::hover_proxy_path(&item.path);
         std::fs::create_dir_all(proxy.parent().unwrap()).unwrap();
         std::fs::write(proxy, b"proxy").unwrap();
+        std::fs::write(hover, b"hover").unwrap();
     }
     let report = cleanup_selected(&items, |path| {
         if path.file_name().is_some_and(|name| name == "busy.webp") {
@@ -331,8 +333,11 @@ fn cleanup_continues_after_a_failed_move_and_removes_ready_proxies() {
     assert!(items[1].path.exists());
     assert!(!items[2].path.exists());
     assert!(!mediaa_media::preview_cache::proxy_path(&items[0].path).exists());
+    assert!(!mediaa_media::preview_cache::hover_proxy_path(&items[0].path).exists());
     assert!(mediaa_media::preview_cache::proxy_path(&items[1].path).exists());
+    assert!(mediaa_media::preview_cache::hover_proxy_path(&items[1].path).exists());
     assert!(!mediaa_media::preview_cache::proxy_path(&items[2].path).exists());
+    assert!(!mediaa_media::preview_cache::hover_proxy_path(&items[2].path).exists());
 }
 
 #[test]

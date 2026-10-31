@@ -2,7 +2,7 @@ use super::output_kinds;
 use super::status::starting_card;
 use crate::pages::record::profile_editor;
 use eframe::egui;
-use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::kittest::Queryable;
 use mediaa_core::settings::RecordProfile;
 use mediaa_core::{AnimFormat, OutputKind, Settings, VideoContainer};
 use rust_i18n::t;
@@ -59,7 +59,91 @@ fn animation_editor_shows_one_frame_rate_and_resolution() {
 }
 
 #[test]
-fn parallel_webp_is_shown_only_for_segmented_webp() {
+fn manual_video_edits_switch_the_preset_to_custom() {
+    let _ui = crate::app::test_support::ui_test_guard();
+    let settings = Settings::default();
+    let mut harness = egui_kittest::Harness::new_ui_state(
+        |ui: &mut egui::Ui, settings: &mut Settings| {
+            ui.set_width(1100.0);
+            let mut refresh = false;
+            profile_editor(ui, settings, RecordProfile::App, &[], None, &mut refresh);
+        },
+        settings,
+    );
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label(&t!("record.preset").to_string())
+        .is_some());
+    assert_eq!(
+        harness.state().record.preset(&harness.state().anim),
+        Some(mediaa_core::settings::RecordPreset::Quality)
+    );
+
+    harness.state_mut().record.video_quality = 50;
+    harness.run_steps(2);
+    assert_eq!(harness.state().record.preset(&harness.state().anim), None);
+}
+
+#[test]
+fn audio_preset_defaults_to_quality_and_becomes_custom() {
+    let _ui = crate::app::test_support::ui_test_guard();
+    let audio = mediaa_core::settings::AudioRecordSettings::default();
+    let mut harness = egui_kittest::Harness::new_ui_state(
+        |ui: &mut egui::Ui, audio: &mut mediaa_core::settings::AudioRecordSettings| {
+            ui.set_width(1100.0);
+            crate::pages::audio::audio_editor(ui, audio, &[], "test");
+        },
+        audio,
+    );
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().preset(),
+        Some(mediaa_core::settings::RecordPreset::Quality)
+    );
+    harness.state_mut().kbps = 160;
+    harness.run_steps(2);
+    assert_eq!(harness.state().preset(), None);
+}
+
+#[test]
+fn switching_format_restores_that_formats_settings() {
+    let _ui = crate::app::test_support::ui_test_guard();
+    let mut settings = Settings::default();
+    settings.record.fps = 30;
+    settings.record.output_height = 720;
+    settings.record.video_quality = 70;
+    let mut harness = egui_kittest::Harness::new_ui_state(
+        |ui: &mut egui::Ui, settings: &mut Settings| {
+            ui.set_width(1100.0);
+            let mut refresh = false;
+            profile_editor(ui, settings, RecordProfile::App, &[], None, &mut refresh);
+        },
+        settings,
+    );
+    harness.run_steps(2);
+    harness.get_by_label("MKV").click();
+    harness.run_steps(2);
+    let record = &harness.state().record;
+    assert_eq!(record.output, OutputKind::Video(VideoContainer::Mkv));
+    assert_eq!((record.fps, record.output_height), (60, 2160));
+
+    harness.state_mut().record.fps = 30;
+    harness.state_mut().record.output_height = 1080;
+    harness.state_mut().record.video_quality = 80;
+    harness.run_steps(2);
+    harness.get_by_label("MP4").click();
+    harness.run_steps(2);
+    let record = &harness.state().record;
+    assert_eq!(record.output, OutputKind::Video(VideoContainer::Mp4));
+    assert_eq!(
+        (record.fps, record.output_height, record.video_quality),
+        (30, 720, 70)
+    );
+}
+
+#[test]
+fn animation_preset_applies_webp_mode_and_limits() {
+    let _ui = crate::app::test_support::ui_test_guard();
     let mut settings = Settings::default();
     settings.region_record.output = OutputKind::Anim(AnimFormat::Webp);
     let mut harness = egui_kittest::Harness::new_ui_state(
@@ -71,34 +155,30 @@ fn parallel_webp_is_shown_only_for_segmented_webp() {
         settings,
     );
     harness.run_steps(2);
-    let segmented = t!("record.segmented_webp").to_string();
-    let parallel = t!("record.parallel_webp").to_string();
-    assert!(!harness
-        .get_by_label(&segmented)
-        .accesskit_node()
-        .is_disabled());
-    assert!(!harness
-        .get_by_label(&parallel)
-        .accesskit_node()
-        .is_disabled());
-    assert!(harness.state().region_record.segmented_webp);
-    assert!(harness.state().region_record.parallel_webp);
-
-    harness.state_mut().region_record.segmented_webp = false;
-    harness.run_steps(2);
-    assert!(!harness
-        .get_by_label(&segmented)
-        .accesskit_node()
-        .is_disabled());
     assert!(harness
-        .get_by_label(&parallel)
-        .accesskit_node()
-        .is_disabled());
+        .query_by_label(&t!("record.preset").to_string())
+        .is_some());
+    assert_eq!(
+        harness
+            .state()
+            .region_record
+            .preset(&harness.state().region_anim),
+        Some(mediaa_core::settings::RecordPreset::Fast)
+    );
 
-    harness.state_mut().region_record.output = OutputKind::Anim(AnimFormat::Gif);
-    harness.run();
-    assert!(harness.query_by_label(&segmented).is_none());
-    assert!(harness.query_by_label(&parallel).is_none());
+    let state = harness.state_mut();
+    state.region_record.apply_preset(
+        mediaa_core::settings::RecordPreset::Quality,
+        &mut state.region_anim,
+    );
+    harness.run_steps(2);
+    let record = &harness.state().region_record;
+    assert_eq!(record.webp_mode, mediaa_core::settings::WebpMode::Quality);
+    assert_eq!((record.fps, record.output_height), (30, 1080));
+    assert_eq!(
+        record.preset(&harness.state().region_anim),
+        Some(mediaa_core::settings::RecordPreset::Quality)
+    );
 }
 
 #[test]

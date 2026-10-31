@@ -53,7 +53,6 @@ pub(super) fn finish_session(
     session: RecordingSession,
     action: StopAction,
     cancel: Arc<AtomicBool>,
-    webp_trace: Option<String>,
 ) {
     let events = session.events_tx.clone();
     let work_dir = session.work_dir.clone();
@@ -75,7 +74,7 @@ pub(super) fn finish_session(
                         error: format!("{:#}", failure.error),
                         kind,
                         recovery_files: failure.recovery_files,
-                        log_ref: webp_trace,
+                        log_ref: None,
                     }),
                     keep_work_dir,
                 )

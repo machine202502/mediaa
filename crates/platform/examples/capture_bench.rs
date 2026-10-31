@@ -50,7 +50,7 @@ fn main() -> anyhow::Result<()> {
     let dir = std::env::temp_dir().join("mediaa-capture-bench");
     let id = m.id;
     let window = std::env::var("WINDOW").ok().map(
-        |t| -> anyhow::Result<mediaa_platform::screen::WindowId> {
+        |t| -> anyhow::Result<mediaa_platform::screen::CaptureWindowId> {
             let w = mediaa_platform::screen::windows()?
                 .into_iter()
                 .find(|w| w.title.contains(&t));
@@ -94,7 +94,7 @@ fn main() -> anyhow::Result<()> {
         .audio_layout(AudioLayout::EveryFile)
         .audio_kbps(192)
         .animation(AnimSettings::default())
-        .webp_mode(WebpMode::SegmentedParallel)
+        .webp_mode(WebpMode::Fast)
         .build()?,
     )?;
     let _tone = std::env::var_os("AUDIO")

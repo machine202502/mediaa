@@ -171,6 +171,14 @@ impl Notices {
     }
 
     pub(crate) fn show(&mut self, ctx: &egui::Context) -> Option<NoticeAction> {
+        self.show_with(ctx, true)
+    }
+
+    pub(crate) fn show_blocked(&mut self, ctx: &egui::Context) -> Option<NoticeAction> {
+        self.show_with(ctx, false)
+    }
+
+    fn show_with(&mut self, ctx: &egui::Context, interactive: bool) -> Option<NoticeAction> {
         let now = Instant::now();
         let mut close = None;
         let mut copy_log = None;
@@ -183,6 +191,9 @@ impl Notices {
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -12.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
+                if !interactive {
+                    ui.disable();
+                }
                 let p = theme::palette(ui);
                 ui.set_max_width(460.0);
                 ui.spacing_mut().item_spacing.y = 6.0;
@@ -529,8 +540,13 @@ impl App {
         );
     }
 
-    pub(super) fn show_notices(&mut self, ctx: &egui::Context) {
-        if let Some(action) = self.notices.show(ctx) {
+    pub(super) fn show_notices(&mut self, ctx: &egui::Context, interactive: bool) {
+        let action = if interactive {
+            self.notices.show(ctx)
+        } else {
+            self.notices.show_blocked(ctx)
+        };
+        if let Some(action) = action {
             self.handle_notice_action(ctx, action);
         }
     }
@@ -585,6 +601,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui_kittest::kittest::{NodeT, Queryable};
 
     fn notice() -> (Notices, Instant) {
         let mut notices = Notices::default();
@@ -598,6 +615,22 @@ mod tests {
         );
         let opened = notices.items[0].opened_at;
         (notices, opened)
+    }
+
+    #[test]
+    fn blocked_notices_are_disabled() {
+        let _ui = crate::app::test_support::ui_test_guard();
+        let (mut notices, _) = notice();
+        notices.items[0].expanded = true;
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, notices: &mut Notices| {
+                notices.show_blocked(ui.ctx());
+            },
+            notices,
+        );
+        harness.run_steps(3);
+        let copy = t!("notice.copy").to_string();
+        assert!(harness.get_by_label(&copy).accesskit_node().is_disabled());
     }
 
     #[test]

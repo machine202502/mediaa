@@ -3,7 +3,7 @@ use crate::jobs::Job;
 use crate::overlay;
 use crossbeam_channel::Receiver;
 use mediaa_core::settings::RecordProfile;
-use mediaa_platform::screen::{MonitorInfo, WindowId, WindowInfo};
+use mediaa_platform::screen::{CaptureWindowId, MonitorInfo, WindowInfo};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -14,6 +14,11 @@ pub enum Page {
     RecordAudio,
     Library,
     Convert,
+    Catalogs,
+    Providers,
+    Models,
+    Queue,
+    Budget,
     Settings,
     About,
 }
@@ -23,12 +28,13 @@ pub(crate) enum Pending {
     RegionScreenshot {
         purpose: overlay::Purpose,
         after_completion: bool,
+        restore: bool,
     },
     FullscreenScreenshot {
         monitor: MonitorInfo,
         after_completion: bool,
     },
-    WindowScreenshot(WindowId),
+    WindowScreenshot(CaptureWindowId),
     BeginRecording(RecordTarget, RecordProfile),
 }
 

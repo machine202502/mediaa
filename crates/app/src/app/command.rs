@@ -7,6 +7,7 @@ pub(crate) enum RecordingCommand {
     Start {
         target: RecordTarget,
         profile: RecordProfile,
+        hide: Option<bool>,
     },
     Stop {
         action: StopAction,

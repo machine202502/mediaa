@@ -1,19 +1,16 @@
 use super::{header, tile};
-use crate::{i18n, theme};
-use eframe::egui::{self, RichText};
+use crate::theme;
+use eframe::egui;
 use egui_phosphor::regular as icon;
-use mediaa_core::settings::AfterCapture;
-use mediaa_core::ImageFormat;
 use mediaa_core::Settings;
-use mediaa_platform::screen::{MonitorInfo, WindowId, WindowInfo};
+use mediaa_platform::screen::{CaptureWindowId, MonitorInfo, WindowInfo};
 use rust_i18n::t;
 
 pub enum CaptureUiAction {
-    SettingsChanged,
     RefreshCatalogs,
     StartRegion,
     StartFullscreen(Option<MonitorInfo>),
-    StartWindow(WindowId),
+    StartWindow(CaptureWindowId),
 }
 
 pub fn ui(
@@ -62,65 +59,30 @@ pub fn ui(
     });
     ui.add_space(4.0);
 
-    let mut changed = false;
     let mut shot_monitor = None;
     let mut refresh_monitors = false;
-    theme::equal_cards(
-        ui,
-        "shot-row",
-        |ui| {
-            theme::section(ui, icon::GEAR, &t!("shot.after"));
-            let s = &mut settings.screenshot;
-            theme::row(ui, &t!("shot.action"), |ui| {
-                egui::ComboBox::from_id_salt("after-capture")
-                    .selected_text(i18n::after_capture(s.after_capture))
-                    .show_ui(ui, |ui| {
-                        for a in AfterCapture::ALL {
-                            changed |= ui
-                                .selectable_value(&mut s.after_capture, a, i18n::after_capture(a))
-                                .changed();
-                        }
-                    });
+    theme::card(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            theme::section(ui, icon::MONITOR, &t!("shot.displays"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                refresh_monitors =
+                    theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh")).clicked();
             });
-            theme::row(ui, &t!("shot.format"), |ui| {
-                let opts: Vec<_> = ImageFormat::ALL
-                    .iter()
-                    .map(|f| (*f, f.label().to_string()))
-                    .collect();
-                changed |= theme::segmented(ui, &mut s.format, &opts);
-            });
-            theme::row(ui, "", |ui| {
-                changed |= ui
-                    .checkbox(&mut s.hide_window, t!("shot.hide_window"))
-                    .changed();
-            });
-        },
-        |ui| {
-            ui.horizontal(|ui| {
-                theme::section(ui, icon::MONITOR, &t!("shot.displays"));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    refresh_monitors =
-                        theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh"))
-                            .clicked();
-                });
-            });
-            for m in monitors {
-                let label = super::record::monitor_label(m);
-                if ui
-                    .add(
-                        theme::secondary(icon::CAMERA, &label)
-                            .min_size(egui::vec2(ui.available_width(), 28.0)),
-                    )
-                    .clicked()
-                {
-                    shot_monitor = Some(m.clone());
-                }
+        });
+        for m in monitors {
+            let label = super::record::monitor_label(m);
+            if ui
+                .add(
+                    theme::secondary(icon::CAMERA, &label)
+                        .min_size(egui::vec2(ui.available_width(), 28.0)),
+                )
+                .clicked()
+            {
+                shot_monitor = Some(m.clone());
             }
-        },
-    );
-    if changed {
-        actions.push(CaptureUiAction::SettingsChanged);
-    }
+        }
+    });
     if refresh_monitors {
         actions.push(CaptureUiAction::RefreshCatalogs);
     }
@@ -150,14 +112,15 @@ pub fn ui(
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for w in windows {
-                    ui.horizontal(|ui| {
-                        if theme::icon_button(ui, icon::CAMERA, &t!("shot.capture_window"))
-                            .clicked()
-                        {
-                            capture = Some(w.id);
-                        }
-                        ui.add(egui::Label::new(RichText::new(w.label())).truncate());
-                    });
+                    if ui
+                        .add(
+                            theme::secondary(icon::CAMERA, &w.label())
+                                .min_size(egui::vec2(ui.available_width(), 28.0)),
+                        )
+                        .clicked()
+                    {
+                        capture = Some(w.id);
+                    }
                 }
             });
         if let Some(id) = capture {

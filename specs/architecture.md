@@ -42,6 +42,13 @@ capture и позволяют использовать синтетически�
 
 Изолируют dev overrides, стабильное хэширование путей и начальную настройку логирования.
 
+### 1.8. `agent`, `catalogs`, `chat`, `outline`, `pulse`, `retrieval`, `speakers`, `transcript`, `slots`
+
+Определяют настройки агента, каталоги записей, историю чатов, план и разбор записи,
+метрику загрузки моделей, поисковый индекс, имена говорящих и расшифровку записи. `slots`
+держит очереди слотов пулов провайдеров и инструмента поиска: лимиты и привязку подключений
+берёт из `AgentSettings`, выдаёт слот по FIFO.
+
 ## 2. `platform` — операционная система
 
 Крейт зависит от `core`. Он отвечает за native API и платформенные различия.
@@ -69,7 +76,8 @@ Windows Graphics Capture, X11/MIT-SHM и Wayland/PipeWire отличаются �
 
 ## 3. `media` — медиа-операции
 
-Крейт зависит от `core` и `webp-pipeline`. Он не знает о страницах UI.
+Крейт зависит от `core`, `mediaa-ffmpeg`, `mediaa-webp` и `mediaa-gif`. Он не знает
+о страницах UI.
 
 ### 3.1. `recorder`
 
@@ -77,7 +85,7 @@ Windows Graphics Capture, X11/MIT-SHM и Wayland/PipeWire отличаются �
 
 #### 3.1.1. `recorder/request`
 
-Валидирует `RecordingRequest`, профиль записи, WebP runtime mode и limits.
+Валидирует `RecordingRequest`, профиль записи и limits.
 
 #### 3.1.2. `recorder/capture`
 
@@ -85,16 +93,18 @@ Windows Graphics Capture, X11/MIT-SHM и Wayland/PipeWire отличаются �
 
 #### 3.1.3. `recorder/finalize`
 
-Преобразует исходники в итоговые файлы, связывает аудио, выполняет WebP fallback и recovery.
+Преобразует исходники в итоговые файлы, связывает аудио и выполняет recovery.
 
 #### 3.1.4. `recorder/recovery`
 
 Восстанавливает незавершённые пользовательские источники после сбоя.
 
-### 3.2. `animation_backends`, `webp_decode`, `live_webp`
+### 3.2. `animation_backends`, `webp_decode`
 
-Выбирают Direct/Segmented encoder, читают анимационный WebP и выполняют live WebP path.
-`SegmentFailure` различает permanent и retryable сбой сегментного pipeline.
+Кодируют анимацию одним полным проходом Direct: WebP через FFmpeg/libwebp, GIF через
+FFmpeg. Фильтры и WebP-части приходят из `mediaa-webp`/`mediaa-gif`.
+`WebpMode::{Quality, Fast}` задаёт method и ограничения fps/высоты. Сегментного и
+live-WebP больше нет.
 
 ### 3.3. `convert`, `filters`
 
@@ -104,30 +114,19 @@ Windows Graphics Capture, X11/MIT-SHM и Wayland/PipeWire отличаются �
 
 Определяют медиа metadata, hover-preview, proxy и thumbnail operations.
 
-### 3.5. `job`, `error`
+### 3.5. `error`
 
-`job` управляет FFmpeg execution/cancel. `error` классифицирует ошибки, от которых зависит
-пользовательское действие или recovery.
+`error` классифицирует ошибки, от которых зависит пользовательское действие или recovery.
+FFmpeg execution/cancel живёт в отдельном `mediaa-ffmpeg`.
 
-## 4. `webp-pipeline`
+## 4. Форматные крейты
 
-Крейт зависит от `core` и отвечает только за сегментное кодирование animated WebP.
+- `mediaa-ffmpeg` — запуск/отмена FFmpeg, общий слой для форматов.
+- `mediaa-webp` — WebP-граф, normalize/validate/trim, merge animated WebP.
+- `mediaa-gif` — GIF-граф, палитра и dither.
 
-### 4.1. Планирование
-
-Делит временную шкалу на сегменты, рассчитывает frames и tuning parameters.
-
-### 4.2. `scheduler`
-
-Запускает bounded workers, повторы и degradation при доказанной resource failure.
-
-### 4.3. `memory`
-
-Проверяет per-segment и aggregate budget. Это расчётная защита, не измерение RSS FFmpeg.
-
-### 4.4. `webp_parts`
-
-Нормализует, валидирует и объединяет animated WebP с сохранением timing/alpha.
+`mediaa-media` не содержит сегментного pipeline; форматные операции вызываются через
+эти крейты.
 
 ## 5. `storage` — библиотека и кэши
 
@@ -190,7 +189,8 @@ Watcher overflow требует reconciliation.
 #### 7.2.1. `features/recording`
 
 Владеет выбранным target, `Idle/Starting/Recording/Saving`, session и finalizer.
-`Saving` не освобождает результат до завершения cleanup.
+`Saving` не освобождает результат до завершения cleanup. Завершённая запись индексируется в
+библиотеке и копируется в буфер как файл.
 
 #### 7.2.2. `features/capture`
 
@@ -218,6 +218,23 @@ Watcher overflow требует reconciliation.
 
 Содержит одну removal operation с `Selected` и `OlderThan`; bulk age перепроверяется.
 
+#### 7.2.5. `features/agent`
+
+Владеет подключениями, слотами и scheduler очереди. Хост запускается, когда открыт раздел
+Agent или в очереди остались незавершённые задачи; изменение лимитов параллелизма обновляет
+slots живого scheduler, а не пересоздаёт его. Каждый вызов модели идёт через `Gated`: перед
+вызовом он берёт слот группы подключения, если группа задана. Пулы очереди постоянно большие
+и не дублируют лимиты групп. Ключи подключений загружаются и сохраняются через
+`agent/secrets` (OS keychain), а не через `core`. Инференса внутри приложения нет.
+
+#### 7.2.6. `pages/agent`
+
+Рисует UI агента: каталоги, подключения, модели, очередь и лимиты параллелизма. Страницы находятся в
+`pages/agent`, навигация — через `Section::Agent`, вкладки студии — в
+`pages/agent/tab_strip.rs`. Каталоги рисуют собственный split-view в `catalogs::screen`;
+shell не содержит их layout. Фоновые проверки, загрузки и поиск используют общие
+`jobs::Job` и `latest_worker::LatestWorker`.
+
 ### 7.3. Pages
 
 `pages/record`, `pages/audio`, `pages/capture`, `pages/settings`, `pages/about` рисуют конкретные
@@ -239,9 +256,23 @@ Watcher overflow требует reconciliation.
   координатах полного кадра и видны во всём editor viewport. Активный text editor имеет рамку,
   перетаскивается за её поля и фиксируется кликом снаружи. Overlay использует один native viewport;
   opaque viewport создаётся скрытым заранее и переиспользуется при открытии; `Tab` меняет monitor
-  frame через один capture job без создания нового окна.
+  frame через один capture job без создания нового окна. Сохранение области идёт через системный
+  диалог; формат берётся из расширения, а overlay закрывается только после успешной записи.
+  Перед снимком области окно скрывается и выдерживается `HIDE_DELAY`, затем показывается overlay.
 
-## 8. Языковые файлы
+## 8. `agent`, `engine`, `queue`, `eval` — агентские крейты
+
+`queue` зависит только от внешних крейтов и хранит задачи, композиты, пулы ресурсов и
+chunked runs. `engine` зависит от `core`. Чат и эмбеддинги идут через `genai`, у каждого
+подключения свой клиент и свой прокси. Расшифровка, реранк, список моделей и pull Ollama
+остаются своим HTTP. `Gated` — обёртка `Engine`, которая берёт слот группы подключения перед
+каждым запросом к модели. Спикеры и отпечаток приходят в ответе расшифровки, отдельной роли и
+стадии очереди у них нет. Своих моделей и движков инференса нет. `agent` зависит от
+`core`, `media`, `engine` и `queue` и собирает chat loop, инструменты, индексацию и расшифровку;
+секреты подключений хранятся в OS keychain (`agent/secrets`). `eval` зависит от агентских
+крейтов и прогоняет оценку качества.
+
+## 9. Языковые файлы
 
 Переводы:
 
@@ -259,16 +290,22 @@ crates/app/src/i18n.rs
 Locale-ключи должны совпадать во всех языковых файлах. Тесты проверяют отсутствие неизвестных
 ключей в коде и расхождений между locale.
 
-## 9. Зависимости
+## 10. Зависимости
 
 ```text
 core
   <- render
-  <- webp-pipeline
   <- storage
   <- platform
-  <- media <- webp-pipeline
-  <- app <- все перечисленные
+  <- mediaa-ffmpeg
+  <- mediaa-webp
+  <- mediaa-gif
+  <- media <- mediaa-ffmpeg, mediaa-webp, mediaa-gif
+  <- engine
+  <- queue
+  <- agent <- engine, queue
+  <- eval <- agent, engine, queue
+  <- app <- все перечисленные, кроме eval
 ```
 
 `core` — общий фундамент, а не строго чистая domain model. Новые OS API и FFmpeg зависимости в

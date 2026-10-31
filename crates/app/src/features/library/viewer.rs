@@ -257,13 +257,7 @@ impl Viewer {
             return Some(rect);
         }
         let Some(tex) = &self.texture else {
-            egui::Spinner::new()
-                .size(32.0)
-                .color(Color32::WHITE)
-                .paint_at(
-                    ui,
-                    Rect::from_center_size(area.center(), egui::vec2(32.0, 32.0)),
-                );
+            theme::preview_loader(ui, area.center(), 32.0);
             return None;
         };
         let size = tex.size_vec2();
@@ -281,6 +275,13 @@ impl Viewer {
             Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             Color32::WHITE,
         );
+        if self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.preview_generating())
+        {
+            theme::preview_loader(ui, egui::pos2(area.right() - 22.0, area.top() + 22.0), 24.0);
+        }
 
         if self.kind == MediaKind::Image {
             if resp.dragged() {
