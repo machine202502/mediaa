@@ -255,4 +255,8 @@ icacls <repo> /setintegritylevel "(OI)(CI)M" /C /Q
   на метку Low (раздел «Изоляция Windows от песочниц агентов»).
 - Windows snapshot baselines не являются доказательством поведения Linux/macOS.
 - Live tests реального desktop/capture пропускаются без display session.
+- Видео-тесты `cargo test -p mediaa-media --test pipeline scenarios` пишут 30-секундное видео в
+  реальном времени и меряют качество кадров. Параллельная нагрузка (сборка, тесты, clippy,
+  UI-прогоны, индексация) сбивает тайминг, и тесты падают по `quality` без дефекта в продукте.
+  Запускать только отдельно и последовательно, без другой работы на машине.
 - Documentation-only изменение не требует повторного Rust suite.
