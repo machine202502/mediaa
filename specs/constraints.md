@@ -19,6 +19,18 @@
 
 ## Платформы
 
+- Сейчас поддерживается и проверяется только Windows. Linux/macOS-код остаётся в дереве, но
+  не собирается и не тестируется обычным прогоном.
+- Проектный Windows-код находится в `crates/platform/src/windows/`; существующий X11 — в
+  `linux/`; общий POSIX-код Linux/macOS — в `unix/`. Внешние пакеты, уже абстрагирующие ОС,
+  в platform не переносятся.
+- На неподдерживаемой ОС `screen` возвращает `Err`, факультативные window effects —
+  `WindowResult::Unsupported`, `NativeWindow::from_raw` — `WindowOpen::Unsupported`.
+  Единственная обязательная паника — `single_instance::acquire` на неизвестной ОС.
+- `cfg(windows)` вне `crates/platform` допустим только внутри `#[cfg(test)]`.
+- Build-time исключения: `windows_subsystem` в `app/src/main.rs`, `winresource` в
+  `app/build.rs`, выбор `.lib`/`lib*.a` в `ffmpeg/build.rs` и target-секция `tray-icon` в
+  `app/Cargo.toml`.
 - Wayland/PipeWire не гарантирует содержимое alpha-байта в RGBx/BGRx. Курсором управляет
   композитор.
 - macOS AVFoundation всегда рисует курсор.

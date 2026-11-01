@@ -54,8 +54,8 @@ non-Windows-код рабочим и сделать публичный API та�
 
 - Поддерживается только Windows. Linux/macOS не собираются и не тестируются.
 - Существующий non-Windows-код не удаляется и остаётся рабочим там, где он написан:
-  `x11.rs`, `stream.rs`, unix-`single_instance`, non-Windows `cursor`, `cursor_overlay::arrow`,
-  `device_query`, `xcb`, `libc`.
+  `linux/x11.rs`, `unix/stream.rs`, `unix/single_instance.rs`, `unix/cursor.rs`,
+  `cursor_overlay::arrow`, `device_query`, `xcb`, `libc`.
 - `clipboard`, `files`, `audio`, `startup` остаются на верхнем уровне: они построены на
   внешних межплатформенных пакетах.
 - `WindowOpen`, `WindowResult`, `RegionOutline`, `cursor::current` не удаляются.
@@ -126,8 +126,14 @@ crates/platform/src/
   single_instance.rs     # фасад + unix-реализация
   startup.rs
   cursor_overlay.rs
-  stream.rs              # существующий non-Windows захват
-  x11.rs                 # существующий X11
+  linux/
+    mod.rs
+    x11.rs               # существующий X11
+  unix/
+    mod.rs
+    stream.rs            # существующий Linux/macOS захват
+    single_instance.rs
+    cursor.rs
   windows/
     mod.rs
     init.rs              # DPI awareness
@@ -269,8 +275,9 @@ non-Windows-ветки не паникуют там, где есть fallback.
 
 - весь проектный платформенно-зависимый код живёт в `mediaa-platform`;
 - Windows-реализация — в `crates/platform/src/windows/`;
-- `linux/`, `macos/`, `unix/` и подпапки версий Windows/дистрибутивов Linux добавляются
-  только вместе с конкретным кодом, а не заранее;
+- `linux/` и `unix/` содержат существующий код; `macos/` появится с отдельным macOS-only
+  кодом. Новые подпапки версий Windows/дистрибутивов Linux добавляются только вместе с
+  конкретным кодом, а не заранее;
 - внешние пакеты, уже абстрагирующие ОС, не переносятся в platform;
 - публичный API остаётся доменным; факультативные операции возвращают
   `Unsupported`/`Err`/`None`/`false`, обязательные без реализации паникуют;
@@ -281,7 +288,7 @@ non-Windows-ветки не паникуют там, где есть fallback.
 - Не удаляем `x11.rs`, `stream.rs`, unix-`single_instance`, `device_query`, `xcb`, `libc`,
   `cursor_overlay::arrow`, `WindowOpen`, `WindowResult`, `RegionOutline`,
   `cursor::current`.
-- Не создаём `linux/`, `macos/`, `unix/`.
+- Не добавляем новые реализации для Linux/macOS; существующий код лежит в `linux/` и `unix/`.
 - Не трогаем `windows_subsystem`, `winresource`, `ffmpeg/build.rs` и target-секцию
   `tray-icon`.
 - Не добавляем CI/Docker под Linux/macOS.
@@ -300,9 +307,37 @@ non-Windows-ветки не паникуют там, где есть fallback.
 
 - Смена `bool` → `WindowResult` затрагивает `app`; это не удаление фич, но требует правок.
 - WGC/GDI-перенос проверять снимком и записью.
-- Non-Windows-код остаётся недоделанным; `single_instance` unix по-прежнему содержит
-  `super::development_scope()` и, вероятно, не компилируется. Раз Linux/macOS не
-  собираются, это допустимо, но при будущей поддержке нужно исправить.
+- Non-Windows-код остаётся недоделанным и не проверяется. Ошибка
+  `super::development_scope()` в unix-`single_instance` исправлена на
+  `mediaa_core::dev::instance_scope()`, но Linux/macOS всё равно не собираются в этой задаче.
 - `dead_code = deny` может потребовать оставить вызовы перенесённых функций.
-- Для экрана на неизвестной ОС сообщение об ошибке должно попасть в уведомление; нужен
-  тест/проверка, что UI не падает и показывает ошибку.
+- Для экрана на неизвестной ОС сообщение об ошибке должно попасть в уведомление; это
+  проверено только на уровне формирования `Err` и существующих обработчиков `app`.
+
+## Результат
+
+- Windows-код перенесён в `crates/platform/src/windows/`: `screen`, `wgc`, `window`,
+  `outline`, `outline_window`, `cursor`, `keys`, `single_instance`, `startup`, `audio`,
+  `init`. Существующий X11 — в `linux/x11.rs`; Linux/macOS-поток, unix-single-instance и
+  unix-курсор — в `unix/`.
+- `screen` разделён на `mod.rs`, `types.rs`, `capture.rs`; общий `xcap`-код остаётся в
+  `capture.rs`.
+- `void`-сигнатуры window effects и `RegionOutline::show` заменены на `WindowResult`;
+  `WindowResult::Failed` возвращается при отказе Win32, `WindowOpen::Unsupported` остаётся
+  fallback-ом.
+- `platform::init()` добавлен; примеры используют его вместо ручного DPI.
+- `single_instance` на неизвестной ОС паникует; `screen` на неизвестной ОС возвращает `Err`.
+- `boundary.rs` расширен: `build.rs`, `Cargo.toml`, `std::os::*`, `RawWindowHandle::*`,
+  `windows_subsystem`, тестовые модули.
+- Документация обновлена: `specs/architecture.md` §2, `specs/rules.md`,
+  `specs/constraints.md`, `README.md`.
+- `cargo check -p mediaa-platform --lib`, `cargo test -p mediaa-platform --lib`,
+  `cargo test -p mediaa-platform --test boundary`, `cargo clippy -p mediaa-platform
+  --all-targets -- -D warnings`, `cargo fmt --all -- --check`, `cargo check --workspace
+  --lib --bins --profile dev-check` проходят.
+- `cargo check -p mediaa --tests --profile dev-check` проходит. `cargo test -p mediaa --lib
+  --profile test-fast`: 369 passed, 3 failed — это существующие/независимые тесты
+  `bulk_delete_clears_the_deleted_selection`,
+  `deleting_from_the_card_tools_clears_its_selection` и
+  `ui_regression_snapshot_viewer_player`, не связанные с platform.
+- Live-тесты платформы не запускались (нужен desktop-сеанс).

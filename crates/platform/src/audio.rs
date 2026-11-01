@@ -36,7 +36,14 @@ fn wait_ready<T>(
 }
 
 pub fn system_audio_supported() -> bool {
-    cfg!(any(target_os = "windows", target_os = "macos"))
+    #[cfg(windows)]
+    {
+        crate::windows::audio::system_audio_supported()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 pub fn default_input_device() -> Option<String> {

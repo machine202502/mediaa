@@ -44,22 +44,25 @@ pub fn show(
     let width = width.clamp(2, 32);
     let margin = ((width as f32 + GAP) * scale).round() as i32;
     let stroke = (width as f32 * scale).round() as i32;
-    if native.show(
-        mediaa_platform::outline::OutlineGeometry {
-            x: monitor.x + rect.x - margin,
-            y: monitor.y + rect.y - margin,
-            width: rect.w.max(1) + margin * 2,
-            height: rect.h.max(1) + margin * 2,
-            stroke_width: stroke,
-        },
-        if paused {
-            mediaa_platform::outline::OutlineAppearance::Paused
-        } else if blink_on {
-            mediaa_platform::outline::OutlineAppearance::Active
-        } else {
-            mediaa_platform::outline::OutlineAppearance::ActiveDim
-        },
-    ) {
+    if native
+        .show(
+            mediaa_platform::outline::OutlineGeometry {
+                x: monitor.x + rect.x - margin,
+                y: monitor.y + rect.y - margin,
+                width: rect.w.max(1) + margin * 2,
+                height: rect.h.max(1) + margin * 2,
+                stroke_width: stroke,
+            },
+            if paused {
+                mediaa_platform::outline::OutlineAppearance::Paused
+            } else if blink_on {
+                mediaa_platform::outline::OutlineAppearance::Active
+            } else {
+                mediaa_platform::outline::OutlineAppearance::ActiveDim
+            },
+        )
+        .is_ok()
+    {
         return;
     }
     let geometry = geometry(monitor, rect, width);

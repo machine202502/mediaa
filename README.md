@@ -60,7 +60,7 @@ crates/
   ffmpeg/         FFmpeg jobs, probing, frame export, push input and cancellation
   webp/           WebP decode/encode, animation graphs, normalize, validate, trim and merge
   gif/            GIF encode, trim, graphs, palette and dither
-  platform/       OS capture, audio I/O, clipboard/files, cursor and window integration
+  platform/       OS capture, audio I/O, clipboard/files, cursor and window integration; Windows in src/windows/
   engine/         external model connections: OpenAI-compatible HTTP, Ollama and user commands
   agent/          chat loop, tools, indexing, transcription, speaker names, providers and secrets
   queue/          persistent task queue: composites, resource pools, chunked runs
@@ -286,6 +286,9 @@ changed in Settings.
   "Monitor of …" PulseAudio/PipeWire device as the microphone.
 - **Linux Wayland**: screenshots and recordings go through the desktop portal (a permission prompt
   appears); global hotkeys need X11/XWayland.
+- **Supported target**: current checks and releases cover Windows. Existing Linux/macOS code paths
+  stay in the tree but are not verified by the current suite; project Windows code is in
+  `crates/platform/src/windows/`.
 
 ## License
 

@@ -52,28 +52,106 @@ capture и позволяют использовать синтетически�
 
 ## 2. `platform` — операционная система
 
-Крейт зависит от `core`. Он отвечает за native API и платформенные различия.
+Крейт зависит от `core`. Он отвечает за native API и платформенные различия. Сейчас
+поддерживается и проверяется только Windows; Linux/macOS-код остаётся в дереве, но не
+считается поддержанным.
 
-### 2.1. `screen`, `stream`, `wgc`, `x11`
+### 2.1. Раскладка
 
-Перечисляют мониторы и окна, создают источники кадров и реализуют платформенный capture.
-Windows Graphics Capture, X11/MIT-SHM и Wayland/PipeWire отличаются внутри этого слоя.
+```text
+crates/platform/src/
+  screen/
+    mod.rs       # доменный фасад
+    types.rs     # MonitorInfo, WindowInfo, id и состояния
+    capture.rs   # общий xcap-захват, источники, DeferredSource
+  windows/
+    screen.rs    # WGC и Win32-состояние окна
+    wgc.rs
+    window.rs    # NativeWindow, ghost, capture exclusion, прозрачность, анимация
+    outline.rs   # WindowsBackend
+    outline_window.rs
+    cursor.rs    # GDI-курсор
+    keys.rs
+    single_instance.rs
+    startup.rs
+    audio.rs
+    init.rs      # DPI awareness
+  window.rs      # публичные WindowOpen/WindowResult/RegionOutline
+  outline.rs     # публичный OutlineGeometry/RegionOutline
+  cursor.rs      # CursorState/position/current
+  keys.rs
+  single_instance.rs
+  startup.rs
+  audio.rs
+  clipboard.rs
+  files.rs
+  cursor_overlay.rs
+  linux/
+    mod.rs
+    x11.rs       # существующий X11
+  unix/
+    mod.rs
+    stream.rs    # существующий Linux/macOS capture
+    single_instance.rs
+    cursor.rs
+```
 
-### 2.2. `audio`
+Весь проектный Windows-код лежит в `windows/`; существующий Linux/X11 — в `linux/`;
+общий POSIX-код Linux/macOS — в `unix/`. `macos/` появится, когда появится отдельный
+macOS-only код. Общий `xcap`-код остаётся в `screen/capture.rs`, потому что им пользуются
+и Windows, и сохранённые x11/stream-пути. Внешние пакеты, уже абстрагирующие ОС (`xcap`,
+`cpal`, `clipboard-rs`, `opener`, `trash`, `auto-launch`), в папки ОС не переносятся.
 
-Предоставляет микрофоны, system audio, `CpalSource` и confirmation tone.
+### 2.2. `screen`
 
-### 2.3. `clipboard`, `files`
+`screen/mod.rs` — доменный фасад. `screen/types.rs` содержит `MonitorInfo`, `WindowInfo`,
+`MonitorId`, `CaptureWindowId`, `WindowState`. `screen/capture.rs` перечисляет мониторы и
+окна, снимает кадр через `xcap`, держит `MonitorSource`/`WindowSource`/`DeferredSource` и
+общий пересчёт координат. WGC-путь, проверки Win32-окна и screenshot через WGC — в
+`windows/screen.rs`.
 
-Выполняют native clipboard, open/reveal и перемещение файлов в trash.
+На неподдерживаемой ОС `monitors`/`windows`/`capture_*`/`*_source` возвращают `Err`
+«screen capture is not supported on this platform»; `monitor_at` → `None`,
+`monitor_state` → `Disconnected`, `window_status` → `Missing`. Приложение показывает
+ошибку через существующие уведомления.
 
-### 2.4. `window`, `outline`, `region_marker`, `cursor`, `cursor_overlay`
+### 2.3. `window`, `outline`, `cursor`, `cursor_overlay`
 
-Управляют native window visibility, подсветкой области и отрисовкой курсора.
+`window.rs` хранит непрозрачный `NativeWindow`, `WindowOpen`, `WindowResult` и приватный
+`RegionOutline`. Win32-тела, capture exclusion, прозрачность, анимация открытия и native
+layered-окно контура — в `windows/window.rs`, `windows/outline.rs`,
+`windows/outline_window.rs`.
+
+`outline::RegionOutline::show` и window effects возвращают `WindowResult`:
+`Ok` — выполнено, `Unsupported` — ОС/возможность недоступна, `Failed` — Win32-вызов не
+удался. `NativeWindow::from_raw` на не-Win32 возвращает `WindowOpen::Unsupported`.
+`cursor::current`/`position` сохраняют `Option`-семантику; GDI-курсор — в
+`windows/cursor.rs`, non-Windows `device_query` — в `cursor.rs`.
+
+### 2.4. `audio`, `clipboard`, `files`
+
+`audio` — cpal-фасад: микрофоны, system audio, `AudioOut` и confirmation tone.
+`system_audio_supported` — `true` в `windows/audio.rs`, `false` на остальных.
+`clipboard` и `files` — обёртки над внешними `clipboard-rs`, `opener`, `trash`; они не
+содержат проектного платформенного кода и остаются на верхнем уровне.
 
 ### 2.5. `single_instance`, `startup`, `keys`
 
-Обеспечивают single-instance scope, start mode и OS-level keyboard polling.
+`single_instance` — фасад над Win32 mutex/event (`windows/single_instance.rs`) и unix
+flock/socket (`single_instance.rs`); на неизвестной ОС `acquire` паникует.
+`startup` — auto-launch; Windows-цитирование пути — в `windows/startup.rs`.
+`keys::print_screen_down` — Win32-опрос в `windows/keys.rs`, `false` на остальных.
+
+### 2.6. Правило раскладки
+
+- Весь проектный платформенно-зависимый код живёт в `mediaa-platform`.
+- Windows-реализация — в `crates/platform/src/windows/`.
+- `linux/`, `macos/`, `unix/` содержат существующий код; новые подпапки версий
+  Windows/дистрибутивов Linux добавляются только вместе с конкретным кодом, а не заранее.
+- Внешние пакеты, уже абстрагирующие ОС, не переносятся в platform.
+- Публичный API остаётся доменным. Факультативные операции возвращают
+  `Unsupported`/`Err`/`None`/`false`; обязательные без реализации паникуют.
+- `cfg(windows)` в тестах допустим только внутри `#[cfg(test)]`.
 
 ## 3. `media` — медиа-операции
 

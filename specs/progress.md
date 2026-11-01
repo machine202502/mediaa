@@ -117,10 +117,11 @@
 | SET-1 | 31.10.26 13:20 | Простые/расширенные настройки: простой режим по умолчанию, сброс скрытых полей, snapshots и запись | готово | [simple-advanced-settings.md](tasks/simple-advanced-settings.md) |
 | PLAT-1 | 31.10.26 13:40 | Чистая граница платформы: скрыты OS-модули, добавлены audio-фабрики и WindowResult, архитектурный тест | готово | [platform-boundary.md](tasks/platform-boundary.md) |
 | DOC-UI-1 | 01.11.26 01:35 | Описать reusable widgets, темы и пути пользовательских настроек в архитектуре | готово | [ui-docs-widgets-themes-settings.md](tasks/ui-docs-widgets-themes-settings.md) |
-| PLAT-2.1 | 01.11.26 04:12 | Каркас `windows/` и перенос screen/capture/WGC | ожидание | [platform-layout.md](tasks/platform-layout.md) |
-| PLAT-2.2 | 01.11.26 04:12 | Window/outline: перенос Win32 и `bool` → `WindowResult` | ожидание | [platform-layout.md](tasks/platform-layout.md) |
-| PLAT-2.3 | 01.11.26 04:12 | Cursor/keys/single_instance/startup/audio в `windows/` | ожидание | [platform-layout.md](tasks/platform-layout.md) |
-| PLAT-2.4 | 01.11.26 04:12 | `platform::init()` и DPI awareness в примерах | ожидание | [platform-layout.md](tasks/platform-layout.md) |
-| PLAT-2.5 | 01.11.26 04:12 | Unsupported-политика: ошибки экрана и уведомления | ожидание | [platform-layout.md](tasks/platform-layout.md) |
-| PLAT-2.6 | 01.11.26 04:12 | Boundary-тест и финальные проверки | ожидание | [platform-layout.md](tasks/platform-layout.md) |
-| PLAT-2.7 | 01.11.26 04:47 | Документация: архитектура, правила и раскладка платформенного кода | ожидание | [platform-layout.md](tasks/platform-layout.md) |
+| PLAT-2.1 | 01.11.26 04:12 | Каркас `windows/` и перенос screen/capture/WGC | готово | [platform-layout.md](tasks/platform-layout.md) |
+| PLAT-2.2 | 01.11.26 04:12 | Window/outline: перенос Win32 и `bool` → `WindowResult` | готово | [platform-layout.md](tasks/platform-layout.md) |
+| PLAT-2.3 | 01.11.26 04:12 | Cursor/keys/single_instance/startup/audio в `windows/` | готово | [platform-layout.md](tasks/platform-layout.md) |
+| PLAT-2.4 | 01.11.26 04:12 | `platform::init()` и DPI awareness в примерах | готово | [platform-layout.md](tasks/platform-layout.md) |
+| PLAT-2.5 | 01.11.26 04:12 | Unsupported-политика: ошибки экрана и уведомления | готово | [platform-layout.md](tasks/platform-layout.md) |
+| PLAT-2.6 | 01.11.26 04:12 | Boundary-тест и финальные проверки | готово | [platform-layout.md](tasks/platform-layout.md) |
+| PLAT-2.7 | 01.11.26 04:47 | Документация: архитектура, правила и раскладка платформенного кода | готово | [platform-layout.md](tasks/platform-layout.md) |
+| PLAT-2.8 | 01.11.26 05:44 | Разложить non-Windows файлы по `linux/` и `unix/` | готово | [platform-layout.md](tasks/platform-layout.md) |

@@ -122,6 +122,21 @@
 - Общие interaction/geometry tests выполняются на всех платформах; platform-specific snapshots
   не выдаются за общий контракт.
 
+## Платформенный код
+
+- Весь проектный платформенно-зависимый код живёт в `crates/platform`.
+- Windows-реализация — в `crates/platform/src/windows/`.
+- `linux/` и `unix/` содержат существующий код; `macos/` появится с отдельным macOS-only
+  кодом. Новые подпапки версий Windows/дистрибутивов Linux добавляются только вместе с
+  конкретным кодом, а не заранее.
+- Внешние пакеты, уже абстрагирующие ОС (`xcap`, `cpal`, `clipboard-rs`, `opener`, `trash`,
+  `auto-launch`, `tray-icon` и т.п.), не переносятся в platform.
+- Публичный API platform остаётся доменным. Факультативные операции возвращают
+  `Unsupported`/`Err`/`None`/`false`; обязательные без реализации паникуют.
+- `cfg(windows)` вне `crates/platform` допустим только внутри `#[cfg(test)]`; build-time
+  исключения (`windows_subsystem`, `winresource`, FFmpeg build) фиксируются в
+  `specs/constraints.md`.
+
 ## Код
 
 - Нет обратной совместимости: миграций, deprecated aliases, compatibility re-exports,

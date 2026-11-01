@@ -553,9 +553,9 @@ impl State {
         }
         self.frames_drawn += 1;
         if self.frames_drawn == 1 {
-            mediaa_platform::window::disable_open_animation(WINDOW_TITLE);
+            let _ = mediaa_platform::window::disable_open_animation(WINDOW_TITLE);
             if !mediaa_core::dev::picker_enabled() {
-                mediaa_platform::window::exclude_from_capture(WINDOW_TITLE);
+                let _ = mediaa_platform::window::exclude_from_capture(WINDOW_TITLE);
             }
         }
         if self.frames_drawn < 2 {

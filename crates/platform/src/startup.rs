@@ -39,10 +39,7 @@ fn launcher(mode: AutoStart) -> anyhow::Result<AutoLaunch> {
 }
 
 fn launcher_for(executable: &Path, mode: AutoStart) -> anyhow::Result<AutoLaunch> {
-    #[cfg(windows)]
-    let app_path = format!("\"{}\"", executable.display());
-    #[cfg(not(windows))]
-    let app_path = executable.to_string_lossy().into_owned();
+    let app_path = app_path(executable);
     AutoLaunchBuilder::new()
         .set_app_name(APP_IDENTITY.name)
         .set_app_path(&app_path)
@@ -52,6 +49,17 @@ fn launcher_for(executable: &Path, mode: AutoStart) -> anyhow::Result<AutoLaunch
         .set_macos_launch_mode(MacOSLaunchMode::LaunchAgent)
         .build()
         .context("cannot configure MediaA autostart")
+}
+
+fn app_path(executable: &Path) -> String {
+    #[cfg(windows)]
+    {
+        crate::windows::startup::app_path(executable)
+    }
+    #[cfg(not(windows))]
+    {
+        executable.to_string_lossy().into_owned()
+    }
 }
 
 #[cfg(test)]

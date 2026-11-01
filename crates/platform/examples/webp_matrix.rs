@@ -188,17 +188,6 @@ impl Args {
     }
 }
 
-fn dpi_aware() {
-    #[cfg(windows)]
-    // SAFETY: process-wide setting, called before any capture exists.
-    unsafe {
-        use windows_sys::Win32::UI::HiDpi::{
-            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-        };
-        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    }
-}
-
 fn region(size: (u32, u32), monitor: &MonitorInfo) -> Rect {
     let w = size.0.min(monitor.width) as i32 & !1;
     let h = size.1.min(monitor.height) as i32 & !1;
@@ -319,7 +308,7 @@ fn wait_finished(
 }
 
 fn main() -> anyhow::Result<()> {
-    dpi_aware();
+    mediaa_platform::init();
     mediaa_media::preview_cache::set_full_previews_enabled(false);
     mediaa_media::preview_cache::set_animated_previews_enabled(false);
     let args = Args::parse()?;

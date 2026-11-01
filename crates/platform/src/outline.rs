@@ -1,3 +1,5 @@
+use crate::window::WindowResult;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutlineGeometry {
     pub x: i32,
@@ -15,7 +17,7 @@ pub enum OutlineAppearance {
 }
 
 pub(crate) trait RegionOutlineBackend {
-    fn show(&mut self, geometry: OutlineGeometry, appearance: OutlineAppearance) -> bool;
+    fn show(&mut self, geometry: OutlineGeometry, appearance: OutlineAppearance) -> WindowResult;
     fn hide(&mut self);
 }
 
@@ -31,7 +33,11 @@ impl RegionOutline {
         }
     }
 
-    pub fn show(&mut self, geometry: OutlineGeometry, appearance: OutlineAppearance) -> bool {
+    pub fn show(
+        &mut self,
+        geometry: OutlineGeometry,
+        appearance: OutlineAppearance,
+    ) -> WindowResult {
         self.backend.show(geometry, appearance)
     }
 
@@ -51,35 +57,11 @@ impl Default for RegionOutline {
 fn platform_backend() -> Box<dyn RegionOutlineBackend> {
     #[cfg(windows)]
     {
-        Box::new(WindowsBackend::default())
+        crate::windows::outline::backend()
     }
     #[cfg(not(windows))]
     {
         Box::new(UnsupportedBackend)
-    }
-}
-
-#[cfg(windows)]
-#[derive(Default)]
-struct WindowsBackend {
-    inner: crate::window::RegionOutline,
-}
-
-#[cfg(windows)]
-impl RegionOutlineBackend for WindowsBackend {
-    fn show(&mut self, geometry: OutlineGeometry, appearance: OutlineAppearance) -> bool {
-        self.inner.show(
-            geometry.x,
-            geometry.y,
-            geometry.width,
-            geometry.height,
-            geometry.stroke_width,
-            appearance,
-        )
-    }
-
-    fn hide(&mut self) {
-        self.inner.hide();
     }
 }
 
@@ -88,8 +70,8 @@ struct UnsupportedBackend;
 
 #[cfg(not(windows))]
 impl RegionOutlineBackend for UnsupportedBackend {
-    fn show(&mut self, _geometry: OutlineGeometry, _appearance: OutlineAppearance) -> bool {
-        false
+    fn show(&mut self, _geometry: OutlineGeometry, _appearance: OutlineAppearance) -> WindowResult {
+        WindowResult::Unsupported
     }
 
     fn hide(&mut self) {}
@@ -102,8 +84,12 @@ mod tests {
     struct Fake;
 
     impl RegionOutlineBackend for Fake {
-        fn show(&mut self, _geometry: OutlineGeometry, _appearance: OutlineAppearance) -> bool {
-            true
+        fn show(
+            &mut self,
+            _geometry: OutlineGeometry,
+            _appearance: OutlineAppearance,
+        ) -> WindowResult {
+            WindowResult::Ok
         }
 
         fn hide(&mut self) {}
@@ -119,7 +105,7 @@ mod tests {
             height: 4,
             stroke_width: 5,
         };
-        assert!(outline.show(geometry, OutlineAppearance::Active));
+        assert!(outline.show(geometry, OutlineAppearance::Active).is_ok());
         outline.hide();
     }
 }

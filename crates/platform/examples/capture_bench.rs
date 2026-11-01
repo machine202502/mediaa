@@ -9,14 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 fn main() -> anyhow::Result<()> {
-    #[cfg(windows)]
-    // SAFETY: process-wide setting, called before any capture exists.
-    unsafe {
-        use windows_sys::Win32::UI::HiDpi::{
-            SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-        };
-        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    }
+    mediaa_platform::init();
     mediaa_core::logging::init(
         &std::env::temp_dir().join("mediaa-capture-bench"),
         log::LevelFilter::Info,
