@@ -21,9 +21,6 @@ impl App {
                     Err(error) => {
                         self.show_window(ctx);
                         self.error(t!("err.copy_failed", error = error));
-                        if !self.quit_when_idle {
-                            self.page = Page::Library;
-                        }
                     }
                 },
                 Purpose::Silent => {

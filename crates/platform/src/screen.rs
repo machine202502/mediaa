@@ -239,7 +239,7 @@ pub fn capture_window(id: CaptureWindowId) -> anyhow::Result<Frame> {
     Ok(Frame::from_image(img))
 }
 
-pub struct DeferredSource {
+pub(crate) struct DeferredSource {
     name: String,
     size: (u32, u32),
     probe: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -408,7 +408,7 @@ pub fn deferred_monitor_source(
     )?))
 }
 
-pub struct MonitorSource {
+pub(crate) struct MonitorSource {
     monitor: xcap::Monitor,
     name: String,
     region: Option<Rect>,
@@ -487,7 +487,7 @@ impl FrameSource for MonitorSource {
     }
 }
 
-pub struct WindowSource {
+pub(crate) struct WindowSource {
     window: xcap::Window,
     id: CaptureWindowId,
     name: String,

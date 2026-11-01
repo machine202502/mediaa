@@ -51,7 +51,7 @@ pub(super) fn toolbar_tools(
     )
     .on_hover_text(t!("lib.search_help"));
     let sort = &mut controller.query.sort;
-    egui::ComboBox::from_id_salt("lib-sort")
+    crate::theme::combo_box("lib-sort")
         .width(150.0)
         .selected_text(sort_label(*sort))
         .show_ui(ui, |ui| {
@@ -126,6 +126,7 @@ pub(super) fn library_tile(
     let mut action = None;
     let mut media_resp = None;
     let mut name_resp: Option<egui::Response> = None;
+    let mut strip_clicked = false;
     let tile_rect = Rect::from_min_size(
         ui.cursor().min,
         egui::vec2(width, width * MEDIA_ASPECT + 70.0),
@@ -142,9 +143,10 @@ pub(super) fn library_tile(
         }
     }
     let hovered = controller.hovered.as_ref() == Some(&e.path);
+    let selected = controller.selected.iter().any(|path| path == &e.path);
     let shown = egui::Frame::new()
-        .fill(p.card)
-        .stroke(Stroke::new(TILE_BORDER, p.border))
+        .fill(if selected { p.accent_soft } else { p.card })
+        .stroke(Stroke::new(2.0, if selected { p.accent } else { p.border }))
         .corner_radius(CornerRadius::same(10))
         .show(ui, |ui| {
             ui.vertical(|ui| {
@@ -287,6 +289,20 @@ pub(super) fn library_tile(
                     painter.circle_filled(egui::pos2(x, y), 6.0, Color32::WHITE);
                     painter.circle_stroke(egui::pos2(x, y), 6.0, Stroke::new(1.5, p.accent));
                 }
+                let timeline_click = timeline.is_some()
+                    && ui.input(|i| {
+                        i.pointer
+                            .interact_pos()
+                            .is_some_and(|pos| pos.y >= rect.bottom() - SCRUB_ZONE)
+                    });
+                if resp.clicked()
+                    && !resp.double_clicked()
+                    && !timeline_click
+                    && !controller.cleanup_active()
+                {
+                    let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+                    controller.select_click(&e.path, ctrl, shift);
+                }
                 if resp.double_clicked() && !controller.cleanup_active() {
                     action = Some(LibraryAction::View(e.path.clone(), e.kind, info));
                 }
@@ -294,6 +310,12 @@ pub(super) fn library_tile(
                 egui::Frame::new()
                     .inner_margin(egui::Margin::symmetric(STRIP_PAD, 6))
                     .show(ui, |ui| {
+                        let strip = ui.interact(
+                            ui.max_rect(),
+                            ui.id().with(("select-strip", &e.path)),
+                            Sense::click(),
+                        );
+                        strip_clicked = strip.clicked();
                         let inner = width - 2.0 * f32::from(STRIP_PAD);
                         ui.set_width(inner);
                         ui.set_max_width(inner);
@@ -306,13 +328,22 @@ pub(super) fn library_tile(
                         name_resp =
                             Some(ui.add(egui::Label::new(label).truncate().sense(Sense::click())));
                         if !controller.cleanup_active() {
-                            if let Some(a) = tools_strip(ui, &tools(e)) {
+                            let (a, tools_clicked) = tools_strip(ui, &tools(e));
+                            if tools_clicked {
+                                strip_clicked = false;
+                            }
+                            if let Some(a) = a {
                                 action = Some(a);
                             }
                         }
                     });
             })
         });
+    let strip_clicked = strip_clicked || name_resp.as_ref().is_some_and(|resp| resp.clicked());
+    if action.is_none() && strip_clicked && !controller.cleanup_active() {
+        let (ctrl, shift) = ui.input(|i| (i.modifiers.command, i.modifiers.shift));
+        controller.select_click(&e.path, ctrl, shift);
+    }
     if let Some(target) = media_resp
         .into_iter()
         .chain(name_resp)

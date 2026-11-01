@@ -12,6 +12,8 @@ pub enum ThemePreference {
     System,
     Light,
     Dark,
+    Lime,
+    Peach,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -95,7 +97,6 @@ pub struct RecordSettings {
     pub video_quality: u8,
     pub microphone: MicChoice,
     pub system_audio: bool,
-    pub audio_in_every_file: bool,
     pub record_cursor: bool,
     pub output_height: u32,
     pub hide_to_tray: bool,
@@ -170,7 +171,6 @@ impl Default for RecordSettings {
             video_quality: 100,
             microphone: MicChoice::Auto,
             system_audio: true,
-            audio_in_every_file: true,
             record_cursor: true,
             output_height: 2160,
             hide_to_tray: true,
@@ -204,25 +204,39 @@ impl Default for AudioRecordSettings {
 
 impl AudioRecordSettings {
     pub fn preset(&self) -> Option<RecordPreset> {
-        RecordPreset::AUDIO.into_iter().find(|preset| {
-            self.kbps
-                == match preset {
-                    RecordPreset::Quality => 256,
-                    RecordPreset::Medium => 192,
-                    RecordPreset::Fast => 128,
-                }
-        })
+        if self.format.lossless() {
+            return None;
+        }
+        RecordPreset::AUDIO
+            .into_iter()
+            .find(|preset| self.kbps == audio_preset_kbps(self.format, *preset))
     }
 
     pub fn apply_preset(&mut self, preset: RecordPreset) {
-        self.kbps = match preset {
-            RecordPreset::Quality => 256,
-            RecordPreset::Medium => 192,
-            RecordPreset::Fast => 128,
-        };
+        if !self.format.lossless() {
+            self.kbps = audio_preset_kbps(self.format, preset);
+        }
     }
 }
 
+pub fn audio_default_kbps(format: AudioFormat) -> Option<u32> {
+    (!format.lossless()).then(|| audio_preset_kbps(format, RecordPreset::Medium))
+}
+
+fn audio_preset_kbps(format: AudioFormat, preset: RecordPreset) -> u32 {
+    match (format, preset) {
+        (AudioFormat::Mp3, RecordPreset::Quality) => 320,
+        (AudioFormat::Mp3, RecordPreset::Medium) => 256,
+        (AudioFormat::Mp3, RecordPreset::Fast) => 128,
+        (AudioFormat::M4a, RecordPreset::Quality) => 256,
+        (AudioFormat::M4a, RecordPreset::Medium) => 192,
+        (AudioFormat::M4a, RecordPreset::Fast) => 128,
+        (AudioFormat::Ogg, RecordPreset::Quality) => 192,
+        (AudioFormat::Ogg, RecordPreset::Medium) => 128,
+        (AudioFormat::Ogg, RecordPreset::Fast) => 96,
+        (AudioFormat::Wav | AudioFormat::Flac, _) => DEFAULT_MUSIC_AUDIO_KBPS,
+    }
+}
 pub const AUDIO_BITRATES: [u32; 5] = [96, 128, 192, 256, 320];
 
 pub const OUTPUT_HEIGHTS: [u32; 5] = [2160, 1440, 1080, 720, 480];
@@ -284,12 +298,35 @@ impl RecordSettings {
         }
     }
 
-    pub fn switch_output(
-        &mut self,
-        next: OutputKind,
-        anim: &mut AnimationQuality,
-        default_animation: RecordPreset,
-    ) {
+    pub fn simple_preset(&self, anim: &AnimationQuality) -> Option<RecordPreset> {
+        match self.output {
+            OutputKind::Video(_) => RecordPreset::VIDEO.into_iter().find(|preset| {
+                let (fps, _, quality) = video_preset_values(*preset);
+                self.fps == fps && self.video_quality == quality
+            }),
+            OutputKind::Anim(AnimFormat::Webp) => {
+                RecordPreset::ANIMATION.into_iter().find(|preset| {
+                    let (fps, _, quality) = animation_preset_values(*preset);
+                    self.fps == fps
+                        && anim.webp_quality == quality
+                        && self.webp_mode == preset_webp_mode(*preset)
+                })
+            }
+            OutputKind::Anim(AnimFormat::Gif) => {
+                RecordPreset::ANIMATION.into_iter().find(|preset| {
+                    let (fps, _, colors, dither) = gif_preset_values(*preset);
+                    self.fps == fps && anim.gif_colors == colors && anim.gif_dither == dither
+                })
+            }
+            OutputKind::Audio(_) => None,
+        }
+    }
+
+    pub fn apply_simple_preset(&mut self, preset: RecordPreset, anim: &mut AnimationQuality) {
+        self.apply_preset(preset, anim);
+    }
+
+    pub fn switch_output(&mut self, next: OutputKind, anim: &mut AnimationQuality) {
         if self.output == next {
             return;
         }
@@ -302,8 +339,8 @@ impl RecordSettings {
             saved.apply(self, anim);
         } else {
             let preset = match next {
-                OutputKind::Anim(_) => default_animation,
-                _ => RecordPreset::Quality,
+                OutputKind::Anim(_) => RecordPreset::Fast,
+                _ => RecordPreset::Medium,
             };
             self.apply_preset(preset, anim);
         }
@@ -360,11 +397,19 @@ impl RecordSettings {
     }
 }
 
+fn simple_height(height: u32) -> u32 {
+    match height {
+        0 | 1080.. => 1080,
+        720..=1079 => 720,
+        _ => 480,
+    }
+}
+
 fn video_preset_values(preset: RecordPreset) -> (u32, u32, u8) {
     match preset {
         RecordPreset::Quality => (60, 2160, 100),
-        RecordPreset::Medium => (60, 1440, 85),
-        RecordPreset::Fast => (30, 1080, 70),
+        RecordPreset::Medium => (60, 1080, 85),
+        RecordPreset::Fast => (30, 720, 70),
     }
 }
 
@@ -481,9 +526,17 @@ pub enum RecordProfile {
     Region,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub advanced_settings: bool,
+    #[serde(default = "default_true")]
+    pub hide_recording_preparation: bool,
+    pub notifications_enabled: bool,
     pub theme: ThemePreference,
     pub language: Option<String>,
     pub media_dir: PathBuf,
@@ -506,6 +559,7 @@ pub struct Settings {
     pub tray_progress: bool,
     pub animated_previews: bool,
     pub full_preview_videos: bool,
+    pub viewer_volume: f32,
     pub stop_recording_on_left_click: bool,
     pub highlight_recording_region: bool,
     pub recording_region_outline_width: u32,
@@ -513,12 +567,18 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self {
+        let mut settings = Self {
+            advanced_settings: false,
+            hide_recording_preparation: true,
+            notifications_enabled: false,
             theme: ThemePreference::System,
             language: None,
             media_dir: paths::default_media_dir(),
             convert_dir: None,
-            record: RecordSettings::default(),
+            record: RecordSettings {
+                output: OutputKind::Video(VideoContainer::Mkv),
+                ..RecordSettings::default()
+            },
             anim: AnimationQuality::default(),
             hotkey_record: RecordSettings {
                 output: OutputKind::Video(VideoContainer::Mkv),
@@ -526,7 +586,7 @@ impl Default for Settings {
             },
             hotkey_anim: AnimationQuality::default(),
             region_record: RecordSettings {
-                output: OutputKind::Anim(AnimFormat::Webp),
+                output: OutputKind::Anim(AnimFormat::Gif),
                 fps: 30,
                 output_height: 720,
                 webp_mode: WebpMode::Fast,
@@ -536,7 +596,7 @@ impl Default for Settings {
                 gif_dither: GifDither::Bayer,
                 ..AnimationQuality::default()
             },
-            hotkey_screen: ScreenChoice::Primary,
+            hotkey_screen: ScreenChoice::UnderCursor,
             audio_record: AudioRecordSettings::default(),
             hotkey_audio: AudioRecordSettings::default(),
             hotkeys: HotkeySettings::default(),
@@ -548,10 +608,13 @@ impl Default for Settings {
             tray_progress: true,
             animated_previews: true,
             full_preview_videos: true,
+            viewer_volume: 1.0,
             stop_recording_on_left_click: true,
             highlight_recording_region: true,
             recording_region_outline_width: 4,
-        }
+        };
+        settings.apply_simple_mode();
+        settings
     }
 }
 
@@ -581,10 +644,96 @@ impl Settings {
     }
 
     pub fn load() -> Settings {
-        Self::load_from(&paths::settings_file())
+        let path = paths::settings_file();
+        if path.is_file() {
+            return Self::load_from(&path);
+        }
+        if let Some(legacy) = paths::legacy_settings_file().filter(|path| path.is_file()) {
+            let settings = Self::load_from(&legacy);
+            if let Err(error) = settings.save_to(&path) {
+                log::warn!("settings migration: {error:#}");
+            }
+            return settings;
+        }
+        Self::default()
+    }
+
+    pub fn set_advanced_settings(&mut self, advanced: bool) {
+        self.advanced_settings = advanced;
+        if !advanced {
+            self.apply_simple_mode();
+        }
+    }
+
+    pub fn apply_simple_mode(&mut self) {
+        if !matches!(
+            self.record.output,
+            OutputKind::Video(VideoContainer::Mp4 | VideoContainer::Mkv)
+        ) {
+            self.record.output = OutputKind::Video(VideoContainer::Mkv);
+        }
+        if !matches!(
+            self.region_record.output,
+            OutputKind::Anim(AnimFormat::Gif | AnimFormat::Webp)
+        ) {
+            self.region_record.output = OutputKind::Anim(AnimFormat::Gif);
+        }
+        if !matches!(
+            self.hotkey_record.output,
+            OutputKind::Video(VideoContainer::Mp4 | VideoContainer::Mkv)
+        ) {
+            self.hotkey_record.output = OutputKind::Video(VideoContainer::Mkv);
+        }
+        self.record.output_height = simple_height(self.record.output_height);
+        self.region_record.output_height = simple_height(self.region_record.output_height);
+        self.hotkey_record.output_height = simple_height(self.hotkey_record.output_height);
+
+        for r in [
+            &mut self.record,
+            &mut self.region_record,
+            &mut self.hotkey_record,
+        ] {
+            r.record_cursor = true;
+            r.show_no_signal = true;
+            r.allow_unavailable_sources = false;
+            r.hide_to_tray = true;
+        }
+        for audio in [&mut self.audio_record, &mut self.hotkey_audio] {
+            if !AudioFormat::SIMPLE.contains(&audio.format) {
+                audio.format = AudioFormat::Mp3;
+            }
+            if audio.preset().is_none() {
+                audio.apply_preset(RecordPreset::Medium);
+            }
+        }
+
+        let video = if matches!(self.record.output, OutputKind::Anim(_)) {
+            RecordPreset::Fast
+        } else {
+            RecordPreset::Medium
+        };
+        self.record.apply_simple_preset(video, &mut self.anim);
+        self.region_record
+            .apply_simple_preset(RecordPreset::Fast, &mut self.region_anim);
+        self.hotkey_record
+            .apply_simple_preset(RecordPreset::Medium, &mut self.hotkey_anim);
     }
 
     pub fn sanitized(mut self) -> Settings {
+        if !self.advanced_settings {
+            if !matches!(
+                self.hotkey_record.output,
+                OutputKind::Video(VideoContainer::Mp4 | VideoContainer::Mkv)
+            ) {
+                self.hotkey_record.output = OutputKind::Video(VideoContainer::Mkv);
+            }
+            if !matches!(
+                self.region_record.output,
+                OutputKind::Anim(AnimFormat::Gif | AnimFormat::Webp)
+            ) {
+                self.region_record.output = OutputKind::Anim(AnimFormat::Gif);
+            }
+        }
         for r in [
             &mut self.record,
             &mut self.hotkey_record,
@@ -610,6 +759,7 @@ impl Settings {
             self.start_in_tray = false;
         }
         self.recording_region_outline_width = self.recording_region_outline_width.clamp(2, 32);
+        self.viewer_volume = self.viewer_volume.clamp(0.0, 1.0);
         self
     }
 
@@ -676,6 +826,23 @@ mod tests {
         assert_eq!(Settings::load_from(&path), s);
     }
 
+    #[test]
+    fn theme_is_system_by_default() {
+        assert_eq!(Settings::default().theme, ThemePreference::System);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        assert_eq!(
+            Settings::load_from(&path).theme,
+            ThemePreference::System,
+            "a missing or fresh settings file uses the system theme"
+        );
+        std::fs::write(&path, "advanced_settings = true\n").unwrap();
+        assert_eq!(
+            Settings::load_from(&path).theme,
+            ThemePreference::System,
+            "a settings file without a theme uses the system theme"
+        );
+    }
     #[test]
     fn missing_file_gives_defaults() {
         let s = Settings::load_from(Path::new("/nope/settings.toml"));
@@ -814,6 +981,24 @@ mod tests {
     }
 
     #[test]
+    fn viewer_volume_is_persisted_and_clamped() {
+        assert_eq!(Settings::default().viewer_volume, 1.0);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.toml");
+        std::fs::write(&path, "viewer_volume = 0.35\n").unwrap();
+        assert_eq!(Settings::load_from(&path).viewer_volume, 0.35);
+        let s = Settings {
+            viewer_volume: 0.35,
+            ..Settings::default()
+        };
+        s.save_to(&path).unwrap();
+        assert_eq!(Settings::load_from(&path).viewer_volume, 0.35);
+        std::fs::write(&path, "viewer_volume = 2.0\n").unwrap();
+        assert_eq!(Settings::load_from(&path).viewer_volume, 1.0);
+        std::fs::write(&path, "viewer_volume = -1.0\n").unwrap();
+        assert_eq!(Settings::load_from(&path).viewer_volume, 0.0);
+    }
+    #[test]
     fn values_are_clamped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.toml");
@@ -883,11 +1068,7 @@ mod tests {
         let r = RecordSettings::default();
         assert_eq!(r.output, OutputKind::Video(VideoContainer::Mp4));
         assert!(
-            r.record_audio
-                && r.system_audio
-                && r.microphone == MicChoice::Auto
-                && r.audio_in_every_file
-                && r.record_cursor
+            r.record_audio && r.system_audio && r.microphone == MicChoice::Auto && r.record_cursor
         );
         assert_eq!(r.webp_mode, WebpMode::Fast);
         assert!(!r.allow_unavailable_sources);
@@ -901,14 +1082,14 @@ mod tests {
         );
         assert_eq!(
             (s.hotkey_record.fps, s.hotkey_record.video_quality),
-            (60, 100)
+            (60, 85)
         );
         assert!(
             s.hotkey_record.record_audio
                 && s.hotkey_record.system_audio
                 && s.hotkey_record.microphone == MicChoice::Auto
         );
-        assert_eq!(s.region_record.output, OutputKind::Anim(AnimFormat::Webp));
+        assert_eq!(s.region_record.output, OutputKind::Anim(AnimFormat::Gif));
         assert_eq!(
             (s.region_record.fps, s.region_record.output_height),
             (30, 720)
@@ -921,13 +1102,14 @@ mod tests {
             s.region_record.preset(&s.region_anim),
             Some(RecordPreset::Fast)
         );
-        assert_eq!(s.record.preset(&s.anim), Some(RecordPreset::Quality));
+        assert_eq!(s.record.simple_preset(&s.anim), Some(RecordPreset::Medium));
+        assert_eq!(s.record.output_height, 1080);
         assert_eq!(
-            s.hotkey_record.preset(&s.hotkey_anim),
-            Some(RecordPreset::Quality)
+            s.hotkey_record.simple_preset(&s.hotkey_anim),
+            Some(RecordPreset::Medium)
         );
-        assert_eq!(s.audio_record.preset(), Some(RecordPreset::Quality));
-        assert_eq!(s.hotkey_screen, ScreenChoice::Primary);
+        assert_eq!(s.audio_record.preset(), Some(RecordPreset::Medium));
+        assert_eq!(s.hotkey_screen, ScreenChoice::UnderCursor);
         let h = &s.hotkeys;
         assert!([
             &h.region_screenshot,
@@ -938,6 +1120,51 @@ mod tests {
         ]
         .iter()
         .all(|k| k.is_empty()));
+    }
+
+    #[test]
+    fn simple_mode_resets_hidden_values_and_formats() {
+        let mut s = Settings::default();
+        s.set_advanced_settings(true);
+        s.record.output = OutputKind::Anim(AnimFormat::Webp);
+        s.record.output_height = 2160;
+        s.record.show_no_signal = true;
+        s.record.record_cursor = false;
+        s.record.hide_to_tray = true;
+        s.region_record.output = OutputKind::Video(VideoContainer::Mkv);
+        s.region_record.show_no_signal = true;
+        s.audio_record.format = AudioFormat::Flac;
+        s.hotkey_audio.format = AudioFormat::Ogg;
+
+        s.set_advanced_settings(false);
+
+        assert!(!s.advanced_settings);
+        assert_eq!(s.record.output, OutputKind::Video(VideoContainer::Mkv));
+        assert_eq!(s.record.output_height, 1080);
+        assert!(s.record.record_cursor);
+        assert!(s.record.show_no_signal);
+        assert!(s.record.hide_to_tray);
+        assert_eq!(s.record.simple_preset(&s.anim), Some(RecordPreset::Medium));
+        assert_eq!(s.region_record.output, OutputKind::Anim(AnimFormat::Gif));
+        assert_eq!(s.region_record.output_height, 720);
+        assert_eq!(
+            s.region_record.simple_preset(&s.region_anim),
+            Some(RecordPreset::Fast)
+        );
+        assert_eq!(s.audio_record.format, AudioFormat::Mp3);
+        assert_eq!(s.hotkey_audio.format, AudioFormat::Mp3);
+    }
+
+    #[test]
+    fn simple_preset_sets_its_resolution() {
+        let mut s = Settings::default();
+        s.record.output_height = 720;
+        assert_eq!(s.record.simple_preset(&s.anim), Some(RecordPreset::Medium));
+        s.record
+            .apply_simple_preset(RecordPreset::Fast, &mut s.anim);
+        assert_eq!(s.record.output_height, 720);
+        assert_eq!(s.record.fps, 30);
+        assert_eq!(s.record.simple_preset(&s.anim), Some(RecordPreset::Fast));
     }
 
     #[test]
@@ -957,7 +1184,7 @@ mod tests {
         record.apply_preset(RecordPreset::Medium, &mut anim);
         assert_eq!(
             (record.fps, record.output_height, record.video_quality),
-            (60, 1440, 85)
+            (60, 1080, 85)
         );
         assert_eq!(record.preset(&anim), Some(RecordPreset::Medium));
 
@@ -984,34 +1211,22 @@ mod tests {
         record.output_height = 720;
         record.video_quality = 70;
 
-        record.switch_output(
-            OutputKind::Video(VideoContainer::Mkv),
-            &mut anim,
-            RecordPreset::Quality,
-        );
+        record.switch_output(OutputKind::Video(VideoContainer::Mkv), &mut anim);
         assert_eq!(
             (record.fps, record.output_height, record.video_quality),
-            (60, 2160, 100),
+            (60, 1080, 85),
             "a fresh format starts from its default preset"
         );
         record.fps = 30;
         record.output_height = 1080;
         record.video_quality = 80;
 
-        record.switch_output(
-            OutputKind::Video(VideoContainer::Mp4),
-            &mut anim,
-            RecordPreset::Quality,
-        );
+        record.switch_output(OutputKind::Video(VideoContainer::Mp4), &mut anim);
         assert_eq!(
             (record.fps, record.output_height, record.video_quality),
             (30, 720, 70)
         );
-        record.switch_output(
-            OutputKind::Video(VideoContainer::Mkv),
-            &mut anim,
-            RecordPreset::Quality,
-        );
+        record.switch_output(OutputKind::Video(VideoContainer::Mkv), &mut anim);
         assert_eq!(
             (record.fps, record.output_height, record.video_quality),
             (30, 1080, 80)
@@ -1026,30 +1241,18 @@ mod tests {
         record.apply_preset(RecordPreset::Fast, &mut anim);
         assert_eq!((record.fps, record.output_height), (30, 720));
 
-        record.switch_output(
-            OutputKind::Anim(AnimFormat::Gif),
-            &mut anim,
-            RecordPreset::Fast,
-        );
+        record.switch_output(OutputKind::Anim(AnimFormat::Gif), &mut anim);
         assert_eq!(anim.gif_dither, GifDither::Bayer);
         record.fps = 15;
         record.output_height = 480;
         anim.gif_colors = 64;
 
-        record.switch_output(
-            OutputKind::Anim(AnimFormat::Webp),
-            &mut anim,
-            RecordPreset::Quality,
-        );
+        record.switch_output(OutputKind::Anim(AnimFormat::Webp), &mut anim);
         assert_eq!(
             (record.fps, record.output_height, record.webp_mode),
             (30, 720, WebpMode::Fast)
         );
-        record.switch_output(
-            OutputKind::Anim(AnimFormat::Gif),
-            &mut anim,
-            RecordPreset::Quality,
-        );
+        record.switch_output(OutputKind::Anim(AnimFormat::Gif), &mut anim);
         assert_eq!(
             (record.fps, record.output_height, anim.gif_colors),
             (15, 480, 64)
@@ -1074,8 +1277,8 @@ mod tests {
         let mut anim = AnimationQuality::default();
         for (preset, values) in [
             (RecordPreset::Quality, (60, 2160, 100)),
-            (RecordPreset::Medium, (60, 1440, 85)),
-            (RecordPreset::Fast, (30, 1080, 70)),
+            (RecordPreset::Medium, (60, 1080, 85)),
+            (RecordPreset::Fast, (30, 720, 70)),
         ] {
             record.apply_preset(preset, &mut anim);
             assert_eq!(
@@ -1116,11 +1319,7 @@ mod tests {
         record.fps = 30;
         record.output_height = 720;
         record.video_quality = 70;
-        record.switch_output(
-            OutputKind::Video(VideoContainer::Mkv),
-            &mut anim,
-            RecordPreset::Quality,
-        );
+        record.switch_output(OutputKind::Video(VideoContainer::Mkv), &mut anim);
         record.fps = 30;
         record.output_height = 1080;
         record.video_quality = 80;
@@ -1131,11 +1330,7 @@ mod tests {
             (restored.fps, restored.output_height, restored.video_quality),
             (30, 1080, 80)
         );
-        restored.switch_output(
-            OutputKind::Video(VideoContainer::Mp4),
-            &mut anim,
-            RecordPreset::Quality,
-        );
+        restored.switch_output(OutputKind::Video(VideoContainer::Mp4), &mut anim);
         assert_eq!(
             (restored.fps, restored.output_height, restored.video_quality),
             (30, 720, 70)
@@ -1157,8 +1352,11 @@ mod tests {
     fn audio_presets_match_bitrates() {
         let mut audio = AudioRecordSettings::default();
         audio.apply_preset(RecordPreset::Quality);
-        assert_eq!(audio.kbps, 256);
+        assert_eq!(audio.kbps, 320);
         assert_eq!(audio.preset(), Some(RecordPreset::Quality));
+        audio.apply_preset(RecordPreset::Medium);
+        assert_eq!(audio.kbps, 256);
+        assert_eq!(audio.preset(), Some(RecordPreset::Medium));
         audio.apply_preset(RecordPreset::Fast);
         assert_eq!(audio.kbps, 128);
         assert_eq!(audio.preset(), Some(RecordPreset::Fast));
@@ -1264,5 +1462,91 @@ mod tests {
     fn after_capture_flags() {
         assert!(AfterCapture::Copy.copies() && !AfterCapture::Copy.saves());
         assert!(AfterCapture::CopyAndSave.copies() && AfterCapture::CopyAndSave.saves());
+    }
+
+    #[test]
+    fn recording_preparation_is_hidden_by_default_and_can_be_reenabled() {
+        assert!(Settings::default().hide_recording_preparation);
+        let missing: Settings = toml::from_str("advanced_settings = true").unwrap();
+        assert!(missing.hide_recording_preparation);
+        let shown: Settings = toml::from_str("hide_recording_preparation = false").unwrap();
+        assert!(!shown.hide_recording_preparation);
+    }
+
+    #[test]
+    fn simple_formats_keep_mp4_and_webp_but_reject_other_containers() {
+        let mut simple = Settings::default();
+        simple.hotkey_record.output = OutputKind::Video(VideoContainer::Mp4);
+        simple.region_record.output = OutputKind::Anim(AnimFormat::Webp);
+        let simple = simple.sanitized();
+        assert_eq!(
+            simple.hotkey_record.output,
+            OutputKind::Video(VideoContainer::Mp4)
+        );
+        assert_eq!(
+            simple.region_record.output,
+            OutputKind::Anim(AnimFormat::Webp)
+        );
+        let mut unsupported = simple;
+        unsupported.hotkey_record.output = OutputKind::Anim(AnimFormat::Gif);
+        unsupported.region_record.output = OutputKind::Video(VideoContainer::Mkv);
+        let unsupported = unsupported.sanitized();
+        assert_eq!(
+            unsupported.hotkey_record.output,
+            OutputKind::Video(VideoContainer::Mkv)
+        );
+        assert_eq!(
+            unsupported.region_record.output,
+            OutputKind::Anim(AnimFormat::Gif)
+        );
+    }
+    #[test]
+    fn in_app_notifications_are_off_by_default() {
+        assert!(!Settings::default().notifications_enabled);
+        let missing: Settings = toml::from_str("advanced_settings = true").unwrap();
+        assert!(!missing.notifications_enabled);
+        let enabled: Settings = toml::from_str("notifications_enabled = true").unwrap();
+        assert!(enabled.notifications_enabled);
+    }
+
+    #[test]
+    fn audio_presets_follow_the_selected_format() {
+        for (format, quality, medium, fast) in [
+            (AudioFormat::Mp3, 320, 256, 128),
+            (AudioFormat::M4a, 256, 192, 128),
+            (AudioFormat::Ogg, 192, 128, 96),
+        ] {
+            let mut audio = AudioRecordSettings {
+                format,
+                ..AudioRecordSettings::default()
+            };
+            audio.apply_preset(RecordPreset::Quality);
+            assert_eq!(
+                (audio.kbps, audio.preset()),
+                (quality, Some(RecordPreset::Quality))
+            );
+            audio.apply_preset(RecordPreset::Medium);
+            assert_eq!(
+                (audio.kbps, audio.preset()),
+                (medium, Some(RecordPreset::Medium))
+            );
+            audio.apply_preset(RecordPreset::Fast);
+            assert_eq!(
+                (audio.kbps, audio.preset()),
+                (fast, Some(RecordPreset::Fast))
+            );
+            assert_eq!(audio_default_kbps(format), Some(medium));
+        }
+        for format in [AudioFormat::Wav, AudioFormat::Flac] {
+            let mut audio = AudioRecordSettings {
+                format,
+                ..AudioRecordSettings::default()
+            };
+            let before = audio.kbps;
+            audio.apply_preset(RecordPreset::Quality);
+            assert_eq!(audio.kbps, before);
+            assert_eq!(audio.preset(), None);
+            assert_eq!(audio_default_kbps(format), None);
+        }
     }
 }

@@ -660,7 +660,7 @@ impl State {
 
     fn paint(&self, painter: &egui::Painter, map: Mapping, screen: ERect) {
         let dim = Color32::from_black_alpha(130);
-        let accent = theme::DARK.accent;
+        let accent = theme::current_palette(painter.ctx()).accent;
         let Some(sel) = self.editor.selection().filter(|r| !r.is_empty()) else {
             painter.rect_filled(screen, CornerRadius::ZERO, dim);
             self.hint(painter, screen);
@@ -811,10 +811,10 @@ fn dark_bar(
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
         .show(ctx, |ui| {
-            *ui.visuals_mut() = theme::dark_visuals();
+            let palette = theme::current_palette(ui.ctx());
             egui::Frame::new()
-                .fill(Color32::from_rgb(22, 28, 40))
-                .stroke(Stroke::new(1.0, Color32::from_rgb(60, 72, 96)))
+                .fill(palette.card)
+                .stroke(Stroke::new(1.0, palette.border))
                 .corner_radius(CornerRadius::same(10))
                 .inner_margin(egui::Margin::same(6))
                 .shadow(egui::epaint::Shadow {

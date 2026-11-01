@@ -70,37 +70,75 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
         });
         ui.add_space(8.0);
     });
+    ui.add_space(8.0);
+    theme::card(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        theme::section(ui, icon::SELECTION, &t!("settings.picker_keys"));
+        for (keys, what) in [
+            ("Enter".to_string(), t!("keys.default_action")),
+            ("Ctrl+C".to_string(), t!("keys.copy")),
+            ("Ctrl+S".to_string(), t!("keys.save")),
+            ("Ctrl+Z".to_string(), t!("keys.undo")),
+            ("Ctrl+A".to_string(), t!("keys.select_all")),
+            (
+                format!(
+                    "{}{}{}{}",
+                    icon::ARROW_LEFT,
+                    icon::ARROW_UP,
+                    icon::ARROW_RIGHT,
+                    icon::ARROW_DOWN
+                ),
+                t!("keys.move"),
+            ),
+            (
+                format!(
+                    "Shift + {}{}{}{}",
+                    icon::ARROW_LEFT,
+                    icon::ARROW_UP,
+                    icon::ARROW_RIGHT,
+                    icon::ARROW_DOWN
+                ),
+                t!("keys.resize"),
+            ),
+            ("Tab".to_string(), t!("keys.next_display")),
+            ("Esc".to_string(), t!("keys.cancel")),
+        ] {
+            theme::row(ui, &keys, |ui| ui.label(what));
+        }
+    });
 }
 
 pub(crate) fn contract_window(ctx: &egui::Context, open: &mut bool) {
     if !*open {
         return;
     }
-    theme::modal_backdrop(ctx);
-    let response = egui::Window::new(t!("settings.contract_title"))
-        .id(egui::Id::new("speech-contract-window"))
-        .order(egui::Order::Foreground)
-        .open(open)
-        .collapsible(false)
-        .resizable(true)
-        .default_width(560.0)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.set_min_width(480.0);
-            egui::ScrollArea::vertical()
-                .max_height(440.0)
-                .show(ui, |ui| {
-                    ui.add(egui::Label::new(t!("settings.contract_body")).wrap());
-                    ui.add_space(8.0);
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(t!("settings.contract_example")).monospace(),
-                        )
+    let mut close = false;
+    let modal = egui::Modal::new(egui::Id::new("speech-contract-modal")).show(ctx, |ui| {
+        ui.set_width(560.0);
+        theme::popup_title(ui, &t!("settings.contract_title"));
+        egui::ScrollArea::vertical()
+            .max_height(440.0)
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(t!("settings.contract_body")).wrap());
+                ui.add_space(8.0);
+                ui.add(
+                    egui::Label::new(RichText::new(t!("settings.contract_example")).monospace())
                         .wrap(),
-                    );
-                });
+                );
+            });
+        ui.add_space(8.0);
+        ui.set_width(560.0);
+        ui.add_space(7.0);
+        let close_label = t!("common.close").to_string();
+        ui.vertical_centered(|ui| {
+            if ui.add(theme::secondary(icon::X, &close_label)).clicked() {
+                close = true;
+            }
         });
-    theme::mark_modal(ctx, &response);
+    });
+    if close || modal.should_close() {
+        *open = false;
+    }
 }
 
 fn section_help(ui: &mut egui::Ui, icon: &str, title: &str, help: &str) {

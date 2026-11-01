@@ -1,5 +1,3 @@
-use mediaa_core::source::FrameSource;
-
 fn main() -> anyhow::Result<()> {
     #[cfg(windows)]
     // SAFETY: process-wide setting, called before any window or capture exists.
@@ -23,7 +21,7 @@ fn main() -> anyhow::Result<()> {
                     c.image.image.height
                 );
             }
-            mediaa_platform::screen::MonitorSource::new(m.id, None, true)?.grab()?
+            mediaa_platform::screen::monitor_source(m.id, None, true)?.grab()?
         }
         Some(title) => {
             let pid: Option<u32> = title.strip_prefix("pid:").and_then(|p| p.parse().ok());

@@ -29,7 +29,12 @@ enum Msg {
         need_details: bool,
     },
     Forget(PathBuf),
+    Relink {
+        old: PathBuf,
+        new: PathBuf,
+    },
     Retain(PathBuf, HashSet<String>),
+    Clear(PathBuf),
     Flush(Sender<()>),
 }
 
@@ -39,6 +44,7 @@ enum ProxyMsg {
 
 pub struct Thumbnails {
     tiles: HashMap<Key, Option<Tile>>,
+    details_requested: HashSet<Key>,
     req_tx: Sender<Msg>,
     proxy_tx: Sender<ProxyMsg>,
     done_rx: Receiver<(Key, Option<Frame>, Option<MediaInfo>)>,
@@ -140,7 +146,14 @@ impl Thumbnails {
                                 cache_for(&mut cache, dir).remove(&file_name(&path));
                             }
                         }
+                        Msg::Relink { old, new } => {
+                            if let Some(dir) = old.parent() {
+                                cache_for(&mut cache, dir)
+                                    .relink(&file_name(&old), &file_name(&new));
+                            }
+                        }
                         Msg::Retain(dir, names) => cache_for(&mut cache, &dir).retain(&names),
+                        Msg::Clear(dir) => cache_for(&mut cache, &dir).clear(),
                         Msg::Flush(ack) => {
                             cache.as_mut().map(flush);
                             let _ = ack.send(());
@@ -154,6 +167,7 @@ impl Thumbnails {
         }
         Self {
             tiles: HashMap::new(),
+            details_requested: HashSet::new(),
             req_tx,
             proxy_tx,
             done_rx,
@@ -178,36 +192,90 @@ impl Thumbnails {
 
     pub fn get(&mut self, e: &LibraryEntry, need_details: bool) -> Tile {
         let key = (e.path.clone(), e.modified);
-        match self.tiles.get(&key) {
-            Some(Some(t)) => t.clone(),
-            Some(None) => Tile::default(),
-            None => {
-                self.tiles.retain(|(path, _), _| path != &e.path);
-                let key_for_request = key.clone();
-                self.tiles.insert(key, None);
-                if self
-                    .req_tx
-                    .try_send(Msg::Thumb {
-                        key: key_for_request.clone(),
-                        size: e.size,
-                        kind: e.kind,
-                        need_details,
-                    })
-                    .is_err()
-                {
-                    self.tiles.remove(&key_for_request);
+        if let Some(Some(tile)) = self.tiles.get(&key) {
+            let tile = tile.clone();
+            if need_details && tile.info.is_none() && self.details_requested.insert(key.clone()) {
+                let request = Msg::Thumb {
+                    key: key.clone(),
+                    size: e.size,
+                    kind: e.kind,
+                    need_details: true,
+                };
+                if self.req_tx.try_send(request).is_err() {
+                    self.details_requested.remove(&key);
                 }
-                Tile::default()
             }
+            return tile;
         }
+        if matches!(self.tiles.get(&key), Some(None)) {
+            return Tile::default();
+        }
+        self.tiles.retain(|(path, _), _| path != &e.path);
+        self.tiles.insert(key.clone(), None);
+        if self
+            .req_tx
+            .try_send(Msg::Thumb {
+                key: key.clone(),
+                size: e.size,
+                kind: e.kind,
+                need_details,
+            })
+            .is_err()
+        {
+            self.tiles.remove(&key);
+        }
+        Tile::default()
+    }
+
+    pub fn prewarm(&mut self, entries: &[LibraryEntry]) {
+        for entry in entries.iter().take(120) {
+            let _ = self.get(entry, false);
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn details_requested_for(&self, path: &Path) -> bool {
+        self.details_requested
+            .iter()
+            .any(|(requested, _)| requested == path)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_pending(&self, path: &Path) -> bool {
+        self.tiles
+            .iter()
+            .any(|((p, _), tile)| p == path && tile.is_none())
+    }
+    pub fn clear_cache(&mut self, dir: &Path) {
+        self.tiles.retain(|(path, _), _| path.parent() != Some(dir));
+        let _ = self.req_tx.try_send(Msg::Clear(dir.to_path_buf()));
+    }
+    pub fn forget_cached(&mut self, path: &Path) {
+        self.tiles.retain(|(p, _), _| p != path);
+        let _ = self.req_tx.try_send(Msg::Forget(path.to_path_buf()));
     }
 
     pub fn forget(&mut self, path: &Path, proxy: mediaa_core::paths::CachePath) {
-        self.tiles.retain(|(p, _), _| p != path);
-        let _ = self.req_tx.try_send(Msg::Forget(path.to_path_buf()));
+        self.forget_cached(path);
         let _ = self.proxy_tx.try_send(ProxyMsg::Forget(proxy));
     }
 
+    pub fn relink(&mut self, old: &Path, new: &Path) {
+        let keys: Vec<Key> = self
+            .tiles
+            .keys()
+            .filter(|(path, _)| path == old)
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(tile) = self.tiles.remove(&key) {
+                self.tiles.insert((new.to_path_buf(), key.1), tile);
+            }
+        }
+        let _ = self.req_tx.try_send(Msg::Relink {
+            old: old.to_path_buf(),
+            new: new.to_path_buf(),
+        });
+    }
     pub fn retain(&mut self, dir: &Path, entries: HashMap<String, SystemTime>) {
         self.tiles
             .retain(|(path, modified), _| keep_tile(path, *modified, dir, &entries));
@@ -290,4 +358,27 @@ mod tests {
             &entries
         ));
     }
+}
+
+#[test]
+fn a_prewarmed_tile_upgrades_to_details_on_demand() {
+    use crate::features::library::thumbs::{Thumbnails as ThumbnailsForTest, Tile};
+    use mediaa_core::library::LibraryEntry;
+    let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1);
+    let entry = LibraryEntry {
+        path: std::path::PathBuf::from("/library/clip.mp4"),
+        name: "clip.mp4".into(),
+        title: "Clip".into(),
+        kind: mediaa_core::MediaKind::Video,
+        size: 10,
+        modified,
+        taken: chrono::NaiveDateTime::default(),
+        details: None,
+    };
+    let mut thumbnails = ThumbnailsForTest::new(&eframe::egui::Context::default());
+    thumbnails
+        .tiles
+        .insert((entry.path.clone(), modified), Some(Tile::default()));
+    thumbnails.get(&entry, true);
+    assert!(thumbnails.details_requested_for(&entry.path));
 }

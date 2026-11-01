@@ -861,7 +861,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 || t!("queue.scope_any").to_string(),
                 |(_, name)| name.clone(),
             );
-        egui::ComboBox::from_id_salt("queue-scope")
+        crate::theme::combo_box("queue-scope")
             .width(220.0)
             .selected_text(selected)
             .show_ui(ui, |ui| {
@@ -1076,6 +1076,36 @@ fn load_row(ui: &mut egui::Ui, p: Palette, name: &str, busy: u32, limit: u32, wa
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn snapshot_of_the_task_details_modal() {
+        let (store, _sched, _root, _kids, _clock) = tree();
+        let task = store
+            .top_level(&Filter::default())
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("a queued task");
+        let now = task.started_ms.unwrap_or_default() + 5_000;
+        let copied = false;
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, copied: &mut bool| {
+                task_details::show(
+                    ui.ctx(),
+                    &task,
+                    &Stats::default(),
+                    now,
+                    "log line",
+                    copied,
+                    &crate::pages::agent::mentions::Roster::default(),
+                );
+            },
+            copied,
+        );
+        crate::theme::install(&harness.ctx);
+        harness.run_steps(2);
+        harness.snapshot("queue-task-details");
+    }
     #[test]
     fn the_load_lists_pools_and_the_web_tool() {
         let state = slots::Status {

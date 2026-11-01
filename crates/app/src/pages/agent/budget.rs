@@ -119,7 +119,7 @@ fn web(ui: &mut egui::Ui, web: &mut WebSettings, limit: &mut u32, state: &mut Bu
                 .changed();
         });
         theme::row(ui, &t!("agent.web_engine"), |ui| {
-            egui::ComboBox::from_id_salt("web-engine")
+            crate::theme::combo_box("web-engine")
                 .selected_text(engine_label(web.engine))
                 .show_ui(ui, |ui| {
                     for engine in [

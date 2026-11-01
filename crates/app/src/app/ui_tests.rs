@@ -195,6 +195,17 @@ fn settings() -> Settings {
         language: Some("en".into()),
         theme: ThemePreference::Dark,
         media_dir: PathBuf::from(r"C:\Users\Test\Documents\MediaA"),
+        advanced_settings: true,
+        hotkey_screen: ScreenChoice::Primary,
+        ..Settings::default()
+    }
+}
+
+fn simple_settings() -> Settings {
+    Settings {
+        language: Some("en".into()),
+        theme: ThemePreference::Dark,
+        media_dir: PathBuf::from(r"C:\Users\Test\Documents\MediaA"),
         ..Settings::default()
     }
 }
@@ -616,6 +627,190 @@ fn ui_regression_snapshot_library_populated() {
 
 #[cfg(windows)]
 #[test]
+fn ui_regression_snapshot_library_bulk_selected() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::time::SystemTime::now();
+    let mut paths = Vec::new();
+    for (index, color) in [[40, 90, 180, 255], [180, 70, 50, 255]]
+        .into_iter()
+        .enumerate()
+    {
+        let path = dir.path().join(format!(
+            "Bulk_{}_2026-01-0{}_10-00-00.png",
+            index + 1,
+            index + 1
+        ));
+        image::RgbaImage::from_pixel(320, 200, image::Rgba(color))
+            .save(&path)
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(base - std::time::Duration::from_secs(2 - index as u64))
+            .unwrap();
+        paths.push(path);
+    }
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut library = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    {
+        let app = library.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+        app.lib.select_for_test(paths);
+    }
+    library.run_steps(4);
+    library.snapshot("library-bulk-selected");
+}
+
+#[cfg(windows)]
+#[test]
+fn bulk_button_stays_pinned_while_the_library_scrolls() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for index in 0..12 {
+        let path = dir
+            .path()
+            .join(format!("Scroll_{index:02}_2026-01-01_10-00-00.png"));
+        image::RgbaImage::from_pixel(320, 200, image::Rgba([20 + index * 8, 40, 80, 255]))
+            .save(&path)
+            .unwrap();
+        paths.push(path);
+    }
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut library = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 420.0),
+    );
+    {
+        let app = library.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+        app.lib.select_for_test(vec![paths[0].clone()]);
+    }
+    library.run_steps(4);
+    assert_eq!(
+        library.state().app.as_ref().unwrap().lib.selected_count(),
+        1
+    );
+    let button_before = library
+        .get_by_label_contains(&t!("lib.selected", n = 1))
+        .rect();
+    library.event(egui::Event::PointerMoved(egui::pos2(600.0, 350.0)));
+    for _ in 0..2 {
+        library.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -160.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::default(),
+        });
+        library.run_steps(1);
+    }
+    let button_after = library
+        .get_by_label_contains(&t!("lib.selected", n = 1))
+        .rect();
+    assert!(
+        (button_after.top() - button_before.top()).abs() < 0.5,
+        "the selection button must stay pinned: {button_before:?} -> {button_after:?}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_settings_simple() {
+    let mut harness = harness_with(
+        Page::Settings,
+        simple_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness.snapshot("settings-simple");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_settings_simple_minimum() {
+    let mut harness = harness_with(
+        Page::Settings,
+        simple_settings(),
+        catalog(),
+        egui::vec2(520.0, 700.0),
+    );
+    harness.run_steps(2);
+    harness.snapshot("settings-simple-minimum");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_record_simple() {
+    let mut harness = harness_with(
+        Page::Record,
+        simple_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness.snapshot("record-simple");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_audio_simple() {
+    let mut harness = harness_with(
+        Page::RecordAudio,
+        simple_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness.snapshot("audio-simple");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_convert_batch_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for index in 0..3 {
+        let path = dir
+            .path()
+            .join(format!("batch-{index}_2026-01-01_10-00-00.png"));
+        image::RgbaImage::from_pixel(64, 48, image::Rgba([20 + index * 40, 80, 120, 255]))
+            .save(&path)
+            .unwrap();
+        paths.push(path);
+    }
+    let mut convert = harness(Page::Convert);
+    convert
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .conversion
+        .set_inputs(paths);
+    for _ in 0..100 {
+        convert.run_steps(1);
+        if convert
+            .query_by_label(Target::Still(StillFormat::Jpeg).label())
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    convert.snapshot("convert-batch-list");
+}
+
+#[cfg(windows)]
+#[test]
 fn ui_regression_snapshot_convert_page() {
     let mut convert = harness(Page::Convert);
     convert.snapshot("convert-empty-wide");
@@ -738,6 +933,7 @@ fn fullscreen_screenshot_saves_png() {
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
         .count();
     assert_eq!(outputs, 1);
+    assert_eq!(app.page, Page::Screenshot, "a screenshot stays on its page");
     assert!(app.notices.items.last().is_some());
 }
 
@@ -770,6 +966,11 @@ fn window_screenshot_uses_selected_window() {
     run_pending(app, &ctx);
     finish_capture_jobs(app, &ctx);
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().flatten().count(), 1);
+    assert_eq!(
+        app.page,
+        Page::Screenshot,
+        "a window shot stays on its page"
+    );
 }
 
 #[test]
@@ -928,7 +1129,9 @@ fn stop_from_window_saves_a_synthetic_recording() {
     app.recording.test_recording(session, events);
     std::thread::sleep(std::time::Duration::from_millis(120));
     harness.run_steps(2);
-    harness.get_by_label(&t!("record.stop_save")).click();
+    harness
+        .get_by_label_contains(&t!("record.stop_save"))
+        .click();
     harness.run_steps(2);
     assert!(matches!(
         harness.state().app.as_ref().unwrap().recording.view(),
@@ -973,8 +1176,8 @@ fn stop_from_tray_uses_the_same_save_flow() {
     );
     assert_eq!(
         app.page,
-        Page::Library,
-        "the finished recording is copied and shown in the library"
+        Page::Record,
+        "finishing a recording does not leave the capture page"
     );
 }
 
@@ -1082,17 +1285,19 @@ fn active_recording_supports_pause_resume_and_save() {
         .get_all_by_label_contains(&t!("record.pause"))
         .last()
         .expect("pause button")
-        .click();
+        .click_accesskit();
     harness.run_steps(3);
     assert!(harness.state().app.as_ref().unwrap().recording.is_paused());
     harness
         .get_all_by_label_contains(&t!("record.resume"))
         .last()
         .expect("resume button")
-        .click();
+        .click_accesskit();
     harness.run_steps(3);
     assert!(!harness.state().app.as_ref().unwrap().recording.is_paused());
-    harness.get_by_label(&t!("record.stop_save")).click();
+    harness
+        .get_by_label_contains(&t!("record.stop_save"))
+        .click();
     harness.run_steps(1);
     let ctx = harness.ctx.clone();
     finish_recording(harness.state_mut().app.as_mut().unwrap(), &ctx);
@@ -1114,9 +1319,19 @@ fn active_recording_can_be_cancelled_without_publishing_output() {
     let app = harness.state_mut().app.as_mut().unwrap();
     app.recording.test_recording(session, events);
     std::thread::sleep(std::time::Duration::from_millis(120));
-    harness.run_steps(1);
-    harness.get_by_label(&t!("record.cancel")).click();
-    harness.run_steps(1);
+    harness.run_steps(2);
+    harness.get_by_label_contains(&t!("record.cancel")).click();
+    harness.run_steps(2);
+    harness
+        .get_by_label_contains(&t!("record.cancel_confirm"))
+        .click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_by_label_contains(&t!("record.saving_long"))
+            .is_none(),
+        "discarding a recording must not show the saving screen"
+    );
     let ctx = harness.ctx.clone();
     finish_recording(harness.state_mut().app.as_mut().unwrap(), &ctx);
     assert_eq!(
@@ -1131,7 +1346,8 @@ fn webp_fallback_notice_exposes_trace_and_reason() {
     let (events_tx, events) = crossbeam_channel::bounded(2);
     let ctx = harness.ctx.clone();
     let app = harness.state_mut().app.as_mut().unwrap();
-    app.recording.test_saving(events);
+    app.recording
+        .test_saving(events, std::time::Duration::from_secs(1));
     events_tx
         .send(SessionEvent::Notice(SessionNotice::WebpFallback {
             trace_id: "webp-ui-failure".into(),
@@ -1329,6 +1545,7 @@ fn library_filter_and_delete_work_through_the_ui() {
 
 #[test]
 fn convert_page_starts_and_finishes_a_selected_target() {
+    use egui_kittest::kittest::NodeT;
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("Picture_2026-01-01_10-00-00.png");
     image::RgbaImage::from_pixel(32, 24, image::Rgba([20, 40, 80, 255]))
@@ -1360,11 +1577,13 @@ fn convert_page_starts_and_finishes_a_selected_target() {
     }
     harness.get_by_label(jpeg).click();
     harness.run_steps(1);
-    harness
-        .get_all_by_label_contains(&t!("convert.start"))
-        .last()
-        .expect("convert start button")
-        .click();
+    let start_label = t!("convert.start").into_owned();
+    let node = harness
+        .get_all_by_label_contains(&start_label)
+        .rev()
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("convert start button");
+    node.click();
     harness.run_steps(1);
     assert!(harness.state().app.as_ref().unwrap().conversion.is_busy());
 
@@ -1648,7 +1867,11 @@ fn the_transcription_provider_has_the_contract_info() {
         egui::vec2(1180.0, 900.0),
     );
     harness.run_steps(2);
-    harness.get_by_role(egui::accesskit::Role::ComboBox).click();
+    harness
+        .get_all_by_role(egui::accesskit::Role::ComboBox)
+        .next()
+        .expect("header section combo")
+        .click();
     harness.run_steps(2);
     harness
         .get_all_by_label(egui_phosphor::regular::INFO)
@@ -1830,4 +2053,1652 @@ fn ui_regression_snapshot_settings_russian_light() {
         egui::Theme::Light,
     );
     harness.snapshot("settings-russian-light");
+}
+
+#[test]
+fn bulk_rename_keeps_focus_text_and_enter_confirms() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+        app.lib
+            .begin_bulk_rename_for_test(vec![dir.path().join("a.png")]);
+    }
+    harness.run_steps(2);
+    let edit = harness
+        .get_all_by_role(egui::accesskit::Role::TextInput)
+        .max_by(|a, b| a.rect().width().total_cmp(&b.rect().width()))
+        .expect("bulk rename input");
+    edit.click();
+    harness.run_steps(1);
+    harness.event(egui::Event::Text("Bulk".into()));
+    harness.run_steps(1);
+    assert_eq!(
+        harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .lib
+            .bulk_rename_title_for_test(),
+        Some("Bulk")
+    );
+    harness.event(egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::default(),
+    });
+    harness.run_steps(1);
+    assert_eq!(
+        harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .lib
+            .bulk_rename_title_for_test(),
+        None
+    );
+}
+
+#[test]
+fn clear_selection_button_removes_selection() {
+    let mut harness = harness(Page::Library);
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.lib.select_for_test(vec![PathBuf::from("a.png")]);
+    }
+    harness.run_steps(2);
+    harness.get_by_label(&t!("lib.clear_selection")).click();
+    harness.run_steps(1);
+    assert_eq!(
+        harness.state().app.as_ref().unwrap().lib.selected_count(),
+        0
+    );
+}
+
+#[test]
+fn bulk_delete_clears_the_deleted_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for index in 0..2 {
+        let path = dir
+            .path()
+            .join(format!("delete_{index}_2026-01-01_10-00-00.png"));
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([20, 40, 80, 255]))
+            .save(&path)
+            .unwrap();
+        paths.push(path);
+    }
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 700.0),
+    );
+    harness.run_steps(3);
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+        app.lib.set_test_trash();
+        app.lib.select_for_test(paths.clone());
+    }
+    harness.run_steps(2);
+    std::fs::create_dir_all(mediaa_media::preview_cache::previews_dir(dir.path())).unwrap();
+    let proxies: Vec<_> = paths
+        .iter()
+        .flat_map(|path| {
+            [
+                mediaa_media::preview_cache::proxy_path(path),
+                mediaa_media::preview_cache::hover_proxy_path(path),
+            ]
+        })
+        .collect();
+    for proxy in &proxies {
+        std::fs::write(proxy.as_ref(), b"proxy").unwrap();
+    }
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .lib
+        .delete_many(paths.clone())
+        .unwrap();
+    let ctx = harness.ctx.clone();
+    for _ in 0..200 {
+        harness.run_steps(1);
+        {
+            let app = harness.state_mut().app.as_mut().unwrap();
+            crate::features::library::poll_cleanup(app, &ctx);
+        }
+        if harness.state().app.as_ref().unwrap().lib.selected_count() == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        harness.state().app.as_ref().unwrap().lib.selected_count(),
+        0,
+        "deleted cards leave the selection"
+    );
+    assert!(paths.iter().all(|path| !path.exists()));
+    assert!(proxies.iter().all(|proxy| !proxy.exists()));
+}
+
+#[test]
+fn renaming_moves_the_selection_to_the_new_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("old_2026-01-01_10-00-00.png");
+    image::RgbaImage::from_pixel(32, 24, image::Rgba([20, 40, 80, 255]))
+        .save(&old)
+        .unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 700.0),
+    );
+    harness.run_steps(3);
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+        app.lib.select_for_test(vec![old.clone()]);
+    }
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .rename_media(&ctx, old.clone(), "Renamed".into());
+    for _ in 0..200 {
+        harness.run_steps(1);
+        harness.state_mut().app.as_mut().unwrap().poll_desktop();
+        let moved = harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .lib
+            .selected_for_test()
+            .first()
+            .is_some_and(|path| path != &old);
+        if moved {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let app = harness.state().app.as_ref().unwrap();
+    assert_eq!(app.lib.selected_count(), 1);
+    assert!(!old.exists());
+    let current = app.lib.selected_for_test();
+    assert_eq!(current.len(), 1);
+    assert_ne!(current[0], old);
+    assert!(current[0].exists(), "{:?}", current[0]);
+}
+
+#[test]
+fn a_plain_click_selects_and_ctrl_click_adds_to_the_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for index in 0..2 {
+        let path = dir
+            .path()
+            .join(format!("Plain_{index}_2026-01-01_10-00-00.png"));
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([20, 40, 80, 255]))
+            .save(&path)
+            .unwrap();
+        paths.push(path);
+    }
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 700.0),
+    );
+    harness.run_steps(3);
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+    }
+    harness.run_steps(2);
+    let first = "Plain_0";
+    let second = "Plain_1";
+    harness.get_by_label_contains(first).click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().app.as_ref().unwrap().lib.selected_count(),
+        1,
+        "a plain click selects one card"
+    );
+    harness
+        .get_by_label_contains(second)
+        .click_modifiers(egui::Modifiers {
+            command: true,
+            ..Default::default()
+        });
+    harness.run_steps(2);
+    assert_eq!(
+        harness.state().app.as_ref().unwrap().lib.selected_count(),
+        2,
+        "ctrl-click adds a card"
+    );
+    harness.get_by_label_contains(second).click();
+    harness.run_steps(2);
+    let app = harness.state().app.as_ref().unwrap();
+    assert_eq!(app.lib.selected_count(), 1);
+    assert_eq!(app.lib.selected_for_test(), vec![paths[1].clone()]);
+}
+
+#[test]
+fn deleting_from_the_card_tools_clears_its_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("card_2026-01-01_10-00-00.png");
+    image::RgbaImage::from_pixel(32, 24, image::Rgba([20, 40, 80, 255]))
+        .save(&path)
+        .unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 700.0),
+    );
+    harness.run_steps(3);
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+        app.lib.set_test_trash();
+        app.lib.select_for_test(vec![path.clone()]);
+    }
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        crate::features::library::apply_action(
+            app,
+            &ctx,
+            crate::features::library::LibraryAction::AskDelete(path.clone()),
+        );
+    }
+    harness.run_steps(2);
+    harness
+        .get_all_by_label_contains(&t!("lib.delete_confirm"))
+        .last()
+        .expect("delete confirmation")
+        .click();
+    for _ in 0..200 {
+        harness.run_steps(1);
+        {
+            let app = harness.state_mut().app.as_mut().unwrap();
+            crate::features::library::poll_cleanup(app, &ctx);
+        }
+        if !path.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(
+        harness.state().app.as_ref().unwrap().lib.selected_count(),
+        0,
+        "the card-tools delete clears the selection"
+    );
+    assert!(!path.exists());
+}
+
+#[test]
+fn renaming_from_the_card_tools_moves_its_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("card_2026-01-01_10-00-00.png");
+    image::RgbaImage::from_pixel(32, 24, image::Rgba([20, 40, 80, 255]))
+        .save(&path)
+        .unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 700.0),
+    );
+    harness.run_steps(3);
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+        app.lib.select_for_test(vec![path.clone()]);
+    }
+    harness.run_steps(2);
+    let ctx = harness.ctx.clone();
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        crate::features::library::apply_action(
+            app,
+            &ctx,
+            crate::features::library::LibraryAction::AskRename(path.clone(), "Card".into()),
+        );
+    }
+    harness.run_steps(2);
+    harness
+        .get_all_by_label_contains(&t!("lib.rename_confirm"))
+        .last()
+        .expect("rename confirmation")
+        .click();
+    for _ in 0..200 {
+        harness.run_steps(1);
+        harness.state_mut().app.as_mut().unwrap().poll_desktop();
+        let moved = harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .lib
+            .selected_for_test()
+            .first()
+            .is_some_and(|selected| selected != &path);
+        if moved {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let app = harness.state().app.as_ref().unwrap();
+    assert_eq!(app.lib.selected_count(), 1);
+    assert_ne!(app.lib.selected_for_test()[0], path);
+    assert!(app.lib.selected_for_test()[0].exists());
+}
+
+#[test]
+fn an_empty_library_purges_orphaned_cache_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let previews = mediaa_media::preview_cache::previews_dir(dir.path());
+    std::fs::create_dir_all(&previews).unwrap();
+    let orphan = previews.join("hover-orphan.mp4");
+    std::fs::write(&orphan, b"orphan").unwrap();
+    let cache = dir.path().join(".cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    let thumb_page = cache.join("thumbs-0.jpg");
+    std::fs::write(&thumb_page, b"page").unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 700.0),
+    );
+    for _ in 0..200 {
+        harness.run_steps(1);
+        if !orphan.exists() && !thumb_page.exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!orphan.exists(), "orphaned preview cache is purged");
+    assert!(!thumb_page.exists(), "orphaned thumbnail page is purged");
+}
+
+#[test]
+fn recording_status_panel_does_not_jump_between_states() {
+    let _recording = recording_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().join("out");
+    let mut harness = harness_with(Page::Record, selected, catalog(), egui::vec2(1180.0, 900.0));
+    let session = test_recording("Fixed status", dir.path());
+    let events = session.events();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.recording.test_recording(session, events.clone());
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    harness.run_steps(3);
+    let recording = harness
+        .get_all_by_label_contains(&t!("record.start"))
+        .last()
+        .expect("start button")
+        .rect();
+    harness
+        .get_all_by_label_contains(&t!("record.pause"))
+        .last()
+        .expect("pause button")
+        .click_accesskit();
+    harness.run_steps(3);
+    let paused = harness
+        .get_all_by_label_contains(&t!("record.start"))
+        .last()
+        .expect("start button")
+        .rect();
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .recording
+        .test_saving(events, std::time::Duration::from_secs(7));
+    harness.run_steps(3);
+    let saving = harness
+        .get_all_by_label_contains(&t!("record.start"))
+        .last()
+        .expect("start button")
+        .rect();
+    assert!(
+        (recording.top() - paused.top()).abs() < 0.5,
+        "pause must not move the start bar: {recording:?} -> {paused:?}"
+    );
+    assert!(
+        (recording.top() - saving.top()).abs() < 0.5,
+        "saving must not move the start bar: {recording:?} -> {saving:?}"
+    );
+    assert!((recording.height() - saving.height()).abs() < 0.5);
+}
+
+#[test]
+fn delete_modal_closes_on_a_backdrop_click() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("clip.mp4");
+    std::fs::write(&file, b"media").unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    let ctx = harness.ctx.clone();
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        crate::features::library::apply_action(
+            app,
+            &ctx,
+            crate::features::library::LibraryAction::AskDelete(file.clone()),
+        );
+    }
+    harness.run_steps(2);
+    assert!(harness
+        .query_all_by_label_contains(&t!("lib.delete_confirm"))
+        .next()
+        .is_some());
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton {
+            pos: egui::pos2(5.0, 5.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+    }
+    harness.run_steps(2);
+    assert!(
+        harness
+            .query_all_by_label_contains(&t!("lib.delete_confirm"))
+            .next()
+            .is_none(),
+        "the delete modal closes when the backdrop is clicked"
+    );
+    assert!(file.exists(), "an outside click must not press Delete");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_contract_modal() {
+    let _ui = crate::app::test_support::ui_test_guard();
+    let mut harness = egui_kittest::Harness::new_ui_state(
+        |ui, open: &mut bool| {
+            crate::pages::about::contract_window(ui.ctx(), open);
+        },
+        true,
+    );
+    crate::theme::install(&harness.ctx);
+    harness.run_steps(2);
+    harness.snapshot("contract-modal");
+    for pressed in [true, false] {
+        harness.event(egui::Event::PointerButton {
+            pos: egui::pos2(5.0, 5.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        });
+    }
+    harness.run_steps(2);
+    assert!(!*harness.state(), "the contract modal closes outside");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_delete_modal() {
+    let mut harness = harness(Page::Library);
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    crate::features::library::apply_action(
+        app,
+        &ctx,
+        crate::features::library::LibraryAction::AskDelete(PathBuf::from("clip.mp4")),
+    );
+    harness.run_steps(2);
+    harness.snapshot("modal-delete");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_rename_modal() {
+    let mut harness = harness(Page::Library);
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    crate::features::library::apply_action(
+        app,
+        &ctx,
+        crate::features::library::LibraryAction::AskRename(
+            PathBuf::from("Clip_2026-01-01_10-00-00.png"),
+            "Clip".into(),
+        ),
+    );
+    harness.run_steps(2);
+    harness.snapshot("modal-rename");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_bulk_delete_modal() {
+    let mut harness = harness(Page::Library);
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    crate::features::library::apply_action(
+        app,
+        &ctx,
+        crate::features::library::LibraryAction::AskDeleteMany(vec![
+            PathBuf::from("a.png"),
+            PathBuf::from("b.png"),
+        ]),
+    );
+    harness.run_steps(2);
+    harness.snapshot("modal-bulk-delete");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_bulk_rename_modal() {
+    let mut harness = harness(Page::Library);
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    crate::features::library::apply_action(
+        app,
+        &ctx,
+        crate::features::library::LibraryAction::AskRenameMany(vec![
+            PathBuf::from("a.png"),
+            PathBuf::from("b.png"),
+        ]),
+    );
+    harness.run_steps(2);
+    harness.snapshot("modal-bulk-rename");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_recording_status_states() {
+    let _recording = recording_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().join("out");
+    let mut harness = harness_with(Page::Record, selected, catalog(), egui::vec2(1180.0, 900.0));
+    let session = test_recording("Status shots", dir.path());
+    let events = session.events();
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.recording.test_recording(session, events.clone());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    harness.run_steps(3);
+    let options = egui_kittest::SnapshotOptions::default().max_failed_pixels(1200);
+    harness.snapshot_options("record-status-recording", &options);
+    harness
+        .get_all_by_label_contains(&t!("record.pause"))
+        .last()
+        .expect("pause button")
+        .click_accesskit();
+    harness.run_steps(3);
+    harness.snapshot_options("record-status-paused", &options);
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .recording
+        .test_saving(events.clone(), std::time::Duration::from_secs(7));
+    harness.run_steps(3);
+    harness.snapshot_options("record-status-saving", &options);
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .recording
+        .test_saving_progress(events, std::time::Duration::from_secs(7), Some(0.42));
+    harness.run_steps(3);
+    harness.snapshot_options("record-status-saving-progress", &options);
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_delete_modal_russian() {
+    let mut selected = settings();
+    selected.language = Some("ru".into());
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    crate::features::library::apply_action(
+        app,
+        &ctx,
+        crate::features::library::LibraryAction::AskDelete(PathBuf::from("clip.mp4")),
+    );
+    harness.run_steps(2);
+    harness.snapshot("modal-delete-ru");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_bulk_delete_modal_russian() {
+    let mut selected = settings();
+    selected.language = Some("ru".into());
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    crate::features::library::apply_action(
+        app,
+        &ctx,
+        crate::features::library::LibraryAction::AskDeleteMany(vec![
+            PathBuf::from("a.png"),
+            PathBuf::from("b.png"),
+        ]),
+    );
+    harness.run_steps(2);
+    harness.snapshot("modal-bulk-delete-ru");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_rename_modal_russian() {
+    let mut selected = settings();
+    selected.language = Some("ru".into());
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    crate::features::library::apply_action(
+        app,
+        &ctx,
+        crate::features::library::LibraryAction::AskRename(
+            PathBuf::from("Clip_2026-01-01_10-00-00.png"),
+            "Clip".into(),
+        ),
+    );
+    harness.run_steps(2);
+    harness.snapshot("modal-rename-ru");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_contract_modal_russian() {
+    let _ui = crate::app::test_support::ui_test_guard();
+    rust_i18n::set_locale("ru");
+    let mut harness = egui_kittest::Harness::new_ui_state(
+        |ui, open: &mut bool| {
+            crate::pages::about::contract_window(ui.ctx(), open);
+        },
+        true,
+    );
+    crate::theme::install(&harness.ctx);
+    harness.run_steps(2);
+    harness.snapshot("contract-modal-ru");
+    rust_i18n::set_locale("en");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_recording_status_minimum() {
+    let _recording = recording_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().join("out");
+    let mut harness = harness_with(Page::Record, selected, catalog(), egui::vec2(520.0, 900.0));
+    let session = test_recording("Status minimum", dir.path());
+    let events = session.events();
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.recording.test_recording(session, events.clone());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    harness.run_steps(3);
+    let options = egui_kittest::SnapshotOptions::default().max_failed_pixels(1200);
+    harness.snapshot_options("record-status-recording-minimum", &options);
+    harness
+        .get_all_by_label_contains(&t!("record.pause"))
+        .last()
+        .expect("pause button")
+        .click_accesskit();
+    harness.run_steps(3);
+    harness.snapshot_options("record-status-paused-minimum", &options);
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .recording
+        .test_saving(events.clone(), std::time::Duration::from_secs(7));
+    harness.run_steps(3);
+    harness.snapshot_options("record-status-saving-minimum", &options);
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .recording
+        .test_saving_progress(events, std::time::Duration::from_secs(7), Some(0.42));
+    harness.run_steps(3);
+    harness.snapshot_options("record-status-saving-progress-minimum", &options);
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_recording_status_minimum_russian() {
+    let _recording = recording_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let mut selected = settings();
+    selected.language = Some("ru".into());
+    selected.media_dir = dir.path().join("out");
+    let mut harness = harness_with(Page::Record, selected, catalog(), egui::vec2(520.0, 900.0));
+    let session = test_recording("Status minimum", dir.path());
+    let events = session.events();
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.recording.test_recording(session, events.clone());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    harness.run_steps(3);
+    harness.snapshot("record-status-recording-minimum-ru");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_recording_status_narrow_russian() {
+    let _recording = recording_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let mut selected = settings();
+    selected.language = Some("ru".into());
+    selected.media_dir = dir.path().join("out");
+    let mut harness = harness_with(Page::Record, selected, catalog(), egui::vec2(480.0, 700.0));
+    let session = test_recording("Status narrow", dir.path());
+    let events = session.events();
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.recording.test_recording(session, events);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    harness.run_steps(3);
+    harness.snapshot("record-status-recording-narrow-ru");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_starting_video() {
+    let mut harness = harness(Page::Record);
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.settings.hide_recording_preparation = false;
+    app.recording.test_starting(Page::Record);
+    harness.run_steps(2);
+    harness.snapshot("record-status-starting-video");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_starting_audio() {
+    let mut harness = harness(Page::RecordAudio);
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.settings.hide_recording_preparation = false;
+    app.recording.test_starting(Page::RecordAudio);
+    harness.run_steps(2);
+    harness.snapshot("record-status-starting-audio");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_library_card_menu() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Design_review_2026-01-01_10-00-00.png");
+    image::RgbaImage::from_pixel(320, 200, image::Rgba([180, 70, 50, 255]))
+        .save(&path)
+        .unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut library = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    library
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .lib
+        .set_test_entries(dir.path());
+    library.run_steps(4);
+    library.get_by_label_contains(&t!("lib.more")).click();
+    library.run_steps(2);
+    library.snapshot("library-card-menu");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_library_selection_menu() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::time::SystemTime::now();
+    let mut paths = Vec::new();
+    for index in 0..2 {
+        let path = dir.path().join(format!(
+            "Bulk_{}_2026-01-0{}_10-00-00.png",
+            index + 1,
+            index + 1
+        ));
+        image::RgbaImage::from_pixel(320, 200, image::Rgba([40, 90, 180, 255]))
+            .save(&path)
+            .unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(base - std::time::Duration::from_secs(2 - index as u64))
+            .unwrap();
+        paths.push(path);
+    }
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut library = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    {
+        let app = library.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+        app.lib.select_for_test(paths);
+    }
+    library.run_steps(4);
+    library
+        .get_by_label_contains(&t!("lib.selected", n = 2))
+        .click();
+    library.run_steps(2);
+    library.snapshot("library-selection-menu");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_reset_settings_modal() {
+    let mut selected = settings();
+    selected.advanced_settings = true;
+    let mut harness = harness_with(
+        Page::Settings,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness.get_by_label_contains(&t!("settings.reset")).click();
+    harness.run_steps(2);
+    harness.snapshot("settings-reset-modal");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_convert_batch_statuses() {
+    use crate::features::conversion::BatchStatus;
+    let mut harness = harness(Page::Convert);
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.conversion.test_batch(
+        &[
+            ("Done_2026-01-03_10-00-00.mp4", BatchStatus::Done, None),
+            (
+                "Failed_2026-01-02_10-00-00.mp4",
+                BatchStatus::Failed,
+                Some("encoder failed"),
+            ),
+            (
+                "Pending_2026-01-01_10-00-00.mp4",
+                BatchStatus::Pending,
+                None,
+            ),
+            (
+                "Cancelled_2026-01-01_09-00-00.mp4",
+                BatchStatus::Cancelled,
+                None,
+            ),
+        ],
+        Some(mediaa_media::convert::Target::Video(
+            mediaa_media::convert::VideoFormat::Mp4,
+        )),
+    );
+    harness.run_steps(3);
+    harness.snapshot("convert-batch-statuses");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_convert_batch_conflict() {
+    use crate::features::conversion::BatchStatus;
+    let mut harness = harness(Page::Convert);
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.conversion.test_batch(
+        &[
+            ("Track_2026-01-02_10-00-00.mp3", BatchStatus::Pending, None),
+            (
+                "Picture_2026-01-01_10-00-00.png",
+                BatchStatus::Pending,
+                None,
+            ),
+        ],
+        None,
+    );
+    harness.run_steps(3);
+    harness.snapshot("convert-batch-conflict");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_convert_batch_running() {
+    use crate::features::conversion::BatchStatus;
+    let mut harness = harness(Page::Convert);
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.conversion.test_batch(
+        &[
+            (
+                "Running_2026-01-02_10-00-00.mp4",
+                BatchStatus::Running,
+                None,
+            ),
+            ("Next_2026-01-01_10-00-00.mp4", BatchStatus::Pending, None),
+        ],
+        Some(mediaa_media::convert::Target::Video(
+            mediaa_media::convert::VideoFormat::Mp4,
+        )),
+    );
+    harness.run_steps(3);
+    harness.snapshot("convert-batch-running");
+}
+
+#[test]
+fn reset_settings_button_restores_defaults_but_keeps_personal_preferences() {
+    let mut selected = settings();
+    selected.advanced_settings = true;
+    selected.language = Some("ru".into());
+    selected.theme = ThemePreference::Light;
+    selected.viewer_volume = 0.35;
+    selected.media_dir = PathBuf::from("D:/CustomMedia");
+    selected.record.fps = 17;
+    selected.record.show_no_signal = false;
+    selected.record.hide_to_tray = false;
+    selected.close_to_tray = true;
+    selected.tray_progress = false;
+    let mut harness = harness_with(
+        Page::Settings,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness.get_by_label_contains(&t!("settings.reset")).click();
+    harness.run_steps(2);
+    let reset = format!(
+        "{}  {}",
+        egui_phosphor::regular::ARROW_COUNTER_CLOCKWISE,
+        t!("settings.reset_confirm")
+    );
+    harness.get_by_label(&reset).click();
+    harness.run_steps(2);
+    let settings = &harness.state().app.as_ref().unwrap().settings;
+    assert_eq!(settings.language.as_deref(), Some("ru"));
+    assert_eq!(settings.theme, ThemePreference::Light);
+    assert_eq!(settings.viewer_volume, 0.35);
+    assert!(settings.advanced_settings);
+    assert_eq!(
+        settings.media_dir,
+        mediaa_core::Settings::default().media_dir
+    );
+    assert_eq!(
+        settings.record.fps,
+        mediaa_core::Settings::default().record.fps
+    );
+    assert!(!settings.close_to_tray);
+    assert!(settings.record.show_no_signal);
+    assert!(settings.record.hide_to_tray);
+    assert!(settings.tray_progress);
+    assert_eq!(
+        settings.record.preset(&settings.anim),
+        Some(mediaa_core::settings::RecordPreset::Medium)
+    );
+    assert_eq!(
+        settings.region_record.preset(&settings.region_anim),
+        Some(mediaa_core::settings::RecordPreset::Fast)
+    );
+    assert_eq!(
+        settings.record.output,
+        mediaa_core::OutputKind::Video(mediaa_core::VideoContainer::Mkv)
+    );
+    assert_eq!(
+        settings.region_record.output,
+        mediaa_core::OutputKind::Anim(mediaa_core::AnimFormat::Gif)
+    );
+    let mut expected = Settings {
+        advanced_settings: true,
+        ..Settings::default()
+    };
+    expected.record.output = mediaa_core::OutputKind::Video(mediaa_core::VideoContainer::Mkv);
+    expected.record.fps = 60;
+    expected.record.output_height = 1080;
+    expected.record.video_quality = 85;
+    expected.region_record.output = mediaa_core::OutputKind::Anim(mediaa_core::AnimFormat::Gif);
+    expected.region_record.fps = 30;
+    expected.region_record.output_height = 720;
+    expected.region_anim.gif_colors = 256;
+    expected.region_anim.gif_dither = mediaa_core::settings::GifDither::Bayer;
+    expected.hotkey_record.fps = 60;
+    expected.hotkey_record.output_height = 1080;
+    expected.hotkey_record.video_quality = 85;
+    expected.language = Some("ru".into());
+    expected.theme = ThemePreference::Light;
+    expected.viewer_volume = 0.35;
+    assert_eq!(*settings, expected);
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_header_nav_dropdown() {
+    let mut harness = harness_with(
+        Page::Record,
+        settings(),
+        catalog(),
+        egui::vec2(720.0, 1000.0),
+    );
+    harness.run_steps(2);
+    harness
+        .get_all_by_role(egui::accesskit::Role::ComboBox)
+        .next()
+        .expect("header section combo")
+        .click();
+    harness.run_steps(2);
+    harness.snapshot("header-nav-dropdown");
+}
+
+#[test]
+fn ui_regression_snapshot_record_cancel_confirm() {
+    let _recording = recording_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().join("out");
+    let mut harness = harness_with(Page::Record, selected, catalog(), egui::vec2(1180.0, 900.0));
+    let session = test_recording("Cancel confirm", dir.path());
+    let events = session.events();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.recording.test_recording(session, events);
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    harness.run_steps(2);
+    harness.get_by_label_contains(&t!("record.cancel")).click();
+    harness.run_steps(2);
+    harness.snapshot("record-cancel-confirm");
+}
+
+#[test]
+fn remove_sound_disables_the_audio_options() {
+    use crate::features::conversion::BatchStatus;
+    let mut harness = harness(Page::Convert);
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.conversion.test_batch(
+        &[("clip.mp4", BatchStatus::Pending, None)],
+        Some(mediaa_media::convert::Target::Video(
+            mediaa_media::convert::VideoFormat::Mp4,
+        )),
+    );
+    harness.run_steps(2);
+    harness.get_by_label(&t!("convert.remove_audio")).click();
+    harness.run_steps(2);
+    assert!(harness
+        .get_by_label(&t!("convert.mono"))
+        .accesskit_node()
+        .is_disabled());
+    harness.get_by_label(&t!("convert.remove_audio")).click();
+    harness.run_steps(2);
+    assert!(!harness
+        .get_by_label(&t!("convert.mono"))
+        .accesskit_node()
+        .is_disabled());
+}
+
+#[test]
+fn incompatible_batch_shows_a_notice_and_does_not_start() {
+    use crate::features::conversion::BatchStatus;
+    let mut harness = harness(Page::Convert);
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.conversion.test_batch(
+        &[
+            ("track.mp3", BatchStatus::Pending, None),
+            ("picture.png", BatchStatus::Pending, None),
+        ],
+        None,
+    );
+    harness.run_steps(2);
+    assert!(harness.query_by_label(&t!("convert.no_common")).is_some());
+    assert!(!harness.state().app.as_ref().unwrap().conversion.is_busy());
+}
+
+#[test]
+fn saving_audio_keeps_the_audio_page_marker() {
+    let mut harness = harness(Page::RecordAudio);
+    let (events_tx, events) = crossbeam_channel::bounded(1);
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.recording
+        .test_saving_on(events, std::time::Duration::from_secs(1), Page::RecordAudio);
+    assert_eq!(app.recording.page(), Page::RecordAudio);
+    drop(events_tx);
+}
+
+#[test]
+fn turning_off_advanced_settings_confirms_and_resets_bonus_theme() {
+    let mut selected = settings();
+    selected.advanced_settings = true;
+    selected.theme = ThemePreference::Lime;
+    let mut harness = harness_with(
+        Page::Settings,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness.get_by_label(&t!("settings.advanced")).click();
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label(&t!("settings.advanced_off_text"))
+        .is_some());
+    assert!(
+        harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .settings
+            .advanced_settings
+    );
+    let confirm = format!(
+        "{}  {}",
+        egui_phosphor::regular::WARNING,
+        t!("settings.advanced_off_confirm")
+    );
+    harness.get_by_label(&confirm).click();
+    harness.run_steps(2);
+    let settings = &harness.state().app.as_ref().unwrap().settings;
+    assert!(!settings.advanced_settings);
+    assert_eq!(settings.theme, ThemePreference::System);
+    assert!(settings.record.show_no_signal);
+    assert!(settings.record.hide_to_tray);
+    harness.get_by_label(&t!("settings.advanced")).click();
+    harness.run_steps(2);
+    let settings = &harness.state().app.as_ref().unwrap().settings;
+    assert!(settings.advanced_settings);
+    assert!(settings.record.show_no_signal);
+    assert!(settings.record.hide_to_tray);
+}
+
+#[test]
+fn convert_folder_override_comes_from_saved_settings() {
+    let mut selected = settings();
+    selected.convert_dir = Some(PathBuf::from("D:/SavedConversions"));
+    let mut harness = harness_with(
+        Page::Convert,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    let app = harness.state().app.as_ref().unwrap();
+    assert_eq!(
+        app.conversion.test_folder(),
+        Some(std::path::Path::new("D:/SavedConversions"))
+    );
+}
+
+#[test]
+fn recording_preparation_is_hidden_by_default() {
+    for page in [Page::Record, Page::RecordAudio] {
+        let mut harness = harness(page);
+        harness
+            .state_mut()
+            .app
+            .as_mut()
+            .unwrap()
+            .recording
+            .test_starting(page);
+        harness.run_steps(2);
+        assert!(
+            harness.query_by_label(&t!("record.starting")).is_none(),
+            "{page:?}: preparation must stay hidden"
+        );
+        harness
+            .state_mut()
+            .app
+            .as_mut()
+            .unwrap()
+            .settings
+            .hide_recording_preparation = false;
+        harness.run_steps(2);
+        assert!(
+            harness.query_by_label(&t!("record.starting")).is_some(),
+            "{page:?}: manual opt-in shows preparation"
+        );
+    }
+}
+
+#[test]
+fn simple_audio_only_exposes_mp3_and_preset() {
+    let mut harness = harness_with(
+        Page::RecordAudio,
+        simple_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    assert!(harness.query_by_label(AudioFormat::Mp3.label()).is_some());
+    for format in [
+        AudioFormat::M4a,
+        AudioFormat::Wav,
+        AudioFormat::Flac,
+        AudioFormat::Ogg,
+    ] {
+        assert!(
+            harness.query_by_label(format.label()).is_none(),
+            "{format:?}"
+        );
+    }
+    assert!(harness.query_by_label(&t!("audio.bitrate")).is_none());
+    assert!(harness.query_by_label(&t!("record.preset")).is_some());
+}
+
+#[test]
+fn simple_capture_hides_fps_and_quality_but_keeps_resolution() {
+    let mut harness = harness_with(
+        Page::Record,
+        simple_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    assert!(harness.query_by_label(&t!("record.resolution")).is_some());
+    assert!(harness.query_by_label(&t!("record.format")).is_some());
+    assert!(harness.query_by_label(&t!("record.cursor")).is_some());
+    assert!(harness.query_by_label(&t!("record.fps")).is_none());
+    assert!(harness.query_by_label(&t!("record.quality")).is_none());
+    assert!(!harness.get_by_label("MP4").accesskit_node().is_disabled());
+    assert!(harness.query_by_label("GIF").is_none());
+    assert!(harness.query_by_label("WebP").is_none());
+    assert_eq!(
+        harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .settings
+            .record
+            .output_height,
+        1080
+    );
+}
+
+#[test]
+fn recording_status_overlay_keeps_its_position_between_frames() {
+    let _recording = recording_guard();
+    let dir = tempfile::tempdir().unwrap();
+    let mut harness = harness(Page::Record);
+    let session = test_recording("Status position", dir.path());
+    let events = session.events();
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.recording.test_recording(session, events);
+    }
+    harness.run_steps(2);
+    let first = harness.get_by_label(&t!("record.recording")).rect().top();
+    harness.run_steps(2);
+    let second = harness.get_by_label(&t!("record.recording")).rect().top();
+    assert!(
+        (first - second).abs() < 0.5,
+        "status overlay moved from {first} to {second}"
+    );
+}
+
+#[test]
+fn in_app_notifications_toggle_is_only_in_advanced_settings() {
+    let mut harness = harness_with(
+        Page::Settings,
+        simple_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label(&t!("settings.in_app_notifications"))
+        .is_none());
+    assert!(
+        !harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .settings
+            .notifications_enabled
+    );
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .settings
+        .advanced_settings = true;
+    harness.run_steps(2);
+    harness
+        .get_by_label(&t!("settings.in_app_notifications"))
+        .click();
+    harness.run_steps(2);
+    assert!(
+        harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .settings
+            .notifications_enabled
+    );
+}
+
+#[test]
+fn picker_keys_live_on_the_about_page() {
+    let mut settings_page = harness(Page::Settings);
+    settings_page.run_steps(2);
+    assert!(settings_page
+        .query_by_label(&t!("settings.picker_keys"))
+        .is_none());
+    assert!(settings_page
+        .query_by_label(&t!("settings.hk_stop"))
+        .is_some());
+    drop(settings_page);
+    let mut about_page = harness(Page::About);
+    about_page.run_steps(2);
+    assert!(about_page
+        .query_by_label(&t!("settings.picker_keys"))
+        .is_some());
+    assert!(about_page.query_by_label(&t!("settings.hk_stop")).is_none());
+}
+
+#[test]
+fn simple_recording_hides_display_selection_and_uses_one_display() {
+    let harness = harness_with(
+        Page::Record,
+        simple_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    let primary = crate::pages::record::monitor_label(&primary_monitor());
+    let secondary = crate::pages::record::monitor_label(&secondary_monitor());
+    assert!(harness.query_by_label(&primary).is_none());
+    assert!(harness.query_by_label(&secondary).is_none());
+    let app = harness.state().app.as_ref().unwrap();
+    assert!(matches!(
+        app.record_target_from_ui().unwrap(),
+        super::RecordTarget::Screens(ref monitors) if monitors.len() == 1
+    ));
+}
+#[test]
+fn simple_recording_selects_only_one_window() {
+    let mut harness = harness_with(
+        Page::Record,
+        simple_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.get_by_label(&t!("shot.window")).click();
+    harness.run();
+    let first = format!(
+        "{}  ({}×{})",
+        window().label(),
+        window().width,
+        window().height
+    );
+    let second = format!(
+        "{}  ({}×{})",
+        second_window().label(),
+        second_window().width,
+        second_window().height
+    );
+    harness.get_by_label(&first).click();
+    harness.run();
+    harness.get_by_label(&second).click();
+    harness.run();
+    let selected = &harness.state().app.as_ref().unwrap().recording.ui.windows;
+    assert_eq!(selected.len(), 1);
+    assert!(selected.contains(&CaptureWindowId::new(8)));
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_header_nav_recording() {
+    let _recording = recording_guard();
+    let mut harness = harness_with(
+        Page::Record,
+        settings(),
+        catalog(),
+        egui::vec2(720.0, 1000.0),
+    );
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .recording
+        .test_starting(Page::Record);
+    harness.run_steps(2);
+    harness.snapshot("header-nav-recording");
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_header_nav_wide_recording() {
+    let _recording = recording_guard();
+    let mut harness = harness(Page::Record);
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .recording
+        .test_starting(Page::Record);
+    harness.run_steps(2);
+    harness.snapshot("header-nav-wide-recording");
+}
+
+#[test]
+fn simple_settings_hide_the_hotkey_display_selector() {
+    let mut harness = harness_with(
+        Page::Settings,
+        simple_settings(),
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label(&t!("settings.hotkey_screen"))
+        .is_none());
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .settings
+        .advanced_settings = true;
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label(&t!("settings.hotkey_screen"))
+        .is_some());
+}
+
+#[test]
+fn convert_button_is_always_visible_and_disabled_until_ready() {
+    use egui_kittest::kittest::NodeT;
+    let mut harness = harness(Page::Convert);
+    harness.run_steps(2);
+    let label = t!("convert.start").into_owned();
+    let node = harness
+        .get_all_by_label_contains(&label)
+        .rev()
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("convert button");
+    assert!(node.accesskit_node().is_disabled());
+}
+
+#[test]
+fn convert_delete_all_clears_the_list() {
+    use crate::features::conversion::BatchStatus;
+    let mut harness = harness(Page::Convert);
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.conversion.test_batch(
+        &[("clip.mp4", BatchStatus::Pending, None)],
+        Some(mediaa_media::convert::Target::Video(
+            mediaa_media::convert::VideoFormat::Mp4,
+        )),
+    );
+    harness.run_steps(2);
+    harness.get_by_label_contains(&t!("convert.clear")).click();
+    harness.run_steps(2);
+    assert!(harness
+        .state()
+        .app
+        .as_ref()
+        .unwrap()
+        .conversion
+        .test_batch_is_empty());
+}
+
+#[cfg(windows)]
+#[test]
+fn ui_regression_snapshot_convert_status_busy() {
+    let mut harness = harness(Page::Convert);
+    let cancel = harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .conversion
+        .test_busy(200, std::time::Duration::from_millis(3_200));
+    harness.run_steps(2);
+    assert!(harness
+        .query_by_label(&t!("convert.status_running"))
+        .is_some());
+    harness.snapshot("convert-status-busy");
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .conversion
+        .test_status(780, std::time::Duration::from_millis(41_200));
+    harness.run_steps(2);
+    harness.snapshot("convert-status-progress");
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .conversion
+        .test_status(950, std::time::Duration::from_millis(65_200));
+    harness.run_steps(2);
+    harness.snapshot("convert-status-finishing");
+    cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[cfg(windows)]
+#[test]
+fn convert_cancel_stops_the_running_job() {
+    let mut harness = harness(Page::Convert);
+    let cancel = harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .conversion
+        .test_busy(450, std::time::Duration::from_secs(3));
+    harness.run_steps(2);
+    harness.get_by_label_contains(&t!("common.cancel")).click();
+    harness.run_steps(2);
+    assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+    let ctx = harness.ctx.clone();
+    let app = harness.state_mut().app.as_mut().unwrap();
+    for _ in 0..100 {
+        app.poll_conversion(&ctx);
+        if !app.conversion.is_busy() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(!app.conversion.is_busy());
+}
+
+#[test]
+fn changing_convert_format_resets_batch_statuses() {
+    use crate::features::conversion::BatchStatus;
+    let mut harness = harness(Page::Convert);
+    let app = harness.state_mut().app.as_mut().unwrap();
+    app.conversion.test_batch(
+        &[("clip.mp4", BatchStatus::Done, None)],
+        Some(mediaa_media::convert::Target::Video(
+            mediaa_media::convert::VideoFormat::Mp4,
+        )),
+    );
+    harness.run_steps(2);
+    harness.get_by_label("MKV").click();
+    harness.run_steps(2);
+    assert_eq!(
+        harness
+            .state()
+            .app
+            .as_ref()
+            .unwrap()
+            .conversion
+            .test_batch_statuses(),
+        vec![BatchStatus::Pending]
+    );
 }

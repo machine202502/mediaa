@@ -3,15 +3,39 @@ use raw_window_handle::RawWindowHandle;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeWindow(isize);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowResult {
+    Ok,
+    Unsupported,
+    Failed,
+}
+
+impl WindowResult {
+    pub fn is_ok(self) -> bool {
+        matches!(self, Self::Ok)
+    }
+}
+
+pub enum WindowOpen {
+    Supported(NativeWindow),
+    Unsupported(&'static str),
+}
+
 impl NativeWindow {
-    pub fn from_raw(raw: RawWindowHandle) -> Option<Self> {
+    pub fn from_raw(raw: RawWindowHandle) -> WindowOpen {
+        #[cfg(windows)]
         match raw {
-            RawWindowHandle::Win32(h) => Some(NativeWindow(h.hwnd.get())),
-            _ => None,
+            RawWindowHandle::Win32(h) => WindowOpen::Supported(NativeWindow(h.hwnd.get())),
+            _ => WindowOpen::Unsupported("native window handle is not supported"),
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = raw;
+            WindowOpen::Unsupported("native windows are not implemented on this platform")
         }
     }
 
-    pub fn set_visible(self, visible: bool) -> bool {
+    pub fn set_visible(self, visible: bool) -> WindowResult {
         #[cfg(windows)]
         {
             use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -26,16 +50,16 @@ impl NativeWindow {
                     SetForegroundWindow(hwnd);
                 }
             }
-            true
+            WindowResult::Ok
         }
         #[cfg(not(windows))]
         {
             let _ = visible;
-            false
+            WindowResult::Unsupported
         }
     }
 
-    pub fn set_ghost(self, ghost: bool) -> bool {
+    pub fn set_ghost(self, ghost: bool) -> WindowResult {
         #[cfg(windows)]
         {
             use std::sync::atomic::{AtomicIsize, Ordering};
@@ -66,12 +90,12 @@ impl NativeWindow {
                     }
                 }
             }
-            true
+            WindowResult::Ok
         }
         #[cfg(not(windows))]
         {
             let _ = ghost;
-            false
+            WindowResult::Unsupported
         }
     }
 }
@@ -130,6 +154,18 @@ pub fn make_black_transparent(title: &str) -> bool {
     {
         let _ = title;
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_result_is_explicit() {
+        assert!(WindowResult::Ok.is_ok());
+        assert!(!WindowResult::Unsupported.is_ok());
+        assert!(!WindowResult::Failed.is_ok());
     }
 }
 

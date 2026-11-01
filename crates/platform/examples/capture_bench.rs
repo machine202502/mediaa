@@ -1,6 +1,6 @@
 use mediaa_core::formats::{AnimFormat, OutputKind, VideoContainer};
 use mediaa_core::settings::{AnimSettings, WebpMode};
-use mediaa_core::source::{FrameSource, SourceFactory};
+use mediaa_core::source::SourceFactory;
 use mediaa_media::recorder::{
     AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction,
 };
@@ -23,23 +23,27 @@ fn main() -> anyhow::Result<()> {
     );
     let m = mediaa_platform::screen::monitors()?.remove(0);
     println!("display {}x{}", m.width, m.height);
-    let mut screenshots = mediaa_platform::screen::MonitorSource::new(m.id, None, true)?;
-    let mut backend = mediaa_platform::screen::monitor_source(m.id, None, true)?;
-    for (label, src) in [
-        ("screenshots", &mut screenshots as &mut dyn FrameSource),
-        ("recording backend", backend.as_mut()),
-    ] {
-        let n = 30;
-        let t = Instant::now();
-        for _ in 0..n {
-            src.grab()?;
-        }
-        let per = t.elapsed() / n;
-        println!(
-            "{label}: {per:?} per grab = {:.0} grabs/s",
-            1.0 / per.as_secs_f64()
-        );
+    let n = 30;
+    let t = Instant::now();
+    for _ in 0..n {
+        mediaa_platform::screen::capture_monitor(m.id)?;
     }
+    let per = t.elapsed() / n;
+    println!(
+        "screenshots: {per:?} per grab = {:.0} grabs/s",
+        1.0 / per.as_secs_f64()
+    );
+
+    let mut backend = mediaa_platform::screen::monitor_source(m.id, None, true)?;
+    let t = Instant::now();
+    for _ in 0..n {
+        backend.grab()?;
+    }
+    let per = t.elapsed() / n;
+    println!(
+        "recording backend: {per:?} per grab = {:.0} grabs/s",
+        1.0 / per.as_secs_f64()
+    );
     drop(backend);
 
     let output = match std::env::args().nth(1).as_deref() {
@@ -71,10 +75,7 @@ fn main() -> anyhow::Result<()> {
             output,
             vec![factory],
             if std::env::var_os("AUDIO").is_some() {
-                vec![Box::new(mediaa_platform::audio::CpalSource::new(
-                    mediaa_platform::audio::CpalTarget::System,
-                ))
-                    as Box<dyn mediaa_core::source::AudioSource>]
+                vec![mediaa_platform::audio::system_source()]
             } else {
                 vec![]
             },

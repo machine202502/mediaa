@@ -10,7 +10,6 @@ use rust_i18n::t;
 pub enum AudioUiAction {
     SettingsChanged,
     RefreshCatalogs,
-    RecordingCommand(super::record::status::RecordingUiCommand),
 }
 
 pub fn ui(
@@ -20,18 +19,15 @@ pub fn ui(
     ui: &mut egui::Ui,
 ) -> Vec<AudioUiAction> {
     let mut actions = Vec::new();
-    let ctx = ui.ctx().clone();
     header(ui, &t!("audio.title"), "");
     let live = !recording.is_idle();
-    if let Some(command) = super::record::status::live_status(recording, ui, &ctx) {
-        actions.push(AudioUiAction::RecordingCommand(command));
-        return actions;
-    }
     if live {
         ui.disable();
     }
 
-    let (changed, refresh_mics) = audio_editor(ui, &mut settings.audio_record, microphones, "page");
+    let simple = !settings.advanced_settings;
+    let (changed, refresh_mics) =
+        audio_editor(ui, &mut settings.audio_record, microphones, "page", simple);
     if changed {
         actions.push(AudioUiAction::SettingsChanged);
     }
@@ -46,6 +42,7 @@ pub fn audio_editor(
     a: &mut AudioRecordSettings,
     mics: &[String],
     salt: &str,
+    simple: bool,
 ) -> (bool, bool) {
     let changed = std::cell::Cell::new(false);
     let mark = |c: bool| changed.set(changed.get() | c);
@@ -63,25 +60,37 @@ pub fn audio_editor(
         |ui| {
             theme::section(ui, icon::FILE_AUDIO, &t!("audio.output"));
             theme::row(ui, &t!("record.format"), |ui| {
-                let opts: Vec<(AudioFormat, String)> = AudioFormat::ALL
+                let formats: &[AudioFormat] = if simple {
+                    &AudioFormat::SIMPLE
+                } else {
+                    &AudioFormat::ALL
+                };
+                let opts: Vec<(AudioFormat, String)> = formats
                     .iter()
                     .map(|f| (*f, f.label().to_string()))
                     .collect();
-                mark(theme::segmented(ui, format, &opts));
-            });
-            theme::row(ui, &t!("record.preset"), |ui| {
-                if let Some(preset) = super::preset_combo(
-                    ui,
-                    egui::Id::new(("audio-preset", salt)),
-                    current_preset,
-                    &RecordPreset::AUDIO,
-                ) {
-                    pending_preset.set(Some(preset));
+                if theme::segmented(ui, format, &opts) {
+                    mark(true);
+                    if let Some(default) = mediaa_core::settings::audio_default_kbps(*format) {
+                        *kbps = default;
+                    }
                 }
             });
             if !format.lossless() {
+                theme::row(ui, &t!("record.preset"), |ui| {
+                    if let Some(preset) = super::preset_combo(
+                        ui,
+                        egui::Id::new(("audio-preset", salt)),
+                        current_preset,
+                        &RecordPreset::AUDIO,
+                    ) {
+                        pending_preset.set(Some(preset));
+                    }
+                });
+            }
+            if !simple && !format.lossless() {
                 theme::row(ui, &t!("audio.bitrate"), |ui| {
-                    egui::ComboBox::from_id_salt(("audio-kbps", salt))
+                    crate::theme::combo_box(("audio-kbps", salt))
                         .selected_text(format!("{} kbit/s", kbps))
                         .show_ui(ui, |ui| {
                             for k in AUDIO_BITRATES {

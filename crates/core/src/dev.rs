@@ -7,7 +7,6 @@ const CONVERT_ENV: &str = "MEDIAA_DEV_CONVERT";
 const PICKER_ENV: &str = "MEDIAA_DEV_PICKER";
 const VIEW_ENV: &str = "MEDIAA_DEV_VIEW";
 const PREVIEW_ENV: &str = "MEDIAA_DEV_PREVIEW";
-const NOTICES_ENV: &str = "MEDIAA_DEV_NOTICES";
 
 fn value(name: &str) -> Option<OsString> {
     #[cfg(debug_assertions)]
@@ -43,10 +42,6 @@ pub fn view_filter() -> Option<String> {
 
 pub fn preview_filter() -> Option<String> {
     text(PREVIEW_ENV)
-}
-
-pub fn notices_mode() -> Option<String> {
-    text(NOTICES_ENV)
 }
 
 pub fn instance_scope() -> Option<String> {

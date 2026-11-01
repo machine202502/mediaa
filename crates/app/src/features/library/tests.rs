@@ -9,6 +9,56 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 #[test]
+fn selection_clicks_and_day_toggle() {
+    let mut controller = LibraryController::default();
+    let a = std::path::PathBuf::from("a.png");
+    let b = std::path::PathBuf::from("b.png");
+    controller.select_click(&a, false, false);
+    assert_eq!(controller.selected, vec![a.clone()]);
+    controller.select_click(&b, true, false);
+    assert_eq!(controller.selected, vec![a.clone(), b.clone()]);
+    controller.select_click(&a, true, false);
+    assert_eq!(controller.selected, vec![b.clone()]);
+
+    let ea = entry(a.clone(), SystemTime::UNIX_EPOCH);
+    let eb = entry(b.clone(), SystemTime::UNIX_EPOCH);
+    controller.select_day(&[&ea, &eb]);
+    assert_eq!(controller.selected.len(), 2);
+    controller.select_day(&[&ea, &eb]);
+    assert!(controller.selected.is_empty());
+
+    controller.select_click(&a, false, false);
+    controller.clear_selection();
+    assert!(controller.selected.is_empty());
+}
+
+#[test]
+fn bulk_delete_moves_every_file_to_trash() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.png");
+    let b = dir.path().join("b.png");
+    std::fs::write(&a, b"a").unwrap();
+    std::fs::write(&b, b"b").unwrap();
+    let mut controller = LibraryController::default();
+    controller.set_test_trash();
+    controller.delete_many(vec![a.clone(), b.clone()]).unwrap();
+    let ctx = eframe::egui::Context::default();
+    let report = (0..100)
+        .find_map(|_| {
+            let report = controller.poll_cleanup(&ctx);
+            if report.is_none() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            report
+        })
+        .expect("removal should finish")
+        .0;
+    assert_eq!(report.removed.len(), 2);
+    assert!(!a.exists());
+    assert!(!b.exists());
+}
+
+#[test]
 fn a_running_scan_is_not_duplicated_by_manual_refresh() {
     use crate::jobs::Job;
     use mediaa_core::Settings;
@@ -91,7 +141,7 @@ fn more_button_opens_the_menu_and_its_items_act() {
     let mut harness = egui_kittest::Harness::new_ui_state(
         |ui, chosen: &mut Option<LibraryAction>| {
             ui.set_width(300.0);
-            if let Some(a) = tools_strip(ui, &list) {
+            if let Some(a) = tools_strip(ui, &list).0 {
                 *chosen = Some(a);
             }
         },
@@ -154,8 +204,13 @@ fn every_kind_gets_all_tools_and_few_main_ones() {
         );
         assert_eq!(
             list.len(),
-            if kind == MediaKind::Image { 9 } else { 8 },
+            if kind == MediaKind::Image { 10 } else { 9 },
             "{kind:?}"
+        );
+        assert!(
+            list.iter()
+                .any(|tool| matches!(&tool.action, super::LibraryAction::ToggleSelect(_))),
+            "{kind:?}: the menu can select the card"
         );
     }
 }
@@ -249,6 +304,7 @@ fn cleanup_rechecks_the_file_age_before_moving_it() {
     let item = CleanupItem {
         path: path.clone(),
         size: 1,
+        modified: None,
     };
     let mut calls = 0;
     let report = cleanup_old_selected(
@@ -310,6 +366,7 @@ fn cleanup_continues_after_a_failed_move_and_removes_ready_proxies() {
         .map(|name| CleanupItem {
             path: dir.path().join(name),
             size: 10,
+            modified: None,
         })
         .collect();
     for item in &items {
@@ -320,7 +377,9 @@ fn cleanup_continues_after_a_failed_move_and_removes_ready_proxies() {
         std::fs::write(proxy, b"proxy").unwrap();
         std::fs::write(hover, b"hover").unwrap();
     }
+    let mut trashed = Vec::new();
     let report = cleanup_selected(&items, |path| {
+        trashed.push(path.to_path_buf());
         if path.file_name().is_some_and(|name| name == "busy.webp") {
             anyhow::bail!("file is busy")
         }
@@ -328,6 +387,9 @@ fn cleanup_continues_after_a_failed_move_and_removes_ready_proxies() {
         Ok(())
     });
     assert_eq!(report.removed.len(), 2);
+    assert!(trashed
+        .iter()
+        .all(|path| items.iter().any(|item| &item.path == path)));
     assert_eq!(report.failures.len(), 1);
     assert!(!items[0].path.exists());
     assert!(items[1].path.exists());
@@ -416,4 +478,74 @@ fn cleanup_modal_shows_the_scope_and_can_be_cancelled() {
         .click();
     harness.run();
     assert_eq!(harness.state(), &Some(false));
+}
+
+#[test]
+fn a_file_that_is_already_gone_is_not_a_delete_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a_2026-01-01_10-00-00.png");
+    let b = dir.path().join("b_2026-01-01_10-00-00.png");
+    std::fs::write(&a, b"a").unwrap();
+    std::fs::write(&b, b"b").unwrap();
+    let mut controller = LibraryController::default();
+    controller.set_test_entries(dir.path());
+    std::fs::remove_file(&a).unwrap();
+    std::fs::remove_file(&b).unwrap();
+    controller.delete_many(vec![a, b]).unwrap();
+    let ctx = eframe::egui::Context::default();
+    for _ in 0..200 {
+        if let Some((report, _)) = controller.poll_cleanup(&ctx) {
+            assert!(report.failures.is_empty(), "{:?}", report.failures);
+            assert_eq!(report.removed.len(), 2);
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    panic!("removal did not finish");
+}
+
+#[test]
+fn renaming_updates_selected_paths_and_the_anchor() {
+    let old = std::path::PathBuf::from("old.png");
+    let new = std::path::PathBuf::from("new.png");
+    let mut controller = LibraryController::default();
+    controller.select_for_test(vec![old.clone()]);
+    controller.rename_selected(&old, &new);
+    assert_eq!(controller.selected, vec![new.clone()]);
+    assert_eq!(controller.anchor, Some(new));
+}
+#[test]
+fn deleting_removes_deleted_paths_from_the_selection() {
+    let a = std::path::PathBuf::from("a.png");
+    let b = std::path::PathBuf::from("b.png");
+    let mut controller = LibraryController::default();
+    controller.select_for_test(vec![a.clone(), b.clone()]);
+    controller.remove_selected(&[a]);
+    assert_eq!(controller.selected, vec![b.clone()]);
+    assert_eq!(controller.anchor, Some(b));
+    controller.remove_selected(&[std::path::PathBuf::from("b.png")]);
+    assert!(controller.selected.is_empty());
+    assert_eq!(controller.anchor, None);
+}
+
+#[test]
+fn startup_prewarms_thumbnails_without_opening_the_library() {
+    use super::thumbs::Thumbnails;
+    use mediaa_core::Settings;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Recording_2026-01-01_10-00-00.mkv");
+    let mut index = LibraryIndex::load(dir.path());
+    index.apply_scan(vec![entry(path.clone(), SystemTime::UNIX_EPOCH)]);
+    let mut controller = LibraryController {
+        index: Some(index),
+        ..LibraryController::default()
+    };
+    let ctx = eframe::egui::Context::default();
+    let mut thumbs = Thumbnails::new(&ctx);
+    let settings = Settings {
+        media_dir: dir.path().to_path_buf(),
+        ..Settings::default()
+    };
+    controller.poll_background(&settings, &ctx, &mut thumbs);
+    assert!(thumbs.is_pending(&path));
 }

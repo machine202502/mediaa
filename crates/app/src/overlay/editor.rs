@@ -38,7 +38,10 @@ impl State {
                         .clamp(180.0, 600.0);
                     let frame = egui::Frame::new()
                         .fill(Color32::TRANSPARENT)
-                        .stroke(Stroke::new(frame_stroke, theme::DARK.accent))
+                        .stroke(Stroke::new(
+                            frame_stroke,
+                            theme::current_palette(ui.ctx()).accent,
+                        ))
                         .corner_radius(CornerRadius::same(4))
                         .inner_margin(egui::Margin::same(frame_margin as i8))
                         .show(ui, |ui| {

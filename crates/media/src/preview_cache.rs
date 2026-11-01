@@ -5,7 +5,7 @@ use mediaa_ffmpeg::{job, push_source, Input, JobBuilder, Output, VSync};
 use mediaa_webp::Reader;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const PREVIEW_MAX_HEIGHT: u32 = 1080;
 const PREVIEW_MAX_FPS: u32 = 30;
@@ -97,6 +97,22 @@ pub fn previews_dir(media_dir: &Path) -> std::path::PathBuf {
 
 fn cache_path(source: &Path, tag: &[u8], version: u32) -> CachePath {
     let metadata = std::fs::metadata(source).ok();
+    cache_path_at(
+        source,
+        tag,
+        version,
+        metadata.as_ref().map_or(0, |m| m.len()),
+        metadata.and_then(|m| m.modified().ok()),
+    )
+}
+
+fn cache_path_at(
+    source: &Path,
+    tag: &[u8],
+    version: u32,
+    size: u64,
+    modified: Option<SystemTime>,
+) -> CachePath {
     let mut hasher = mediaa_core::hash::StableHasher::default();
     hasher.write(&version.to_le_bytes());
     hasher.write(tag);
@@ -106,16 +122,9 @@ fn cache_path(source: &Path, tag: &[u8], version: u32) -> CachePath {
             .to_string_lossy()
             .as_bytes(),
     );
+    hasher.write(&size.to_le_bytes());
     hasher.write(
-        &metadata
-            .as_ref()
-            .map(|m| m.len())
-            .unwrap_or(0)
-            .to_le_bytes(),
-    );
-    hasher.write(
-        &metadata
-            .and_then(|m| m.modified().ok())
+        &modified
             .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_nanos())
             .unwrap_or(0)
@@ -135,10 +144,38 @@ pub fn proxy_path(source: &Path) -> CachePath {
     cache_path(source, b"preview", PREVIEW_VERSION)
 }
 
+pub fn proxy_path_at(source: &Path, size: u64, modified: Option<SystemTime>) -> CachePath {
+    cache_path_at(source, b"preview", PREVIEW_VERSION, size, modified)
+}
+
+pub fn hover_proxy_path_at(source: &Path, size: u64, modified: Option<SystemTime>) -> CachePath {
+    cache_path_at(source, b"hover", HOVER_VERSION, size, modified)
+}
 pub fn hover_proxy_path(source: &Path) -> CachePath {
     cache_path(source, b"hover", HOVER_VERSION)
 }
 
+pub fn relink_proxies(old: &Path, new: &Path) -> anyhow::Result<()> {
+    for (from, to) in [
+        (proxy_path(old), proxy_path(new)),
+        (hover_proxy_path(old), hover_proxy_path(new)),
+    ] {
+        if from == to || !from.is_file() {
+            continue;
+        }
+        if let Some(parent) = to.as_ref().parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::rename(from.as_ref(), to.as_ref()) {
+            Ok(()) => {}
+            Err(error) if to.is_file() => {
+                log::debug!("preview proxy already relinked: {error:#}");
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
 pub fn ready_proxy(source: &Path) -> Option<CachePath> {
     let path = proxy_path(source);
     path.is_file().then_some(path)
@@ -380,5 +417,28 @@ mod tests {
         assert_eq!(clear_previews(dir.path(), false, true), 1);
         assert!(!previews.join("aaaa.mp4").exists());
         assert!(previews.join("hover-cccc.mp4").exists());
+    }
+
+    #[test]
+    fn renaming_moves_both_proxy_namespaces_to_the_new_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let previews = previews_dir(dir.path());
+        std::fs::create_dir_all(&previews).unwrap();
+        let old = dir.path().join("old_2026-01-01_10-00-00.png");
+        let new = dir.path().join("new_2026-01-01_10-00-00.png");
+        std::fs::write(&old, b"same").unwrap();
+        std::fs::write(&new, b"same").unwrap();
+        let old_full = proxy_path(&old);
+        let old_hover = hover_proxy_path(&old);
+        std::fs::write(old_full.as_ref(), b"full").unwrap();
+        std::fs::write(old_hover.as_ref(), b"hover").unwrap();
+        relink_proxies(&old, &new).unwrap();
+        assert!(!old_full.exists());
+        assert!(!old_hover.exists());
+        assert_eq!(std::fs::read(proxy_path(&new).as_ref()).unwrap(), b"full");
+        assert_eq!(
+            std::fs::read(hover_proxy_path(&new).as_ref()).unwrap(),
+            b"hover"
+        );
     }
 }

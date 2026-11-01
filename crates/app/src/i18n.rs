@@ -29,6 +29,24 @@ pub fn current() -> String {
     rust_i18n::locale().to_string()
 }
 
+pub fn files(n: usize) -> &'static str {
+    if rust_i18n::locale().to_string() == "ru" {
+        let tail = n % 100;
+        if (11..=14).contains(&tail) {
+            return "файлов";
+        }
+        match n % 10 {
+            1 => "файл",
+            2..=4 => "файла",
+            _ => "файлов",
+        }
+    } else if n == 1 {
+        "file"
+    } else {
+        "files"
+    }
+}
+
 pub fn dither(d: GifDither) -> String {
     match d {
         GifDither::None => t!("dither.none").into(),
@@ -51,6 +69,8 @@ pub fn theme(p: ThemePreference) -> String {
         ThemePreference::System => t!("theme.system"),
         ThemePreference::Light => t!("theme.light"),
         ThemePreference::Dark => t!("theme.dark"),
+        ThemePreference::Lime => t!("theme.lime"),
+        ThemePreference::Peach => t!("theme.peach"),
     }
     .into()
 }

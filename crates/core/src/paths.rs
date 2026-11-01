@@ -62,9 +62,11 @@ fn project_dirs() -> Option<ProjectDirs> {
 }
 
 pub fn settings_file() -> PathBuf {
-    project_dirs()
-        .map(|d| d.config_dir().join("settings.toml"))
-        .unwrap_or_else(|| PathBuf::from("mediaa-settings.toml"))
+    home().join(".mediaa.toml")
+}
+
+pub fn legacy_settings_file() -> Option<PathBuf> {
+    project_dirs().map(|dirs| dirs.config_dir().join("settings.toml"))
 }
 
 pub fn data_dir() -> PathBuf {
@@ -164,7 +166,8 @@ mod tests {
     fn default_dirs_end_with_app_name() {
         assert!(default_media_dir().ends_with(APP_IDENTITY.name));
         assert!(work_dir().starts_with(data_dir()));
-        assert_eq!(settings_file().file_name().unwrap(), "settings.toml");
+        assert_eq!(settings_file().file_name().unwrap(), ".mediaa.toml");
+        assert_eq!(settings_file().parent(), Some(home().as_path()));
     }
 
     #[test]

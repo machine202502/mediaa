@@ -14,7 +14,7 @@ pub enum OutlineAppearance {
     Paused,
 }
 
-pub trait RegionOutlineBackend {
+pub(crate) trait RegionOutlineBackend {
     fn show(&mut self, geometry: OutlineGeometry, appearance: OutlineAppearance) -> bool;
     fn hide(&mut self);
 }
@@ -24,7 +24,8 @@ pub struct RegionOutline {
 }
 
 impl RegionOutline {
-    pub fn with_backend(backend: impl RegionOutlineBackend + 'static) -> Self {
+    #[cfg(test)]
+    pub(crate) fn with_backend(backend: impl RegionOutlineBackend + 'static) -> Self {
         Self {
             backend: Box::new(backend),
         }
@@ -92,4 +93,33 @@ impl RegionOutlineBackend for UnsupportedBackend {
     }
 
     fn hide(&mut self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Fake;
+
+    impl RegionOutlineBackend for Fake {
+        fn show(&mut self, _geometry: OutlineGeometry, _appearance: OutlineAppearance) -> bool {
+            true
+        }
+
+        fn hide(&mut self) {}
+    }
+
+    #[test]
+    fn the_public_type_delegates_without_exposing_the_backend() {
+        let mut outline = RegionOutline::with_backend(Fake);
+        let geometry = OutlineGeometry {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+            stroke_width: 5,
+        };
+        assert!(outline.show(geometry, OutlineAppearance::Active));
+        outline.hide();
+    }
 }

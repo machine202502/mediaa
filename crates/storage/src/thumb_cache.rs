@@ -174,6 +174,24 @@ impl ThumbCache {
         }
     }
 
+    pub fn relink(&mut self, old: &str, new: &str) {
+        let Some(slot) = self.items.remove(old) else {
+            return;
+        };
+        self.items.insert(new.to_string(), slot);
+        for pending in &mut self.pending {
+            if pending == old {
+                *pending = new.to_string();
+            }
+        }
+        self.sql(|db| {
+            db.execute(
+                "UPDATE thumbs SET name = ?1 WHERE name = ?2",
+                params![new, old],
+            )
+            .map(|_| ())
+        });
+    }
     pub fn get(&mut self, name: &str, size: u64, modified: SystemTime) -> Option<Frame> {
         let slot = *self.items.get(name)?;
         if slot.size != size || slot.modified_ms != to_ms(modified) {
@@ -295,6 +313,22 @@ impl ThumbCache {
         }
     }
 
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.pending.clear();
+        self.open = None;
+        self.pages.clear();
+        self.sql(|db| db.execute("DELETE FROM thumbs", []).map(|_| ()));
+        if let Ok(entries) = std::fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("thumbs-") && name.ends_with(".jpg") {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
     pub fn retain(&mut self, names: &HashSet<String>) {
         let gone: Vec<String> = self
             .items
@@ -616,5 +650,32 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM thumbs", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn a_thumbnail_can_be_relinked_to_a_renamed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut cache = ThumbCache::open(dir.path());
+        assert!(cache.put("old.png", 10, t, &thumb(64, 48, [10, 20, 30])));
+        cache.flush().unwrap();
+        cache.relink("old.png", "new.png");
+        assert!(cache.get("old.png", 10, t).is_none());
+        let frame = cache.get("new.png", 10, t).expect("relinked thumbnail");
+        assert_eq!((frame.width, frame.height), (64, 48));
+    }
+
+    #[test]
+    fn a_deleted_file_loses_its_thumbnail_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let mut cache = ThumbCache::open(dir.path());
+        assert!(cache.put("gone.png", 10, t, &thumb(64, 48, [10, 20, 30])));
+        cache.remove("gone.png");
+        assert!(cache.get("gone.png", 10, t).is_none());
+        cache.flush().unwrap();
+        assert!(ThumbCache::open(dir.path())
+            .get("gone.png", 10, t)
+            .is_none());
     }
 }

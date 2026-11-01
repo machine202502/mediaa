@@ -15,7 +15,6 @@ use eframe::egui::{self, Color32, CornerRadius, Margin, RichText, Stroke};
 use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
 use mediaa_core::settings::{RecordPreset, RecordProfile, ThemePreference};
-use mediaa_media::recorder::StopAction;
 use rust_i18n::t;
 use std::time::Duration;
 
@@ -42,7 +41,7 @@ pub(crate) fn preset_combo(
         .map(label)
         .unwrap_or_else(|| t!("record.preset_custom"));
     let mut picked = None;
-    egui::ComboBox::from_id_salt(id)
+    crate::theme::combo_box(id)
         .selected_text(selected)
         .show_ui(ui, |ui| {
             for preset in presets {
@@ -101,10 +100,15 @@ fn sub_pages(section: Section) -> Vec<(Page, &'static str, String)> {
     }
 }
 
+#[cfg(test)]
 pub fn shell(app: &mut App, ui: &mut egui::Ui) {
+    chrome(app, ui);
+    page(app, ui);
+}
+
+pub fn chrome(app: &mut App, ui: &mut egui::Ui) {
     let p = theme::palette(ui);
     let ctx = ui.ctx().clone();
-    theme::block_background_input(&ctx);
     egui::Panel::top("header")
         .resizable(false)
         .exact_size(46.0)
@@ -125,17 +129,44 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
         }
         let pages = sub_pages(section);
         if !pages.is_empty() {
-            egui::Panel::top("subnav")
+            let subnav = egui::Panel::top("subnav")
                 .resizable(false)
                 .exact_size(36.0)
                 .frame(
                     egui::Frame::new()
                         .fill(p.chrome)
-                        .inner_margin(Margin::symmetric(12, 4))
-                        .stroke(Stroke::new(1.0, p.border)),
+                        .inner_margin(Margin::symmetric(12, 4)),
                 )
                 .show(ui, |ui| sub_nav(app, ui, &pages));
+            ui.painter().hline(
+                subnav.response.rect.x_range(),
+                subnav.response.rect.bottom() - 0.5,
+                Stroke::new(1.0, p.border),
+            );
         }
+    }
+
+    if app.page == Page::Convert {
+        let convert_dir = app.settings.convert_dir();
+        egui::Panel::bottom("convert-start")
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(p.bg)
+                    .inner_margin(Margin::symmetric(18, 10)),
+            )
+            .show(ui, |ui| {
+                let ready = app.conversion.can_start();
+                ui.vertical_centered(|ui| {
+                    let btn = theme::primary(ui, icon::SHUFFLE, &t!("convert.start"))
+                        .min_size(egui::vec2(240.0, 38.0));
+                    if ui.add_enabled(ready, btn).clicked() {
+                        if let Some(error) = app.conversion.start_from_ui(ui.ctx(), &convert_dir) {
+                            app.error(error);
+                        }
+                    }
+                });
+            });
     }
 
     if matches!(app.page, Page::Record | Page::RecordAudio) {
@@ -147,22 +178,113 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                     .inner_margin(Margin::symmetric(18, 10)),
             )
             .show(ui, |ui| {
-                if !app.recording.is_idle() {
-                    ui.disable();
-                }
-                if app.page == Page::Record {
-                    let target = app.record_target_from_ui().map(|_| ());
-                    if record::start_bar(&app.settings, app.recovery_active(), &target, ui) {
-                        app.start_recording_from_ui(ui.ctx());
-                    }
-                } else {
-                    if audio::start_bar(&app.settings, app.recovery_active(), ui) {
+                let live = !app.recording.is_idle();
+                ui.add_enabled_ui(!live, |ui| {
+                    if app.page == Page::Record {
+                        let target = app.record_target_from_ui().map(|_| ());
+                        if record::start_bar(&app.settings, app.recovery_active(), &target, ui) {
+                            app.start_recording_from_ui(ui.ctx());
+                        }
+                    } else if audio::start_bar(&app.settings, app.recovery_active(), ui) {
                         app.start_audio_recording(ui.ctx(), RecordProfile::App, None);
                     }
-                }
+                });
             });
     }
 
+    if matches!(app.page, Page::Record | Page::RecordAudio) {
+        let live = !app.recording.is_idle();
+        let ctx = ui.ctx().clone();
+        let hidden_starting =
+            app.settings.hide_recording_preparation && app.recording.is_starting();
+        let show = live && !hidden_starting;
+        let shown_id = egui::Id::new("record-status-shown");
+        let was_shown = ctx
+            .data(|data| data.get_temp::<bool>(shown_id))
+            .unwrap_or(false);
+        ctx.data_mut(|data| data.insert_temp(shown_id, show));
+        if show {
+            let width = 640.0_f32.min((ctx.content_rect().width() - 36.0).max(280.0));
+            let overlay_bottom = ctx.content_rect().bottom() - 56.0 - 18.0;
+            egui::Area::new(egui::Id::new("record-status-overlay"))
+                .order(egui::Order::Foreground)
+                .fade_in(false)
+                .constrain(false)
+                .sizing_pass(!was_shown)
+                .pivot(egui::Align2::CENTER_BOTTOM)
+                .default_size(egui::vec2(width, 166.0))
+                .fixed_pos(egui::pos2(ctx.content_rect().center().x, overlay_bottom))
+                .show(&ctx, |ui| {
+                    ui.set_width(width);
+                    if let Some(command) = record::status::live_status(
+                        &mut app.recording,
+                        ui,
+                        &ctx,
+                        app.settings.hide_recording_preparation,
+                    ) {
+                        let command = match command {
+                            record::status::RecordingUiCommand::TogglePause => {
+                                RecordingCommand::TogglePause
+                            }
+                            record::status::RecordingUiCommand::Stop(action) => {
+                                RecordingCommand::Stop {
+                                    action,
+                                    source: crate::features::recording::StopSource::Ui,
+                                }
+                            }
+                        };
+                        app.dispatch_command(ui.ctx(), AppCommand::Recording(command));
+                    }
+                });
+        }
+    }
+    if app.page == Page::Convert {
+        if let Some(status) = app.conversion.status() {
+            let ctx = ui.ctx().clone();
+            let width = 640.0_f32.min((ctx.content_rect().width() - 36.0).max(280.0));
+            let bottom = ctx.content_rect().bottom() - 56.0 - 18.0;
+            let time = human_duration(status.elapsed.as_secs_f64());
+            let detail = (status.total > 1).then(|| {
+                t!(
+                    "convert.batch_progress",
+                    done = status.done + 1,
+                    total = status.total
+                )
+                .to_string()
+            });
+            let cancel_label = t!("common.cancel").into_owned();
+            let mut cancel = false;
+            egui::Area::new(egui::Id::new("convert-status-overlay"))
+                .order(egui::Order::Foreground)
+                .fade_in(false)
+                .constrain(false)
+                .pivot(egui::Align2::CENTER_BOTTOM)
+                .fixed_pos(egui::pos2(ctx.content_rect().center().x, bottom))
+                .show(&ctx, |ui| {
+                    ui.set_width(width);
+                    cancel = theme::status_card(
+                        ui,
+                        theme::StatusCard {
+                            icon: icon::SHUFFLE,
+                            color: theme::palette(ui).accent,
+                            time: &time,
+                            label: &t!("convert.status_running"),
+                            detail: detail.as_deref(),
+                            progress: status.progress,
+                            action: Some((icon::X, &cancel_label)),
+                        },
+                    );
+                });
+            ctx.request_repaint_after(Duration::from_millis(250));
+            if cancel {
+                app.conversion.cancel();
+            }
+        }
+    }
+}
+
+pub fn page(app: &mut App, ui: &mut egui::Ui) {
+    let p = theme::palette(ui);
     if app.page == Page::Catalogs {
         agent::catalogs::screen(app, ui);
         return;
@@ -175,8 +297,15 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                 .inner_margin(Margin::symmetric(18, 14)),
         )
         .show(ui, |ui| {
-            egui::ScrollArea::vertical()
+            let offset = app
+                .page_scroll
+                .iter()
+                .find(|(page, _)| *page == app.page)
+                .map_or(0.0, |(_, offset)| *offset);
+            let scroll = egui::ScrollArea::vertical()
+                .id_salt(format!("page-scroll-{:?}", app.page))
                 .auto_shrink([false, false])
+                .vertical_scroll_offset(offset)
                 .show(ui, |ui| match app.page {
                     Page::Screenshot => {
                         let actions =
@@ -220,20 +349,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                                         ui.ctx(),
                                         overlay::Purpose::RecordRegion,
                                     ),
-                                record::RecordUiAction::RecordingCommand(command) => {
-                                    let command = match command {
-                                        record::status::RecordingUiCommand::TogglePause => {
-                                            RecordingCommand::TogglePause
-                                        }
-                                        record::status::RecordingUiCommand::Stop(action) => {
-                                            RecordingCommand::Stop {
-                                                action,
-                                                source: crate::features::recording::StopSource::Ui,
-                                            }
-                                        }
-                                    };
-                                    app.dispatch_command(ui.ctx(), AppCommand::Recording(command));
-                                }
                             }
                         }
                     }
@@ -246,20 +361,6 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                                 audio::AudioUiAction::RefreshCatalogs => {
                                     app.refresh_catalogs(ui.ctx())
                                 }
-                                audio::AudioUiAction::RecordingCommand(command) => {
-                                    let command = match command {
-                                        record::status::RecordingUiCommand::TogglePause => {
-                                            RecordingCommand::TogglePause
-                                        }
-                                        record::status::RecordingUiCommand::Stop(action) => {
-                                            RecordingCommand::Stop {
-                                                action,
-                                                source: crate::features::recording::StopSource::Ui,
-                                            }
-                                        }
-                                    };
-                                    app.dispatch_command(ui.ctx(), AppCommand::Recording(command));
-                                }
                             }
                         }
                     }
@@ -271,8 +372,16 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                         }
                     }
                     Page::Convert => {
-                        if let Some(action) = app.conversion.ui(ui, &app.settings.convert_dir()) {
-                            app.apply_conversion_ui_action(ui.ctx(), action);
+                        let convert_dir = app.settings.convert_dir();
+                        let before = app.settings.convert_dir.clone();
+                        if let Some(action) =
+                            app.conversion
+                                .ui(ui, &convert_dir, &mut app.settings.convert_dir)
+                        {
+                            app.apply_conversion_ui_action(action);
+                        }
+                        if app.settings.convert_dir != before {
+                            app.settings_changed();
                         }
                     }
                     Page::Providers => agent::providers::ui(app, ui),
@@ -283,6 +392,15 @@ pub fn shell(app: &mut App, ui: &mut egui::Ui) {
                     Page::Settings => settings::ui(app, ui),
                     Page::About => about::ui(app, ui),
                 });
+            if let Some(entry) = app
+                .page_scroll
+                .iter_mut()
+                .find(|(page, _)| *page == app.page)
+            {
+                entry.1 = scroll.state.offset.y;
+            } else {
+                app.page_scroll.push((app.page, scroll.state.offset.y));
+            }
         });
 }
 
@@ -296,28 +414,94 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
 
         let mut section = app.page.section();
         let before = section;
-        theme::segmented(
-            ui,
-            &mut section,
-            &[
-                (
-                    Some(Section::Library),
-                    format!("{}  {}", icon::IMAGES, t!("section.library")),
-                ),
-                (
-                    Some(Section::Capture),
-                    format!("{}  {}", icon::SCREENCAST, t!("section.capture")),
-                ),
-                (
-                    Some(Section::Convert),
-                    format!("{}  {}", icon::SHUFFLE, t!("section.convert")),
-                ),
-                (
-                    Some(Section::Agent),
-                    format!("{}  {}", icon::SPARKLE, t!("section.agent")),
-                ),
-            ],
-        );
+        let nav = [
+            (
+                Some(Section::Library),
+                format!("{}  {}", icon::IMAGES, t!("section.library")),
+            ),
+            (
+                Some(Section::Capture),
+                format!("{}  {}", icon::SCREENCAST, t!("section.capture")),
+            ),
+            (
+                Some(Section::Convert),
+                format!("{}  {}", icon::SHUFFLE, t!("section.convert")),
+            ),
+            (
+                Some(Section::Agent),
+                format!("{}  {}", icon::SPARKLE, t!("section.agent")),
+            ),
+        ];
+        let mut marks: Vec<(Option<Section>, Color32)> = Vec::new();
+        if !app.recording.is_idle() {
+            marks.push((Some(Section::Capture), p.danger));
+        }
+        if app.conversion.is_busy() {
+            marks.push((Some(Section::Convert), p.success));
+        }
+        if ctx.content_rect().width() < 820.0 {
+            let selected = nav
+                .iter()
+                .find(|(option, _)| *option == section)
+                .map(|(_, label)| label.clone())
+                .unwrap_or_default();
+            let font = ui
+                .style()
+                .text_styles
+                .get(&egui::TextStyle::Button)
+                .cloned()
+                .unwrap_or_else(|| egui::FontId::proportional(14.0));
+            let text_width = nav
+                .iter()
+                .map(|(_, label)| {
+                    ui.fonts_mut(|fonts| {
+                        fonts
+                            .layout_no_wrap(label.clone(), font.clone(), egui::Color32::WHITE)
+                            .size()
+                            .x
+                    })
+                })
+                .fold(0.0_f32, f32::max);
+            let selected_mark = marks
+                .iter()
+                .find(|(option, _)| *option == section)
+                .map(|(_, color)| *color);
+            let selected_text = if selected_mark.is_some() {
+                format!("\u{00A0}\u{00A0}\u{00A0}\u{00A0}{selected}")
+            } else {
+                selected.clone()
+            };
+            let combo = crate::theme::combo_box("header-section")
+                .width(text_width + 34.0 + if selected_mark.is_some() { 22.0 } else { 0.0 })
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    for (option, label) in &nav {
+                        ui.horizontal(|ui| {
+                            if let Some(color) = marks
+                                .iter()
+                                .find(|(marked, _)| marked == option)
+                                .map(|(_, color)| *color)
+                            {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(9.0, 9.0),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter().circle_filled(rect.center(), 3.0, color);
+                            }
+                            ui.selectable_value(&mut section, *option, label);
+                        });
+                    }
+                });
+            if let Some(color) = selected_mark {
+                ui.painter().circle_filled(
+                    combo.response.rect.left_center() + egui::vec2(9.0, 0.0),
+                    3.0,
+                    color,
+                );
+            }
+        } else {
+            theme::segmented_marked_many(ui, &mut section, &nav, &marks);
+        }
         if section != before {
             app.page = match section {
                 Some(Section::Library) => Page::Library,
@@ -353,6 +537,9 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 ThemePreference::System => (icon::DESKTOP, ThemePreference::Dark),
                 ThemePreference::Dark => (icon::MOON, ThemePreference::Light),
                 ThemePreference::Light => (icon::SUN, ThemePreference::System),
+                ThemePreference::Lime | ThemePreference::Peach => {
+                    (icon::DESKTOP, ThemePreference::System)
+                }
             };
             let tip = format!(
                 "{}: {}",
@@ -364,7 +551,6 @@ fn header_bar(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
                 theme::apply_preference(ctx, next);
                 app.settings_changed();
             }
-            recording_status(app, ui, ctx);
         });
     });
 }
@@ -381,101 +567,23 @@ fn sub_nav(app: &mut App, ui: &mut egui::Ui, pages: &[(Page, &str, String)]) {
                 (Color32::TRANSPARENT, p.text)
             };
             let recording = page == app.recording_page() && !app.recording.is_idle();
-            let text = if recording {
-                format!("{ic}  {label}    ")
-            } else {
-                format!("{ic}  {label}")
-            };
-            let btn = egui::Button::new(RichText::new(text).size(13.0).color(fg))
-                .fill(fill)
-                .stroke(Stroke::NONE)
-                .corner_radius(CornerRadius::same(6))
-                .min_size(egui::vec2(0.0, 26.0));
-            let resp = ui.add(btn);
+            let resp = theme::marker_button(
+                ui,
+                theme::MarkerButton {
+                    label: &format!("{ic}  {label}"),
+                    font: egui::FontId::proportional(13.0),
+                    color: fg,
+                    fill,
+                    marker: recording.then_some(p.danger),
+                    height: 26.0,
+                    min_width: 0.0,
+                },
+            );
             if resp.clicked() {
                 app.page = page;
             }
-            if recording {
-                let c = resp.rect.right_center() - egui::vec2(10.0, 0.0);
-                ui.painter().circle_filled(c, 3.5, p.danger);
-            }
         }
     });
-}
-
-fn recording_status(app: &mut App, ui: &mut egui::Ui, ctx: &egui::Context) {
-    let p = theme::palette(ui);
-    let recording = &app.recording;
-    let (label, paused) = if let Some(elapsed) = recording.starting_elapsed() {
-        (
-            format!(
-                "{} {}",
-                t!("record.starting"),
-                human_duration(elapsed.as_secs_f64())
-            ),
-            false,
-        )
-    } else if let Some(elapsed) = recording.recording_elapsed() {
-        (
-            format!(
-                "{} {}",
-                if recording.is_paused() {
-                    t!("record.paused")
-                } else {
-                    t!("record.recording")
-                },
-                human_duration(elapsed.as_secs_f64())
-            ),
-            recording.is_paused(),
-        )
-    } else if let Some(progress) = recording.progress() {
-        (
-            format!("{} {:.0}%", t!("record.saving"), progress * 100.0),
-            false,
-        )
-    } else if let Some(started) = recording.saving_started() {
-        (
-            format!(
-                "{} {}",
-                t!("record.saving"),
-                human_duration(started.elapsed().as_secs_f64())
-            ),
-            false,
-        )
-    } else {
-        return;
-    };
-    if recording.is_recording() {
-        if theme::icon_button(ui, icon::X, &t!("record.cancel")).clicked() {
-            app.dispatch_command(
-                ctx,
-                AppCommand::Recording(RecordingCommand::Stop {
-                    action: StopAction::Discard,
-                    source: crate::features::recording::StopSource::Ui,
-                }),
-            );
-        }
-        if theme::icon_button(ui, icon::STOP, &t!("record.stop_save")).clicked() {
-            app.dispatch_command(
-                ctx,
-                AppCommand::Recording(RecordingCommand::Stop {
-                    action: StopAction::Save,
-                    source: crate::features::recording::StopSource::Ui,
-                }),
-            );
-        }
-        let (ic, tip) = if paused {
-            (icon::PLAY, t!("record.resume"))
-        } else {
-            (icon::PAUSE, t!("record.pause"))
-        };
-        if theme::icon_button(ui, ic, &tip).clicked() {
-            app.dispatch_command(ctx, AppCommand::Recording(RecordingCommand::TogglePause));
-        }
-    }
-    ui.label(RichText::new(label).strong());
-    ui.label(RichText::new(icon::RECORD).color(if paused { p.warning } else { p.danger }));
-    ui.add_space(8.0);
 }
 
 pub fn header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
@@ -487,14 +595,6 @@ pub fn header(ui: &mut egui::Ui, title: &str, subtitle: &str) {
         }
     });
     ui.add_space(8.0);
-}
-
-pub fn activity(ui: &mut egui::Ui, label: &str, elapsed: Duration) {
-    ui.horizontal(|ui| {
-        ui.add(egui::Spinner::new().size(18.0));
-        ui.label(label);
-        ui.monospace(human_duration(elapsed.as_secs_f64()));
-    });
 }
 
 pub fn tile_width(ui: &egui::Ui, n: usize) -> f32 {
@@ -575,23 +675,4 @@ pub fn tile(
         egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), selected, title)
     });
     resp
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn activity_row_does_not_take_the_remaining_page_height() {
-        let ctx = egui::Context::default();
-        let mut height = 0.0;
-        let output = ctx.run_ui(Default::default(), |ui| {
-            ui.set_min_height(600.0);
-            let top = ui.cursor().min.y;
-            activity(ui, "", Duration::from_secs(8));
-            height = ui.cursor().min.y - top;
-        });
-        output.drop_without_applying_deltas();
-        assert!(height < 40.0, "{height}");
-    }
 }

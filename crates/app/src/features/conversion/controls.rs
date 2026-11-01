@@ -1,43 +1,6 @@
 use super::*;
 use mediaa_core::limits::VIDEO_QUALITY;
 
-pub(super) fn estimate_row(ui: &mut egui::Ui, estimate: Option<&Estimate>, source: Option<u64>) {
-    let Some(e) = estimate else { return };
-    let text = |bytes: u64| {
-        let mut s = format!("≈ {}", human_size(bytes));
-        if let Some(src) = source.filter(|s| *s > 0) {
-            let pct = (bytes as f64 / src as f64 - 1.0) * 100.0;
-            s += &format!(
-                "  ({}{:.0} %)",
-                if pct < 0.0 { "−" } else { "+" },
-                pct.abs()
-            );
-        }
-        s
-    };
-    theme::row(ui, &t!("convert.size"), |ui| {
-        let resp = match &e.result {
-            Some(Ok(bytes)) => ui.label(RichText::new(text(*bytes)).strong()),
-            Some(Err(err)) => ui
-                .label(RichText::new(t!("convert.size_failed")).color(theme::palette(ui).text_weak))
-                .on_hover_text(err),
-            None => {
-                ui.add(egui::Spinner::new().size(12.0));
-                match e.previous {
-                    Some(bytes) => {
-                        ui.label(RichText::new(text(bytes)).color(theme::palette(ui).text_weak))
-                    }
-                    None => ui.label(
-                        RichText::new(t!("convert.size_estimating"))
-                            .color(theme::palette(ui).text_weak),
-                    ),
-                }
-            }
-        };
-        resp.on_hover_text(t!("convert.size_hint"));
-    });
-}
-
 pub(super) fn effort_row(ui: &mut egui::Ui, effort: &mut Effort) {
     theme::row(ui, &t!("convert.effort"), |ui| {
         let opts: Vec<(Effort, String)> = Effort::ALL
@@ -59,7 +22,7 @@ pub(super) fn effort_row(ui: &mut egui::Ui, effort: &mut Effort) {
 }
 
 pub(super) fn kbps_combo(ui: &mut egui::Ui, kbps: &mut u32) {
-    egui::ComboBox::from_id_salt("convert-kbps")
+    crate::theme::combo_box("convert-kbps")
         .selected_text(format!("{kbps} kbit/s"))
         .show_ui(ui, |ui| {
             for k in AUDIO_BITRATES {
@@ -80,7 +43,7 @@ pub(super) fn fps_combo(ui: &mut egui::Ui, max_fps: &mut Option<u32>, source_fps
             |f| format!("{f} fps"),
         )
     };
-    egui::ComboBox::from_id_salt("convert-fps")
+    crate::theme::combo_box("convert-fps")
         .selected_text(label(*max_fps))
         .show_ui(ui, |ui| {
             ui.selectable_value(max_fps, None, label(None));
@@ -102,7 +65,7 @@ pub(super) fn png_colors_combo(ui: &mut egui::Ui, colors: &mut Option<u16>) {
             |n| t!("convert.colors_n", n = n).to_string(),
         )
     };
-    egui::ComboBox::from_id_salt("convert-colors")
+    crate::theme::combo_box("convert-colors")
         .selected_text(label(*colors))
         .show_ui(ui, |ui| {
             ui.selectable_value(colors, None, label(None));
@@ -136,7 +99,7 @@ pub(super) fn pick_file_dialog(
     if convert_dir.is_dir() {
         dialog = dialog.set_directory(convert_dir);
     }
-    if let Some(path) = dialog.pick_file() {
-        controller.set_input(path);
+    if let Some(paths) = dialog.pick_files() {
+        controller.add_inputs(paths);
     }
 }

@@ -1,4 +1,4 @@
-use super::{activity, header, tile};
+use super::{header, tile};
 use crate::features::recording::TargetKind;
 use crate::{i18n, theme};
 use eframe::egui::{self, RichText};
@@ -6,8 +6,8 @@ use egui_phosphor::regular as icon;
 use mediaa_core::library::human_duration;
 use mediaa_core::limits::{FPS, GIF_COLORS, VIDEO_QUALITY};
 use mediaa_core::settings::{
-    AnimSettings, AnimationQuality, GifDither, MicChoice, RecordPreset, RecordProfile,
-    ANIM_HEIGHTS, OUTPUT_HEIGHTS,
+    AnimSettings, AnimationQuality, GifDither, MicChoice, RecordProfile, ANIM_HEIGHTS,
+    OUTPUT_HEIGHTS,
 };
 use mediaa_core::Settings;
 use mediaa_core::{AnimFormat, OutputKind};
@@ -32,7 +32,6 @@ pub enum RecordUiAction {
     SettingsChanged,
     RefreshCatalogs,
     SelectRegion,
-    RecordingCommand(status::RecordingUiCommand),
 }
 
 pub fn ui(
@@ -44,70 +43,103 @@ pub fn ui(
     ui: &mut egui::Ui,
 ) -> Vec<RecordUiAction> {
     let mut actions = Vec::new();
-    let ctx = ui.ctx().clone();
     header(ui, &t!("record.title"), "");
     let live = !recording.is_idle();
-    if let Some(command) = status::live_status(recording, ui, &ctx) {
-        actions.push(RecordUiAction::RecordingCommand(command));
-        return actions;
-    }
     if live {
         ui.disable();
     }
 
+    let gap = ui.spacing().item_spacing.x;
+    let avail = ui.available_width();
     let w = super::tile_width(ui, 3);
     let target = recording.ui.target;
-    ui.horizontal_wrapped(|ui| {
-        if tile(
+    if w >= 340.0 {
+        ui.horizontal(|ui| {
+            if target_tile(
+                ui,
+                recording,
+                TargetKind::Region,
+                icon::SELECTION,
+                &t!("shot.area"),
+                w,
+                target == TargetKind::Region,
+            ) {
+                actions.push(RecordUiAction::SelectRegion);
+            }
+            if target_tile(
+                ui,
+                recording,
+                TargetKind::Screen,
+                icon::MONITOR,
+                &t!("shot.full"),
+                w,
+                target == TargetKind::Screen,
+            ) {
+                actions.push(RecordUiAction::RefreshCatalogs);
+            }
+            if target_tile(
+                ui,
+                recording,
+                TargetKind::Windows,
+                icon::APP_WINDOW,
+                &t!("shot.window"),
+                w,
+                target == TargetKind::Windows,
+            ) {
+                actions.push(RecordUiAction::RefreshCatalogs);
+            }
+        });
+    } else {
+        let half = ((avail - gap) / 2.0).floor();
+        ui.horizontal(|ui| {
+            if target_tile(
+                ui,
+                recording,
+                TargetKind::Region,
+                icon::SELECTION,
+                &t!("shot.area"),
+                half,
+                target == TargetKind::Region,
+            ) {
+                actions.push(RecordUiAction::SelectRegion);
+            }
+            if target_tile(
+                ui,
+                recording,
+                TargetKind::Windows,
+                icon::APP_WINDOW,
+                &t!("shot.window"),
+                half,
+                target == TargetKind::Windows,
+            ) {
+                actions.push(RecordUiAction::RefreshCatalogs);
+            }
+        });
+        ui.add_space(4.0);
+        if target_tile(
             ui,
-            icon::SELECTION,
-            &t!("shot.area"),
-            "",
-            w,
-            target == TargetKind::Region,
-        )
-        .clicked()
-        {
-            recording.ui.target = TargetKind::Region;
-            actions.push(RecordUiAction::SelectRegion);
-        }
-        if tile(
-            ui,
+            recording,
+            TargetKind::Screen,
             icon::MONITOR,
             &t!("shot.full"),
-            "",
-            w,
+            avail,
             target == TargetKind::Screen,
-        )
-        .clicked()
-        {
-            recording.ui.target = TargetKind::Screen;
+        ) {
             actions.push(RecordUiAction::RefreshCatalogs);
         }
-        if tile(
-            ui,
-            icon::APP_WINDOW,
-            &t!("shot.window"),
-            "",
-            w,
-            target == TargetKind::Windows,
-        )
-        .clicked()
-        {
-            recording.ui.target = TargetKind::Windows;
-            actions.push(RecordUiAction::RefreshCatalogs);
-        }
-    });
+    }
     ui.add_space(4.0);
 
-    theme::card(ui).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.set_height(SOURCE_PANEL_H);
-        if source_details(recording, monitors, windows, ui) {
-            actions.push(RecordUiAction::RefreshCatalogs);
-        }
-    });
-    ui.add_space(4.0);
+    if settings.advanced_settings || recording.ui.target != TargetKind::Screen {
+        theme::card(ui).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.set_height(SOURCE_PANEL_H);
+            if source_details(recording, monitors, windows, settings.advanced_settings, ui) {
+                actions.push(RecordUiAction::RefreshCatalogs);
+            }
+        });
+        ui.add_space(4.0);
+    }
 
     let sources_h = source_height(recording, monitors);
     let mut refresh_mics = false;
@@ -127,6 +159,22 @@ pub fn ui(
     actions
 }
 
+fn target_tile(
+    ui: &mut egui::Ui,
+    recording: &mut crate::features::recording::RecordingController,
+    kind: TargetKind,
+    icon: &str,
+    label: &str,
+    width: f32,
+    selected: bool,
+) -> bool {
+    let clicked = tile(ui, icon, label, "", width, selected).clicked();
+    if clicked {
+        recording.ui.target = kind;
+    }
+    clicked
+}
+
 pub fn profile_editor(
     ui: &mut egui::Ui,
     settings: &mut Settings,
@@ -143,17 +191,35 @@ pub fn profile_editor(
         RecordProfile::Hotkey => 1,
         RecordProfile::Region => 2,
     };
+    let advanced = settings.advanced_settings;
     let (r, anim) = settings.profile_mut(profile);
+    if !advanced {
+        match profile {
+            RecordProfile::Hotkey | RecordProfile::App => {
+                if !matches!(
+                    r.output,
+                    OutputKind::Video(
+                        mediaa_core::VideoContainer::Mp4 | mediaa_core::VideoContainer::Mkv
+                    )
+                ) {
+                    r.output = OutputKind::Video(mediaa_core::VideoContainer::Mkv);
+                }
+            }
+            RecordProfile::Region => {
+                if !matches!(
+                    r.output,
+                    OutputKind::Anim(AnimFormat::Gif | AnimFormat::Webp)
+                ) {
+                    r.output = OutputKind::Anim(AnimFormat::Gif);
+                }
+            }
+        }
+    }
     let kind = r.output;
     let presets = r.preset_options();
     let current_preset = r.preset(anim);
     let pending_preset = std::cell::Cell::new(None);
     let pending_output = std::cell::Cell::new(None);
-    let default_animation = if profile == RecordProfile::Region {
-        RecordPreset::Fast
-    } else {
-        RecordPreset::Quality
-    };
     let (output, height, fps, quality, hide, cursor, no_signal, unavailable) = (
         &mut r.output,
         &mut r.output_height,
@@ -164,18 +230,28 @@ pub fn profile_editor(
         &mut r.show_no_signal,
         &mut r.allow_unavailable_sources,
     );
-    let (record_audio, microphone, system_audio, every_file) = (
-        &mut r.record_audio,
-        &mut r.microphone,
-        &mut r.system_audio,
-        &mut r.audio_in_every_file,
-    );
+    let (record_audio, microphone, system_audio) =
+        (&mut r.record_audio, &mut r.microphone, &mut r.system_audio);
     theme::split_card(
         ui,
         |ui| {
             theme::section(ui, icon::FILM_STRIP, &t!("record.output"));
             theme::row(ui, &t!("record.format"), |ui| {
-                let opts: Vec<(OutputKind, String)> = output_kinds(profile)
+                let kinds = if !advanced {
+                    match profile {
+                        RecordProfile::Hotkey | RecordProfile::App => vec![
+                            OutputKind::Video(mediaa_core::VideoContainer::Mkv),
+                            OutputKind::Video(mediaa_core::VideoContainer::Mp4),
+                        ],
+                        RecordProfile::Region => vec![
+                            OutputKind::Anim(AnimFormat::Gif),
+                            OutputKind::Anim(AnimFormat::Webp),
+                        ],
+                    }
+                } else {
+                    output_kinds(profile)
+                };
+                let opts: Vec<(OutputKind, String)> = kinds
                     .into_iter()
                     .map(|k| (k, k.label().to_string()))
                     .collect();
@@ -197,22 +273,26 @@ pub fn profile_editor(
                     }
                 });
             }
-            theme::row(ui, &t!("record.resolution"), |ui| {
-                mark(resolution_picker(
-                    ui,
-                    height,
-                    &OUTPUT_HEIGHTS,
-                    sources_h,
-                    egui::Id::new(("rec-resolution", salt)),
-                ));
-            });
-            theme::row(ui, &t!("record.fps"), |ui| {
-                mark(
-                    ui.add(egui::Slider::new(fps, 5..=FPS.max).suffix(" fps"))
-                        .changed(),
-                );
-            });
-            if let OutputKind::Video(_) = kind {
+            if advanced || profile == RecordProfile::App {
+                theme::row(ui, &t!("record.resolution"), |ui| {
+                    mark(resolution_picker(
+                        ui,
+                        height,
+                        &OUTPUT_HEIGHTS,
+                        sources_h,
+                        egui::Id::new(("rec-resolution", salt)),
+                    ));
+                });
+                if advanced {
+                    theme::row(ui, &t!("record.fps"), |ui| {
+                        mark(
+                            ui.add(egui::Slider::new(fps, 5..=FPS.max).suffix(" fps"))
+                                .changed(),
+                        );
+                    });
+                }
+            }
+            if advanced && matches!(kind, OutputKind::Video(_)) {
                 theme::row(ui, &t!("record.quality"), |ui| {
                     mark(
                         ui.add(
@@ -229,14 +309,16 @@ pub fn profile_editor(
             theme::row(ui, "", |ui| {
                 mark(ui.checkbox(cursor, t!("record.cursor")).changed());
             });
-            theme::row(ui, "", |ui| {
-                mark(
-                    ui.checkbox(no_signal, t!("record.show_no_signal"))
-                        .on_hover_text(t!("record.show_no_signal_hint"))
-                        .changed(),
-                );
-            });
-            if profile != RecordProfile::Region {
+            if advanced {
+                theme::row(ui, "", |ui| {
+                    mark(
+                        ui.checkbox(no_signal, t!("record.show_no_signal"))
+                            .on_hover_text(t!("record.show_no_signal_hint"))
+                            .changed(),
+                    );
+                });
+            }
+            if advanced && profile != RecordProfile::Region {
                 theme::row(ui, "", |ui| {
                     mark(
                         ui.checkbox(unavailable, t!("record.allow_unavailable_sources"))
@@ -245,7 +327,7 @@ pub fn profile_editor(
                     );
                 });
             }
-            if profile == RecordProfile::App {
+            if advanced && profile == RecordProfile::App {
                 theme::row(ui, "", |ui| {
                     mark(ui.checkbox(hide, t!("record.hide_to_tray")).changed());
                 });
@@ -280,26 +362,19 @@ pub fn profile_editor(
                             theme::hint(ui, t!("record.system_audio_linux"));
                         }
                     });
-                    if profile == RecordProfile::App {
-                        theme::row(ui, "", |ui| {
-                            mark(
-                                ui.checkbox(every_file, t!("record.audio_every_file"))
-                                    .on_hover_text(t!("record.audio_every_file_hint"))
-                                    .changed(),
-                            );
-                        });
-                    }
                 });
             }
             OutputKind::Anim(fmt) => {
-                theme::section(ui, icon::GIF, &t!("record.animation"));
-                mark(quality_options(ui, anim, Some(fmt)));
+                if advanced {
+                    theme::section(ui, icon::GIF, &t!("record.animation"));
+                    mark(quality_options(ui, anim, Some(fmt)));
+                }
             }
         },
     );
     *refresh_mics = refresh.get();
     if let Some(output) = pending_output.get() {
-        r.switch_output(output, anim, default_animation);
+        r.switch_output(output, anim);
         changed.set(true);
     }
     if let Some(preset) = pending_preset.get() {
@@ -358,7 +433,7 @@ pub fn resolution_picker(
     } else {
         label(*value)
     };
-    egui::ComboBox::from_id_salt(id)
+    crate::theme::combo_box(id)
         .selected_text(selected)
         .show_ui(ui, |ui| {
             if ui
@@ -403,11 +478,20 @@ fn source_details(
     recording: &mut crate::features::recording::RecordingController,
     monitors: &[MonitorInfo],
     windows: &[mediaa_platform::screen::WindowInfo],
+    advanced: bool,
     ui: &mut egui::Ui,
 ) -> bool {
     let mut refresh = false;
+    if !advanced {
+        if let Some(first) = recording.ui.monitors.iter().next().copied() {
+            recording.ui.monitors.retain(|id| *id == first);
+        }
+        if let Some(first) = recording.ui.windows.iter().next().copied() {
+            recording.ui.windows.retain(|id| *id == first);
+        }
+    }
     match recording.ui.target {
-        TargetKind::Screen => {
+        TargetKind::Screen if advanced => {
             ui.horizontal(|ui| {
                 theme::section(ui, icon::MONITOR, &t!("record.displays_title"));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -422,19 +506,25 @@ fn source_details(
             for m in monitors {
                 let ticked = recording.ui.monitors.contains(&m.id)
                     || (recording.ui.monitors.is_empty() && Some(m.id) == primary);
-                let mut on = ticked;
-                if ui.checkbox(&mut on, monitor_label(m)).changed() {
-                    if recording.ui.monitors.is_empty() {
-                        recording.ui.monitors.extend(primary);
+                if advanced {
+                    let mut on = ticked;
+                    if ui.checkbox(&mut on, monitor_label(m)).changed() {
+                        if recording.ui.monitors.is_empty() {
+                            recording.ui.monitors.extend(primary);
+                        }
+                        if on {
+                            recording.ui.monitors.insert(m.id);
+                        } else {
+                            recording.ui.monitors.remove(&m.id);
+                        }
                     }
-                    if on {
-                        recording.ui.monitors.insert(m.id);
-                    } else {
-                        recording.ui.monitors.remove(&m.id);
-                    }
+                } else if ui.radio(ticked, monitor_label(m)).clicked() {
+                    recording.ui.monitors.clear();
+                    recording.ui.monitors.insert(m.id);
                 }
             }
         }
+        TargetKind::Screen => {}
         TargetKind::Region => {
             theme::section(ui, icon::SELECTION, &t!("record.area"));
             match &recording.ui.region {
@@ -468,19 +558,20 @@ fn source_details(
                 .show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 2.0;
                     for w in windows {
-                        let mut on = recording.ui.windows.contains(&w.id);
-                        if ui
-                            .checkbox(
-                                &mut on,
-                                format!("{}  ({}×{})", w.label(), w.width, w.height),
-                            )
-                            .changed()
-                        {
-                            if on {
-                                recording.ui.windows.insert(w.id);
-                            } else {
-                                recording.ui.windows.remove(&w.id);
+                        let on = recording.ui.windows.contains(&w.id);
+                        let label = format!("{}  ({}×{})", w.label(), w.width, w.height);
+                        if advanced {
+                            let mut on = on;
+                            if ui.checkbox(&mut on, label).changed() {
+                                if on {
+                                    recording.ui.windows.insert(w.id);
+                                } else {
+                                    recording.ui.windows.remove(&w.id);
+                                }
                             }
+                        } else if ui.radio(on, label).clicked() {
+                            recording.ui.windows.clear();
+                            recording.ui.windows.insert(w.id);
                         }
                     }
                 });
@@ -555,7 +646,7 @@ fn quality_controls(
                 .changed();
         });
         theme::row(ui, &t!("anim.dither"), |ui| {
-            egui::ComboBox::from_id_salt(("dither", fmt.is_some()))
+            crate::theme::combo_box(("dither", fmt.is_some()))
                 .selected_text(i18n::dither(*gif_dither))
                 .show_ui(ui, |ui| {
                     for d in GifDither::ALL {
@@ -623,7 +714,7 @@ pub fn mic_combo(
         MicChoice::Device(d) => t!("record.mic_missing", device = d).to_string(),
     };
     let mut changed = false;
-    let combo = egui::ComboBox::from_id_salt(id)
+    let combo = crate::theme::combo_box(id)
         .selected_text(label(microphone))
         .show_ui(ui, |ui| {
             let mut options = vec![MicChoice::Auto, MicChoice::Off];

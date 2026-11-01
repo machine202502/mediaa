@@ -1,7 +1,46 @@
-use eframe::egui::{
-    self, Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Visuals,
+pub use crate::widgets::button::{button_width, danger, primary, secondary};
+pub use crate::widgets::icon_button::{
+    framed_icon_button, icon_button, icon_button_sized, icon_face, ICON_BUTTON,
 };
+pub use crate::widgets::layout::{centered_row, centered_row_sized, centered_widget};
+pub use crate::widgets::marker::{marker_button, MarkerButton};
+pub use crate::widgets::menu_item::menu_item;
+pub use crate::widgets::modal::{
+    centered_buttons, popup_title, ModalButton, ModalButtonKind, POPUP_TITLE,
+};
+pub use crate::widgets::segmented::{segmented, segmented_marked_many};
+pub use crate::widgets::status_card::{status_card, StatusCard};
+use eframe::egui::{
+    self, Align2, Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Visuals,
+};
+use egui_phosphor::regular as icon;
 use mediaa_core::settings::ThemePreference;
+
+mod dark;
+mod light;
+mod lime;
+mod peach;
+
+pub use dark::DARK;
+pub use light::LIGHT;
+pub use lime::LIME;
+pub use peach::PEACH;
+
+#[derive(Debug, Clone, Copy)]
+pub struct IconPalette {
+    pub deep: [f32; 3],
+    pub mid: [f32; 3],
+    pub light: [f32; 3],
+}
+
+pub fn icon_palette(pref: ThemePreference) -> IconPalette {
+    match pref {
+        ThemePreference::Lime => lime::ICON,
+        ThemePreference::Peach => peach::ICON,
+        ThemePreference::Light => light::ICON,
+        ThemePreference::System | ThemePreference::Dark => dark::ICON,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
@@ -20,44 +59,25 @@ pub struct Palette {
     pub warning: Color32,
 }
 
-pub const DARK: Palette = Palette {
-    bg: Color32::from_rgb(13, 21, 34),
-    chrome: Color32::from_rgb(17, 28, 45),
-    card: Color32::from_rgb(22, 35, 58),
-    card_hover: Color32::from_rgb(29, 45, 73),
-    border: Color32::from_rgb(38, 58, 92),
-    text: Color32::from_rgb(227, 235, 247),
-    text_weak: Color32::from_rgb(143, 163, 192),
-    accent: Color32::from_rgb(61, 139, 255),
-    accent_soft: Color32::from_rgb(26, 51, 88),
-    on_accent: Color32::WHITE,
-    danger: Color32::from_rgb(255, 93, 108),
-    success: Color32::from_rgb(47, 208, 138),
-    warning: Color32::from_rgb(255, 181, 71),
-};
-
-pub const LIGHT: Palette = Palette {
-    bg: Color32::from_rgb(238, 243, 250),
-    chrome: Color32::from_rgb(227, 235, 246),
-    card: Color32::WHITE,
-    card_hover: Color32::from_rgb(242, 246, 252),
-    border: Color32::from_rgb(211, 222, 238),
-    text: Color32::from_rgb(15, 30, 51),
-    text_weak: Color32::from_rgb(91, 110, 138),
-    accent: Color32::from_rgb(37, 99, 235),
-    accent_soft: Color32::from_rgb(220, 232, 253),
-    on_accent: Color32::WHITE,
-    danger: Color32::from_rgb(220, 47, 69),
-    success: Color32::from_rgb(18, 160, 92),
-    warning: Color32::from_rgb(199, 127, 10),
-};
-
-pub fn palette(ui: &egui::Ui) -> Palette {
-    if ui.visuals().dark_mode {
+fn palette_for(visuals: &Visuals) -> Palette {
+    if visuals.panel_fill == LIME.bg {
+        LIME
+    } else if visuals.panel_fill == PEACH.bg {
+        PEACH
+    } else if visuals.dark_mode {
         DARK
     } else {
         LIGHT
     }
+}
+
+pub fn palette(ui: &egui::Ui) -> Palette {
+    palette_for(ui.visuals())
+}
+
+pub fn current_palette(ctx: &egui::Context) -> Palette {
+    let style = ctx.style_of(ctx.theme());
+    palette_for(&style.visuals)
 }
 
 pub fn preview_loader(ui: &egui::Ui, center: egui::Pos2, size: f32) {
@@ -142,10 +162,6 @@ fn visuals(p: &Palette, dark: bool) -> Visuals {
     v
 }
 
-pub fn dark_visuals() -> Visuals {
-    visuals(&DARK, true)
-}
-
 const SYMBOL_FONTS: [&str; 4] = [
     "Segoe UI Symbol",
     "Noto Sans Symbols 2",
@@ -167,6 +183,21 @@ fn symbol_font() -> Option<Vec<u8>> {
     db.with_face_data(id, |data, _| data.to_vec())
 }
 
+pub fn combo_box(id_salt: impl egui::AsIdSalt) -> egui::ComboBox {
+    egui::ComboBox::from_id_salt(id_salt).icon(|ui, rect, visuals, open| {
+        ui.painter().text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            if open {
+                icon::CARET_UP
+            } else {
+                icon::CARET_DOWN
+            },
+            FontId::proportional(14.0),
+            visuals.text_color(),
+        );
+    })
+}
 pub fn install(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
@@ -217,11 +248,24 @@ pub fn install(ctx: &egui::Context) {
 }
 
 pub fn apply_preference(ctx: &egui::Context, pref: ThemePreference) {
+    ctx.set_visuals_of(egui::Theme::Light, visuals(&LIGHT, false));
+    ctx.set_visuals_of(egui::Theme::Dark, visuals(&DARK, true));
     ctx.set_theme(match pref {
         ThemePreference::System => egui::ThemePreference::System,
-        ThemePreference::Light => egui::ThemePreference::Light,
+        ThemePreference::Light | ThemePreference::Lime | ThemePreference::Peach => {
+            egui::ThemePreference::Light
+        }
         ThemePreference::Dark => egui::ThemePreference::Dark,
     });
+    match pref {
+        ThemePreference::Lime => {
+            ctx.set_visuals_of(egui::Theme::Light, visuals(&LIME, false));
+        }
+        ThemePreference::Peach => {
+            ctx.set_visuals_of(egui::Theme::Light, visuals(&PEACH, false));
+        }
+        _ => {}
+    }
 }
 
 pub fn card(ui: &egui::Ui) -> egui::Frame {
@@ -249,41 +293,6 @@ pub fn hint(ui: &mut egui::Ui, text: impl Into<String>) {
             .size(11.5)
             .color(p.text_weak),
     );
-}
-
-fn sized(btn: egui::Button<'static>) -> egui::Button<'static> {
-    btn.corner_radius(CornerRadius::same(6))
-        .min_size(egui::vec2(0.0, 28.0))
-}
-
-pub fn primary(ui: &egui::Ui, icon: &str, text: &str) -> egui::Button<'static> {
-    let p = palette(ui);
-    sized(
-        egui::Button::new(
-            egui::RichText::new(format!("{icon}  {text}"))
-                .color(p.on_accent)
-                .strong(),
-        )
-        .fill(p.accent),
-    )
-}
-
-pub fn danger(ui: &egui::Ui, icon: &str, text: &str) -> egui::Button<'static> {
-    let p = palette(ui);
-    sized(
-        egui::Button::new(egui::RichText::new(format!("{icon}  {text}")).color(Color32::WHITE))
-            .fill(p.danger),
-    )
-}
-
-pub fn secondary(icon: &str, text: &str) -> egui::Button<'static> {
-    sized(egui::Button::new(format!("{icon}  {text}")))
-}
-
-pub const POPUP_TITLE: f32 = 13.0;
-
-pub fn popup_title(ui: &mut egui::Ui, title: &str) {
-    ui.label(egui::RichText::new(title).size(POPUP_TITLE));
 }
 
 pub fn with_compact_title<R>(ctx: &egui::Context, f: impl FnOnce() -> R) -> R {
@@ -317,139 +326,6 @@ impl Drop for RestoreHeading<'_> {
     }
 }
 
-pub fn menu_item(ui: &mut egui::Ui, icon: &str, label: &str, danger: bool) -> egui::Response {
-    let p = palette(ui);
-    let (rect, resp) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), egui::Sense::click());
-    let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-    if ui.is_rect_visible(rect) {
-        let color = if danger { p.danger } else { p.text };
-        if resp.hovered() || resp.has_focus() {
-            let tint = if danger {
-                p.danger.gamma_multiply(0.15)
-            } else {
-                p.accent_soft
-            };
-            ui.painter().rect_filled(rect, CornerRadius::same(6), tint);
-        }
-        let font = FontId::proportional(13.5);
-        ui.painter().text(
-            rect.left_center() + egui::vec2(10.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            icon,
-            FontId::proportional(15.0),
-            color,
-        );
-        ui.painter().text(
-            rect.left_center() + egui::vec2(36.0, 0.0),
-            egui::Align2::LEFT_CENTER,
-            label,
-            font,
-            color,
-        );
-    }
-    resp
-}
-
-pub const ICON_BUTTON: f32 = 26.0;
-
-pub fn icon_button(ui: &mut egui::Ui, icon: &str, tooltip: &str) -> egui::Response {
-    icon_button_sized(ui, icon, tooltip, ICON_BUTTON)
-}
-
-pub fn icon_button_sized(
-    ui: &mut egui::Ui,
-    icon: &str,
-    tooltip: &str,
-    side: f32,
-) -> egui::Response {
-    icon_face(ui, icon, tooltip, side).on_hover_text(tooltip)
-}
-
-pub fn icon_face(ui: &mut egui::Ui, icon: &str, label: &str, side: f32) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(side, side), egui::Sense::click());
-    if ui.is_rect_visible(rect) {
-        let p = palette(ui);
-        let (fill, stroke) = if resp.is_pointer_button_down_on() {
-            (p.accent, p.accent)
-        } else if resp.hovered() {
-            (p.accent_soft, p.accent)
-        } else {
-            (Color32::TRANSPARENT, Color32::TRANSPARENT)
-        };
-        let color = if !ui.is_enabled() {
-            p.text_weak
-        } else if resp.is_pointer_button_down_on() {
-            p.on_accent
-        } else {
-            p.text
-        };
-        ui.painter().rect(
-            rect,
-            CornerRadius::same(6),
-            fill,
-            Stroke::new(1.0, stroke),
-            egui::StrokeKind::Inside,
-        );
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            icon,
-            FontId::proportional(14.0),
-            color,
-        );
-    }
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
-    });
-    resp
-}
-
-pub fn segmented<T: PartialEq + Copy>(
-    ui: &mut egui::Ui,
-    value: &mut T,
-    options: &[(T, String)],
-) -> bool {
-    let p = palette(ui);
-    let mut changed = false;
-    egui::Frame::new()
-        .fill(p.card_hover)
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(CornerRadius::same(7))
-        .inner_margin(Margin::same(2))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            ui.horizontal(|ui| {
-                for (opt, label) in options {
-                    let selected = *value == *opt;
-                    let text = egui::RichText::new(label.as_str()).color(if selected {
-                        p.on_accent
-                    } else {
-                        p.text
-                    });
-                    let btn = egui::Button::new(text)
-                        .fill(if selected {
-                            p.accent
-                        } else {
-                            Color32::TRANSPARENT
-                        })
-                        .stroke(Stroke::NONE)
-                        .corner_radius(CornerRadius::same(5))
-                        .min_size(egui::vec2(48.0, 22.0));
-                    if ui.add(btn).clicked() && !selected {
-                        *value = *opt;
-                        changed = true;
-                    }
-                }
-            });
-        });
-    changed
-}
-
 pub fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.horizontal(|ui| {
         let p = palette(ui);
@@ -464,62 +340,6 @@ pub fn row<R>(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui) ->
 }
 
 pub const COLUMN_MIN: f32 = 330.0;
-
-pub(crate) fn mark_modal<R>(ctx: &egui::Context, response: &Option<egui::InnerResponse<R>>) {
-    if let Some(response) = response {
-        ctx.memory_mut(|memory| memory.set_modal_layer(response.response.layer_id));
-        mark_modal_rect(ctx, response.response.rect);
-    }
-}
-
-pub(crate) fn mark_modal_rect(ctx: &egui::Context, rect: egui::Rect) {
-    ctx.data_mut(|data| {
-        let id = egui::Id::new("modal-rects");
-        let mut rects: Vec<egui::Rect> = data.get_temp(id).unwrap_or_default();
-        rects.push(rect);
-        data.insert_temp(id, rects);
-    });
-}
-
-pub(crate) fn block_background_input(ctx: &egui::Context) {
-    let rects: Vec<egui::Rect> = ctx
-        .data_mut(|data| data.remove_temp(egui::Id::new("modal-rects")))
-        .unwrap_or_default();
-    if rects.is_empty() {
-        return;
-    }
-    let wants_keys = ctx.egui_wants_keyboard_input();
-    ctx.input_mut(|input| {
-        input.events.retain(|event| match event {
-            egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => {
-                rects.iter().any(|rect| rect.contains(*pos))
-            }
-            egui::Event::Key { .. }
-            | egui::Event::Text(_)
-            | egui::Event::Paste(_)
-            | egui::Event::Copy
-            | egui::Event::Cut => wants_keys,
-            _ => true,
-        });
-    });
-}
-
-pub(crate) fn modal_backdrop(ctx: &egui::Context) {
-    let frame = ctx.cumulative_frame_nr();
-    let id = egui::Id::new("modal-backdrop-frame");
-    if ctx.data(|data| data.get_temp::<u64>(id)) == Some(frame) {
-        return;
-    }
-    ctx.data_mut(|data| data.insert_temp(id, frame));
-    egui::Area::new(egui::Id::new("modal-backdrop"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(egui::Pos2::ZERO)
-        .show(ctx, |ui| {
-            let rect = ctx.content_rect();
-            ui.set_min_size(rect.size());
-            ui.allocate_rect(rect, egui::Sense::click_and_drag());
-        });
-}
 
 pub fn is_wide(ui: &egui::Ui) -> bool {
     ui.available_width() >= 2.0 * COLUMN_MIN + ui.spacing().item_spacing.x
@@ -567,5 +387,24 @@ mod tests {
     fn a_symbol_font_is_found() {
         let data = super::symbol_font().expect("a symbol font");
         assert!(data.len() > 100_000);
+    }
+
+    #[test]
+    fn custom_preference_applies_its_palette_and_visuals() {
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, frame: &mut u8| {
+                if *frame == 0 {
+                    super::apply_preference(ui.ctx(), mediaa_core::settings::ThemePreference::Lime);
+                    *frame = 1;
+                    return;
+                }
+                let p = super::palette(ui);
+                assert_eq!(p.bg, super::LIME.bg);
+                assert_eq!(ui.visuals().panel_fill, super::LIME.bg);
+                assert_eq!(ui.visuals().widgets.active.bg_fill, super::LIME.accent);
+            },
+            0_u8,
+        );
+        harness.run_steps(2);
     }
 }

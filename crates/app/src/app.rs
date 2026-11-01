@@ -21,18 +21,19 @@ use crate::{pages, theme};
 use command::{AppCommand, RecordingCommand};
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
-use mediaa_core::settings::{AfterCapture, RecordProfile, ScreenChoice, TrayClickAction};
+use mediaa_core::settings::{
+    AfterCapture, RecordProfile, ScreenChoice, ThemePreference, TrayClickAction,
+};
 use mediaa_core::source::{AudioSource, SourceFactory};
 use mediaa_core::{library, naming, paths, Frame, ImageFormat, Settings};
 use mediaa_media::recorder::{
     recover_incomplete_sessions, AudioLayout, RecordingRequest, RecoveryReport, SessionEvent,
     SessionFailure, SessionNotice, StopAction,
 };
-use mediaa_platform::audio::{CpalSource, CpalTarget};
 use mediaa_platform::files;
 use mediaa_platform::screen::{self, MonitorInfo, WindowInfo};
 use mediaa_platform::single_instance::SingleInstance;
-use mediaa_platform::window::NativeWindow;
+use mediaa_platform::window::{NativeWindow, WindowOpen};
 use mediaa_storage::screenshot;
 use notices::{notice_summary, NoticeLevel, Notices};
 use raw_window_handle::HasWindowHandle;
@@ -59,6 +60,7 @@ pub struct App {
     settings_dirty: Option<Instant>,
     settings_writer: SettingsWriter,
     pub page: Page,
+    pub(crate) page_scroll: Vec<(Page, f32)>,
     pub last_capture_page: Page,
     pub last_main_page: Page,
     pub last_agent_page: Page,
@@ -95,7 +97,7 @@ pub struct App {
     _instance: Option<SingleInstance>,
     native_window: Option<NativeWindow>,
     startup: StartupAction,
-    logo: Option<egui::TextureHandle>,
+    logo: Option<(ThemePreference, egui::TextureHandle)>,
     #[cfg(test)]
     fixed_catalogs: bool,
     #[cfg(test)]
@@ -174,15 +176,17 @@ impl App {
             settings.agent.connections.clone(),
         ));
 
+        let notifications_enabled = settings.notifications_enabled;
         let mut app = Self {
             settings,
             settings_dirty: None,
             settings_writer: SettingsWriter::create(),
             page: Page::Screenshot,
+            page_scroll: Vec::new(),
             last_capture_page: Page::Screenshot,
             last_main_page: Page::Screenshot,
             last_agent_page: Page::Catalogs,
-            notices: Notices::default(),
+            notices: Notices::with_enabled(notifications_enabled),
             tray,
             tray_rx,
             hotkeys,
@@ -213,10 +217,15 @@ impl App {
             housekeeping_jobs: Vec::new(),
             last_cache_sweep: Instant::now(),
             _instance: instance,
-            native_window: cc
-                .window_handle()
-                .ok()
-                .and_then(|h| NativeWindow::from_raw(h.as_raw())),
+            native_window: cc.window_handle().ok().and_then(|h| {
+                match NativeWindow::from_raw(h.as_raw()) {
+                    WindowOpen::Supported(window) => Some(window),
+                    WindowOpen::Unsupported(reason) => {
+                        log::info!("native window: {reason}");
+                        None
+                    }
+                }
+            }),
             startup: StartupAction::None,
             logo: None,
             #[cfg(test)]
@@ -228,24 +237,6 @@ impl App {
             #[cfg(test)]
             completion_sound_enabled: true,
         };
-        if let Some(mode) = mediaa_core::dev::notices_mode() {
-            app.notices.push(
-                NoticeLevel::Error,
-                t!("dev.webp_notice_summary").into_owned(),
-                t!("dev.webp_notice_detail").into_owned(),
-                Some("webp-33868-0001".into()),
-                vec![
-                    "C:\\Users\\wmachine\\Documents\\MediaA\\Recording part 1.mkv".into(),
-                    "C:\\Users\\wmachine\\Documents\\MediaA\\Recording part 2.mkv".into(),
-                ],
-                true,
-            );
-            if mode == "expanded" {
-                if let Some(notice) = app.notices.items.last_mut() {
-                    notice.expanded = true;
-                }
-            }
-        }
         app.refresh_catalogs(ctx);
         app.lib.refresh(&app.settings);
         app.start_recovery();
@@ -504,6 +495,9 @@ impl eframe::App for App {
             }
         }
         features::library::poll_cleanup(self, ctx);
+        let settings = &self.settings;
+        let thumbs = &mut self.thumbs;
+        self.lib.poll_background(settings, ctx, thumbs);
         self.update_tray();
         self.show_recording_region(ctx);
 
@@ -551,11 +545,12 @@ impl eframe::App for App {
         self.thumbs.poll(&ctx);
         self.prewarm_region_overlay(&ctx);
         self.handle_overlay(&ctx);
-        pages::shell(self, ui);
+        pages::chrome(self, ui);
         let interactive = ctx.memory(|memory| memory.allows_interaction(ui.layer_id()));
         if !self.lib.viewer_open() {
             self.show_notices(&ctx, interactive);
         }
+        pages::page(self, ui);
     }
 
     fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {

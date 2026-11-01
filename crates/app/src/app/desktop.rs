@@ -54,8 +54,16 @@ impl App {
                 }
                 DesktopAction::Rename { path, .. } => match event.result {
                     Ok(Some(new)) if new != path => {
-                        let proxy = mediaa_media::preview_cache::proxy_path(&path);
-                        self.thumbs.forget(&path, proxy);
+                        if let Err(error) = mediaa_media::preview_cache::relink_proxies(&path, &new)
+                        {
+                            log::warn!(
+                                "preview relink {} -> {}: {error:#}",
+                                path.display(),
+                                new.display()
+                            );
+                        }
+                        self.thumbs.relink(&path, &new);
+                        self.lib.rename_selected(&path, &new);
                         self.lib.files_changed(&[path, new.clone()]);
                         self.success(t!(
                             "lib.renamed",

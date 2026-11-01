@@ -35,6 +35,7 @@ impl CleanupOlder {
 pub(crate) struct CleanupItem {
     pub(crate) path: PathBuf,
     pub(crate) size: u64,
+    pub(crate) modified: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,7 +54,6 @@ impl CleanupPlan {
 pub(crate) struct RemovedItem {
     pub(crate) path: PathBuf,
     pub(crate) size: u64,
-    pub(crate) proxy: mediaa_core::paths::CachePath,
 }
 
 #[derive(Debug)]
@@ -87,6 +87,7 @@ pub(crate) fn cleanup_items(
         .map(|entry| CleanupItem {
             path: entry.path.clone(),
             size: entry.size,
+            modified: Some(entry.modified),
         })
         .collect()
 }
@@ -119,14 +120,14 @@ fn cleanup_one(
     move_to_trash: &mut impl FnMut(&Path) -> anyhow::Result<()>,
     report: &mut CleanupReport,
 ) {
-    let proxy = mediaa_media::preview_cache::proxy_path(&item.path);
-    let hover = mediaa_media::preview_cache::hover_proxy_path(&item.path);
+    let proxy = mediaa_media::preview_cache::proxy_path_at(&item.path, item.size, item.modified);
+    let hover =
+        mediaa_media::preview_cache::hover_proxy_path_at(&item.path, item.size, item.modified);
     match move_to_trash(&item.path) {
         Ok(()) => {
             report.removed.push(RemovedItem {
                 path: item.path.clone(),
                 size,
-                proxy: proxy.clone(),
             });
             for cache in [&proxy, &hover] {
                 if let Err(error) = std::fs::remove_file(cache) {

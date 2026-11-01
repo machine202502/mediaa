@@ -9,7 +9,9 @@ mod overlay;
 mod pages;
 mod region_marker;
 mod services;
-mod theme;
+mod themes;
+pub(crate) use themes as theme;
 mod tray;
+mod widgets;
 
 rust_i18n::i18n!("locales", fallback = "en");

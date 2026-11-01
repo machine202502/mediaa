@@ -73,7 +73,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 .as_ref()
                 .map(|source| source.connection.clone())
                 .unwrap_or_default();
-            egui::ComboBox::from_id_salt(("connection", role as u8))
+            crate::theme::combo_box(("connection", role as u8))
                 .selected_text(if selected.is_empty() {
                     t!("agent.model_connection").into_owned()
                 } else {
@@ -117,7 +117,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 });
                 let known = app.agent.models.models.get(&source.connection).cloned();
                 if let Some(known) = known {
-                    egui::ComboBox::from_id_salt(("model", role as u8))
+                    crate::theme::combo_box(("model", role as u8))
                         .selected_text(if source.model.is_empty() {
                             t!("agent.model_name").into_owned()
                         } else {
@@ -222,7 +222,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                     }
                     if source.thinking {
                         let mut depth = source.thinking_depth;
-                        egui::ComboBox::from_id_salt(("depth", role as u8))
+                        crate::theme::combo_box(("depth", role as u8))
                             .selected_text(depth_label(depth))
                             .show_ui(ui, |ui| {
                                 for item in [

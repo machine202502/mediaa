@@ -2,17 +2,27 @@ use super::*;
 
 impl App {
     pub fn logo(&mut self, ctx: &egui::Context) -> egui::TextureHandle {
-        self.logo
-            .get_or_insert_with(|| {
-                let img =
-                    egui::ColorImage::from_rgba_unmultiplied([64, 64], &crate::icon::rgba(64));
-                ctx.load_texture("logo", img, egui::TextureOptions::LINEAR)
-            })
-            .clone()
+        let theme = self.settings.theme;
+        if let Some((cached, texture)) = &self.logo {
+            if *cached == theme {
+                return texture.clone();
+            }
+        }
+        let icon = crate::theme::icon_palette(theme);
+        let img = egui::ColorImage::from_rgba_unmultiplied(
+            [64, 64],
+            &crate::icon::rgba_with(64, icon.deep, icon.mid, icon.light),
+        );
+        let texture =
+            ctx.load_texture(format!("logo-{theme:?}"), img, egui::TextureOptions::LINEAR);
+        self.logo = Some((theme, texture.clone()));
+        texture
     }
 
     fn set_window_visible(&mut self, ctx: &egui::Context, visible: bool) {
-        let native = self.native_window.is_some_and(|w| w.set_visible(visible));
+        let native = self
+            .native_window
+            .is_some_and(|w| w.set_visible(visible).is_ok());
         if !native {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
         }

@@ -199,10 +199,10 @@ impl App {
         if want_sound {
             if let Some(mic) = microphone.resolve(&self.mic_devices, default_mic.as_deref()) {
                 log::info!("microphone: {mic}");
-                audio.push(Box::new(CpalSource::new(CpalTarget::Input(mic))));
+                audio.push(mediaa_platform::audio::input_source(mic));
             }
             if system_audio && mediaa_platform::audio::system_audio_supported() {
-                audio.push(Box::new(CpalSource::new(CpalTarget::System)));
+                audio.push(mediaa_platform::audio::system_source());
             }
         }
         let now = chrono::Local::now();
@@ -225,11 +225,7 @@ impl App {
             if audio_only { "Audio" } else { "Recording" }.into(),
         )
         .video(fps, record.video_quality, max_height)
-        .audio_layout(if record.audio_in_every_file {
-            AudioLayout::EveryFile
-        } else {
-            AudioLayout::FirstFileOnly
-        })
+        .audio_layout(AudioLayout::EveryFile)
         .audio_kbps(if audio_only {
             audio_settings.kbps
         } else {
@@ -395,11 +391,8 @@ impl App {
                     {
                         Ok(()) => {
                             sound_deferred = sound;
-                            if !self.quit_when_idle {
-                                if !self.recording_quiet {
-                                    self.show_window(ctx);
-                                }
-                                self.page = Page::Library;
+                            if !self.quit_when_idle && !self.recording_quiet {
+                                self.show_window(ctx);
                             }
                             true
                         }
@@ -408,9 +401,6 @@ impl App {
                                 self.show_window(ctx);
                             }
                             self.error(t!("err.copy_failed", error = error));
-                            if !self.quit_when_idle {
-                                self.page = Page::Library;
-                            }
                             false
                         }
                     };

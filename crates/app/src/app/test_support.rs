@@ -34,6 +34,7 @@ impl App {
             settings_dirty: None,
             settings_writer: SettingsWriter::discard(),
             page,
+            page_scroll: Vec::new(),
             last_capture_page: if page.section() == Some(pages::Section::Capture) {
                 page
             } else {

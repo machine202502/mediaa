@@ -1172,84 +1172,75 @@ impl OptionsWindow {
         id: egui::Id,
         p: Palette,
     ) -> Outcome<AnalysisOptions> {
-        let mut open = true;
         let mut outcome = Outcome::Open;
         let draft = &mut self.draft;
         let restart = self.restart;
         theme::with_compact_title(ctx, || {
-            theme::modal_backdrop(ctx);
-            let response = egui::Window::new(t!("analysis.options_title"))
-                .id(id)
-                .order(egui::Order::Foreground)
-                .collapsible(false)
-                .resizable(false)
-                .open(&mut open)
-                .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.set_width(340.0);
-                    if restart {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(t!("analysis.options_restart_warn"))
-                                    .size(12.0)
-                                    .color(p.danger),
-                            )
-                            .wrap(),
-                        );
-                        ui.add_space(6.0);
-                    }
-                    ui.add_enabled(
-                        false,
-                        egui::Checkbox::new(&mut true, t!("analysis.opt_recognition")),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.add_enabled_ui(draft.can_diarize(), |ui| {
-                            ui.checkbox(&mut draft.diarize, t!("analysis.opt_diarize"));
-                        });
-                        ui.add_enabled(
-                            draft.can_diarize() && draft.diarize,
-                            egui::TextEdit::singleline(&mut draft.speakers)
-                                .desired_width(48.0)
-                                .hint_text(t!("analysis.opt_speakers_hint")),
-                        );
-                        ui.label(
-                            RichText::new(t!("analysis.opt_speakers"))
+            let modal = egui::Modal::new(id).show(ctx, |ui| {
+                ui.set_width(340.0);
+                theme::popup_title(ui, &t!("analysis.options_title"));
+                if restart {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(t!("analysis.options_restart_warn"))
                                 .size(12.0)
-                                .color(p.text_weak),
-                        );
+                                .color(p.danger),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(6.0);
+                }
+                ui.add_enabled(
+                    false,
+                    egui::Checkbox::new(&mut true, t!("analysis.opt_recognition")),
+                );
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(draft.can_diarize(), |ui| {
+                        ui.checkbox(&mut draft.diarize, t!("analysis.opt_diarize"));
                     });
-                    if !draft.can_diarize() {
-                        theme::hint(ui, t!("analysis.why_model"));
-                    }
-                    ui.checkbox(&mut draft.index, t!("analysis.opt_index"));
-                    ui.add_enabled_ui(draft.can_topics(), |ui| {
-                        ui.checkbox(&mut draft.topics, t!("analysis.opt_topics"));
-                    });
-                    ui.add_enabled_ui(draft.can_details(), |ui| {
-                        ui.checkbox(&mut draft.details, t!("analysis.opt_details"));
-                    });
-                    draft.normalize();
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add(theme::primary(ui, icon::PLAY, &t!("analysis.run")))
-                            .clicked()
-                        {
-                            outcome = Outcome::Run(draft.options());
-                        }
-                        if ui
-                            .add(theme::secondary(icon::X, &t!("common.cancel")))
-                            .clicked()
-                        {
-                            outcome = Outcome::Cancel;
-                        }
-                    });
+                    ui.add_enabled(
+                        draft.can_diarize() && draft.diarize,
+                        egui::TextEdit::singleline(&mut draft.speakers)
+                            .desired_width(48.0)
+                            .hint_text(t!("analysis.opt_speakers_hint")),
+                    );
+                    ui.label(
+                        RichText::new(t!("analysis.opt_speakers"))
+                            .size(12.0)
+                            .color(p.text_weak),
+                    );
                 });
-            theme::mark_modal(ctx, &response);
+                if !draft.can_diarize() {
+                    theme::hint(ui, t!("analysis.why_model"));
+                }
+                ui.checkbox(&mut draft.index, t!("analysis.opt_index"));
+                ui.add_enabled_ui(draft.can_topics(), |ui| {
+                    ui.checkbox(&mut draft.topics, t!("analysis.opt_topics"));
+                });
+                ui.add_enabled_ui(draft.can_details(), |ui| {
+                    ui.checkbox(&mut draft.details, t!("analysis.opt_details"));
+                });
+                draft.normalize();
+                ui.add_space(8.0);
+                theme::centered_row(ui, |ui| {
+                    if ui
+                        .add(theme::primary(ui, icon::PLAY, &t!("analysis.run")))
+                        .clicked()
+                    {
+                        outcome = Outcome::Run(draft.options());
+                    }
+                    if ui
+                        .add(theme::secondary(icon::X, &t!("common.cancel")))
+                        .clicked()
+                    {
+                        outcome = Outcome::Cancel;
+                    }
+                });
+            });
+            if modal.should_close() && matches!(outcome, Outcome::Open) {
+                outcome = Outcome::Cancel;
+            }
         });
-        if !open {
-            return Outcome::Cancel;
-        }
         outcome
     }
 }
@@ -1290,7 +1281,6 @@ impl ConfirmWindow {
         plan: &Plan,
         p: Palette,
     ) -> Outcome<Plan> {
-        let mut open = true;
         let mut outcome = Outcome::Open;
         let (stage, add) = (self.stage, self.add);
         let speakers = &mut self.speakers;
@@ -1298,58 +1288,48 @@ impl ConfirmWindow {
             .trim_end_matches('…')
             .to_string();
         theme::with_compact_title(ctx, || {
-            theme::modal_backdrop(ctx);
-            let response = egui::Window::new(&title)
-                .id(id)
-                .order(egui::Order::Foreground)
-                .collapsible(false)
-                .resizable(false)
-                .open(&mut open)
-                .anchor(Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(ctx, |ui| {
-                    ui.set_width(340.0);
-                    ui.add(
-                        egui::Label::new(RichText::new(confirm_text(plan, add)).size(13.0)).wrap(),
-                    );
-                    if stage == Stage::Diarize {
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(t!("analysis.opt_speakers"))
-                                    .size(12.0)
-                                    .color(p.text_weak),
-                            );
-                            ui.add(
-                                egui::TextEdit::singleline(speakers)
-                                    .desired_width(48.0)
-                                    .hint_text(t!("analysis.opt_speakers_hint"))
-                                    .margin(Margin::symmetric(4, 2)),
-                            );
-                        });
-                    }
-                    ui.add_space(8.0);
+            let modal = egui::Modal::new(id).show(ctx, |ui| {
+                ui.set_width(340.0);
+                theme::popup_title(ui, &title);
+                ui.add(egui::Label::new(RichText::new(confirm_text(plan, add)).size(13.0)).wrap());
+                if stage == Stage::Diarize {
+                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        let label = if add {
-                            t!("analysis.run_add")
-                        } else {
-                            t!("analysis.run_redo")
-                        };
-                        if ui.add(theme::primary(ui, icon::PLAY, &label)).clicked() {
-                            outcome = Outcome::Run(plan.clone());
-                        }
-                        if ui
-                            .add(theme::secondary(icon::X, &t!("common.cancel")))
-                            .clicked()
-                        {
-                            outcome = Outcome::Cancel;
-                        }
+                        ui.label(
+                            RichText::new(t!("analysis.opt_speakers"))
+                                .size(12.0)
+                                .color(p.text_weak),
+                        );
+                        ui.add(
+                            egui::TextEdit::singleline(speakers)
+                                .desired_width(48.0)
+                                .hint_text(t!("analysis.opt_speakers_hint"))
+                                .margin(Margin::symmetric(4, 2)),
+                        );
                     });
+                }
+                ui.add_space(8.0);
+                theme::centered_row(ui, |ui| {
+                    let label = if add {
+                        t!("analysis.run_add")
+                    } else {
+                        t!("analysis.run_redo")
+                    };
+                    if ui.add(theme::primary(ui, icon::PLAY, &label)).clicked() {
+                        outcome = Outcome::Run(plan.clone());
+                    }
+                    if ui
+                        .add(theme::secondary(icon::X, &t!("common.cancel")))
+                        .clicked()
+                    {
+                        outcome = Outcome::Cancel;
+                    }
                 });
-            theme::mark_modal(ctx, &response);
+            });
+            if modal.should_close() && matches!(outcome, Outcome::Open) {
+                outcome = Outcome::Cancel;
+            }
         });
-        if !open {
-            return Outcome::Cancel;
-        }
         outcome
     }
 }

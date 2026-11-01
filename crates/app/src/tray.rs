@@ -15,7 +15,6 @@ pub enum TrayCommand {
     StartAudio,
     PauseResume,
     StopAndSave,
-    CancelRecording,
     Quit,
 }
 
@@ -28,7 +27,7 @@ pub enum TrayState {
     Saving,
 }
 
-const ITEMS: [(&str, TrayCommand); 9] = [
+const ITEMS: [(&str, TrayCommand); 8] = [
     ("show", TrayCommand::ShowWindow),
     ("region", TrayCommand::RegionScreenshot),
     ("fullscreen", TrayCommand::FullscreenScreenshot),
@@ -36,7 +35,6 @@ const ITEMS: [(&str, TrayCommand); 9] = [
     ("audio", TrayCommand::StartAudio),
     ("pause", TrayCommand::PauseResume),
     ("stop", TrayCommand::StopAndSave),
-    ("cancel", TrayCommand::CancelRecording),
     ("quit", TrayCommand::Quit),
 ];
 
@@ -87,7 +85,6 @@ impl Tray {
             get(TrayCommand::StartAudio),
             get(TrayCommand::PauseResume),
             get(TrayCommand::StopAndSave),
-            get(TrayCommand::CancelRecording),
             &PredefinedMenuItem::separator(),
             get(TrayCommand::Quit),
         ])?;
@@ -126,7 +123,6 @@ impl Tray {
         }
         self.applied = Some((state, progress, locale));
         let active = matches!(state, TrayState::Recording | TrayState::Paused);
-        let cancel_available = active || state == TrayState::Starting;
         for (cmd, text, enabled) in [
             (TrayCommand::ShowWindow, t!("tray.show"), true),
             (TrayCommand::RegionScreenshot, t!("tray.region"), true),
@@ -155,11 +151,6 @@ impl Tray {
                 active,
             ),
             (TrayCommand::StopAndSave, t!("tray.stop"), active),
-            (
-                TrayCommand::CancelRecording,
-                t!("tray.cancel"),
-                cancel_available,
-            ),
             (TrayCommand::Quit, t!("tray.quit"), true),
         ] {
             let item = self.item(cmd);
@@ -238,6 +229,11 @@ mod tests {
         assert_eq!(command_for("nope"), None);
     }
 
+    #[test]
+    fn the_tray_cannot_cancel_a_recording() {
+        assert_eq!(command_for("cancel"), None);
+        assert!(!ITEMS.iter().any(|(id, _)| *id == "cancel"));
+    }
     #[test]
     fn the_progress_switch_removes_and_restores_the_status_dot() {
         let base = crate::icon::rgba(32);

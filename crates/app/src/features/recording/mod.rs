@@ -66,10 +66,13 @@ pub(crate) enum RecState {
         events: Receiver<SessionEvent>,
     },
     Saving {
+        page: Page,
         events: Receiver<SessionEvent>,
         progress_state: RecordingProgress,
         progress: Option<f32>,
         started: Instant,
+        recorded: std::time::Duration,
+        discarding: bool,
         cancel: Arc<AtomicBool>,
         sound_on_completion: bool,
         finalizer: Option<JoinHandle<()>>,
@@ -144,6 +147,8 @@ pub(crate) enum RecordingView {
     Saving {
         progress: Option<f32>,
         elapsed: std::time::Duration,
+        recorded: std::time::Duration,
+        discarding: bool,
     },
 }
 
@@ -205,39 +210,17 @@ impl RecordingController {
                 frames: session.frames_captured(),
             }),
             RecState::Saving {
-                progress, started, ..
+                progress,
+                started,
+                recorded,
+                discarding,
+                ..
             } => RecordingView::Saving {
                 progress: *progress,
                 elapsed: started.elapsed(),
+                recorded: *recorded,
+                discarding: *discarding,
             },
-        }
-    }
-
-    pub(crate) fn progress(&self) -> Option<f32> {
-        match &self.state {
-            RecState::Saving { progress, .. } => *progress,
-            _ => None,
-        }
-    }
-
-    pub(crate) fn saving_started(&self) -> Option<Instant> {
-        match &self.state {
-            RecState::Saving { started, .. } => Some(*started),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn starting_elapsed(&self) -> Option<std::time::Duration> {
-        match &self.state {
-            RecState::Starting { started, .. } => Some(started.elapsed()),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn recording_elapsed(&self) -> Option<std::time::Duration> {
-        match &self.state {
-            RecState::Recording { session, .. } => Some(session.elapsed()),
-            _ => None,
         }
     }
 
@@ -259,6 +242,7 @@ impl RecordingController {
     pub(crate) fn page(&self) -> Page {
         match &self.state {
             RecState::Starting { page, .. } => *page,
+            RecState::Saving { page, .. } => *page,
             RecState::Recording { session, .. }
                 if matches!(session.output(), mediaa_core::OutputKind::Audio(_)) =>
             {
@@ -327,6 +311,7 @@ impl RecordingController {
                     Page::Record
                 };
                 let sound = matches!(source, StopSource::Tray | StopSource::Hotkey);
+                let recorded = session.elapsed();
                 let progress_state = session.progress();
                 let finalizer = match session.stop(action, cancel.clone()) {
                     Ok(handle) => Some(handle),
@@ -336,10 +321,13 @@ impl RecordingController {
                     }
                 };
                 self.state = RecState::Saving {
+                    page,
                     events,
                     progress_state,
                     progress: None,
                     started: Instant::now(),
+                    recorded,
+                    discarding: matches!(action, StopAction::Discard),
                     cancel,
                     sound_on_completion: sound,
                     finalizer,
@@ -355,16 +343,12 @@ impl RecordingController {
     }
 
     pub(crate) fn poll_start(&mut self, discard: bool) -> Option<RecordingStartEvent> {
-        let RecState::Starting {
-            job,
-            started,
-            page: _,
-        } = &mut self.state
-        else {
+        let RecState::Starting { job, started, page } = &mut self.state else {
             return None;
         };
         let result = job.poll()?;
         let started = *started;
+        let page = *page;
         let result = match result {
             Ok(result) => result,
             Err(_) => {
@@ -379,13 +363,17 @@ impl RecordingController {
                 let events = session.events();
                 if discard {
                     let cancel = Arc::new(AtomicBool::new(false));
+                    let recorded = session.elapsed();
                     let progress_state = session.progress();
                     let finalizer = session.stop(StopAction::Discard, cancel.clone()).ok();
                     self.state = RecState::Saving {
+                        page,
                         events,
                         progress_state,
                         progress: None,
                         started,
+                        recorded,
+                        discarding: discard,
                         cancel,
                         sound_on_completion: false,
                         finalizer,
@@ -542,12 +530,42 @@ impl RecordingController {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_saving(&mut self, events: Receiver<SessionEvent>) {
+    pub(crate) fn test_starting(&mut self, page: Page) {
+        let job = Job::spawn("test-starting", Arc::default(), || {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+            Err(RecordingStartFailure::Cancelled)
+        })
+        .expect("starting test job");
+        self.state = RecState::Starting {
+            job,
+            started: Instant::now(),
+            page,
+        };
+    }
+    #[cfg(test)]
+    pub(crate) fn test_saving(
+        &mut self,
+        events: Receiver<SessionEvent>,
+        recorded: std::time::Duration,
+    ) {
+        self.test_saving_on(events, recorded, Page::Record);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_saving_on(
+        &mut self,
+        events: Receiver<SessionEvent>,
+        recorded: std::time::Duration,
+        page: Page,
+    ) {
         self.state = RecState::Saving {
+            page,
             events,
             progress_state: RecordingProgress::default(),
             progress: None,
             started: Instant::now(),
+            recorded,
+            discarding: false,
             cancel: Arc::default(),
             sound_on_completion: false,
             finalizer: None,
@@ -555,6 +573,27 @@ impl RecordingController {
         };
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_saving_progress(
+        &mut self,
+        events: Receiver<SessionEvent>,
+        recorded: std::time::Duration,
+        progress: Option<f32>,
+    ) {
+        self.state = RecState::Saving {
+            page: Page::Record,
+            events,
+            progress_state: RecordingProgress::default(),
+            progress,
+            started: Instant::now(),
+            recorded,
+            discarding: false,
+            cancel: Arc::default(),
+            sound_on_completion: false,
+            finalizer: None,
+            terminal: None,
+        };
+    }
     #[cfg(test)]
     pub(crate) fn saving_sound(&self) -> Option<bool> {
         match &self.state {

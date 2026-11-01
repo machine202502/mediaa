@@ -716,7 +716,7 @@ mod tests {
             let mut harness = egui_kittest::Harness::new_ui_state(
                 |ui: &mut egui::Ui, height: &mut Option<f32>| {
                     let before = ui.cursor().min.y;
-                    metrics_ui(ui, metrics.as_ref(), crate::theme::DARK);
+                    metrics_ui(ui, metrics.as_ref(), crate::theme::palette(ui));
                     *height = Some(ui.cursor().min.y - before);
                 },
                 None,

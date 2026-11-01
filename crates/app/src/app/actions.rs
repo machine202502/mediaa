@@ -128,12 +128,9 @@ impl App {
 
     pub(crate) fn apply_conversion_ui_action(
         &mut self,
-        ctx: &egui::Context,
         action: features::conversion::ConversionUiAction,
     ) {
         match action {
-            features::conversion::ConversionUiAction::Open(path) => self.open_path(ctx, &path),
-            features::conversion::ConversionUiAction::Reveal(path) => self.reveal_path(ctx, path),
             features::conversion::ConversionUiAction::Error(error) => self.error(error),
         }
     }
@@ -154,6 +151,15 @@ impl App {
         use crate::features::recording::TargetKind;
         match self.recording.ui.target {
             TargetKind::Screen => {
+                if !self.settings.advanced_settings {
+                    let monitor = mediaa_platform::cursor::position()
+                        .and_then(|(x, y)| screen::monitor_at(x, y))
+                        .and_then(|id| self.monitors.iter().find(|m| m.id == id).cloned())
+                        .or_else(|| self.monitors.first().cloned());
+                    return monitor
+                        .map(|m| RecordTarget::Screens(vec![m]))
+                        .ok_or_else(|| t!("err.no_display").into());
+                }
                 let mut ms: Vec<_> = self
                     .monitors
                     .iter()
@@ -318,13 +324,6 @@ impl App {
                         source: StopSource::Tray,
                     }),
                 ),
-                TrayCommand::CancelRecording => self.dispatch_command(
-                    ctx,
-                    AppCommand::Recording(RecordingCommand::Stop {
-                        action: StopAction::Discard,
-                        source: StopSource::Tray,
-                    }),
-                ),
                 TrayCommand::Quit => self.dispatch_command(ctx, AppCommand::Quit),
             }
         }
@@ -337,39 +336,46 @@ impl App {
             .map(|rx| rx.try_iter().collect())
             .unwrap_or_default();
         for id in ids {
-            let Some(action) = self.hotkeys.as_ref().and_then(|h| h.action_for(id)) else {
-                continue;
-            };
-            match action {
-                HotkeyAction::RegionScreenshot => {
-                    self.start_region_screenshot_from_hotkey(ctx, overlay::Purpose::Area)
-                }
-                HotkeyAction::FullscreenScreenshot => self.start_fullscreen_screenshot(ctx, None),
-                HotkeyAction::StartVideo if self.recording.is_idle() => {
-                    self.start_hotkey_recording(ctx, None)
-                }
-                HotkeyAction::StartAudio if self.recording.is_idle() => {
-                    self.start_audio_recording(ctx, RecordProfile::Hotkey, None)
-                }
-                HotkeyAction::StartVideo | HotkeyAction::StartAudio => {}
-                HotkeyAction::StopRecording => {
-                    if self.recording.is_recording() || self.recording.is_starting() {
-                        self.dispatch_command(
-                            ctx,
-                            AppCommand::Recording(RecordingCommand::Stop {
-                                action: StopAction::Save,
-                                source: StopSource::Hotkey,
-                            }),
-                        );
-                    }
-                }
+            let actions = crate::hotkeys::ordered_actions(
+                self.hotkeys
+                    .as_ref()
+                    .map(|h| h.actions_for(id))
+                    .unwrap_or_default(),
+            );
+            for action in actions {
+                self.handle_hotkey_action(ctx, action);
             }
         }
     }
 
+    pub(crate) fn handle_hotkey_action(&mut self, ctx: &egui::Context, action: HotkeyAction) {
+        match action {
+            HotkeyAction::RegionScreenshot => {
+                self.start_region_screenshot_from_hotkey(ctx, overlay::Purpose::Area)
+            }
+            HotkeyAction::FullscreenScreenshot => self.start_fullscreen_screenshot(ctx, None),
+            HotkeyAction::StartVideo if self.recording.is_idle() => {
+                self.start_hotkey_recording(ctx, None)
+            }
+            HotkeyAction::StartAudio if self.recording.is_idle() => {
+                self.start_audio_recording(ctx, RecordProfile::Hotkey, None)
+            }
+            HotkeyAction::StartVideo | HotkeyAction::StartAudio => {}
+            HotkeyAction::StopRecording => {
+                if self.recording.is_recording() || self.recording.is_starting() {
+                    self.dispatch_command(
+                        ctx,
+                        AppCommand::Recording(RecordingCommand::Stop {
+                            action: StopAction::Save,
+                            source: StopSource::Hotkey,
+                        }),
+                    );
+                }
+            }
+        }
+    }
     pub fn quit(&mut self, ctx: &egui::Context) {
         self.quit_when_idle = true;
-        self.conversion.cancel_estimate();
         self.recording.cancel_start();
         self.recording.cancel_finalize();
         if self.recording.is_recording() {
@@ -423,11 +429,15 @@ impl App {
     }
 
     pub fn open_in_convert(&mut self, path: PathBuf) {
+        self.open_in_convert_many(vec![path]);
+    }
+
+    pub fn open_in_convert_many(&mut self, paths: Vec<PathBuf>) {
         if self.conversion.is_busy() {
             self.warning(t!("convert.busy"));
             return;
         }
-        self.conversion.set_input(path);
+        self.conversion.add_inputs(paths);
         self.page = Page::Convert;
     }
 }

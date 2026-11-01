@@ -46,13 +46,19 @@ fn mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 }
 
 pub fn rgba(size: u32) -> Vec<u8> {
+    rgba_with(
+        size,
+        [22.0, 44.0, 120.0],
+        [37.0, 99.0, 235.0],
+        [34.0, 211.0, 238.0],
+    )
+}
+
+pub fn rgba_with(size: u32, deep: [f32; 3], blue: [f32; 3], cyan: [f32; 3]) -> Vec<u8> {
     let n = size as f32;
     let aa = 0.8;
     let mut out = vec![0u8; (size * size * 4) as usize];
     let c = n / 2.0;
-    let deep = [22.0, 44.0, 120.0];
-    let blue = [37.0, 99.0, 235.0];
-    let cyan = [34.0, 211.0, 238.0];
     let white = [255.0, 255.0, 255.0];
     for y in 0..size {
         for x in 0..size {

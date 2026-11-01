@@ -13,6 +13,7 @@ MediaA находится в active development и ещё не имеет releas
 
 Хранит persisted-настройки, профили записи, выбор устройств и sanitization. Effective FPS/height
 записи остаются в `RecordSettings`; animation quality хранит только GIF/WebP quality.
+Пользовательский файл настроек и каталоги данных описаны в разделе 7.7.
 
 ### 1.2. `formats`, `frame`, `geometry`
 
@@ -255,7 +256,7 @@ shell не содержит их layout. Фоновые проверки, заг
 - `latest_worker.rs` — bounded replacement worker для устаревающих запросов.
 - `app/notices.rs` — уведомления, fade lifecycle, auto-hide, hover pause и silent actions.
 - `tray.rs`, `hotkeys.rs` — desktop adapters.
-- `theme.rs`, `icon.rs`, `i18n.rs` — presentation and localization.
+- `themes/`, `widgets/`, `icon.rs`, `i18n.rs` — presentation and localization.
 - `overlay.rs` — screenshot editor. Selection определяет итоговый crop, но annotations хранятся в
   координатах полного кадра и видны во всём editor viewport. Активный text editor имеет рамку,
   перетаскивается за её поля и фиксируется кликом снаружи. Overlay использует один native viewport;
@@ -263,6 +264,64 @@ shell не содержит их layout. Фоновые проверки, заг
   frame через один capture job без создания нового окна. Сохранение области идёт через системный
   диалог; формат берётся из расширения, а overlay закрывается только после успешной записи.
   Перед снимком области окно скрывается и выдерживается `HIDE_DELAY`, затем показывается overlay.
+
+### 7.6. Reusable widgets and themes
+
+Переиспользуемые UI-примитивы живут только в `crates/app/src/widgets/`, по одному виджету на
+файл:
+
+```text
+crates/app/src/widgets/
+  mod.rs
+  button.rs
+  icon_button.rs
+  layout.rs
+  menu_item.rs
+  modal.rs
+  segmented.rs
+  track_slider.rs
+```
+
+`widgets/mod.rs` объявляет модули и реэкспортирует публичные функции. Страницы и features
+обязаны использовать эти примитивы вместо локальных копий кнопок, иконок, модалок, сегментов и
+слайдеров. В `pages/` и `features/` остаётся только композиция конкретного экрана и его
+бизнес-состояние; новый общий виджет добавляется отдельным файлом в `widgets/`.
+
+Темы и их палитры живут в `crates/app/src/themes/`:
+
+```text
+crates/app/src/themes/
+  mod.rs
+  dark.rs
+  light.rs
+  lime.rs
+  peach.rs
+```
+
+`themes/mod.rs` владеет контрактами `Palette` и `IconPalette`, выбором текущей палитры,
+применением темы и общими theme-хелперами. Каждый файл темы хранит цвета своей палитры и
+градиент иконки MediaA. Новая тема добавляется отдельным файлом и реэкспортом в `mod.rs`.
+Страницы не содержат собственных цветовых констант: цвета берутся из текущей палитры.
+
+### 7.7. User settings and data locations
+
+Основной файл пользовательских настроек:
+
+```text
+~/.mediaa.toml
+```
+
+Путь задаёт `core::paths::settings_file()`; `~` — домашний каталог пользователя из
+`directories::UserDirs`. Если файла нет, `Settings::load()` ищет legacy-файл
+`ProjectDirs::from("dev", "MediaA", "MediaA").config_dir()/settings.toml`, загружает его и
+сохраняет настройки уже в `~/.mediaa.toml`. В TOML хранятся все пользовательские настройки,
+профили записи и тема; ключи провайдеров хранятся отдельно в OS keychain (`agent/secrets`).
+
+Запись выполняет `services/settings_writer`: изменения объединяются, последняя версия
+сохраняется вне UI, файл публикуется атомарно. Каталоги данных задаёт
+`core::paths::data_dir()` через `ProjectDirs::data_local_dir()` (fallback —
+`std::env::temp_dir()/MediaA`): `logs/` — логи, `work/` — рабочие файлы незавершённых операций. Медиатека по
+умолчанию находится в `Documents/MediaA`, а не в каталоге настроек.
 
 ## 8. `agent`, `engine`, `queue`, `eval` — агентские крейты
 

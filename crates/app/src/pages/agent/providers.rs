@@ -56,7 +56,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
     let mut open_contract = false;
     ui.horizontal(|ui| {
         let mut picked = app.agent.providers.add_kind;
-        egui::ComboBox::from_id_salt("add-provider")
+        crate::theme::combo_box("add-provider")
             .selected_text(kind_label(picked))
             .show_ui(ui, |ui| {
                 for kind in ADD_KINDS {
@@ -140,7 +140,7 @@ pub fn ui(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     selected.clone()
                 };
-                egui::ComboBox::from_id_salt(("provider-group", &id))
+                crate::theme::combo_box(("provider-group", &id))
                     .selected_text(label)
                     .show_ui(ui, |ui| {
                         if ui

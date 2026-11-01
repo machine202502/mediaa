@@ -9,9 +9,9 @@ pub mod screen;
 pub mod single_instance;
 pub mod startup;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub mod stream;
+pub(crate) mod stream;
 #[cfg(windows)]
-pub mod wgc;
+pub(crate) mod wgc;
 pub mod window;
 #[cfg(target_os = "linux")]
-pub mod x11;
+pub(crate) mod x11;

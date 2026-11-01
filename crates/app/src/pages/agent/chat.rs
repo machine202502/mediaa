@@ -944,7 +944,6 @@ impl Chat {
                 }
             });
         });
-        theme::mark_modal_rect(ctx, modal.response.rect);
         if modal.should_close() && decision.is_none() {
             decision = Some(false);
         }

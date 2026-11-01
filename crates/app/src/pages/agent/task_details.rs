@@ -577,7 +577,6 @@ pub fn show(
     copied: &mut bool,
     roster: &super::mentions::Roster,
 ) -> Option<Cmd> {
-    let mut open = true;
     let mut cmd = None;
     let facts = facts_of(task, stats, now_ms, &rust_i18n::locale());
     let hint = hint_for(&facts.error);
@@ -585,138 +584,131 @@ pub fn show(
         .map(|h| hint_text(h, &rust_i18n::locale()))
         .unwrap_or_default();
     let failed = task.status == TaskStatus::Failed || !facts.error.is_empty();
+    let mut dismissed = false;
     theme::with_compact_title(ctx, || {
-        theme::modal_backdrop(ctx);
-        let response = egui::Window::new(t!("details.title"))
-            .id(egui::Id::new(("task-details", task.id)))
-            .order(egui::Order::Foreground)
-            .collapsible(false)
-            .resizable(true)
-            .default_width(560.0)
-            .open(&mut open)
-            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.set_min_width(420.0);
-                ui.set_max_width(640.0);
-                ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
-                let p = theme::palette(ui);
-                let locale = rust_i18n::locale();
-                super::mentions::show(
-                    ui,
-                    &facts.label,
-                    roster,
-                    egui::FontId::proportional(14.0),
-                    ui.visuals().strong_text_color(),
-                    false,
-                    p,
+        let modal = egui::Modal::new(egui::Id::new(("task-details", task.id))).show(ctx, |ui| {
+            ui.set_width(560.0);
+            theme::popup_title(ui, &t!("details.title"));
+            ui.set_min_width(420.0);
+            ui.set_max_width(640.0);
+            ui.spacing_mut().item_spacing = egui::vec2(GAP, GAP);
+            let p = theme::palette(ui);
+            let locale = rust_i18n::locale();
+            super::mentions::show(
+                ui,
+                &facts.label,
+                roster,
+                egui::FontId::proportional(14.0),
+                ui.visuals().strong_text_color(),
+                false,
+                p,
+            );
+            for (key, value) in [
+                ("kind", facts.kind.as_str()),
+                ("recording", facts.recording.as_str()),
+                ("scope", facts.scope.as_str()),
+                ("path", facts.path.as_str()),
+                ("options", facts.options.as_str()),
+                ("status", facts.status.as_str()),
+                ("started", facts.started.as_str()),
+                ("finished", facts.finished.as_str()),
+                ("duration", facts.duration.as_str()),
+                ("progress", facts.progress.as_str()),
+                ("stats", facts.stats.as_str()),
+                ("models", facts.models.as_str()),
+            ] {
+                if key == "recording" {
+                    field_value(ui, &field_label(key, &locale), value, Some(roster));
+                } else {
+                    field(ui, &field_label(key, &locale), value);
+                }
+            }
+            if !facts.tool.is_empty() {
+                field(ui, &field_label("tool", &locale), &facts.tool);
+            }
+            if !facts.cut.is_empty() {
+                field(ui, &field_label("cut", &locale), &facts.cut);
+            }
+            if !facts.hang.is_empty() {
+                field(ui, &field_label("hang", &locale), &facts.hang);
+            }
+            if !facts.read.is_empty() {
+                field(ui, &field_label("read", &locale), &facts.read);
+            }
+            if !facts.names.is_empty() {
+                field(ui, &field_label("names", &locale), &facts.names);
+            }
+            if !facts.evidence.is_empty() {
+                field(ui, &field_label("evidence", &locale), &facts.evidence);
+            }
+            if failed {
+                if !hint_line.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(&hint_line).color(p.text)).wrap());
+                }
+                ui.label(RichText::new(field_label("error", &locale)).color(p.text_weak));
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(if facts.error.is_empty() {
+                            "—"
+                        } else {
+                            facts.error.as_str()
+                        })
+                        .color(p.danger),
+                    )
+                    .wrap()
+                    .selectable(true),
                 );
-                for (key, value) in [
-                    ("kind", facts.kind.as_str()),
-                    ("recording", facts.recording.as_str()),
-                    ("scope", facts.scope.as_str()),
-                    ("path", facts.path.as_str()),
-                    ("options", facts.options.as_str()),
-                    ("status", facts.status.as_str()),
-                    ("started", facts.started.as_str()),
-                    ("finished", facts.finished.as_str()),
-                    ("duration", facts.duration.as_str()),
-                    ("progress", facts.progress.as_str()),
-                    ("stats", facts.stats.as_str()),
-                    ("models", facts.models.as_str()),
-                ] {
-                    if key == "recording" {
-                        field_value(ui, &field_label(key, &locale), value, Some(roster));
-                    } else {
-                        field(ui, &field_label(key, &locale), value);
-                    }
-                }
-                if !facts.tool.is_empty() {
-                    field(ui, &field_label("tool", &locale), &facts.tool);
-                }
-                if !facts.cut.is_empty() {
-                    field(ui, &field_label("cut", &locale), &facts.cut);
-                }
-                if !facts.hang.is_empty() {
-                    field(ui, &field_label("hang", &locale), &facts.hang);
-                }
-                if !facts.read.is_empty() {
-                    field(ui, &field_label("read", &locale), &facts.read);
-                }
-                if !facts.names.is_empty() {
-                    field(ui, &field_label("names", &locale), &facts.names);
-                }
-                if !facts.evidence.is_empty() {
-                    field(ui, &field_label("evidence", &locale), &facts.evidence);
-                }
-                if failed {
-                    if !hint_line.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(&hint_line).color(p.text)).wrap());
-                    }
-                    ui.label(RichText::new(field_label("error", &locale)).color(p.text_weak));
+            }
+            ui.label(RichText::new(field_label("log", &locale)).color(p.text_weak));
+            egui::ScrollArea::vertical()
+                .id_salt(("task-log", task.id))
+                .max_height(160.0)
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    let text = if log.is_empty() { "—" } else { log };
                     ui.add(
                         egui::Label::new(
-                            RichText::new(if facts.error.is_empty() {
-                                "—"
-                            } else {
-                                facts.error.as_str()
-                            })
-                            .color(p.danger),
+                            RichText::new(text)
+                                .font(FontId::monospace(11.0))
+                                .color(p.text),
                         )
                         .wrap()
                         .selectable(true),
                     );
-                }
-                ui.label(RichText::new(field_label("log", &locale)).color(p.text_weak));
-                egui::ScrollArea::vertical()
-                    .id_salt(("task-log", task.id))
-                    .max_height(160.0)
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        let text = if log.is_empty() { "—" } else { log };
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(text)
-                                    .font(FontId::monospace(11.0))
-                                    .color(p.text),
-                            )
-                            .wrap()
-                            .selectable(true),
-                        );
-                    });
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = GAP;
-                    if ui
-                        .add(theme::secondary(icon::COPY, &t!("details.copy")))
-                        .clicked()
-                    {
-                        let text = report_text(&facts, &hint_line, log, &rust_i18n::locale());
-                        match clipboard::copy_text(&text) {
-                            Ok(()) => *copied = true,
-                            Err(e) => cmd = Some(Cmd::CopyFailed(format!("{e:#}"))),
-                        }
-                    }
-                    let mark = t!("details.copied").to_string();
-                    let width = ui.fonts_mut(|f| {
-                        f.layout_no_wrap(mark.clone(), FontId::proportional(13.0), p.text)
-                            .size()
-                            .x
-                    });
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::hover());
-                    if *copied {
-                        ui.painter().text(
-                            rect.left_center(),
-                            egui::Align2::LEFT_CENTER,
-                            mark,
-                            FontId::proportional(13.0),
-                            p.success,
-                        );
-                    }
                 });
+            let copy_label = t!("details.copy").to_string();
+            let mark = t!("details.copied").to_string();
+            let mark_width = ui.fonts_mut(|f| {
+                f.layout_no_wrap(mark.clone(), FontId::proportional(13.0), p.text)
+                    .size()
+                    .x
             });
-        theme::mark_modal(ctx, &response);
+            let width = theme::button_width(ui, icon::COPY, &copy_label) + GAP + mark_width;
+            theme::centered_row_sized(ui, width, |ui| {
+                ui.spacing_mut().item_spacing.x = GAP;
+                if ui.add(theme::secondary(icon::COPY, &copy_label)).clicked() {
+                    let text = report_text(&facts, &hint_line, log, &rust_i18n::locale());
+                    match clipboard::copy_text(&text) {
+                        Ok(()) => *copied = true,
+                        Err(e) => cmd = Some(Cmd::CopyFailed(format!("{e:#}"))),
+                    }
+                }
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(mark_width, 28.0), egui::Sense::hover());
+                if *copied {
+                    ui.painter().text(
+                        rect.left_center(),
+                        egui::Align2::LEFT_CENTER,
+                        mark,
+                        FontId::proportional(13.0),
+                        p.success,
+                    );
+                }
+            });
+        });
+        dismissed = modal.should_close();
     });
-    if !open {
+    if dismissed {
         return Some(Cmd::Close);
     }
     cmd

@@ -316,7 +316,7 @@ impl App {
                 if restore && self.hidden_by_us {
                     self.ghosted = self
                         .native_window
-                        .is_some_and(|window| window.set_ghost(true));
+                        .is_some_and(|window| window.set_ghost(true).is_ok());
                     if !self.ghosted {
                         self.show_window(ctx);
                     }
@@ -458,13 +458,7 @@ impl App {
         if outcome.after_completion {
             if let Some(error) = result.copy_file_error {
                 self.error(t!("err.copy_failed", error = error));
-                if !self.quit_when_idle {
-                    self.page = Page::Library;
-                }
             } else if result.saved.is_none() {
-                if !self.quit_when_idle {
-                    self.page = Page::Library;
-                }
             } else if !self.hidden_by_us {
                 self.success(t!("toast.shot_file_copied"));
             }

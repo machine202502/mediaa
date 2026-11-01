@@ -1179,22 +1179,16 @@ impl Dialog {
             }
             draft.retain(|(id, _)| facts.iter().any(|fact| fact.id == *id));
         }
-        let mut open = true;
         let mut save = false;
         let mut cancel = false;
         let focus = std::mem::take(&mut self.name_focus);
         let ctx = ui.ctx().clone();
+        let mut dismissed = false;
         theme::with_compact_title(&ctx, || {
-            theme::modal_backdrop(&ctx);
-            let response = egui::Window::new(t!("studio.names"))
-                .id(egui::Id::new(("speaker-names", &self.path)))
-                .order(egui::Order::Foreground)
-                .collapsible(false)
-                .resizable(false)
-                .open(&mut open)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(&ctx, |ui| {
+            let modal =
+                egui::Modal::new(egui::Id::new(("speaker-names", &self.path))).show(&ctx, |ui| {
                     ui.set_width(460.0);
+                    theme::popup_title(ui, &t!("studio.names"));
                     let p = theme::palette(ui);
                     let draft = self.name_draft.as_mut().expect("the dialog is open");
                     let mut pending_focus = focus;
@@ -1254,7 +1248,7 @@ impl Dialog {
                         cancel = true;
                     }
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
+                    theme::centered_row(ui, |ui| {
                         if ui
                             .add(theme::primary(ui, icon::CHECK, &t!("studio.save_name")))
                             .clicked()
@@ -1269,11 +1263,14 @@ impl Dialog {
                         }
                     });
                 });
-            theme::mark_modal(&ctx, &response);
+            dismissed = modal.should_close();
         });
+        if dismissed {
+            cancel = true;
+        }
         if save && !cancel {
             self.save_names();
-        } else if cancel || !open {
+        } else if cancel {
             self.name_draft = None;
         }
     }
@@ -1297,21 +1294,17 @@ impl Dialog {
             return;
         };
         let speaker = *speaker;
-        let mut open = true;
+        let mut name = name.clone();
         let mut done = false;
         let ctx = ui.ctx().clone();
+        let mut dismissed = false;
         theme::with_compact_title(&ctx, || {
-            theme::modal_backdrop(&ctx);
-            let response = egui::Window::new(t!("studio.rename_speaker"))
-                .id(egui::Id::new(("speaker-name", &self.path)))
-                .order(egui::Order::Foreground)
-                .collapsible(false)
-                .resizable(false)
-                .open(&mut open)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(&ctx, |ui| {
+            let modal =
+                egui::Modal::new(egui::Id::new(("speaker-name", &self.path))).show(&ctx, |ui| {
+                    ui.set_width(280.0);
+                    theme::popup_title(ui, &t!("studio.rename_speaker"));
                     let edit = ui.add(
-                        egui::TextEdit::singleline(name)
+                        egui::TextEdit::singleline(&mut name)
                             .desired_width(240.0)
                             .hint_text(t!("studio.speaker", n = speaker + 1)),
                     );
@@ -1319,25 +1312,27 @@ impl Dialog {
                     if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                         done = true;
                     }
-                    if ui
-                        .add(theme::primary(ui, icon::CHECK, &t!("studio.save_name")))
-                        .clicked()
-                    {
-                        done = true;
-                    }
+                    theme::centered_row_sized(ui, 120.0, |ui| {
+                        if ui
+                            .add(theme::primary(ui, icon::CHECK, &t!("studio.save_name")))
+                            .clicked()
+                        {
+                            done = true;
+                        }
+                    });
                 });
-            theme::mark_modal(&ctx, &response);
+            dismissed = modal.should_close();
         });
+        if dismissed {
+            self.naming = None;
+        }
         if done {
-            let name = name.clone();
             if let Some(t) = &self.transcript {
                 if let Err(e) = t.rename_speaker(speaker, &name) {
                     log::warn!("transcript: {e:#}");
                 }
             }
             self.read = None;
-            self.naming = None;
-        } else if !open {
             self.naming = None;
         }
     }

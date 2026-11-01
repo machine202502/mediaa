@@ -225,7 +225,7 @@ fn notice_expands_to_the_full_context_and_keeps_its_id() {
             .save(format!("{path}-expanded.png"))
             .unwrap();
     }
-    harness.get_by_label("▾").click();
+    harness.get_by_label(phosphor::CARET_DOWN).click();
     harness.run_steps(20);
     assert!(harness
         .query_by_label("Полный технический контекст без сокращений")
@@ -237,7 +237,7 @@ fn notice_expands_to_the_full_context_and_keeps_its_id() {
         observed.lock().unwrap().clone(),
         Some(NoticeAction::CopyLog("webp-1234-0001".into()))
     );
-    harness.get_by_label("▴").click();
+    harness.get_by_label(phosphor::CARET_UP).click();
     harness.run_steps(20);
     assert!(harness
         .query_by_label("Полный технический контекст без сокращений")
@@ -246,7 +246,7 @@ fn notice_expands_to_the_full_context_and_keeps_its_id() {
 }
 
 #[test]
-fn expanded_notice_expires_with_a_fade() {
+fn expanded_notice_expires_without_leaving_an_empty_frame() {
     let _ui_guard = super::test_support::ui_test_guard();
     let mut notices = Notices::default();
     notices.push(
@@ -266,9 +266,6 @@ fn expanded_notice_expires_with_a_fade() {
         notices,
     );
     crate::theme::install(&harness.ctx);
-    harness.step();
-    assert!(harness.state().items[0].closing_at.is_some());
-    std::thread::sleep(Duration::from_millis(180));
     harness.step();
     assert!(harness.state().items.is_empty());
 }

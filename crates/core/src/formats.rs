@@ -36,7 +36,7 @@ pub enum VideoContainer {
 }
 
 impl VideoContainer {
-    pub const ALL: [VideoContainer; 2] = [VideoContainer::Mp4, VideoContainer::Mkv];
+    pub const ALL: [VideoContainer; 2] = [VideoContainer::Mkv, VideoContainer::Mp4];
 
     pub fn extension(self) -> &'static str {
         match self {
@@ -105,6 +105,7 @@ impl AudioFormat {
         AudioFormat::Flac,
         AudioFormat::Ogg,
     ];
+    pub const SIMPLE: [AudioFormat; 1] = [AudioFormat::Mp3];
 
     pub fn extension(self) -> &'static str {
         match self {
@@ -147,8 +148,8 @@ impl Default for OutputKind {
 
 impl OutputKind {
     pub const ALL: [OutputKind; 4] = [
-        OutputKind::Video(VideoContainer::Mp4),
         OutputKind::Video(VideoContainer::Mkv),
+        OutputKind::Video(VideoContainer::Mp4),
         OutputKind::Anim(AnimFormat::Gif),
         OutputKind::Anim(AnimFormat::Webp),
     ];
@@ -291,7 +292,7 @@ mod tests {
     #[test]
     fn extensions_are_lowercase_and_distinct() {
         let exts: Vec<_> = OutputKind::ALL.iter().map(|k| k.extension()).collect();
-        assert_eq!(exts, ["mp4", "mkv", "gif", "webp"]);
+        assert_eq!(exts, ["mkv", "mp4", "gif", "webp"]);
         assert_eq!(ImageFormat::Webp.extension(), "webp");
         assert_eq!(VideoContainer::Mkv.muxer(), "matroska");
     }

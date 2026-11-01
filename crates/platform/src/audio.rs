@@ -56,13 +56,21 @@ pub fn input_devices() -> Vec<String> {
     names
 }
 
+pub fn input_source(name: impl Into<String>) -> Box<dyn AudioSource> {
+    Box::new(CpalSource::new(CpalTarget::Input(name.into())))
+}
+
+pub fn system_source() -> Box<dyn AudioSource> {
+    Box::new(CpalSource::new(CpalTarget::System))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CpalTarget {
+pub(crate) enum CpalTarget {
     Input(String),
     System,
 }
 
-pub struct CpalSource {
+pub(crate) struct CpalSource {
     target: CpalTarget,
     stop_tx: Option<Sender<()>>,
     thread: Option<JoinHandle<()>>,

@@ -56,12 +56,19 @@ pub struct LibraryController {
     hits: Option<Arc<HitList>>,
     limit: usize,
     confirm_delete: Option<PathBuf>,
+    confirm_delete_many: Option<Vec<PathBuf>>,
     confirm_cleanup: Option<CleanupPlan>,
     removal_job: Option<RemovalJob>,
     renaming: Option<(PathBuf, String)>,
+    renaming_many: Option<(Vec<PathBuf>, String)>,
+    selected: Vec<PathBuf>,
+    anchor: Option<PathBuf>,
+    last_query: Query,
     hovered: Option<PathBuf>,
     hover_next: Option<PathBuf>,
     previews_enabled: bool,
+    empty_cache_purged: bool,
+    prewarm_done: bool,
     previews: Previews,
     viewer: Option<Viewer>,
     dev_viewed: bool,
@@ -79,6 +86,7 @@ struct HitList {
 
 enum RemovalRequest {
     Selected { item: CleanupItem, success: String },
+    SelectedMany(Vec<CleanupItem>),
     OlderThan(CleanupPlan),
 }
 
@@ -101,12 +109,19 @@ impl Default for LibraryController {
             hits: None,
             limit: CHUNK,
             confirm_delete: None,
+            confirm_delete_many: None,
             confirm_cleanup: None,
             removal_job: None,
             renaming: None,
+            renaming_many: None,
+            selected: Vec::new(),
+            anchor: None,
+            last_query: Query::default(),
             hovered: None,
             hover_next: None,
             previews_enabled: true,
+            empty_cache_purged: false,
+            prewarm_done: false,
             previews: Previews::default(),
             viewer: None,
             dev_viewed: false,
@@ -126,6 +141,7 @@ impl LibraryController {
         let mut index = LibraryIndex::load(dir);
         index.apply_scan(library_index::scan_dir(dir));
         self.index = Some(index);
+        self.hits = None;
         self.last_scan = Instant::now();
     }
 
@@ -135,6 +151,141 @@ impl LibraryController {
             std::fs::remove_file(path)?;
             Ok(())
         }));
+    }
+
+    pub(crate) fn selected_count(&self) -> usize {
+        self.selected.len()
+    }
+
+    fn select_click(&mut self, path: &Path, ctrl: bool, shift: bool) {
+        if shift {
+            let entries: &[LibraryEntry] = self.hits.as_ref().map_or(&[], |h| &h.entries);
+            let anchor = self.anchor.clone().unwrap_or_else(|| path.to_path_buf());
+            let (Some(a), Some(b)) = (
+                entries.iter().position(|e| e.path == anchor),
+                entries.iter().position(|e| e.path == path),
+            ) else {
+                self.selected = vec![path.to_path_buf()];
+                self.anchor = Some(path.to_path_buf());
+                return;
+            };
+            let (from, to) = if a <= b { (a, b) } else { (b, a) };
+            self.selected = entries[from..=to].iter().map(|e| e.path.clone()).collect();
+            return;
+        }
+        if ctrl {
+            if let Some(index) = self.selected.iter().position(|p| p == path) {
+                self.selected.remove(index);
+            } else {
+                self.selected.push(path.to_path_buf());
+            }
+            self.anchor = Some(path.to_path_buf());
+            return;
+        }
+        self.selected = vec![path.to_path_buf()];
+        self.anchor = Some(path.to_path_buf());
+    }
+
+    pub(crate) fn toggle_selected(&mut self, path: &Path) {
+        if let Some(index) = self.selected.iter().position(|p| p == path) {
+            self.selected.remove(index);
+        } else {
+            self.selected.push(path.to_path_buf());
+        }
+        self.anchor = Some(path.to_path_buf());
+    }
+
+    fn select_day(&mut self, entries: &[&LibraryEntry]) {
+        let all_selected = !entries.is_empty()
+            && entries
+                .iter()
+                .all(|entry| self.selected.iter().any(|path| path == &entry.path));
+        if all_selected {
+            let paths: Vec<&PathBuf> = entries.iter().map(|entry| &entry.path).collect();
+            self.selected.retain(|path| !paths.contains(&path));
+            self.anchor = None;
+        } else {
+            for entry in entries {
+                if !self.selected.contains(&entry.path) {
+                    self.selected.push(entry.path.clone());
+                }
+            }
+            self.anchor = entries.last().map(|entry| entry.path.clone());
+        }
+    }
+
+    fn clear_selection(&mut self) {
+        self.selected.clear();
+        self.anchor = None;
+    }
+
+    pub(crate) fn rename_selected(&mut self, old: &Path, new: &Path) {
+        for path in &mut self.selected {
+            if path == old {
+                *path = new.to_path_buf();
+            }
+        }
+        if self.anchor.as_deref() == Some(old) {
+            self.anchor = Some(new.to_path_buf());
+        }
+    }
+
+    pub(crate) fn remove_selected(&mut self, removed: &[PathBuf]) {
+        self.selected.retain(|path| !removed.contains(path));
+        if self
+            .anchor
+            .as_ref()
+            .is_some_and(|path| removed.contains(path))
+        {
+            self.anchor = None;
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn selected_for_test(&self) -> Vec<PathBuf> {
+        self.selected.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_for_test(&mut self, paths: Vec<PathBuf>) {
+        self.selected = paths;
+        self.anchor = self.selected.last().cloned();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn begin_bulk_rename_for_test(&mut self, paths: Vec<PathBuf>) {
+        self.renaming_many = Some((paths, String::new()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bulk_rename_title_for_test(&self) -> Option<&str> {
+        self.renaming_many.as_ref().map(|(_, title)| title.as_str())
+    }
+
+    pub(crate) fn delete_many(&mut self, paths: Vec<PathBuf>) -> anyhow::Result<()> {
+        let items = paths
+            .into_iter()
+            .map(|path| {
+                let known = self.index.as_ref().and_then(|index| {
+                    index
+                        .entries()
+                        .iter()
+                        .find(|entry| entry.path == path)
+                        .map(|entry| (entry.size, entry.modified))
+                });
+                let metadata = std::fs::metadata(&path).ok();
+                CleanupItem {
+                    size: known
+                        .map(|(size, _)| size)
+                        .or_else(|| metadata.as_ref().map(|m| m.len()))
+                        .unwrap_or(0),
+                    modified: known
+                        .map(|(_, modified)| modified)
+                        .or_else(|| metadata.and_then(|m| m.modified().ok())),
+                    path,
+                }
+            })
+            .collect();
+        self.start_removal(RemovalRequest::SelectedMany(items))
     }
 
     pub fn viewer_open(&self) -> bool {
@@ -151,6 +302,7 @@ impl LibraryController {
                 job.cancel();
             }
         }
+        self.prewarm_done = false;
         if self.index.as_ref().is_none_or(|i| i.dir() != dir) {
             if self.load_job.is_none() {
                 let worker_dir = dir.clone();
@@ -180,7 +332,27 @@ impl LibraryController {
         self.last_scan = Instant::now();
     }
 
+    pub(crate) fn poll_background(
+        &mut self,
+        settings: &Settings,
+        ctx: &egui::Context,
+        thumbs: &mut Thumbnails,
+    ) {
+        if let Some((dir, names)) = self.poll(settings, ctx) {
+            self.previews.retain(&dir, &names);
+            thumbs.retain(&dir, names);
+            self.prewarm_done = false;
+        }
+        if !self.prewarm_done {
+            if let Some(index) = self.index.as_ref() {
+                thumbs.prewarm(index.entries());
+                self.prewarm_done = true;
+            }
+        }
+    }
+
     pub fn files_changed(&mut self, paths: &[PathBuf]) {
+        self.prewarm_done = false;
         if let Some(index) = self.index.as_mut() {
             index.refresh_paths(paths);
         }
@@ -364,7 +536,14 @@ impl LibraryController {
     }
 
     fn start_delete(&mut self, path: PathBuf) -> anyhow::Result<()> {
-        let item = CleanupItem { path, size: 0 };
+        let modified = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let item = CleanupItem {
+            path,
+            size: 0,
+            modified,
+        };
         let success = t!(
             "lib.deleted",
             name = item.path.file_name().unwrap_or_default().to_string_lossy()
@@ -379,6 +558,15 @@ impl LibraryController {
         }
         let (items, success) = match &request {
             RemovalRequest::Selected { item, success } => (vec![item.clone()], success.clone()),
+            RemovalRequest::SelectedMany(items) => (
+                items.clone(),
+                t!(
+                    "lib.deleted_many",
+                    count = items.len(),
+                    files = crate::i18n::files(items.len())
+                )
+                .into_owned(),
+            ),
             RemovalRequest::OlderThan(plan) => (
                 plan.items.clone(),
                 t!(
@@ -395,6 +583,9 @@ impl LibraryController {
         let trash = self.trash.clone();
         let job = Job::spawn("library-removal", Arc::default(), move || {
             let delete = move |path: &Path| -> anyhow::Result<()> {
+                if !path.exists() {
+                    return Ok(());
+                }
                 #[cfg(test)]
                 if let Some(trash) = &trash {
                     return trash(path);
@@ -403,6 +594,7 @@ impl LibraryController {
             };
             match worker_request {
                 RemovalRequest::Selected { item, .. } => cleanup_selected(&[item], delete),
+                RemovalRequest::SelectedMany(items) => cleanup_selected(&items, delete),
                 RemovalRequest::OlderThan(plan) => {
                     cleanup_old_selected(&plan.items, plan.older, SystemTime::now(), delete)
                 }
@@ -438,12 +630,19 @@ pub(crate) enum LibraryAction {
     View(PathBuf, MediaKind, Option<Details>),
     Reveal(PathBuf),
     CopyFile(PathBuf),
+    CopyFiles(Vec<PathBuf>),
     CopyImage(PathBuf),
     CopyPath(PathBuf),
+    CopyPaths(Vec<PathBuf>),
     CopyLink(String),
     Convert(PathBuf),
+    ConvertMany(Vec<PathBuf>),
     AskDelete(PathBuf),
+    AskDeleteMany(Vec<PathBuf>),
     AskRename(PathBuf, String),
+    AskRenameMany(Vec<PathBuf>),
+    ToggleSelect(PathBuf),
+    SetViewerVolume(f32),
     AskCleanup(CleanupPlan),
 }
 
@@ -526,6 +725,12 @@ fn tools(e: &LibraryEntry) -> Vec<Tool> {
             LibraryAction::AskRename(p.clone(), e.title.clone()),
             false,
         ),
+        tool(
+            icon::CHECK,
+            t!("lib.select"),
+            LibraryAction::ToggleSelect(p.clone()),
+            false,
+        ),
         Tool {
             danger: true,
             ..tool(
@@ -539,23 +744,27 @@ fn tools(e: &LibraryEntry) -> Vec<Tool> {
     list
 }
 
-fn tools_strip(ui: &mut egui::Ui, all: &[Tool]) -> Option<LibraryAction> {
+fn tools_strip(ui: &mut egui::Ui, all: &[Tool]) -> (Option<LibraryAction>, bool) {
     let mut action = None;
+    let mut clicked = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
         for t in all.iter().filter(|t| t.main) {
             if theme::icon_button(ui, t.icon, &t.label).clicked() {
                 action = Some(t.action.clone());
+                clicked = true;
             }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let more = theme::icon_button(ui, icon::DOTS_THREE_CIRCLE, &t!("lib.more"));
+            clicked |= more.clicked();
             if let Some(a) = tools_menu(egui::Popup::menu(&more), all) {
                 action = Some(a);
+                clicked = true;
             }
         });
     });
-    action
+    (action, clicked)
 }
 
 fn tools_menu(popup: egui::Popup<'_>, tools: &[Tool]) -> Option<LibraryAction> {
@@ -613,6 +822,17 @@ impl LibraryController {
         ui: &mut egui::Ui,
     ) -> Vec<LibraryAction> {
         self.previews_enabled = settings.animated_previews;
+        if let Some(index) = self.index.as_ref() {
+            let empty = index.is_empty();
+            if empty && !self.empty_cache_purged {
+                let dir = index.dir().to_path_buf();
+                mediaa_media::preview_cache::clear_previews(&dir, true, true);
+                thumbs.clear_cache(&dir);
+                self.empty_cache_purged = true;
+            } else if !empty {
+                self.empty_cache_purged = false;
+            }
+        }
         let mut actions = Vec::new();
         if let Some((dir, names)) = self.poll(settings, ui.ctx()) {
             self.previews.retain(&dir, &names);
@@ -634,8 +854,108 @@ impl LibraryController {
                 actions.extend(toolbar_tools(self, settings, ui, total, view_w));
             });
         }
+        if self.selected_count() > 0 {
+            let paths = self.selected.clone();
+            let label = t!("lib.selected", n = paths.len());
+            let ctx = ui.ctx().clone();
+            egui::Area::new(egui::Id::new("library-bulk-floating"))
+                .order(egui::Order::Foreground)
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 54.0))
+                .show(&ctx, |ui| {
+                    let p = theme::palette(ui);
+                    egui::Frame::new()
+                        .fill(p.card)
+                        .stroke(egui::Stroke::new(1.0, p.border))
+                        .corner_radius(egui::CornerRadius::same(10))
+                        .inner_margin(egui::Margin::symmetric(6, 4))
+                        .shadow(egui::epaint::Shadow {
+                            offset: [0, 4],
+                            blur: 12,
+                            spread: 0,
+                            color: egui::Color32::from_black_alpha(48),
+                        })
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let button = ui.add(theme::primary(ui, icon::CHECK, &label));
+                                if theme::icon_button(ui, icon::X, &t!("lib.clear_selection"))
+                                    .clicked()
+                                {
+                                    self.clear_selection();
+                                }
+                                egui::Popup::menu(&button).show(|ui| {
+                                    if theme::menu_item(
+                                        ui,
+                                        icon::COPY,
+                                        &t!("lib.copy_files"),
+                                        false,
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(LibraryAction::CopyFiles(paths.clone()));
+                                        ui.close();
+                                    }
+                                    if theme::menu_item(
+                                        ui,
+                                        icon::CLIPBOARD,
+                                        &t!("lib.copy_paths"),
+                                        false,
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(LibraryAction::CopyPaths(paths.clone()));
+                                        ui.close();
+                                    }
+                                    if theme::menu_item(
+                                        ui,
+                                        icon::SHUFFLE,
+                                        &t!("lib.convert"),
+                                        false,
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(LibraryAction::ConvertMany(paths.clone()));
+                                        ui.close();
+                                    }
+                                    if theme::menu_item(
+                                        ui,
+                                        icon::PENCIL_SIMPLE,
+                                        &t!("lib.rename"),
+                                        false,
+                                    )
+                                    .clicked()
+                                    {
+                                        actions.push(LibraryAction::AskRenameMany(paths.clone()));
+                                        ui.close();
+                                    }
+                                    if theme::menu_item(
+                                        ui,
+                                        icon::X,
+                                        &t!("lib.clear_selection"),
+                                        false,
+                                    )
+                                    .clicked()
+                                    {
+                                        self.clear_selection();
+                                        ui.close();
+                                    }
+                                    ui.separator();
+                                    if theme::menu_item(ui, icon::TRASH, &t!("lib.delete"), true)
+                                        .clicked()
+                                    {
+                                        actions.push(LibraryAction::AskDeleteMany(paths.clone()));
+                                        ui.close();
+                                    }
+                                });
+                            });
+                        });
+                });
+        }
         ui.add_space(4.0);
 
+        if self.last_query != self.query {
+            self.clear_selection();
+            self.last_query = self.query.clone();
+        }
         let hits = self.hits();
         if hits.as_ref().is_none_or(|hits| hits.entries.is_empty()) {
             self.previews.stop();
@@ -674,6 +994,7 @@ impl LibraryController {
                     e.kind,
                     d.and_then(|d| d.duration_secs),
                     d.is_some_and(|d| d.audio),
+                    settings.viewer_volume,
                 ));
             }
         }
@@ -694,7 +1015,9 @@ impl LibraryController {
         let mut previewing = false;
         for (day, items) in groups {
             if let Some(day) = day {
-                date_divider(ui, &day_label(day));
+                if date_divider(ui, &day_label(day)) {
+                    self.select_day(&items);
+                }
             }
             for row in items.chunks(cols) {
                 ui.horizontal(|ui| {
@@ -743,6 +1066,9 @@ impl LibraryController {
                 }
                 actions.push(LibraryAction::Open(p));
             }
+            Some(ViewerAction::Volume(volume)) => {
+                actions.push(LibraryAction::SetViewerVolume(volume));
+            }
             None => {}
         }
         self.flush_details();
@@ -759,8 +1085,10 @@ pub fn poll_cleanup(app: &mut App, ctx: &egui::Context) {
 
 pub(crate) fn dialogs(app: &mut App, ctx: &egui::Context) {
     delete_dialog(app, ctx);
+    delete_many_dialog(app, ctx);
     cleanup_dialog(app, ctx);
     rename_dialog(app, ctx);
+    rename_many_dialog(app, ctx);
 }
 
 pub(crate) fn apply_action(app: &mut App, ctx: &egui::Context, action: LibraryAction) {
@@ -800,10 +1128,11 @@ fn day_label(day: chrono::NaiveDate) -> String {
     .into()
 }
 
-fn date_divider(ui: &mut egui::Ui, text: &str) {
+fn date_divider(ui: &mut egui::Ui, text: &str) -> bool {
     let p = theme::palette(ui);
     ui.add_space(6.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::hover());
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::click());
     let galley =
         ui.painter()
             .layout_no_wrap(text.to_string(), FontId::proportional(12.5), p.text_weak);
@@ -815,7 +1144,9 @@ fn date_divider(ui: &mut egui::Ui, text: &str) {
     ui.painter()
         .hline(text_rect.right() + 12.0..=rect.right(), y, stroke);
     ui.painter().galley(text_rect.min, galley, p.text_weak);
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     ui.add_space(2.0);
+    response.clicked()
 }
 
 fn overlay_badge(painter: &egui::Painter, pos: Pos2, anchor: egui::Align2, text: String) {
@@ -830,7 +1161,8 @@ mod actions;
 #[cfg(test)]
 use actions::cleanup_modal;
 use actions::{
-    apply_cleanup_report, cleanup_dialog, delete_dialog, finish_cleanup, rename_dialog, run_action,
+    apply_cleanup_report, cleanup_dialog, delete_dialog, delete_many_dialog, finish_cleanup,
+    rename_dialog, rename_many_dialog, run_action,
 };
 
 #[cfg(test)]

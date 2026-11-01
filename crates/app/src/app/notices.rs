@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const NOTICE_SUMMARY_CHARS: usize = 72;
+const NOTICE_WIDTH: f32 = 460.0;
 const NOTICE_FADE_IN: Duration = Duration::from_millis(180);
-const NOTICE_FADE_OUT: Duration = Duration::from_millis(160);
 const NOTICE_ANIMATION_FRAME: Duration = Duration::from_millis(16);
 const NOTICE_IMPORTANT_LIFETIME: Duration = Duration::from_secs(30);
 
@@ -28,11 +28,8 @@ fn smoothstep(value: f32) -> f32 {
 }
 
 fn notice_opacity(notice: &AppNotice, now: Instant) -> (f32, bool) {
-    if let Some(started) = notice.closing_at {
-        let elapsed = now.saturating_duration_since(started).as_secs_f32();
-        let duration = NOTICE_FADE_OUT.as_secs_f32();
-        let progress = (elapsed / duration).clamp(0.0, 1.0);
-        return (smoothstep(1.0 - progress), progress >= 1.0);
+    if notice.closing_at.is_some() {
+        return (0.0, true);
     }
     let elapsed = now
         .saturating_duration_since(notice.opened_at)
@@ -79,10 +76,12 @@ pub(crate) struct AppNotice {
     pub(crate) paused_remaining: Option<Duration>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub(crate) struct Notices {
     pub(crate) items: Vec<AppNotice>,
     next_id: u64,
+    enabled: bool,
+    visible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,7 +92,33 @@ pub(crate) enum NoticeAction {
     RevealFile(PathBuf),
 }
 
+impl Default for Notices {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            next_id: 0,
+            enabled: true,
+            visible: false,
+        }
+    }
+}
+
 impl Notices {
+    pub(crate) fn with_enabled(enabled: bool) -> Self {
+        Self {
+            enabled,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        if self.enabled != enabled {
+            self.items.clear();
+            self.visible = false;
+        }
+        self.enabled = enabled;
+    }
+
     pub(crate) fn push(
         &mut self,
         level: NoticeLevel,
@@ -111,6 +136,9 @@ impl Notices {
             NoticeLevel::Success => log::info!("[{log_ref}] {detail}"),
             NoticeLevel::Warning => log::warn!("[{log_ref}] {detail}"),
             NoticeLevel::Error => log::error!("[{log_ref}] {detail}"),
+        }
+        if !self.enabled {
+            return;
         }
         let lifetime = if important {
             NOTICE_IMPORTANT_LIFETIME
@@ -179,6 +207,20 @@ impl Notices {
     }
 
     fn show_with(&mut self, ctx: &egui::Context, interactive: bool) -> Option<NoticeAction> {
+        if !self.enabled {
+            return None;
+        }
+        let before = self.items.len();
+        self.items.retain(|notice| notice.closing_at.is_none());
+        if self.items.len() != before {
+            ctx.request_repaint();
+        }
+        if self.items.is_empty() {
+            self.visible = false;
+            return None;
+        }
+        let first_show = !self.visible;
+        self.visible = true;
         let now = Instant::now();
         let mut close = None;
         let mut copy_log = None;
@@ -190,12 +232,13 @@ impl Notices {
         egui::Area::new(egui::Id::new("app-notices"))
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -12.0))
             .order(egui::Order::Foreground)
+            .sizing_pass(first_show)
             .show(ctx, |ui| {
                 if !interactive {
                     ui.disable();
                 }
                 let p = theme::palette(ui);
-                ui.set_max_width(460.0);
+                ui.set_max_width(NOTICE_WIDTH);
                 ui.spacing_mut().item_spacing.y = 6.0;
                 for notice in &mut self.items {
                     let (opacity, finished) = notice_opacity(notice, now);
@@ -215,12 +258,7 @@ impl Notices {
                         NoticeLevel::Warning => icon::WARNING,
                         NoticeLevel::Error => icon::WARNING_OCTAGON,
                     };
-                    let estimated = notice.summary.chars().count() as f32 * 6.6 + 88.0;
-                    let width = if notice.expanded {
-                        460.0
-                    } else {
-                        estimated.clamp(280.0, 480.0)
-                    };
+                    let width = NOTICE_WIDTH;
                     let mut toggle = false;
                     let mut card_close = false;
                     let mut card_copy_log = false;
@@ -290,13 +328,13 @@ impl Notices {
                                                         egui::Button::new(
                                                             egui::RichText::new(
                                                                 if notice.expanded {
-                                                                    "▴"
+                                                                    icon::CARET_UP
                                                                 } else {
-                                                                    "▾"
+                                                                    icon::CARET_DOWN
                                                                 },
                                                             )
                                                             .color(p.text_weak)
-                                                            .size(13.0),
+                                                            .size(14.0),
                                                         )
                                                         .frame(false),
                                                     )
@@ -540,7 +578,9 @@ impl App {
         );
     }
 
-    pub(super) fn show_notices(&mut self, ctx: &egui::Context, interactive: bool) {
+    pub(crate) fn show_notices(&mut self, ctx: &egui::Context, interactive: bool) {
+        self.notices
+            .set_enabled(self.settings.notifications_enabled);
         let action = if interactive {
             self.notices.show(ctx)
         } else {
@@ -603,6 +643,31 @@ mod tests {
     use super::*;
     use egui_kittest::kittest::{NodeT, Queryable};
 
+    #[test]
+    fn disabled_notices_are_not_queued() {
+        let mut notices = Notices::with_enabled(false);
+        notices.push(
+            NoticeLevel::Info,
+            "Hidden".into(),
+            "Detail".into(),
+            None,
+            Vec::new(),
+            false,
+        );
+        assert!(notices.items.is_empty());
+        notices.set_enabled(true);
+        notices.push(
+            NoticeLevel::Info,
+            "Shown".into(),
+            "Detail".into(),
+            None,
+            Vec::new(),
+            false,
+        );
+        assert_eq!(notices.items.len(), 1);
+        notices.set_enabled(false);
+        assert!(notices.items.is_empty());
+    }
     fn notice() -> (Notices, Instant) {
         let mut notices = Notices::default();
         notices.push(
@@ -648,14 +713,8 @@ mod tests {
 
         let mut notices = notices;
         notices.items[0].closing_at = Some(halfway);
-        let (closing, finished) = notice_opacity(&notices.items[0], halfway + NOTICE_FADE_OUT / 2);
-        assert!((0.0..1.0).contains(&closing));
-        assert!(!finished);
         assert_eq!(
-            notice_opacity(
-                &notices.items[0],
-                halfway + NOTICE_FADE_OUT + Duration::from_millis(1)
-            ),
+            notice_opacity(&notices.items[0], halfway + Duration::from_millis(1)),
             (0.0, true)
         );
     }
@@ -696,5 +755,196 @@ mod tests {
         assert!(notices.items[0].closing_at.is_none());
         notices.expire(resumed_at + Duration::from_secs(1));
         assert!(notices.items[0].closing_at.is_some());
+    }
+
+    #[test]
+    fn collapsed_notices_share_one_width() {
+        let _ui = crate::app::test_support::ui_test_guard();
+        let mut notices = Notices::default();
+        for summary in ["Short", "A much longer notice summary that wraps a little"] {
+            notices.push(
+                NoticeLevel::Info,
+                summary.into(),
+                "Detail".into(),
+                None,
+                Vec::new(),
+                false,
+            );
+        }
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, notices: &mut Notices| {
+                notices.show(ui.ctx());
+            },
+            notices,
+        );
+        harness.run_steps(3);
+        let closes: Vec<_> = harness
+            .get_all_by_label(icon::X)
+            .map(|node| node.rect().right())
+            .collect();
+        assert_eq!(closes.len(), 2);
+        assert!(
+            (closes[0] - closes[1]).abs() < 0.5,
+            "collapsed notices have one fixed width: {closes:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ui_regression_snapshot_notices() {
+        let _ui = crate::app::test_support::ui_test_guard();
+        let mut notices = Notices::default();
+        notices.push(
+            NoticeLevel::Success,
+            "Converted".into(),
+            "The result is ready in the library".into(),
+            Some("convert-0001".into()),
+            vec!["Recording part 1.mkv".into()],
+            false,
+        );
+        notices.push(
+            NoticeLevel::Warning,
+            "Sources were kept".into(),
+            "The result could not be saved, so the original files are still available".into(),
+            Some("webp-0002".into()),
+            vec!["Recording part 2.mkv".into()],
+            false,
+        );
+        let now = Instant::now();
+        for notice in &mut notices.items {
+            notice.opened_at = now - NOTICE_FADE_IN;
+            notice.expires_at = now + Duration::from_secs(30);
+        }
+        notices.items[1].expanded = true;
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, notices: &mut Notices| {
+                crate::theme::install(ui.ctx());
+                crate::theme::apply_preference(
+                    ui.ctx(),
+                    mediaa_core::settings::ThemePreference::Dark,
+                );
+                ui.painter().rect_filled(
+                    ui.ctx().content_rect(),
+                    0.0,
+                    crate::theme::palette(ui).bg,
+                );
+                notices.show(ui.ctx());
+            },
+            notices,
+        );
+        harness.run_steps(3);
+        harness.snapshot("notices");
+    }
+
+    #[test]
+    fn closing_notice_is_removed_without_an_empty_frame() {
+        let _ui = crate::app::test_support::ui_test_guard();
+        let (mut notices, _) = notice();
+        notices.items[0].closing_at = Some(Instant::now());
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, notices: &mut Notices| {
+                notices.show(ui.ctx());
+            },
+            notices,
+        );
+        harness.run_steps(2);
+        assert!(harness.state().items.is_empty());
+    }
+
+    #[test]
+    fn removing_the_top_notice_does_not_shift_the_bottom_one() {
+        let _ui = crate::app::test_support::ui_test_guard();
+        let mut notices = Notices::default();
+        for summary in ["Top", "Bottom"] {
+            notices.push(
+                NoticeLevel::Info,
+                summary.into(),
+                "Detail".into(),
+                None,
+                Vec::new(),
+                false,
+            );
+        }
+        let now = Instant::now();
+        for notice in &mut notices.items {
+            notice.opened_at = now - NOTICE_FADE_IN;
+            notice.expires_at = now + Duration::from_secs(30);
+        }
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, notices: &mut Notices| {
+                notices.show(ui.ctx());
+            },
+            notices,
+        );
+        harness.run_steps(3);
+        let before: Vec<_> = harness
+            .get_all_by_label(icon::X)
+            .map(|node| node.rect().bottom())
+            .collect();
+        assert_eq!(before.len(), 2);
+        harness.get_all_by_label(icon::X).next().unwrap().click();
+        harness.run_steps(3);
+        let after: Vec<_> = harness
+            .get_all_by_label(icon::X)
+            .map(|node| node.rect().bottom())
+            .collect();
+        assert_eq!(after.len(), 1);
+        assert!(
+            (after[0] - before[1]).abs() < 0.5,
+            "the remaining notice stays anchored: {before:?} -> {after:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ui_regression_snapshot_notices_layers() {
+        let _ui = crate::app::test_support::ui_test_guard();
+        let mut notices = Notices::default();
+        notices.push(
+            NoticeLevel::Info,
+            "Saved".into(),
+            "The screenshot is ready".into(),
+            None,
+            Vec::new(),
+            false,
+        );
+        let now = Instant::now();
+        notices.items[0].opened_at = now - NOTICE_FADE_IN;
+        notices.items[0].expires_at = now + Duration::from_secs(30);
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, notices: &mut Notices| {
+                crate::theme::install(ui.ctx());
+                crate::theme::apply_preference(
+                    ui.ctx(),
+                    mediaa_core::settings::ThemePreference::Dark,
+                );
+                ui.painter().rect_filled(
+                    ui.ctx().content_rect(),
+                    0.0,
+                    crate::theme::palette(ui).bg,
+                );
+                egui::Area::new(egui::Id::new("fake-stop-overlay"))
+                    .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -12.0))
+                    .order(egui::Order::Foreground)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::new()
+                            .fill(crate::theme::palette(ui).card)
+                            .inner_margin(egui::Margin::same(14))
+                            .show(ui, |ui| {
+                                ui.set_width(300.0);
+                                ui.set_min_height(220.0);
+                                ui.label("Recording controls");
+                            });
+                    });
+                notices.show(ui.ctx());
+                egui::Modal::new(egui::Id::new("notice-layer-modal")).show(ui.ctx(), |ui| {
+                    ui.set_width(320.0);
+                    ui.label("Confirm action");
+                });
+            },
+            notices,
+        );
+        harness.run_steps(3);
+        harness.snapshot("notices-layers");
     }
 }

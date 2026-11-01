@@ -1,10 +1,10 @@
 use mediaa_core::settings::WebpMode;
-use mediaa_core::source::{FrameSource, SourceFactory};
+use mediaa_core::source::SourceFactory;
 use mediaa_core::{OutputKind, Rect, VideoContainer};
 use mediaa_media::recorder::{
     AudioLayout, RecordingRequest, RecordingSession, SessionEvent, StopAction,
 };
-use mediaa_platform::screen::{self, MonitorSource};
+use mediaa_platform::screen;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,7 +32,7 @@ fn captures_primary_monitor() {
 #[ignore = "needs a desktop session"]
 fn region_source_has_even_clamped_size() {
     let m = screen::monitors().unwrap().remove(0);
-    let mut src = MonitorSource::new(m.id, Some(Rect::new(11, 13, 301, 201)), true).unwrap();
+    let mut src = screen::monitor_source(m.id, Some(Rect::new(11, 13, 301, 201)), true).unwrap();
     assert_eq!(src.size(), (300, 200));
     let f = src.grab().unwrap();
     assert_eq!((f.width, f.height), (300, 200));
@@ -53,10 +53,8 @@ fn records_real_screen_area_to_mp4() {
     let dir = tempfile::tempdir().unwrap();
     let m = screen::monitors().unwrap().remove(0);
     let id = m.id;
-    let factory: SourceFactory = Box::new(move || {
-        MonitorSource::new(id, Some(Rect::new(0, 0, 640, 360)), true)
-            .map(|s| Box::new(s) as Box<dyn FrameSource>)
-    });
+    let factory: SourceFactory =
+        Box::new(move || screen::monitor_source(id, Some(Rect::new(0, 0, 640, 360)), true));
     let session = RecordingSession::start(
         RecordingRequest::builder(
             OutputKind::Video(VideoContainer::Mp4),

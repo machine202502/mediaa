@@ -1,5 +1,5 @@
 use crate::jobs::Job;
-use crate::pages::{activity, header};
+use crate::pages::header;
 use crate::{i18n, theme};
 use eframe::egui::{self, RichText};
 use egui_phosphor::regular as icon;
@@ -44,9 +44,15 @@ pub enum ConversionOutcome {
 }
 
 pub enum ConversionUiAction {
-    Open(PathBuf),
-    Reveal(PathBuf),
     Error(String),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ConversionStatus {
+    pub progress: Option<f32>,
+    pub elapsed: Duration,
+    pub done: usize,
+    pub total: usize,
 }
 
 #[derive(Clone)]
@@ -58,68 +64,385 @@ struct ProbeInfo {
 
 type ProbeResult = Result<ProbeInfo, String>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BatchStatus {
+    Pending,
+    Running,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone)]
+struct BatchItem {
+    path: PathBuf,
+    kind: Option<MediaKind>,
+    size: Option<u64>,
+    duration: Option<f64>,
+    status: BatchStatus,
+    error: Option<String>,
+}
+
 #[derive(Default)]
 pub struct ConversionController {
     input: Option<PathBuf>,
+    queue: Vec<PathBuf>,
+    batch_total: usize,
+    batch_done: usize,
+    batch_auto: bool,
+    failed: Vec<(PathBuf, String)>,
+    batch: Vec<BatchItem>,
+    conflict_notified: bool,
     probed: Option<ProbeResult>,
     probe_job: Option<Job<ProbeResult>>,
     probe_cancel: Arc<AtomicBool>,
+    probe_loading: bool,
     target: Option<Target>,
     settings: ConvertSettings,
     max_height: u32,
-    name: String,
     folder: Option<PathBuf>,
     job: Option<ConversionJob>,
-    last: Option<PathBuf>,
-    estimate: Option<Estimate>,
-}
-
-const ESTIMATE_DELAY: Duration = Duration::from_millis(500);
-const ESTIMATE_TIMEOUT: Duration = Duration::from_secs(120);
-
-struct Estimate {
-    key: (PathBuf, Target, ConvertSettings),
-    since: Instant,
-    cancel: Arc<AtomicBool>,
-    job: Option<Job<Result<u64, String>>>,
-    result: Option<Result<u64, String>>,
-    previous: Option<u64>,
-    started: Option<Instant>,
-}
-
-impl Drop for Estimate {
-    fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
-    }
+    run_started: Option<Instant>,
 }
 
 impl ConversionController {
     pub fn set_input(&mut self, path: PathBuf) {
-        self.estimate = None;
+        self.set_inputs(vec![path]);
+    }
+
+    pub fn set_inputs(&mut self, paths: Vec<PathBuf>) {
+        let mut unique = Vec::new();
+        for path in paths {
+            if !unique.contains(&path) {
+                unique.push(path);
+            }
+        }
+        let Some(first) = unique.first().cloned() else {
+            return;
+        };
+        self.batch_total = unique.len();
+        self.batch_done = 0;
+        self.batch_auto = false;
+        self.failed.clear();
+        self.conflict_notified = false;
+        self.queue = unique.iter().skip(1).cloned().collect();
+        self.batch = unique
+            .iter()
+            .map(|path| BatchItem {
+                path: path.clone(),
+                kind: MediaKind::detect(std::path::Path::new(path)),
+                size: std::fs::metadata(path).ok().map(|metadata| metadata.len()),
+                duration: None,
+                status: BatchStatus::Pending,
+                error: None,
+            })
+            .collect();
+        self.target = None;
+        self.set_current(first);
+    }
+
+    pub fn add_inputs(&mut self, paths: Vec<PathBuf>) {
+        let mut unique = Vec::new();
+        for path in paths {
+            if !unique.contains(&path) {
+                unique.push(path);
+            }
+        }
+        if unique.is_empty() {
+            return;
+        }
+        if self.batch.is_empty() {
+            self.set_inputs(unique);
+            return;
+        }
+        let first = self.input.is_none().then(|| unique[0].clone());
+        for path in unique {
+            if self.batch.iter().any(|item| item.path == path) {
+                continue;
+            }
+            self.batch.push(BatchItem {
+                kind: MediaKind::detect(&path),
+                size: std::fs::metadata(&path).ok().map(|metadata| metadata.len()),
+                duration: None,
+                status: BatchStatus::Pending,
+                error: None,
+                path,
+            });
+        }
+        self.batch_total = self.batch.len();
+        self.conflict_notified = false;
+        if let Some(path) = first {
+            self.set_current(path);
+        }
+    }
+    fn set_current(&mut self, path: PathBuf) {
         if let Some(job) = self.probe_job.take() {
             job.cancel();
         }
         self.probe_cancel = Arc::default();
-        self.name.clear();
         self.input = Some(path.clone());
-        self.last = None;
+        if self.batch_auto {
+            self.probe_loading = true;
+        } else {
+            self.probe_loading = false;
+            self.probed = None;
+        }
         if MediaKind::detect(&path).is_none() {
             self.probed = Some(Err(t!("convert.unsupported").into()));
-        } else {
-            self.probed = None;
+            self.probe_loading = false;
         }
     }
 
-    pub fn is_busy(&self) -> bool {
-        self.job.is_some()
+    fn mark_batch(&mut self, path: &std::path::Path, status: BatchStatus, error: Option<String>) {
+        if let Some(item) = self.batch.iter_mut().find(|item| item.path == path) {
+            item.status = status;
+            item.error = error;
+        }
     }
 
-    pub fn cancel_estimate(&mut self) {
-        self.estimate = None;
+    fn retry_batch(&mut self, path: &std::path::Path) {
+        if let Some(item) = self.batch.iter_mut().find(|item| item.path == path) {
+            item.status = BatchStatus::Pending;
+            item.error = None;
+        }
+        self.failed.retain(|(failed, _)| failed != path);
+        self.queue.retain(|queued| queued != path);
+        self.conflict_notified = false;
+        self.batch_auto = false;
+        self.target = None;
+        self.set_current(path.to_path_buf());
+    }
+
+    fn remove_batch(&mut self, path: &std::path::Path) {
+        self.batch.retain(|item| item.path != path);
+        self.queue.retain(|queued| queued != path);
+        self.failed.retain(|(failed, _)| failed != path);
+        self.batch_total = self.batch.len();
+        self.conflict_notified = false;
+        if self.input.as_deref() == Some(path) {
+            self.input = None;
+            if let Some(next) = self.queue.first().cloned() {
+                self.queue.remove(0);
+                self.set_current(next);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_status(&mut self, progress: i32, elapsed: Duration) {
+        if let Some(job) = &mut self.job {
+            job.progress.store(progress, Ordering::Relaxed);
+            job.started = Instant::now() - elapsed;
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn test_busy(&mut self, progress: i32, elapsed: Duration) -> Arc<AtomicBool> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = cancel.clone();
+        let job = Job::spawn("convert-test-busy", cancel.clone(), move || {
+            while !worker_cancel.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            ConversionTaskResult::Cancelled
+        })
+        .unwrap();
+        self.run_started = Some(Instant::now() - elapsed);
+        self.job = Some(ConversionJob {
+            output: OutputPath::new("convert-status.mp4"),
+            progress: Arc::new(AtomicI32::new(progress)),
+            started: Instant::now() - elapsed,
+            job,
+        });
+        cancel
+    }
+    #[cfg(test)]
+    pub(crate) fn test_batch_statuses(&self) -> Vec<BatchStatus> {
+        self.batch.iter().map(|item| item.status).collect()
+    }
+    #[cfg(test)]
+    pub(crate) fn test_batch_is_empty(&self) -> bool {
+        self.batch.is_empty()
+    }
+    #[cfg(test)]
+    pub(crate) fn test_folder(&self) -> Option<&std::path::Path> {
+        self.folder.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_batch(
+        &mut self,
+        items: &[(&str, BatchStatus, Option<&str>)],
+        target: Option<Target>,
+    ) {
+        let paths: Vec<PathBuf> = items
+            .iter()
+            .map(|(path, _, _)| PathBuf::from(path))
+            .collect();
+        self.batch = items
+            .iter()
+            .map(|(path, status, error)| BatchItem {
+                path: PathBuf::from(path),
+                kind: MediaKind::detect(std::path::Path::new(path)),
+                size: Some(1024),
+                duration: Some(12.0),
+                status: *status,
+                error: error.map(str::to_string),
+            })
+            .collect();
+        self.batch_total = self.batch.len();
+        self.batch_done = self
+            .batch
+            .iter()
+            .filter(|item| matches!(item.status, BatchStatus::Done | BatchStatus::Failed))
+            .count();
+        self.input = paths.first().cloned();
+        self.queue = paths.into_iter().skip(1).collect();
+        self.target = target;
+        self.probed = self.input.as_ref().map(|_| {
+            Ok(ProbeInfo {
+                kind: self
+                    .batch
+                    .first()
+                    .and_then(|item| item.kind)
+                    .unwrap_or(MediaKind::Video),
+                info: MediaInfo {
+                    duration_us: Some(12_000_000),
+                    width: 1920,
+                    height: 1080,
+                    fps: 30.0,
+                    video_codec: Some("h264".into()),
+                    audio_codec: Some("aac".into()),
+                    audio_streams: 1,
+                },
+                size: Some(1024),
+            })
+        });
+    }
+
+    pub fn is_busy(&self) -> bool {
+        self.job.is_some() || self.batch_auto
+    }
+
+    pub(crate) fn can_start(&self) -> bool {
+        !self.is_busy()
+            && self.input.is_some()
+            && self.target.is_some()
+            && self
+                .batch
+                .iter()
+                .any(|item| item.status != BatchStatus::Done)
+    }
+
+    pub(crate) fn status(&self) -> Option<ConversionStatus> {
+        if self.job.is_none() && !self.batch_auto {
+            return None;
+        }
+        let total = self.batch_total.max(1);
+        let done = self.batch_done.min(total);
+        let current = self.job.as_ref().map_or(0.0, |job| {
+            let value = job.progress.load(Ordering::Relaxed);
+            if value >= 0 {
+                value as f32 / 1000.0
+            } else {
+                0.0
+            }
+        });
+        let progress = ((done as f32 + current) / total as f32).clamp(0.0, 1.0);
+        let elapsed = self
+            .run_started
+            .or_else(|| self.job.as_ref().map(|job| job.started))
+            .map_or(Duration::ZERO, |started| started.elapsed());
+        Some(ConversionStatus {
+            progress: Some(progress),
+            elapsed,
+            done,
+            total,
+        })
+    }
+
+    pub(crate) fn cancel(&mut self) {
+        self.batch_auto = false;
+        self.queue.clear();
+        if let Some(job) = &self.job {
+            job.job.cancel();
+        }
+    }
+
+    pub(crate) fn start_from_ui(
+        &mut self,
+        ctx: &egui::Context,
+        convert_dir: &std::path::Path,
+    ) -> Option<String> {
+        if !self.can_start() {
+            return None;
+        }
+        if !self.prepare_batch_run() {
+            return None;
+        }
+        let target = self.target?;
+        self.start_job(ctx, target, convert_dir)
+    }
+
+    fn prepare_batch_run(&mut self) -> bool {
+        let mut paths = Vec::new();
+        for item in &self.batch {
+            if item.status != BatchStatus::Done {
+                paths.push(item.path.clone());
+            }
+        }
+        let Some(first) = paths.first().cloned() else {
+            return false;
+        };
+        self.input = Some(first);
+        self.queue = paths.into_iter().skip(1).collect();
+        self.batch_done = self
+            .batch
+            .iter()
+            .filter(|item| item.status == BatchStatus::Done)
+            .count();
+        self.failed.clear();
+        self.batch_auto = false;
+        self.conflict_notified = false;
+        self.run_started = Some(Instant::now());
+        true
+    }
+
+    fn reset_batch_statuses(&mut self) {
+        for item in &mut self.batch {
+            item.status = BatchStatus::Pending;
+            item.error = None;
+        }
+        self.batch_done = 0;
+        self.failed.clear();
+        self.queue.clear();
+        self.batch_auto = false;
+        self.conflict_notified = false;
+        self.run_started = None;
+    }
+
+    pub(crate) fn clear_batch(&mut self) {
+        if self.is_busy() {
+            return;
+        }
+        if let Some(job) = self.probe_job.take() {
+            job.cancel();
+        }
+        self.probe_cancel = Arc::default();
+        self.input = None;
+        self.queue.clear();
+        self.batch.clear();
+        self.batch_total = 0;
+        self.batch_done = 0;
+        self.batch_auto = false;
+        self.failed.clear();
+        self.conflict_notified = false;
+        self.probed = None;
+        self.target = None;
+        self.run_started = None;
     }
 
     fn poll_probe(&mut self, ctx: &egui::Context) {
-        if self.probe_job.is_none() && self.probed.is_none() {
+        if self.probe_job.is_none() && (self.probed.is_none() || self.probe_loading) {
             let Some(path) = self.input.clone() else {
                 return;
             };
@@ -139,7 +462,10 @@ impl ConversionController {
                     .map_err(|error| format!("{error:#}"))
             }) {
                 Ok(job) => self.probe_job = Some(job),
-                Err(error) => self.probed = Some(Err(format!("probe: {error}"))),
+                Err(error) => {
+                    self.probed = Some(Err(format!("probe: {error}")));
+                    self.probe_loading = false;
+                }
             }
         }
         let Some(job) = self.probe_job.as_mut() else {
@@ -150,7 +476,17 @@ impl ConversionController {
             return;
         };
         self.probe_job = None;
+        self.probe_loading = false;
         self.probed = Some(result.unwrap_or_else(|_| Err(t!("convert.probe_stopped").into())));
+        if let Some(Ok(probe)) = self.probed.clone() {
+            if let Some(path) = self.input.clone() {
+                if let Some(item) = self.batch.iter_mut().find(|item| item.path == path) {
+                    item.kind = Some(probe.kind);
+                    item.size = probe.size;
+                    item.duration = probe.info.duration_secs();
+                }
+            }
+        }
         let targets = self.targets();
         if self.target.is_some_and(|target| !targets.contains(&target)) {
             self.target = None;
@@ -169,15 +505,41 @@ impl ConversionController {
                 kind: MediaErrorKind::Internal,
                 message: t!("convert.worker_stopped").into(),
             },
-            Ok(ConversionTaskResult::Completed) => {
-                self.last = Some(job.output.clone().into_path());
-                ConversionOutcome::Finished(job.output)
+            Ok(ConversionTaskResult::Completed) => ConversionOutcome::Finished(job.output),
+            Ok(ConversionTaskResult::Cancelled) => {
+                let path = job.output.clone().into_path();
+                let _ = std::fs::remove_file(path);
+                ConversionOutcome::Cancelled
             }
-            Ok(ConversionTaskResult::Cancelled) => ConversionOutcome::Cancelled,
             Ok(ConversionTaskResult::Failed { kind, message }) => {
                 ConversionOutcome::Failed { kind, message }
             }
         };
+        if let Some(path) = self.input.clone() {
+            match &outcome {
+                ConversionOutcome::Finished(_) => {
+                    self.mark_batch(&path, BatchStatus::Done, None);
+                }
+                ConversionOutcome::Failed { message, .. } => {
+                    self.failed.push((path.clone(), message.clone()));
+                    self.mark_batch(&path, BatchStatus::Failed, Some(message.clone()));
+                }
+                ConversionOutcome::Cancelled => {
+                    self.mark_batch(&path, BatchStatus::Cancelled, None);
+                }
+            }
+        }
+        self.batch_done += 1;
+        if !matches!(outcome, ConversionOutcome::Cancelled) {
+            if let Some(next) = self.queue.first().cloned() {
+                self.queue.remove(0);
+                self.batch_auto = true;
+                self.set_current(next);
+            }
+        } else {
+            self.queue.clear();
+            self.batch_auto = false;
+        }
         Some(outcome)
     }
 
@@ -188,6 +550,7 @@ impl ConversionController {
         convert_dir: &std::path::Path,
     ) -> Option<String> {
         let input = self.input.clone()?;
+        self.mark_batch(&input, BatchStatus::Running, None);
         let folder = self
             .folder
             .clone()
@@ -195,11 +558,11 @@ impl ConversionController {
         let output = convert::output_path(
             &mediaa_core::paths::SourcePath::new(input.clone()),
             target,
-            Some(&self.name),
+            None,
             &mediaa_core::paths::MediaDir::new(folder),
         );
         let settings = self.effective();
-        self.estimate = None;
+        self.batch_auto = false;
         let progress = Arc::new(AtomicI32::new(-1));
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_output = output.clone();
@@ -247,80 +610,6 @@ impl ConversionController {
         }
     }
 
-    fn update_estimate(&mut self, ctx: &egui::Context, target: Target) {
-        let Some(input) = self.input.clone() else {
-            return;
-        };
-        let key = (input, target, self.effective());
-        if self
-            .estimate
-            .as_ref()
-            .is_none_or(|estimate| estimate.key != key)
-        {
-            let previous = self.estimate.as_ref().and_then(|estimate| {
-                estimate
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.as_ref().ok().copied())
-                    .or(estimate.previous)
-            });
-            self.estimate = Some(Estimate {
-                key,
-                since: Instant::now(),
-                cancel: Arc::default(),
-                job: None,
-                result: None,
-                previous,
-                started: None,
-            });
-        }
-        let busy = self.is_busy();
-        let Some(estimate) = self.estimate.as_mut() else {
-            return;
-        };
-        if estimate.result.is_some() {
-            return;
-        }
-        if estimate.job.is_none() && !busy && estimate.since.elapsed() >= ESTIMATE_DELAY {
-            let (key, cancel, ctx) = (estimate.key.clone(), estimate.cancel.clone(), ctx.clone());
-            let worker_cancel = cancel.clone();
-            match Job::spawn("convert-estimate", cancel, move || {
-                let (input, target, settings) = key;
-                let input = mediaa_core::paths::SourcePath::new(input);
-                let result = convert::estimate_size(&input, target, &settings, &worker_cancel)
-                    .map_err(|error| format!("{error:#}"));
-                ctx.request_repaint();
-                result
-            }) {
-                Ok(job) => {
-                    estimate.job = Some(job);
-                    estimate.started = Some(Instant::now());
-                }
-                Err(error) => estimate.result = Some(Err(format!("estimate: {error}"))),
-            }
-        }
-        if let Some(job) = estimate.job.as_mut() {
-            if let Some(result) = job.poll() {
-                estimate.job = None;
-                estimate.started = None;
-                estimate.result =
-                    Some(result.unwrap_or_else(|_| Err(t!("convert.worker_stopped").into())));
-            } else if estimate
-                .started
-                .is_some_and(|started| started.elapsed() >= ESTIMATE_TIMEOUT)
-            {
-                job.cancel();
-                estimate.job = None;
-                estimate.started = None;
-                estimate.result = Some(Err(t!("convert.estimate_timeout").into()));
-            } else {
-                ctx.request_repaint_after(Duration::from_millis(100));
-            }
-        } else if estimate.result.is_none() {
-            ctx.request_repaint_after(ESTIMATE_DELAY);
-        }
-    }
-
     fn effective(&self) -> ConvertSettings {
         ConvertSettings {
             max_height: (self.max_height > 0).then_some(self.max_height),
@@ -329,6 +618,27 @@ impl ConversionController {
     }
 
     fn targets(&self) -> Vec<Target> {
+        if !self.queue.is_empty() {
+            let mut paths = self.queue.clone();
+            if let Some(input) = &self.input {
+                paths.insert(0, input.clone());
+            }
+            let mut common: Option<Vec<Target>> = None;
+            for path in paths {
+                let Some(kind) = MediaKind::detect(&path) else {
+                    return Vec::new();
+                };
+                let targets = Target::for_kind(kind);
+                common = Some(match common {
+                    None => targets,
+                    Some(previous) => previous
+                        .into_iter()
+                        .filter(|target| targets.contains(target))
+                        .collect(),
+                });
+            }
+            return common.unwrap_or_default();
+        }
         match &self.probed {
             Some(Ok(probe)) => Target::for_kind(probe.kind)
                 .into_iter()
@@ -341,8 +651,8 @@ impl ConversionController {
 
 mod controls;
 use controls::{
-    effort_row, estimate_row, fps_combo, kbps_combo, mono_checkbox, pick_file_dialog,
-    png_colors_combo, quality_row,
+    effort_row, fps_combo, kbps_combo, mono_checkbox, pick_file_dialog, png_colors_combo,
+    quality_row,
 };
 
 impl ConversionController {
@@ -350,9 +660,49 @@ impl ConversionController {
         &mut self,
         ui: &mut egui::Ui,
         convert_dir: &std::path::Path,
+        folder_override: &mut Option<PathBuf>,
+    ) -> Option<ConversionUiAction> {
+        let before = (
+            self.target,
+            self.settings.clone(),
+            self.max_height,
+            self.folder.clone(),
+        );
+        let action = self.ui_inner(ui, convert_dir, folder_override);
+        if !self.is_busy()
+            && before
+                != (
+                    self.target,
+                    self.settings.clone(),
+                    self.max_height,
+                    self.folder.clone(),
+                )
+        {
+            self.reset_batch_statuses();
+        }
+        action
+    }
+
+    fn ui_inner(
+        &mut self,
+        ui: &mut egui::Ui,
+        convert_dir: &std::path::Path,
+        folder_override: &mut Option<PathBuf>,
     ) -> Option<ConversionUiAction> {
         let ctx = ui.ctx().clone();
+        self.folder = folder_override.clone();
         self.poll_probe(&ctx);
+        if self.batch_auto
+            && self.job.is_none()
+            && self.probed.as_ref().is_some_and(|probe| probe.is_ok())
+        {
+            if let Some(target) = self.target {
+                if let Some(error) = self.start_job(&ctx, target, convert_dir) {
+                    self.failed
+                        .push((self.input.clone().unwrap_or_default(), error.clone()));
+                }
+            }
+        }
         header(ui, &t!("convert.title"), "");
         if self.input.is_none() {
             if let Some(p) = mediaa_core::dev::convert_input() {
@@ -360,21 +710,129 @@ impl ConversionController {
             }
         }
         let busy = self.is_busy();
+        let mut action = None;
         if !busy {
-            if let Some(p) = ctx.input(|i| {
+            let dropped: Vec<PathBuf> = ctx.input(|i| {
                 i.raw
                     .dropped_files
                     .iter()
                     .map(|f| f.path().to_path_buf())
-                    .find(|p| !p.as_os_str().is_empty())
-            }) {
-                self.set_input(p);
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .collect()
+            });
+            if !dropped.is_empty() {
+                self.set_inputs(dropped);
             }
         }
 
         theme::card(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             theme::section(ui, icon::FILE, &t!("convert.input"));
+            if !self.batch.is_empty() {
+                theme::hint(
+                    ui,
+                    t!(
+                        "convert.batch_progress",
+                        done = self.batch_done.min(self.batch.len()),
+                        total = self.batch.len()
+                    ),
+                );
+                let mut retry = None;
+                let mut remove = None;
+                egui::Grid::new("convert-batch")
+                    .num_columns(6)
+                    .spacing(egui::vec2(12.0, 6.0))
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for heading in [
+                            t!("convert.column_name"),
+                            t!("convert.column_type"),
+                            t!("convert.column_size"),
+                            t!("convert.column_duration"),
+                            String::new().into(),
+                            String::new().into(),
+                        ] {
+                            ui.label(RichText::new(heading).strong().size(11.0));
+                        }
+                        ui.end_row();
+                        for item in self.batch.clone() {
+                            ui.add_sized(
+                                [240.0, 20.0],
+                                egui::Label::new(
+                                    RichText::new(
+                                        item.path.file_name().unwrap_or_default().to_string_lossy(),
+                                    )
+                                    .size(12.0),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(item.path.to_string_lossy());
+                            let kind = item
+                                .kind
+                                .map(i18n::media_kind)
+                                .unwrap_or_else(|| "\u{2014}".into());
+                            ui.label(RichText::new(kind).size(11.5));
+                            let size = item
+                                .size
+                                .map(human_size)
+                                .unwrap_or_else(|| "\u{2014}".into());
+                            ui.label(RichText::new(size).size(11.5));
+                            let duration = item
+                                .duration
+                                .map(human_duration)
+                                .unwrap_or_else(|| "\u{2014}".into());
+                            ui.label(RichText::new(duration).size(11.5));
+                            let palette = theme::palette(ui);
+                            let status = match item.status {
+                                BatchStatus::Done => {
+                                    Some((icon::CHECK, palette.success, t!("convert.status_done")))
+                                }
+                                BatchStatus::Failed => {
+                                    Some((icon::X, palette.danger, t!("convert.status_failed")))
+                                }
+                                _ => None,
+                            };
+                            if let Some((status_icon, color, tooltip)) = status {
+                                ui.label(RichText::new(status_icon).size(14.0).color(color))
+                                    .on_hover_text(tooltip);
+                            } else {
+                                ui.label("");
+                            }
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled_ui(!busy, |ui| {
+                                        theme::icon_button(ui, icon::TRASH, &t!("convert.remove"))
+                                    })
+                                    .inner
+                                    .clicked()
+                                {
+                                    remove = Some(item.path.clone());
+                                }
+                                if item.status == BatchStatus::Failed
+                                    && ui
+                                        .add_enabled_ui(!busy, |ui| {
+                                            theme::icon_button(
+                                                ui,
+                                                icon::ARROW_CLOCKWISE,
+                                                &t!("convert.retry"),
+                                            )
+                                        })
+                                        .inner
+                                        .clicked()
+                                {
+                                    retry = Some(item.path.clone());
+                                }
+                            });
+                            ui.end_row();
+                        }
+                    });
+                if let Some(path) = retry {
+                    self.retry_batch(&path);
+                }
+                if let Some(path) = remove {
+                    self.remove_batch(&path);
+                }
+            }
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
@@ -386,43 +844,16 @@ impl ConversionController {
                 {
                     pick_file_dialog(self, convert_dir);
                 }
-                if let Some(p) = &self.input {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(p.file_name().unwrap_or_default().to_string_lossy())
-                                .strong(),
-                        )
-                        .truncate(),
-                    )
-                    .on_hover_text(p.to_string_lossy());
+                if !self.batch.is_empty()
+                    && ui
+                        .add_enabled(!busy, theme::secondary(icon::TRASH, &t!("convert.clear")))
+                        .clicked()
+                {
+                    self.clear_batch();
                 }
             });
-            match (&self.input, &self.probed) {
-                (Some(_), Some(Ok(probe))) => {
-                    let mut facts = vec![i18n::media_kind(probe.kind)];
-                    facts.extend(probe.size.map(human_size));
-                    if probe.info.width > 0 {
-                        facts.push(format!("{}×{}", probe.info.width, probe.info.height));
-                    }
-                    if let Some(d) = probe.info.duration_secs() {
-                        facts.push(human_duration(d));
-                    }
-                    if probe.info.fps > 0.0 && probe.kind == MediaKind::Video {
-                        facts.push(format!("{:.0} fps", probe.info.fps));
-                    }
-                    if probe.kind == MediaKind::Video {
-                        facts.push(if probe.info.has_audio() {
-                            t!("record.with_audio").into()
-                        } else {
-                            t!("record.no_audio").into()
-                        });
-                    }
-                    theme::hint(ui, facts.join(" · "));
-                }
-                (_, Some(Err(e))) => {
-                    ui.colored_label(theme::palette(ui).danger, e);
-                }
-                _ => {}
+            if let Some(Err(e)) = &self.probed {
+                ui.colored_label(theme::palette(ui).danger, e);
             }
         });
 
@@ -433,6 +864,17 @@ impl ConversionController {
         ui.add_space(4.0);
 
         let targets = self.targets();
+        if targets.is_empty() {
+            theme::card(ui).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.colored_label(theme::palette(ui).danger, t!("convert.no_common"));
+            });
+            if !self.conflict_notified {
+                self.conflict_notified = true;
+                action = Some(ConversionUiAction::Error(t!("convert.no_common").into()));
+            }
+            return action;
+        }
         theme::card(ui).show(ui, |ui| {
             ui.set_width(ui.available_width());
             theme::section(ui, icon::SHUFFLE, &t!("convert.format"));
@@ -486,10 +928,8 @@ impl ConversionController {
         });
 
         let target = self.target?;
-        self.update_estimate(&ctx, target);
         ui.add_space(4.0);
 
-        let mut action = None;
         theme::split_card(
             ui,
             |ui| {
@@ -518,14 +958,14 @@ impl ConversionController {
                                 fps_combo(ui, &mut s.max_fps, info.fps)
                             });
                             if info.has_audio() {
+                                theme::row(ui, "", |ui| {
+                                    ui.checkbox(&mut s.remove_audio, t!("convert.remove_audio"))
+                                });
                                 theme::row(ui, &t!("convert.audio"), |ui| {
                                     ui.add_enabled_ui(!s.remove_audio, |ui| {
                                         kbps_combo(ui, &mut s.audio_kbps);
                                         mono_checkbox(ui, &mut s.mono);
                                     });
-                                });
-                                theme::row(ui, "", |ui| {
-                                    ui.checkbox(&mut s.remove_audio, t!("convert.remove_audio"))
                                 });
                             }
                         }
@@ -581,22 +1021,6 @@ impl ConversionController {
             |ui| {
                 theme::section(ui, icon::FLOPPY_DISK, &t!("convert.output"));
                 ui.add_enabled_ui(!busy, |ui| {
-                    let default_title = self
-                        .input
-                        .as_deref()
-                        .and_then(|p| {
-                            mediaa_core::naming::parse_path(p)
-                                .map(|n| n.title)
-                                .or_else(|| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-                        })
-                        .unwrap_or_default();
-                    theme::row(ui, &t!("convert.name"), |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.name)
-                                .hint_text(default_title)
-                                .desired_width(f32::INFINITY),
-                        );
-                    });
                     let folder = self
                         .folder
                         .clone()
@@ -608,7 +1032,8 @@ impl ConversionController {
                             if let Some(p) =
                                 rfd::FileDialog::new().set_directory(&folder).pick_folder()
                             {
-                                self.folder = Some(p);
+                                self.folder = Some(p.clone());
+                                *folder_override = Some(p);
                             }
                         }
                         if self.folder.is_some()
@@ -620,77 +1045,13 @@ impl ConversionController {
                             .clicked()
                         {
                             self.folder = None;
+                            *folder_override = None;
                         }
                         ui.add(egui::Label::new(folder.to_string_lossy()).truncate());
                     });
                 });
-                estimate_row(ui, self.estimate.as_ref(), probe.size);
             },
         );
-        ui.add_space(14.0);
-
-        ui.vertical_centered(|ui| {
-            if let Some(job) = &self.job {
-                let value = job.progress.load(Ordering::Relaxed);
-                let frac = value.max(0) as f32 / 1000.0;
-                if value < 0 {
-                    activity(ui, &t!("convert.processing"), job.started.elapsed());
-                } else {
-                    ui.add(
-                        egui::ProgressBar::new(frac)
-                            .desired_width(420.0)
-                            .show_percentage()
-                            .animate(true),
-                    );
-                }
-                if ui
-                    .add(theme::secondary(icon::X, &t!("common.cancel")))
-                    .clicked()
-                {
-                    job.job.cancel();
-                }
-                ctx.request_repaint_after(Duration::from_millis(200));
-            } else {
-                let btn = theme::primary(ui, icon::SHUFFLE, &t!("convert.start"))
-                    .min_size(egui::vec2(240.0, 38.0));
-                if ui.add(btn).clicked() {
-                    if let Some(error) = self.start_job(&ctx, target, convert_dir) {
-                        action = Some(ConversionUiAction::Error(error));
-                    }
-                }
-                if let Some(last) = self.last.clone() {
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        let name = last
-                            .file_name()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned();
-                        let w = ui.fonts_mut(|f| {
-                            f.layout_no_wrap(
-                                name.clone(),
-                                egui::FontId::proportional(13.0),
-                                egui::Color32::WHITE,
-                            )
-                            .size()
-                            .x
-                        }) + 60.0;
-                        ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
-                        ui.label(
-                            RichText::new(format!("{}  {name}", icon::CHECK_CIRCLE))
-                                .color(theme::palette(ui).text_weak),
-                        );
-                        if theme::icon_button(ui, icon::ARROW_SQUARE_OUT, &t!("lib.open")).clicked()
-                        {
-                            action = Some(ConversionUiAction::Open(last.clone()));
-                        }
-                        if theme::icon_button(ui, icon::FOLDER_OPEN, &t!("lib.reveal")).clicked() {
-                            action = Some(ConversionUiAction::Reveal(last));
-                        }
-                    });
-                }
-            }
-        });
         action
     }
 }
