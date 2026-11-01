@@ -1,8 +1,8 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use eframe::egui;
-use mediaa::app;
 use mediaa::icon;
+use mediaa::shell;
 use mediaa_core::paths;
 
 fn main() -> eframe::Result<()> {
@@ -27,10 +27,10 @@ fn main() -> eframe::Result<()> {
     mediaa_media::init();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let startup = app::StartupAction::from_args(args.clone());
-    let page = app::page_from_args(&args);
+    let startup = shell::StartupAction::from_args(args.clone());
+    let page = shell::page_from_args(&args);
     let start_in_tray =
-        startup == app::StartupAction::Tray || mediaa_core::Settings::load().start_in_tray;
+        startup == shell::StartupAction::Tray || mediaa_core::Settings::load().start_in_tray;
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(paths::APP_IDENTITY.window_title)
@@ -49,6 +49,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         paths::APP_IDENTITY.window_title,
         options,
-        Box::new(move |cc| Ok(Box::new(app::App::new(cc, startup, page, instance)))),
+        Box::new(move |cc| Ok(Box::new(shell::App::new(cc, startup, page, instance)))),
     )
 }

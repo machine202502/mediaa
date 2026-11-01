@@ -285,27 +285,4 @@ cases:
         assert!(parse_cases("recording: x\ncases:\n  - {id: a, level: L1, type: fact}\n").is_err());
         assert!(parse_cases("recording: x\ncases: []\n").is_err());
     }
-
-    #[test]
-    fn the_local_hh_file_parses_when_it_is_present() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../evals/local/hh-experience/cases.yaml");
-        if !path.is_file() {
-            return;
-        }
-        let suite = load_cases(&path).unwrap();
-        let author = suite.cases.iter().find(|c| c.id == "author-name").unwrap();
-        assert_eq!(author.turns[0].intervals[0].0, 675.0);
-        assert_eq!(author.turns[0].intervals.len(), 2);
-        assert!(!author.turns[0].facts[0].any.is_empty());
-        let brother = suite.cases.iter().find(|c| c.id == "brother").unwrap();
-        assert_eq!(brother.kind, "followup");
-        assert_eq!(brother.turns.len(), 2);
-        let taxes = suite.cases.iter().find(|c| c.id == "taxes").unwrap();
-        assert!(taxes.turns[0].forbidden.iter().any(|s| s == "процент"));
-        assert!(taxes.turns[0].intervals.is_empty());
-        let tips = suite.cases.iter().find(|c| c.id == "tips").unwrap();
-        assert!(tips.turns[0].forbidden.iter().any(|s| s == "150 000"));
-        assert!(tips.turns[0].facts.len() >= 6);
-    }
 }

@@ -3797,6 +3797,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mediaa-arch"
+version = "0.1.0"
+dependencies = [
+ "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
 name = "mediaa-core"
 version = "0.1.0"
 dependencies = [

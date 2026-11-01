@@ -1,0 +1,16 @@
+pub(crate) mod agent_host;
+pub(crate) mod cache_maintenance;
+pub(crate) mod capture;
+pub(crate) mod command;
+pub(crate) mod conversion;
+pub(crate) mod hotkeys;
+pub(crate) mod intent;
+pub(crate) mod jobs;
+pub(crate) mod latest_worker;
+pub(crate) mod library;
+pub(crate) mod navigation;
+pub(crate) mod notices;
+pub(crate) mod recording;
+pub(crate) mod region_editor;
+pub(crate) mod screenshot;
+pub(crate) mod window_presence;

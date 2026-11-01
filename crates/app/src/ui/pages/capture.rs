@@ -1,0 +1,125 @@
+use super::{header, tile};
+use crate::logic::intent::{CaptureIntent, Intent};
+use crate::ui::theme;
+use eframe::egui;
+use egui_phosphor::regular as icon;
+use mediaa_core::Settings;
+use mediaa_platform::screen::{MonitorInfo, WindowInfo};
+use rust_i18n::t;
+
+pub fn ui(
+    settings: &Settings,
+    monitors: &[MonitorInfo],
+    windows: &[WindowInfo],
+    ui: &mut egui::Ui,
+) -> Vec<Intent> {
+    let mut intents = Vec::new();
+    header(ui, &t!("shot.title"), "");
+
+    let hk = settings.hotkeys.clone();
+    let key_hint = |key: &str| {
+        if hk.enabled && !key.is_empty() {
+            key.to_string()
+        } else {
+            String::new()
+        }
+    };
+    let w = super::tile_width(ui, 2);
+    ui.horizontal_wrapped(|ui| {
+        if tile(
+            ui,
+            icon::SELECTION,
+            &t!("shot.area"),
+            &key_hint(&hk.region_screenshot),
+            w,
+            false,
+        )
+        .clicked()
+        {
+            intents.push(Intent::Capture(CaptureIntent::Region));
+        }
+        if tile(
+            ui,
+            icon::MONITOR,
+            &t!("shot.full"),
+            &key_hint(&hk.fullscreen_screenshot),
+            w,
+            false,
+        )
+        .clicked()
+        {
+            intents.push(Intent::Capture(CaptureIntent::Fullscreen(None)));
+        }
+    });
+    ui.add_space(4.0);
+
+    let mut shot_monitor = None;
+    let mut refresh_monitors = false;
+    theme::card(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            theme::section(ui, icon::MONITOR, &t!("shot.displays"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                refresh_monitors =
+                    theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh")).clicked();
+            });
+        });
+        for m in monitors {
+            let label = super::record::monitor_label(m);
+            if ui
+                .add(
+                    theme::secondary(icon::CAMERA, &label)
+                        .min_size(egui::vec2(ui.available_width(), 28.0)),
+                )
+                .clicked()
+            {
+                shot_monitor = Some(m.clone());
+            }
+        }
+    });
+    if refresh_monitors {
+        intents.push(Intent::RefreshCatalogs);
+    }
+    if let Some(m) = shot_monitor {
+        intents.push(Intent::Capture(CaptureIntent::Fullscreen(Some(m))));
+    }
+    ui.add_space(4.0);
+
+    theme::card(ui).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            theme::section(ui, icon::APP_WINDOW, &t!("shot.windows"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::icon_button(ui, icon::ARROWS_CLOCKWISE, &t!("common.refresh")).clicked() {
+                    intents.push(Intent::RefreshCatalogs);
+                }
+            });
+        });
+        if windows.is_empty() {
+            theme::hint(ui, t!("shot.no_windows"));
+        }
+        let mut capture = None;
+        egui::ScrollArea::vertical()
+            .max_height(190.0)
+            .auto_shrink([false, true])
+            .id_salt("shot-windows")
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for w in windows {
+                    if ui
+                        .add(
+                            theme::secondary(icon::CAMERA, &w.label())
+                                .min_size(egui::vec2(ui.available_width(), 28.0)),
+                        )
+                        .clicked()
+                    {
+                        capture = Some(w.id);
+                    }
+                }
+            });
+        if let Some(id) = capture {
+            intents.push(Intent::Capture(CaptureIntent::Window(id)));
+        }
+    });
+    intents
+}

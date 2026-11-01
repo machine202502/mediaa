@@ -1,17 +1,13 @@
-pub mod app;
-mod features;
-mod hotkeys;
+mod adapters;
 mod i18n;
 pub mod icon;
-mod jobs;
-mod latest_worker;
-mod overlay;
-mod pages;
-mod region_marker;
-mod services;
-mod themes;
-pub(crate) use themes as theme;
-mod tray;
-mod widgets;
+#[cfg(test)]
+mod layer_check;
+mod logic;
+pub mod shell;
+#[cfg(test)]
+mod test_support;
+mod ui;
+mod wake;
 
 rust_i18n::i18n!("locales", fallback = "en");

@@ -1,0 +1,13 @@
+[package]
+name = "mediaa-arch"
+description = "Architecture gates: crate dependency allowlist and cross-crate effects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+toml.workspace = true
+
+[lints]
+workspace = true

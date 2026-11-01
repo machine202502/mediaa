@@ -502,6 +502,15 @@ pub struct HotkeySettings {
     pub stop_recording: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeyAction {
+    RegionScreenshot,
+    FullscreenScreenshot,
+    StartVideo,
+    StartAudio,
+    StopRecording,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TrayClickAction {
