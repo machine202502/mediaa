@@ -982,6 +982,79 @@ fn window_screenshot_uses_selected_window() {
 }
 
 #[test]
+fn a_disconnected_display_warns_and_takes_no_screenshot() {
+    let mut selected = settings();
+    selected.notifications_enabled = true;
+    let mut harness = harness_with(
+        Page::Screenshot,
+        selected,
+        capture_catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.shot_monitor_state = Some(std::sync::Arc::new(|_| {
+            mediaa_platform::screen::MonitorState::Disconnected
+        }));
+    }
+    let label = format!(
+        "{}  {}",
+        egui_phosphor::regular::CAMERA,
+        crate::ui::pages::record::monitor_label(&primary_monitor())
+    );
+    harness.get_by_label(&label).click();
+    harness.run_steps(2);
+    let app = harness.state().app.as_ref().unwrap();
+    assert!(app.pending.is_none(), "no screenshot is scheduled");
+    assert!(!app.capture.capture_busy());
+    assert!(
+        app.notices
+            .items
+            .iter()
+            .any(|notice| notice.level == crate::logic::notices::NoticeLevel::Warning),
+        "the unavailable display is reported as a warning"
+    );
+}
+
+#[test]
+fn a_minimized_window_warns_and_takes_no_screenshot() {
+    let mut selected = settings();
+    selected.notifications_enabled = true;
+    let mut harness = harness_with(
+        Page::Screenshot,
+        selected,
+        capture_catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.shot_window_state = Some(std::sync::Arc::new(|_| {
+            mediaa_platform::screen::WindowState::Minimized
+        }));
+    }
+    harness
+        .get_by_label(&format!(
+            "{}  {}",
+            egui_phosphor::regular::CAMERA,
+            window().label()
+        ))
+        .click();
+    harness.run_steps(2);
+    let app = harness.state().app.as_ref().unwrap();
+    assert!(app.pending.is_none(), "no screenshot is scheduled");
+    assert!(!app.capture.capture_busy());
+    assert!(
+        app.notices
+            .items
+            .iter()
+            .any(|notice| notice.level == crate::logic::notices::NoticeLevel::Warning),
+        "the minimized window is reported as a warning"
+    );
+}
+
+#[test]
 fn region_screenshot_opens_the_editor_with_mocked_frame() {
     let selected = settings();
     let mut harness = harness_with(
@@ -1626,6 +1699,118 @@ fn convert_page_starts_and_finishes_a_selected_target() {
             .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jpg"))
             .count(),
         1
+    );
+}
+
+#[test]
+fn convert_page_fails_a_missing_file_alone_and_converts_the_rest() {
+    use egui_kittest::kittest::NodeT;
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("Good_2026-01-01_10-00-00.png");
+    image::RgbaImage::from_pixel(32, 24, image::Rgba([20, 40, 80, 255]))
+        .save(&good)
+        .unwrap();
+    let missing = dir.path().join("Missing_2026-01-01_10-00-00.png");
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    selected.notifications_enabled = false;
+    let mut harness = harness_with(
+        Page::Convert,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 900.0),
+    );
+    harness.run_steps(2);
+    harness
+        .state_mut()
+        .app
+        .as_mut()
+        .unwrap()
+        .conversion
+        .add_inputs(vec![missing.clone(), good.clone()]);
+
+    let jpeg = Target::Still(StillFormat::Jpeg).label();
+    for _ in 0..200 {
+        harness.run_steps(1);
+        if harness.query_by_label(jpeg).is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    {
+        let app = harness.state().app.as_ref().unwrap();
+        let batch = &app.conversion.batch;
+        assert_eq!(batch[0].path, missing);
+        assert_eq!(
+            batch[0].status,
+            crate::logic::conversion::BatchStatus::Failed,
+            "the missing file is failed before the run starts"
+        );
+        assert!(
+            batch[0]
+                .error
+                .as_deref()
+                .is_some_and(|error| !error.is_empty()),
+            "the reason is kept"
+        );
+    }
+    harness.get_by_label(jpeg).click();
+    harness.run_steps(1);
+    let start_label = t!("convert.start").into_owned();
+    let node = harness
+        .get_all_by_label_contains(&start_label)
+        .rev()
+        .find(|node| node.accesskit_node().role() == egui::accesskit::Role::Button)
+        .expect("convert start button");
+    node.click();
+    harness.run_steps(1);
+    for _ in 0..600 {
+        harness.run_steps(1);
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.poll_conversion();
+        if !app.conversion.is_busy() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let app = harness.state().app.as_ref().unwrap();
+    let batch = &app.conversion.batch;
+    assert_eq!(
+        batch[0].status,
+        crate::logic::conversion::BatchStatus::Failed,
+        "the missing file stays failed"
+    );
+    assert_eq!(
+        batch[1].status,
+        crate::logic::conversion::BatchStatus::Done,
+        "the rest of the batch is converted"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jpg"))
+            .count(),
+        1
+    );
+
+    harness.run_steps(2);
+    let hover_error = {
+        let app = harness.state().app.as_ref().unwrap();
+        app.conversion.batch[0]
+            .error
+            .clone()
+            .expect("the failed file keeps its reason")
+    };
+    harness
+        .get_all_by_label(egui_phosphor::regular::X)
+        .last()
+        .expect("the failed status icon")
+        .hover();
+    harness.run_steps(40);
+    assert!(
+        harness.query_by_label_contains(&hover_error).is_some(),
+        "the failed status shows the reason on hover: {hover_error}"
     );
 }
 
@@ -2385,6 +2570,107 @@ fn deleting_from_the_card_tools_clears_its_selection() {
         "the card-tools delete clears the selection"
     );
     assert!(!path.exists());
+}
+
+#[test]
+fn converting_from_a_card_keeps_the_library_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("convert_2026-01-01_10-00-00.png");
+    image::RgbaImage::from_pixel(32, 24, image::Rgba([20, 40, 80, 255]))
+        .save(&path)
+        .unwrap();
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 700.0),
+    );
+    harness.run_steps(3);
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+    }
+    harness.run_steps(2);
+    harness.get_by_label(&t!("lib.convert")).click();
+    harness.run_steps(2);
+    let app = harness.state().app.as_ref().unwrap();
+    assert_eq!(
+        app.conversion.batch.len(),
+        1,
+        "the card's file is queued for conversion"
+    );
+    assert_eq!(
+        app.page,
+        Page::Library,
+        "converting from a card does not leave the library"
+    );
+    let notice = app.notices.items.last().expect("the queued notice");
+    assert_eq!(notice.level, crate::logic::notices::NoticeLevel::Info);
+    assert_eq!(notice.summary, t!("convert.queued", count = 1).to_string());
+    assert_eq!(
+        notice.detail,
+        path.file_name().unwrap().to_string_lossy().into_owned(),
+        "the details list the queued file"
+    );
+}
+
+#[test]
+fn converting_a_selection_keeps_the_library_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut paths = Vec::new();
+    for index in 0..2 {
+        let path = dir
+            .path()
+            .join(format!("convert_{index}_2026-01-01_10-00-00.png"));
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([20, 40, 80, 255]))
+            .save(&path)
+            .unwrap();
+        paths.push(path);
+    }
+    let mut selected = settings();
+    selected.media_dir = dir.path().to_path_buf();
+    let mut harness = harness_with(
+        Page::Library,
+        selected,
+        catalog(),
+        egui::vec2(1180.0, 700.0),
+    );
+    let ctx = harness.ctx.clone();
+    {
+        let app = harness.state_mut().app.as_mut().unwrap();
+        app.lib.set_test_entries(dir.path());
+        app.lib.select_for_test(paths.clone());
+        app.apply_library_action(
+            &ctx,
+            crate::logic::library::LibraryAction::ConvertMany(paths.clone()),
+        );
+    }
+    harness.run_steps(2);
+    let app = harness.state().app.as_ref().unwrap();
+    assert_eq!(
+        app.conversion.batch.len(),
+        2,
+        "the selection is queued for conversion"
+    );
+    assert_eq!(
+        app.page,
+        Page::Library,
+        "converting a selection does not leave the library"
+    );
+    let notice = app.notices.items.last().expect("the queued notice");
+    assert_eq!(notice.level, crate::logic::notices::NoticeLevel::Info);
+    assert_eq!(notice.summary, t!("convert.queued", count = 2).to_string());
+    assert_eq!(
+        notice.detail,
+        paths
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        "the details list every queued file"
+    );
 }
 
 #[test]
@@ -3429,13 +3715,14 @@ fn in_app_notifications_toggle_is_only_in_advanced_settings() {
         .query_by_label(&t!("settings.in_app_notifications"))
         .is_none());
     assert!(
-        !harness
+        harness
             .state()
             .app
             .as_ref()
             .unwrap()
             .settings
-            .notifications_enabled
+            .notifications_enabled,
+        "in-app notifications are on by default"
     );
     harness
         .state_mut()
@@ -3450,7 +3737,7 @@ fn in_app_notifications_toggle_is_only_in_advanced_settings() {
         .click();
     harness.run_steps(2);
     assert!(
-        harness
+        !harness
             .state()
             .app
             .as_ref()

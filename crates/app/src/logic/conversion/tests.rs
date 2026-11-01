@@ -6,7 +6,7 @@ use mediaa_core::paths::OutputPath;
 use mediaa_media::convert::Target;
 use std::sync::atomic::{AtomicBool, AtomicI32};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn conversion_job(
     output: std::path::PathBuf,
@@ -187,6 +187,81 @@ fn a_failed_item_can_be_retried_and_an_item_can_be_removed() {
 }
 
 #[test]
+fn an_unsupported_batch_file_is_skipped_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.png");
+    image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 20, 30, 255]))
+        .save(&good)
+        .unwrap();
+    let unsupported = dir.path().join("notes.txt");
+    let wake = crate::wake::Wake::default();
+    let mut controller = ConversionController::default();
+    controller.set_inputs(vec![unsupported.clone(), good.clone()]);
+    assert!(
+        controller.probed.is_some(),
+        "the unsupported file is reported at once"
+    );
+    for _ in 0..400 {
+        controller.poll_probe(&wake);
+        if controller.input.as_deref() == Some(good.as_path())
+            && controller
+                .probed
+                .as_ref()
+                .is_some_and(|probe| probe.is_ok())
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(controller.input.as_deref(), Some(good.as_path()));
+    assert_eq!(controller.batch[0].status, BatchStatus::Failed);
+    assert!(controller.batch[0].error.is_some());
+}
+
+#[test]
+fn a_missing_batch_file_fails_alone_and_the_batch_moves_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let good = dir.path().join("good.png");
+    image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 20, 30, 255]))
+        .save(&good)
+        .unwrap();
+    let missing = dir.path().join("missing.png");
+    let wake = crate::wake::Wake::default();
+    let mut controller = ConversionController::default();
+    controller.set_inputs(vec![missing.clone(), good.clone()]);
+    for _ in 0..400 {
+        controller.poll_probe(&wake);
+        if controller.input.as_deref() == Some(good.as_path())
+            && controller
+                .probed
+                .as_ref()
+                .is_some_and(|probe| probe.is_ok())
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        controller.input.as_deref(),
+        Some(good.as_path()),
+        "the missing file is skipped"
+    );
+    assert_eq!(controller.batch[0].status, BatchStatus::Failed);
+    assert!(
+        controller.batch[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| !error.is_empty()),
+        "the failed file keeps the reason"
+    );
+    assert_eq!(controller.batch[1].status, BatchStatus::Pending);
+    assert!(controller
+        .probed
+        .as_ref()
+        .is_some_and(|probe| probe.is_ok()));
+}
+
+#[test]
 fn a_failed_item_advances_to_the_next_without_leaving_the_batch() {
     let mut controller = ConversionController::default();
     controller.set_inputs(vec!["a.mp4".into(), "b.mp4".into()]);
@@ -281,7 +356,10 @@ fn batch_progress_stays_visible_between_files() {
     assert!(controller.job.is_none());
     assert!(controller.batch_auto);
     assert!(controller.probe_loading);
-    assert!(controller.probed.is_some());
+    assert!(
+        controller.probed.is_none(),
+        "the next file is probed before its job starts"
+    );
     assert!(controller.is_busy());
     let status = controller.status().expect("the batch is still running");
     assert_eq!((status.done, status.total), (1, 2));

@@ -579,7 +579,7 @@ impl Default for Settings {
         let mut settings = Self {
             advanced_settings: false,
             hide_recording_preparation: true,
-            notifications_enabled: false,
+            notifications_enabled: true,
             theme: ThemePreference::System,
             language: None,
             media_dir: paths::default_media_dir(),
@@ -1510,12 +1510,12 @@ mod tests {
         );
     }
     #[test]
-    fn in_app_notifications_are_off_by_default() {
-        assert!(!Settings::default().notifications_enabled);
+    fn in_app_notifications_are_on_by_default() {
+        assert!(Settings::default().notifications_enabled);
         let missing: Settings = toml::from_str("advanced_settings = true").unwrap();
-        assert!(!missing.notifications_enabled);
-        let enabled: Settings = toml::from_str("notifications_enabled = true").unwrap();
-        assert!(enabled.notifications_enabled);
+        assert!(missing.notifications_enabled);
+        let disabled: Settings = toml::from_str("notifications_enabled = false").unwrap();
+        assert!(!disabled.notifications_enabled);
     }
 
     #[test]

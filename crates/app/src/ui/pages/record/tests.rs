@@ -241,8 +241,9 @@ fn only_advanced_settings_show_signal_and_tray_controls() {
 }
 
 #[test]
-fn hotkey_video_only_exposes_preset_and_audio() {
+fn hotkey_video_simple_shows_resolution_without_frame_rate_or_quality() {
     let _ui = crate::test_support::ui_test_guard();
+    let _locale = crate::test_support::english_locale();
     let mut settings = Settings::default();
     settings.advanced_settings = false;
     let mut harness = egui_kittest::Harness::new_ui_state(
@@ -254,13 +255,10 @@ fn hotkey_video_only_exposes_preset_and_audio() {
         settings,
     );
     harness.run_steps(2);
-    for label in [
-        t!("record.resolution"),
-        t!("record.fps"),
-        t!("record.quality"),
-    ] {
+    for label in [t!("record.fps"), t!("record.quality")] {
         assert!(harness.query_by_label(&label).is_none(), "{label}");
     }
+    assert!(harness.query_by_label(&t!("record.resolution")).is_some());
     assert!(harness.query_by_label(&t!("record.format")).is_some());
     assert!(harness.query_by_label(&t!("record.preset")).is_some());
     assert!(harness.query_by_label("MP4").is_some());
@@ -269,6 +267,13 @@ fn hotkey_video_only_exposes_preset_and_audio() {
         harness.state().hotkey_record.output,
         OutputKind::Video(VideoContainer::Mkv)
     );
+
+    harness.get_by_value("1080p (FHD)").click();
+    harness.run_steps(2);
+    harness.get_by_label("720p (HD)").click();
+    harness.run_steps(2);
+    assert_eq!(harness.state().hotkey_record.output_height, 720);
+
     harness.get_by_label("MP4").click();
     harness.run_steps(2);
     assert_eq!(
@@ -277,12 +282,40 @@ fn hotkey_video_only_exposes_preset_and_audio() {
     );
     harness.state_mut().advanced_settings = true;
     harness.run_steps(2);
-    assert!(harness.query_by_label(&t!("record.format")).is_some());
-    harness.get_by_label("MP4").click();
+    assert!(harness.query_by_label(&t!("record.fps")).is_some());
+    assert!(harness.query_by_label(&t!("record.quality")).is_some());
+    assert!(harness.query_by_label(&t!("record.resolution")).is_some());
+}
+
+#[test]
+fn hotkey_video_simple_offers_a_custom_resolution() {
+    use egui_kittest::kittest::NodeT;
+    let _ui = crate::test_support::ui_test_guard();
+    let _locale = crate::test_support::english_locale();
+    let mut settings = Settings::default();
+    settings.advanced_settings = false;
+    settings.hotkey_record.output_height = 900;
+    let mut harness = egui_kittest::Harness::new_ui_state(
+        |ui: &mut egui::Ui, settings: &mut Settings| {
+            ui.set_width(1100.0);
+            let mut refresh = false;
+            profile_editor(ui, settings, RecordProfile::Hotkey, &[], None, &mut refresh);
+        },
+        settings,
+    );
     harness.run_steps(2);
+    assert!(
+        harness
+            .get_all_by_value(&t!("record.res_custom"))
+            .any(|node| node.accesskit_node().role() == egui::accesskit::Role::ComboBox),
+        "the custom height is selected"
+    );
     assert_eq!(
-        harness.state().hotkey_record.output,
-        OutputKind::Video(VideoContainer::Mp4)
+        harness
+            .get_all_by_role(egui::accesskit::Role::SpinButton)
+            .count(),
+        1,
+        "the custom height is editable"
     );
 }
 

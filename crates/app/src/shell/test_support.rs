@@ -87,6 +87,8 @@ impl App {
             fixed_catalogs: true,
             monitor_capture: catalog.monitor_capture,
             window_capture: catalog.window_capture,
+            shot_monitor_state: Some(Arc::new(|_| screen::MonitorState::Available)),
+            shot_window_state: Some(Arc::new(|_| screen::WindowState::Available)),
             completion_sound_enabled: false,
         }
     }

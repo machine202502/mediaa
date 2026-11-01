@@ -1022,9 +1022,14 @@ mod tests {
         settings.stop_recording_on_left_click = false;
         settings.highlight_recording_region = false;
         settings.recording_region_outline_width = 99;
+        settings.notifications_enabled = false;
 
         reset_settings_values(&mut settings);
 
+        assert!(
+            settings.notifications_enabled,
+            "a reset enables in-app notifications"
+        );
         let mut expected = Settings::default();
         expected.advanced_settings = true;
         expected.record.output = OutputKind::Video(VideoContainer::Mkv);

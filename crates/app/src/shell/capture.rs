@@ -104,6 +104,22 @@ impl App {
         self.capture.busy()
     }
 
+    fn shot_monitor_available(&self, id: screen::MonitorId) -> bool {
+        #[cfg(test)]
+        if let Some(state) = &self.shot_monitor_state {
+            return state(id) == screen::MonitorState::Available;
+        }
+        screen::monitor_state(id) == screen::MonitorState::Available
+    }
+
+    fn shot_window_available(&self, window: &WindowInfo) -> bool {
+        #[cfg(test)]
+        if let Some(state) = &self.shot_window_state {
+            return state(window) == screen::WindowState::Available;
+        }
+        screen::window_status(window.id, window.pid, &window.app).is_available()
+    }
+
     pub(crate) fn start_region_screenshot(
         &mut self,
         ctx: &egui::Context,
@@ -187,6 +203,10 @@ impl App {
             .or_else(|| self.monitors.first().cloned());
         match monitor {
             Some(m) => {
+                if !self.shot_monitor_available(m.id) {
+                    self.warning(t!("toast.shot_source_unavailable", name = m.label()));
+                    return;
+                }
                 self.schedule(
                     ctx,
                     Pending::FullscreenScreenshot {
@@ -200,16 +220,16 @@ impl App {
         }
     }
 
-    pub fn start_window_screenshot(
-        &mut self,
-        ctx: &egui::Context,
-        window_id: screen::CaptureWindowId,
-    ) {
+    pub fn start_window_screenshot(&mut self, ctx: &egui::Context, window: WindowInfo) {
         if self.image_io_busy() {
             self.warning(t!("toast.finish_current"));
             return;
         }
-        self.schedule(ctx, Pending::WindowScreenshot(window_id), true);
+        if !self.shot_window_available(&window) {
+            self.warning(t!("toast.shot_source_unavailable", name = window.label()));
+            return;
+        }
+        self.schedule(ctx, Pending::WindowScreenshot(window.id), true);
     }
 
     pub(super) fn queue_monitor_capture(

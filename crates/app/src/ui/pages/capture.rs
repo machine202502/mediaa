@@ -113,12 +113,12 @@ pub fn ui(
                         )
                         .clicked()
                     {
-                        capture = Some(w.id);
+                        capture = Some(w.clone());
                     }
                 }
             });
-        if let Some(id) = capture {
-            intents.push(Intent::Capture(CaptureIntent::Window(id)));
+        if let Some(w) = capture {
+            intents.push(Intent::Capture(CaptureIntent::Window(w)));
         }
     });
     intents

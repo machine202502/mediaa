@@ -171,3 +171,11 @@
 | ARCH-18 | 01.11.26 09:42 | Убрать &mut App из ui: страницы на Ctx и Intent, запрет crate::shell в ui | готово | [ui-logic-separation.md](tasks/ui-logic-separation.md) |
 | ARCH-19 | 01.11.26 09:55 | mediaa-arch: allowlist зависимостей между крейтами и запрет зависимости от app | готово | [crate-boundaries.md](tasks/crate-boundaries.md) |
 | ARCH-20 | 01.11.26 10:05 | mediaa-arch: feature 	esting только в dev, mediaa_engine::testing только в тестах | готово | [crate-boundaries.md](tasks/crate-boundaries.md) |
+| UI-20 | 01.11.26 10:20 | Разрешение видео хоткея и трея видно в простых настройках, включая кастомное значение | готово | [hotkey-resolution-simple.md](tasks/hotkey-resolution-simple.md) |
+| UI-21 | 01.11.26 10:32 | Стрелка разворота уведомления направлена по фактическому раскрытию вверх | готово | [notice-toggle-direction.md](tasks/notice-toggle-direction.md) |
+| UI-22 | 01.11.26 10:40 | Конвертация из карточки и выделения библиотеки не переключает на вкладку «Конвертировать» | готово | [library-convert-no-navigation.md](tasks/library-convert-no-navigation.md) |
+| UI-23 | 01.11.26 10:52 | Скриншот недоступного дисплея или окна не делается, показывается предупреждение | готово | [screenshot-unavailable-source.md](tasks/screenshot-unavailable-source.md) |
+| UI-24 | 01.11.26 11:05 | Битый файл не останавливает пакетную конвертацию, причина видна в подсказке статуса | готово | [conversion-batch-file-failures.md](tasks/conversion-batch-file-failures.md) |
+| UI-25 | 01.11.26 11:18 | Уведомления включены по умолчанию и после сброса; отправка в конвертацию показывает уведомление с именами файлов | готово | [notifications-default-and-convert-queue.md](tasks/notifications-default-and-convert-queue.md) |
+| UI-26 | 01.11.26 11:30 | Исчезновение верхнего уведомления не сдвигает стек: кадр удаления сразу перерисовывается | готово | [notice-stack-position.md](tasks/notice-stack-position.md) |
+| UI-27 | 01.11.26 11:38 | Снапшоты стека уведомлений: два, после закрытия, после истечения | готово | [notice-stack-position.md](tasks/notice-stack-position.md) |

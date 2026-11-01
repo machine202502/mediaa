@@ -2,7 +2,7 @@ use crate::logic::command::AppCommand;
 use crate::logic::conversion::ConversionUiAction;
 use crate::logic::notices::NoticeLevel;
 use mediaa_core::settings::RecordProfile;
-use mediaa_platform::screen::{CaptureWindowId, MonitorInfo};
+use mediaa_platform::screen::{MonitorInfo, WindowInfo};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,5 +45,5 @@ pub enum Intent {
 pub enum CaptureIntent {
     Region,
     Fullscreen(Option<MonitorInfo>),
-    Window(CaptureWindowId),
+    Window(WindowInfo),
 }

@@ -22,7 +22,9 @@ impl App {
             Intent::Capture(CaptureIntent::Fullscreen(monitor)) => {
                 self.start_fullscreen_screenshot(ctx, monitor)
             }
-            Intent::Capture(CaptureIntent::Window(id)) => self.start_window_screenshot(ctx, id),
+            Intent::Capture(CaptureIntent::Window(window)) => {
+                self.start_window_screenshot(ctx, window)
+            }
             Intent::RegionEditor { purpose } => self.start_region_screenshot(ctx, purpose),
             Intent::Notice { level, text } => self.push_notice(level, text),
             Intent::OpenPath(path) => self.open_path(ctx, &path),
@@ -425,16 +427,32 @@ impl App {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 
-    pub fn open_in_convert(&mut self, path: PathBuf) {
-        self.open_in_convert_many(vec![path]);
-    }
-
     pub fn open_in_convert_many(&mut self, paths: Vec<PathBuf>) {
         if self.conversion.is_busy() {
             self.warning(t!("convert.busy"));
             return;
         }
+        if paths.is_empty() {
+            return;
+        }
+        let names: Vec<String> = paths
+            .iter()
+            .map(|path| {
+                path.file_name().map_or_else(
+                    || path.to_string_lossy().into_owned(),
+                    |name| name.to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        let summary = t!("convert.queued", count = names.len()).to_string();
         self.conversion.add_inputs(paths);
-        self.page = Page::Convert;
+        self.notices.push(
+            logic::notices::NoticeLevel::Info,
+            summary,
+            names.join("\n"),
+            None,
+            Vec::new(),
+            false,
+        );
     }
 }

@@ -177,15 +177,43 @@ impl ConversionController {
         }
         self.probe_cancel = Arc::default();
         self.input = Some(path.clone());
-        if self.batch_auto {
-            self.probe_loading = true;
-        } else {
-            self.probe_loading = false;
-            self.probed = None;
-        }
+        self.probe_loading = self.batch_auto;
+        self.probed = None;
         if MediaKind::detect(&path).is_none() {
             self.probed = Some(Err(t!("convert.unsupported").into()));
             self.probe_loading = false;
+        }
+    }
+
+    fn current_input_failed(&self) -> bool {
+        self.batch.iter().any(|item| {
+            Some(&item.path) == self.input.as_ref() && item.status == BatchStatus::Failed
+        })
+    }
+
+    fn skip_failed_input(&mut self) {
+        if self.job.is_some() {
+            return;
+        }
+        let Some(path) = self.input.clone() else {
+            return;
+        };
+        let Some(Err(error)) = self.probed.clone() else {
+            return;
+        };
+        let already_failed = self.current_input_failed();
+        self.mark_batch(&path, BatchStatus::Failed, Some(error.clone()));
+        if !already_failed {
+            self.failed.push((path.clone(), error));
+            if self.batch_auto {
+                self.batch_done += 1;
+            }
+        }
+        if let Some(next) = self.queue.first().cloned() {
+            self.queue.remove(0);
+            self.set_current(next);
+        } else {
+            self.batch_auto = false;
         }
     }
 
@@ -451,12 +479,22 @@ impl ConversionController {
     }
 
     pub(crate) fn poll_probe(&mut self, wake: &Wake) {
+        if self.probe_job.is_none()
+            && self.job.is_none()
+            && self.probed.as_ref().is_some_and(|probe| probe.is_err())
+            && !self.current_input_failed()
+        {
+            self.skip_failed_input();
+            return;
+        }
         if self.probe_job.is_none() && (self.probed.is_none() || self.probe_loading) {
             let Some(path) = self.input.clone() else {
                 return;
             };
             let Some(kind) = MediaKind::detect(&path) else {
                 self.probed = Some(Err(t!("convert.unsupported").into()));
+                self.probe_loading = false;
+                self.skip_failed_input();
                 return;
             };
             let cancel = self.probe_cancel.clone();
@@ -474,6 +512,8 @@ impl ConversionController {
                 Err(error) => {
                     self.probed = Some(Err(format!("probe: {error}")));
                     self.probe_loading = false;
+                    self.skip_failed_input();
+                    return;
                 }
             }
         }
@@ -487,6 +527,10 @@ impl ConversionController {
         self.probe_job = None;
         self.probe_loading = false;
         self.probed = Some(result.unwrap_or_else(|_| Err(t!("convert.probe_stopped").into())));
+        if self.probed.as_ref().is_some_and(|probe| probe.is_err()) {
+            self.skip_failed_input();
+            return;
+        }
         if let Some(Ok(probe)) = self.probed.clone() {
             if let Some(path) = self.input.clone() {
                 if let Some(item) = self.batch.iter_mut().find(|item| item.path == path) {

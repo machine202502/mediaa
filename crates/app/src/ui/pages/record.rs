@@ -273,7 +273,7 @@ pub fn profile_editor(
                     }
                 });
             }
-            if advanced || profile == RecordProfile::App {
+            if advanced || matches!(profile, RecordProfile::App | RecordProfile::Hotkey) {
                 theme::row(ui, &t!("record.resolution"), |ui| {
                     mark(resolution_picker(
                         ui,

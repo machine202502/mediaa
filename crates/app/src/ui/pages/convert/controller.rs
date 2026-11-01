@@ -144,12 +144,18 @@ impl ConversionController {
                             ui.label(RichText::new(duration).size(11.5));
                             let palette = theme::palette(ui);
                             let status = match item.status {
-                                BatchStatus::Done => {
-                                    Some((icon::CHECK, palette.success, t!("convert.status_done")))
-                                }
-                                BatchStatus::Failed => {
-                                    Some((icon::X, palette.danger, t!("convert.status_failed")))
-                                }
+                                BatchStatus::Done => Some((
+                                    icon::CHECK,
+                                    palette.success,
+                                    t!("convert.status_done").into_owned(),
+                                )),
+                                BatchStatus::Failed => Some((
+                                    icon::X,
+                                    palette.danger,
+                                    item.error.clone().unwrap_or_else(|| {
+                                        t!("convert.status_failed").into_owned()
+                                    }),
+                                )),
                                 _ => None,
                             };
                             if let Some((status_icon, color, tooltip)) = status {

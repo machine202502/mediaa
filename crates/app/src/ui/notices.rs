@@ -38,7 +38,8 @@ impl Notices {
         }
         let before = self.items.len();
         self.items.retain(|notice| notice.closing_at.is_none());
-        if self.items.len() != before {
+        let removed_any = self.items.len() != before;
+        if removed_any {
             ctx.request_repaint();
         }
         if self.items.is_empty() {
@@ -154,9 +155,9 @@ impl Notices {
                                                         egui::Button::new(
                                                             egui::RichText::new(
                                                                 if notice.expanded {
-                                                                    icon::CARET_UP
-                                                                } else {
                                                                     icon::CARET_DOWN
+                                                                } else {
+                                                                    icon::CARET_UP
                                                                 },
                                                             )
                                                             .color(p.text_weak)
@@ -326,7 +327,11 @@ impl Notices {
         if let Some(id) = close {
             self.begin_close(id);
         }
+        let before_remove = self.items.len();
         self.items.retain(|notice| !remove.contains(&notice.id));
+        if self.items.len() != before_remove {
+            ctx.request_repaint();
+        }
         let now = Instant::now();
         self.expire(now);
         let mut wake = None;
@@ -618,6 +623,168 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_expired_notice_is_dropped_with_an_immediate_repaint() {
+        let _ui = crate::test_support::ui_test_guard();
+        let _locale = crate::test_support::english_locale();
+        let mut notices = Notices::default();
+        for summary in ["Top", "Bottom"] {
+            notices.push(
+                NoticeLevel::Info,
+                summary.into(),
+                "Detail".into(),
+                None,
+                Vec::new(),
+                false,
+            );
+        }
+        let now = Instant::now();
+        for notice in &mut notices.items {
+            notice.opened_at = now - NOTICE_FADE_IN;
+            notice.expires_at = now + Duration::from_secs(30);
+        }
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, notices: &mut Notices| {
+                notices.show(ui.ctx());
+            },
+            notices,
+        );
+        harness.run_steps(3);
+        let bottom_before = harness
+            .get_all_by_label(icon::X)
+            .last()
+            .expect("the newest notice")
+            .rect();
+        harness.state_mut().items[0].expires_at = Instant::now();
+        harness.run_steps(1);
+        assert_eq!(
+            harness.state().items.len(),
+            1,
+            "the expired notice is dropped"
+        );
+        harness.run_steps(1);
+        assert!(
+            harness.ctx.requested_repaint_last_pass(),
+            "the stack has to be laid out again at once, otherwise the remaining card keeps the shifted position"
+        );
+        harness.run_steps(1);
+        let bottom_after = harness
+            .get_all_by_label(icon::X)
+            .last()
+            .expect("the remaining notice")
+            .rect();
+        assert!(
+            (bottom_after.bottom() - bottom_before.bottom()).abs() < 0.5,
+            "the remaining notice keeps its place: {bottom_before:?} -> {bottom_after:?}"
+        );
+    }
+
+    #[cfg(windows)]
+    fn notice_stack() -> egui_kittest::Harness<'static, Notices> {
+        let mut notices = Notices::default();
+        notices.push(
+            NoticeLevel::Success,
+            "Screenshot copied and saved".into(),
+            "Screenshot_2026-11-01_10-13-26.png".into(),
+            None,
+            Vec::new(),
+            false,
+        );
+        notices.push(
+            NoticeLevel::Info,
+            "Files added to the conversion queue: 2".into(),
+            "Screenshot_2026-11-01_10-27-36.png\nScreenshot_2026-11-01_10-31-02.png".into(),
+            None,
+            Vec::new(),
+            false,
+        );
+        let now = Instant::now();
+        for notice in &mut notices.items {
+            notice.opened_at = now - NOTICE_FADE_IN;
+            notice.expires_at = now + Duration::from_secs(30);
+        }
+        let mut harness = egui_kittest::Harness::new_ui_state(
+            |ui, notices: &mut Notices| {
+                crate::ui::theme::install(ui.ctx());
+                crate::ui::theme::apply_preference(
+                    ui.ctx(),
+                    mediaa_core::settings::ThemePreference::Dark,
+                );
+                ui.painter().rect_filled(
+                    ui.ctx().content_rect(),
+                    0.0,
+                    crate::ui::theme::palette(ui).bg,
+                );
+                notices.show(ui.ctx());
+            },
+            notices,
+        );
+        harness.run_steps(3);
+        harness
+    }
+
+    #[cfg(windows)]
+    fn bottom_notice_bottom(harness: &egui_kittest::Harness<'_, Notices>) -> f32 {
+        harness
+            .get_all_by_label(icon::X)
+            .last()
+            .expect("the newest notice")
+            .rect()
+            .bottom()
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ui_regression_snapshot_notices_stack() {
+        let _ui = crate::test_support::ui_test_guard();
+        let _locale = crate::test_support::english_locale();
+        let mut harness = notice_stack();
+        harness.run_steps(2);
+        harness.snapshot("notices-stack-two");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ui_regression_snapshot_notices_stack_after_close() {
+        let _ui = crate::test_support::ui_test_guard();
+        let _locale = crate::test_support::english_locale();
+        let mut harness = notice_stack();
+        let before = bottom_notice_bottom(&harness);
+        harness
+            .get_all_by_label(icon::X)
+            .next()
+            .expect("the top notice")
+            .click();
+        harness.run_steps(5);
+        assert_eq!(harness.state().items.len(), 1, "the top notice is gone");
+        let after = bottom_notice_bottom(&harness);
+        assert!(
+            (after - before).abs() < 0.5,
+            "the remaining notice keeps its place: {before} -> {after}"
+        );
+        harness.hover_at(egui::pos2(20.0, 20.0));
+        harness.run_steps(2);
+        harness.snapshot("notices-stack-after-close");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ui_regression_snapshot_notices_stack_after_expiry() {
+        let _ui = crate::test_support::ui_test_guard();
+        let _locale = crate::test_support::english_locale();
+        let mut harness = notice_stack();
+        let before = bottom_notice_bottom(&harness);
+        harness.state_mut().items[0].expires_at = Instant::now();
+        harness.run_steps(5);
+        assert_eq!(harness.state().items.len(), 1, "the expired notice is gone");
+        let after = bottom_notice_bottom(&harness);
+        assert!(
+            (after - before).abs() < 0.5,
+            "the remaining notice keeps its place: {before} -> {after}"
+        );
+        harness.snapshot("notices-stack-after-expiry");
+    }
+
     #[cfg(windows)]
     #[test]
     fn ui_regression_snapshot_notices_layers() {
@@ -707,6 +874,11 @@ mod tests {
         assert!(harness
             .query_by_label("Полный технический контекст без сокращений")
             .is_none());
+        assert!(
+            harness.query_by_label(icon::CARET_UP).is_some(),
+            "a collapsed notice expands upwards"
+        );
+        assert!(harness.query_by_label(icon::CARET_DOWN).is_none());
         if let Ok(path) = std::env::var("MEDIAA_NOTICE_SNAPSHOT") {
             std::thread::sleep(Duration::from_millis(200));
             harness.step();
@@ -731,19 +903,20 @@ mod tests {
                 .save(format!("{path}-expanded.png"))
                 .unwrap();
         }
-        harness.get_by_label(icon::CARET_DOWN).click();
+        harness.get_by_label(icon::CARET_UP).click();
         harness.run_steps(20);
         assert!(harness
             .query_by_label("Полный технический контекст без сокращений")
             .is_some());
         assert!(harness.query_by_label(&log_label).is_some());
+        assert!(harness.query_by_label(icon::CARET_DOWN).is_some());
         harness.get_by_label(&copy_label).click();
         harness.run_steps(20);
         assert_eq!(
             observed.lock().unwrap().clone(),
             Some(NoticeAction::CopyLog("webp-1234-0001".into()))
         );
-        harness.get_by_label(icon::CARET_UP).click();
+        harness.get_by_label(icon::CARET_DOWN).click();
         harness.run_steps(20);
         assert!(harness
             .query_by_label("Полный технический контекст без сокращений")

@@ -52,6 +52,10 @@ type TestMonitorCapture = Arc<dyn Fn(screen::MonitorId) -> Result<Frame, String>
 #[cfg(test)]
 type TestWindowCapture =
     Arc<dyn Fn(screen::CaptureWindowId) -> Result<Frame, String> + Send + Sync>;
+#[cfg(test)]
+type TestShotMonitorState = Arc<dyn Fn(screen::MonitorId) -> screen::MonitorState + Send + Sync>;
+#[cfg(test)]
+type TestShotWindowState = Arc<dyn Fn(&WindowInfo) -> screen::WindowState + Send + Sync>;
 
 pub struct App {
     pub settings: Settings,
@@ -104,6 +108,10 @@ pub struct App {
     monitor_capture: Option<TestMonitorCapture>,
     #[cfg(test)]
     window_capture: Option<TestWindowCapture>,
+    #[cfg(test)]
+    shot_monitor_state: Option<TestShotMonitorState>,
+    #[cfg(test)]
+    shot_window_state: Option<TestShotWindowState>,
     #[cfg(test)]
     completion_sound_enabled: bool,
 }
@@ -244,6 +252,10 @@ impl App {
             monitor_capture: None,
             #[cfg(test)]
             window_capture: None,
+            #[cfg(test)]
+            shot_monitor_state: None,
+            #[cfg(test)]
+            shot_window_state: None,
             #[cfg(test)]
             completion_sound_enabled: true,
         };
