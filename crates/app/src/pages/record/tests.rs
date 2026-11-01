@@ -190,6 +190,8 @@ fn starting_recording_has_a_working_cancel_action() {
 #[cfg(windows)]
 #[test]
 fn starting_card_uses_the_new_status_format() {
+    let _ui = crate::app::test_support::ui_test_guard();
+    crate::i18n::apply(Some("en"));
     let mut harness = egui_kittest::Harness::new_ui_state(
         |ui: &mut egui::Ui, cancel: &mut bool| {
             ui.set_width(520.0);

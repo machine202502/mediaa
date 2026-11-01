@@ -706,6 +706,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn ui_regression_snapshot_viewer_player() {
+        let _ui = crate::app::test_support::ui_test_guard();
+        crate::i18n::apply(Some("en"));
         use eframe::egui::{ColorImage, TextureOptions};
 
         let viewer = Viewer::open(
@@ -736,6 +738,10 @@ mod tests {
             TextureOptions::LINEAR,
         ));
         harness.run_steps(2);
+        let player = harness.state_mut().player.as_mut().expect("video player");
+        player.toggle_pause();
+        player.seek(30.0);
+        harness.run_steps(2);
         let options = egui_kittest::SnapshotOptions::default().max_failed_pixels(200);
         harness.snapshot_options("viewer-player-100", &options);
         harness
@@ -759,6 +765,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn ui_regression_snapshot_viewer_player_light() {
+        let _ui = crate::app::test_support::ui_test_guard();
+        crate::i18n::apply(Some("en"));
         use eframe::egui::{ColorImage, TextureOptions};
 
         let viewer = Viewer::open(
@@ -795,6 +803,10 @@ mod tests {
             .as_mut()
             .expect("video player")
             .set_speed(1.25);
+        harness.run_steps(2);
+        let player = harness.state_mut().player.as_mut().expect("video player");
+        player.toggle_pause();
+        player.seek(30.0);
         harness.run_steps(2);
         let options = egui_kittest::SnapshotOptions::default().max_failed_pixels(200);
         harness.snapshot_options("viewer-player-light", &options);
