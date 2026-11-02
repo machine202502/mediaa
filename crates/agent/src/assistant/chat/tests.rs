@@ -2,6 +2,7 @@ use super::super::tools::tests::recording;
 use super::super::{answer, ask, Brain, Message, Piece, Step, ToolSpec, Tools};
 use super::*;
 use mediaa_core::agent::AgentSettings;
+use mediaa_core::assistant::{Metrics, WaitReason};
 use mediaa_core::slots::Slots;
 use mediaa_engine::testing::FakeEngine;
 use mediaa_queue::Status as TaskStatus;

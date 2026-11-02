@@ -7,7 +7,10 @@ const CONVERT_ENV: &str = "MEDIAA_DEV_CONVERT";
 const PICKER_ENV: &str = "MEDIAA_DEV_PICKER";
 const VIEW_ENV: &str = "MEDIAA_DEV_VIEW";
 const PREVIEW_ENV: &str = "MEDIAA_DEV_PREVIEW";
-
+const BACKGROUND_ENV: &str = "MEDIAA_DEV_BACKGROUND";
+const AGENT_ENV: &str = "MEDIAA_DEV_AGENT";
+const RECORD_ENV: &str = "MEDIAA_DEV_RECORD";
+const TRAY_ENV: &str = "MEDIAA_DEV_TRAY";
 fn value(name: &str) -> Option<OsString> {
     #[cfg(debug_assertions)]
     {
@@ -38,6 +41,32 @@ pub fn picker_enabled() -> bool {
 
 pub fn view_filter() -> Option<String> {
     text(VIEW_ENV)
+}
+
+pub fn tray_action() -> Option<String> {
+    text(TRAY_ENV)
+}
+
+pub fn record_seconds() -> Option<u64> {
+    text(RECORD_ENV).and_then(|value| {
+        if value == "1" || value.eq_ignore_ascii_case("true") {
+            Some(3)
+        } else {
+            value.parse().ok().filter(|seconds| *seconds > 0)
+        }
+    })
+}
+
+pub fn agent_copy() -> bool {
+    text(AGENT_ENV).is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+}
+
+pub fn input_file() -> Option<std::path::PathBuf> {
+    value("MEDIAA_DEV_INPUT").map(std::path::PathBuf::from)
+}
+
+pub fn background() -> bool {
+    text(BACKGROUND_ENV).is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
 }
 
 pub fn preview_filter() -> Option<String> {

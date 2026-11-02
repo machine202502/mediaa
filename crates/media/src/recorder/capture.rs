@@ -8,8 +8,19 @@ fn scratch_output(
     max_height: Option<u32>,
     size: (u32, u32),
     fps: u32,
+    tuning: &EncoderTuning,
 ) -> (String, Output) {
     let out = Output::new(path).format("matroska").stream_map("[v]");
+    let mut out = out;
+    if tuning.zerolatency {
+        out = out.video_opt("tune", "zerolatency");
+    }
+    if let Some(threads) = tuning.threads {
+        out = out.video_opt("threads", threads.to_string());
+    }
+    if let Some(lookahead) = tuning.lookahead.filter(|_| !tuning.zerolatency) {
+        out = out.video_opt("rc-lookahead", lookahead.to_string());
+    }
     match kind {
         OutputKind::Video(_) => (
             filters::scratch_graph("yuv420p", max_height),
@@ -45,12 +56,14 @@ pub(super) fn capture_loop(
     gate: Arc<StartGate>,
     events: Sender<SessionEvent>,
     show_no_signal: bool,
+    tuning: EncoderTuning,
 ) -> anyhow::Result<Vec<PathBuf>> {
     let setup = (|| -> anyhow::Result<_> {
         let source = factory()?;
         let (w, h) = source.size();
         let (push_source, handle) = mediaa_ffmpeg::push_source(w, h, "rgba", (1, fps as i32))?;
-        let (graph, output) = scratch_output(&scratch, kind, quality, max_height, (w, h), fps);
+        let (graph, output) =
+            scratch_output(&scratch, kind, quality, max_height, (w, h), fps, &tuning);
         let scheduler = JobBuilder::new()
             .push_input(push_source)
             .filter_desc(&graph)
@@ -144,7 +157,11 @@ pub(super) fn capture_loop(
             };
             let frame = match grabbed {
                 Some(Ok(frame)) => {
-                    let data = frame.fit_to(size.0, size.1, [0, 0, 0, 255]).data;
+                    let data = if frame.width == size.0 && frame.height == size.1 {
+                        frame.data
+                    } else {
+                        frame.fit_to(size.0, size.1, [0, 0, 0, 255]).data
+                    };
                     last_live = Some(data.clone());
                     Some(data)
                 }

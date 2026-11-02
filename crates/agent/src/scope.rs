@@ -1,3 +1,4 @@
+use mediaa_core::assistant::TaskRef;
 use mediaa_engine::{
     ChatAnswer, ChatRequest, DiarizeRequest, EmbeddingsRequest, Engine, EngineError, ModelCheck,
     ModelInfo, RerankRequest, RerankResult, TranscribeRequest, VoiceRequest,
@@ -10,12 +11,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
 use std::time::Instant;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskRef {
-    pub kind: String,
-    pub title: String,
-}
 
 #[derive(Clone)]
 pub struct Scope {

@@ -2,7 +2,7 @@
 
 ## Решение
 
-- `scripts/windows/run.ps1` при падении сборки один раз сбрасывает кэш `ffmpeg-sys-next`
+- `scripts/windows/run/run.ps1` при падении сборки один раз сбрасывает кэш `ffmpeg-sys-next`
   (`cargo clean -p ffmpeg-sys-next`, удаление `target\<profile>\build\ffmpeg-sys-next-*` и
   `.fingerprint\ffmpeg-sys-next-*`), заново выставляет `FFMPEG_DIR` и повторяет сборку.
 - Повтор идёт с `-vv` и пишет `target\build-failure.log`; если сборка снова падает, скрипт
@@ -11,13 +11,13 @@
   была видна без ручной диагностики.
 - До запуска `env.ps1` скрипт снимает блокировку со всех `*.ps1` рядом с собой, поэтому
   предупреждение о запуске скачанных сценариев больше не повторяется.
-- Добавлен `scripts/windows/run.cmd`: запускает PowerShell с `-ExecutionPolicy Bypass`, чтобы
+- Добавлен `scripts/windows/run/run.cmd`: запускает PowerShell с `-ExecutionPolicy Bypass`, чтобы
   не отвечать на запрос политики выполнения.
 
 ## Файлы
 
-- `scripts/windows/run.ps1`
-- `scripts/windows/run.cmd`
+- `scripts/windows/run/run.ps1`
+- `scripts/windows/run/run.cmd`
 
 ## Проверка
 

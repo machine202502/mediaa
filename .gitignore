@@ -1,4 +1,5 @@
 target/
+.cache/
 vcpkg_installed/
 vcpkg_installed_*/
 dist/

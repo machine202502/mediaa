@@ -1,7 +1,9 @@
 pub(crate) mod audio;
 pub(crate) mod cursor;
 pub(crate) mod init;
+pub(crate) mod ipc;
 pub(crate) mod keys;
+pub(crate) mod mask;
 pub(crate) mod outline;
 pub(crate) mod outline_window;
 pub(crate) mod screen;

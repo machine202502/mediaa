@@ -3,9 +3,11 @@ pub mod clipboard;
 pub mod cursor;
 pub(crate) mod cursor_overlay;
 pub mod files;
+pub mod ipc;
 pub mod keys;
 #[cfg(target_os = "linux")]
 pub(crate) mod linux;
+pub mod mask;
 pub mod outline;
 pub mod screen;
 pub mod single_instance;

@@ -14,7 +14,7 @@ use std::sync::atomic::AtomicBool;
 
 pub use crate::filters::Effort;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum VideoFormat {
     Mp4,
     Mov,
@@ -60,7 +60,7 @@ impl VideoFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum StillFormat {
     Jpeg,
     Png,
@@ -103,7 +103,7 @@ impl StillFormat {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Target {
     Video(VideoFormat),
     Anim(AnimFormat),
@@ -150,7 +150,7 @@ pub const PNG_COLORS: [u16; 5] = [256, 128, 64, 32, 16];
 
 pub const VIDEO_FPS: [u32; 4] = [60, 30, 24, 15];
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConvertSettings {
     pub quality: u8,
     pub effort: Effort,

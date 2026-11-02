@@ -118,6 +118,14 @@ pub fn media_path(dir: &Path, title: &str, at: DateTime<Local>, ext: &str) -> Pa
 }
 
 pub fn rename(path: &Path, title: &str) -> anyhow::Result<PathBuf> {
+    let target = rename_target(path, title)?;
+    if target != path {
+        std::fs::rename(path, &target)?;
+    }
+    Ok(target)
+}
+
+pub fn rename_target(path: &Path, title: &str) -> anyhow::Result<PathBuf> {
     let name = parse_path(path)
         .ok_or_else(|| anyhow::anyhow!("{} is not a MediaA file name", path.display()))?;
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -128,9 +136,7 @@ pub fn rename(path: &Path, title: &str) -> anyhow::Result<PathBuf> {
     if sanitize(title, MAX_TITLE) == name.title {
         return Ok(path.to_path_buf());
     }
-    let target = free_path(dir, title, name.taken, ext, Some(path));
-    std::fs::rename(path, &target)?;
-    Ok(target)
+    Ok(free_path(dir, title, name.taken, ext, Some(path)))
 }
 
 #[cfg(test)]

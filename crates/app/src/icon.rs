@@ -161,8 +161,20 @@ pub enum StatusDot {
     Saving,
 }
 
+pub fn rgba_agent(size: u32) -> Vec<u8> {
+    rgba_with(
+        size,
+        [96.0, 12.0, 12.0],
+        [222.0, 34.0, 34.0],
+        [255.0, 170.0, 72.0],
+    )
+}
+
 pub fn rgba_status(size: u32, status: StatusDot) -> Vec<u8> {
-    let mut out = rgba(size);
+    rgba_status_with(size, status, rgba(size))
+}
+
+pub fn rgba_status_with(size: u32, status: StatusDot, mut out: Vec<u8>) -> Vec<u8> {
     let n = size as f32;
     let (cx, cy, r, rim) = (n * 0.74, n * 0.74, n * 0.22, n * 0.06);
     let color = match status {
@@ -218,6 +230,26 @@ mod tests {
             "corner mark: {:?}",
             px(&area, 5, 5)
         );
+    }
+
+    #[test]
+    fn agent_icon_is_red_and_differs_from_the_normal_one() {
+        let n = 64;
+        let normal = super::rgba(n);
+        let agent = super::rgba_agent(n);
+        assert_ne!(normal, agent);
+        let mut red = 0u64;
+        let mut green = 0u64;
+        let mut blue = 0u64;
+        for pixel in agent.chunks_exact(4) {
+            if pixel[3] > 0 {
+                red += u64::from(pixel[0]);
+                green += u64::from(pixel[1]);
+                blue += u64::from(pixel[2]);
+            }
+        }
+        assert!(red > green * 2, "red {red}, green {green}");
+        assert!(red > blue * 2, "red {red}, blue {blue}");
     }
 
     #[test]

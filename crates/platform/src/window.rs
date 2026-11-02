@@ -62,6 +62,85 @@ impl NativeWindow {
     }
 }
 
+pub fn prepare_handle(window: isize) -> WindowResult {
+    #[cfg(windows)]
+    {
+        crate::windows::window::prepare_handle(window)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        WindowResult::Unsupported
+    }
+}
+pub fn hide_handle(window: isize) -> WindowResult {
+    #[cfg(windows)]
+    {
+        crate::windows::window::hide_handle(window)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        WindowResult::Unsupported
+    }
+}
+pub fn hide_window(title: &str) -> WindowResult {
+    #[cfg(windows)]
+    {
+        crate::windows::window::hide_window(title)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = title;
+        WindowResult::Unsupported
+    }
+}
+pub fn prepare_background(title: &str) -> WindowResult {
+    #[cfg(windows)]
+    {
+        crate::windows::window::prepare_background(title)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = title;
+        WindowResult::Unsupported
+    }
+}
+
+pub fn background_show(title: &str) -> WindowResult {
+    #[cfg(windows)]
+    {
+        crate::windows::window::background_show(title)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = title;
+        WindowResult::Unsupported
+    }
+}
+
+pub fn foreground_window() -> isize {
+    #[cfg(windows)]
+    {
+        crate::windows::window::foreground_window()
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
+pub fn restore_foreground(window: isize) -> WindowResult {
+    #[cfg(windows)]
+    {
+        crate::windows::window::restore_foreground(window)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = window;
+        WindowResult::Unsupported
+    }
+}
 pub fn exclude_from_capture(title: &str) -> WindowResult {
     #[cfg(windows)]
     {

@@ -46,7 +46,7 @@ fn crate_dependencies_match_allowlist() {
 fn no_crate_depends_on_app() {
     let mut problems = Vec::new();
     for rule in RULES {
-        if rule.name == "app" {
+        if rule.name == "app" || rule.name == "app-agent" {
             continue;
         }
         let deps = read_deps(rule);

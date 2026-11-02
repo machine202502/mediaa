@@ -1,4 +1,5 @@
 use mediaa_core::Rect;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowState {
@@ -15,7 +16,7 @@ pub enum MonitorState {
     Disconnected,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct MonitorId(u32);
 
 impl MonitorId {
@@ -28,7 +29,7 @@ impl MonitorId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CaptureWindowId(u32);
 
 impl CaptureWindowId {
@@ -41,7 +42,7 @@ impl CaptureWindowId {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MonitorInfo {
     pub id: MonitorId,
     pub device: String,
@@ -65,7 +66,7 @@ impl MonitorInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WindowInfo {
     pub id: CaptureWindowId,
     pub title: String,

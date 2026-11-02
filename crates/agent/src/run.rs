@@ -1,5 +1,6 @@
 use crate::assistant::chat::Live;
 use mediaa_core::agent::AgentSettings;
+use mediaa_core::assistant::Event as AssistantEvent;
 use mediaa_core::slots::Slots;
 use mediaa_engine::Engine;
 use mediaa_queue::state::{Op, Outcome, World};
@@ -61,6 +62,13 @@ impl Feed {
 #[derive(Default)]
 pub struct Streams {
     live: Mutex<HashMap<TaskId, Live>>,
+    events: Mutex<StreamEvents>,
+}
+
+#[derive(Default)]
+struct StreamEvents {
+    start: usize,
+    items: Vec<(TaskId, AssistantEvent)>,
 }
 
 impl Streams {
@@ -74,6 +82,29 @@ impl Streams {
 
     pub fn update<R>(&self, id: TaskId, f: impl FnOnce(&mut Live) -> R) -> Option<R> {
         self.live.lock().expect("streams").get_mut(&id).map(f)
+    }
+
+    pub fn apply_event(&self, id: TaskId, event: AssistantEvent) {
+        self.push_event(id, event.clone());
+        self.update(id, |live| live.apply(&event));
+    }
+
+    pub fn push_event(&self, id: TaskId, event: AssistantEvent) {
+        let mut events = self.events.lock().expect("stream events");
+        events.items.push((id, event));
+        if events.items.len() > 4000 {
+            let drop_n = 2000;
+            events.items.drain(0..drop_n);
+            events.start += drop_n;
+        }
+    }
+
+    pub fn events_since(&self, cursor: usize) -> (usize, Vec<(TaskId, AssistantEvent)>, bool) {
+        let events = self.events.lock().expect("stream events");
+        let end = events.start + events.items.len();
+        let gap = cursor < events.start;
+        let from = cursor.saturating_sub(events.start).min(events.items.len());
+        (end, events.items[from..].to_vec(), gap)
     }
 
     pub fn close(&self, id: TaskId) {
@@ -410,38 +441,40 @@ pub fn has_unfinished(ai_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-pub fn spawn_host(
+fn host_loop(sched: Arc<Scheduler>, feed: Arc<Feed>, stop: Arc<AtomicBool>) {
+    let rx = sched.subscribe();
+    let mut purged = Instant::now();
+    while !stop.load(Ordering::Relaxed) {
+        while let Ok(event) = rx.try_recv() {
+            feed.push(event);
+        }
+        if let Err(error) = sched.tick() {
+            log::warn!("agent queue: {error:#}");
+        }
+        while let Ok(event) = rx.try_recv() {
+            feed.push(event);
+        }
+        if purged.elapsed() > Duration::from_secs(24 * 60 * 60) {
+            purged = Instant::now();
+            if let Err(error) = sched.purge_history() {
+                log::warn!("agent queue: {error:#}");
+            }
+        }
+        let wait = if sched.live().is_empty() { 200 } else { 20 };
+        std::thread::sleep(Duration::from_millis(wait));
+    }
+}
+
+pub fn spawn_host_async(
     sched: Arc<Scheduler>,
     engine: Arc<dyn Engine>,
     feed: Arc<Feed>,
     stop: Arc<AtomicBool>,
-) -> std::io::Result<JoinHandle<()>> {
-    let rx = sched.subscribe();
-    std::thread::Builder::new()
-        .name("agent-queue".into())
-        .spawn(move || {
-            let mut purged = Instant::now();
-            while !stop.load(Ordering::Relaxed) {
-                while let Ok(event) = rx.try_recv() {
-                    feed.push(event);
-                }
-                if let Err(error) = sched.tick() {
-                    log::warn!("agent queue: {error:#}");
-                }
-                while let Ok(event) = rx.try_recv() {
-                    feed.push(event);
-                }
-                let _ = &engine;
-                if purged.elapsed() > Duration::from_secs(24 * 60 * 60) {
-                    purged = Instant::now();
-                    if let Err(error) = sched.purge_history() {
-                        log::warn!("agent queue: {error:#}");
-                    }
-                }
-                let wait = if sched.live().is_empty() { 200 } else { 20 };
-                std::thread::sleep(Duration::from_millis(wait));
-            }
-        })
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        let _ = &engine;
+        host_loop(sched, feed, stop);
+    })
 }
 
 pub fn drain(sched: &Scheduler, limit: Duration) {

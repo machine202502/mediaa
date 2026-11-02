@@ -85,10 +85,43 @@ pub const RULES: &[CrateRule] = &[
     CrateRule {
         name: "app",
         dir: "crates/app",
+        normal: &["frontend", "backend", "core"],
+        dev: &[],
+    },
+    CrateRule {
+        name: "sync",
+        dir: "crates/sync",
+        normal: &[],
+        dev: &[],
+    },
+    CrateRule {
+        name: "protocol",
+        dir: "crates/protocol",
+        normal: &["core", "platform", "media"],
+        dev: &[],
+    },
+    CrateRule {
+        name: "backend",
+        dir: "crates/backend",
         normal: &[
-            "core", "storage", "render", "media", "ffmpeg", "platform", "engine", "agent", "queue",
+            "core", "storage", "render", "media", "ffmpeg", "platform", "engine", "protocol",
+            "sync", "agent", "queue",
         ],
-        dev: &["engine"],
+        dev: &[],
+    },
+    CrateRule {
+        name: "frontend",
+        dir: "crates/frontend",
+        normal: &[
+            "core", "render", "media", "ffmpeg", "platform", "sync", "protocol",
+        ],
+        dev: &[],
+    },
+    CrateRule {
+        name: "app-agent",
+        dir: "crates/app-agent",
+        normal: &["app"],
+        dev: &[],
     },
     CrateRule {
         name: "arch",

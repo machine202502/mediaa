@@ -186,7 +186,7 @@ kittest: каждый вид подключения, выбор модели и�
 
 Убрать из `.cargo/config.toml` генератор CMake, toolchain и `LLAMA_STATIC_CRT`. Удалить
 `cmake/static-crt.cmake` и `Directory.Build.targets`, если они есть. Из
-`scripts/windows/env.ps1` убрать проверки CMake и Vulkan SDK.
+`scripts/windows/build/env.ps1` убрать проверки CMake и Vulkan SDK.
 
 `libclang` оставить, если `cargo tree -i bindgen` показывает потребителя (`ffmpeg-sys`).
 Обход `TEMP` в `target\tmp` убирать только если после EXT-3 `aws-lc-sys` и `lzma-sys` никому

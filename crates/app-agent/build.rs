@@ -1,0 +1,24 @@
+#[path = "../app/src/icon.rs"]
+#[allow(dead_code)]
+mod icon;
+
+fn main() {
+    println!("cargo:rerun-if-changed=../app/src/icon.rs");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let ico_path = out.join("mediaa-agent.ico");
+    let mut dir = ico::IconDir::new(ico::ResourceType::Icon);
+    for size in [16u32, 24, 32, 48, 64, 128, 256] {
+        let image = ico::IconImage::from_rgba_data(size, size, icon::rgba_agent(size));
+        dir.add_entry(ico::IconDirEntry::encode(&image).expect("encode icon"));
+    }
+    dir.write(std::fs::File::create(&ico_path).expect("create ico"))
+        .expect("write ico");
+    let mut res = winresource::WindowsResource::new();
+    res.set_icon(ico_path.to_str().expect("utf-8 path"));
+    res.set("FileDescription", "MediaA agent");
+    res.set("ProductName", "MediaA agent");
+    res.compile().expect("compile Windows resources");
+}

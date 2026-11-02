@@ -17,6 +17,24 @@ fn dither_option(dither: GifDither) -> &'static str {
     }
 }
 
+pub fn palette_graph(settings: &AnimSettings) -> String {
+    format!(
+        "[0:v]fps={fps}{scale},palettegen=max_colors={colors}:stats_mode=diff[p]",
+        fps = FPS.clamp(settings.fps),
+        scale = scale_step(settings.height_limit()),
+        colors = GIF_COLORS.clamp(settings.gif_colors),
+    )
+}
+
+pub fn use_graph(settings: &AnimSettings) -> String {
+    format!(
+        "[0:v]fps={fps}{scale}[b];[b][1:v]paletteuse=dither={dither}:diff_mode=rectangle[v]",
+        fps = FPS.clamp(settings.fps),
+        scale = scale_step(settings.height_limit()),
+        dither = dither_option(settings.gif_dither),
+    )
+}
+
 pub fn graph(settings: &AnimSettings) -> String {
     format!(
         "[0:v]fps={fps}{scale},split[a][b];[a]palettegen=max_colors={colors}:stats_mode=diff[p];\
@@ -38,6 +56,15 @@ mod tests {
         assert!(graph.starts_with("[0:v]fps=15,scale=w=-1:h='min(480,ih)':flags=lanczos,"));
         assert!(graph.contains("palettegen=max_colors=256:stats_mode=diff"));
         assert!(graph.contains("paletteuse=dither=sierra2:diff_mode=rectangle"));
+    }
+
+    #[test]
+    #[test]
+    fn two_pass_graphs_share_palette_settings() {
+        let settings = AnimSettings::default();
+        assert!(palette_graph(&settings).contains("palettegen=max_colors=256"));
+        assert!(use_graph(&settings).contains("paletteuse=dither=sierra2"));
+        assert!(!palette_graph(&settings).contains("split"));
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use mediaa_core::limits::{GIF_COLORS, VIDEO_QUALITY};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum Effort {
     Fastest,
     Fast,

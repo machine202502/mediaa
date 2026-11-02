@@ -2,7 +2,7 @@
 
 ## Цель
 
-`.\scripts\windows\run.ps1` снова собирает и запускает MediaA.
+`.\scripts\windows\run\run.ps1` снова собирает и запускает MediaA.
 
 После `AGENT-EXT-1` сборка больше не требует CMake, Vulkan SDK и static CRT toolchain:
 llama.cpp из дерева зависимостей убран. Ниже — расследование сборки, в которой он ещё был.
@@ -15,7 +15,7 @@ llama.cpp из дерева зависимостей убран. Ниже — р
 Кэш CMake в `target/` продолжал подключать удалённый файл.
 
 Общий конфиг по-прежнему не должен задавать генератор: он ломает Linux, macOS и другую версию
-Visual Studio. Переменные выставляет только `scripts/windows/env.ps1`. Генератор выбирается по
+Visual Studio. Переменные выставляет только `scripts/windows/build/env.ps1`. Генератор выбирается по
 установленной VS. Toolchain задаёт статический CRT, потому что явный генератор VS не переносит
 `/MT` в флаги конфигурации.
 
@@ -54,6 +54,6 @@ icacls <repo> /setintegritylevel "(OI)(CI)M" /C /Q
 
 ## Проверка
 
-`powershell -File .\scripts\windows\env.ps1` не запускают отдельно: скрипт только готовит окружение.
+`powershell -File .\scripts\windows\build\env.ps1` не запускают отдельно: скрипт только готовит окружение.
 Сборка: тот же env, затем `cargo build -p mediaa`. Запуск — отдельный процесс с
 `MEDIAA_DEV_LIBRARY` и `MEDIAA_INSTANCE_ID`, не пользовательский экземпляр.

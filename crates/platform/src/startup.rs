@@ -5,7 +5,7 @@ use auto_launch::{
 use mediaa_core::paths::APP_IDENTITY;
 use std::path::Path;
 
-const TRAY_ARG: &str = "--tray";
+const TRAY_ARG: &str = "--daemon";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoStart {

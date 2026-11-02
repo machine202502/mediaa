@@ -61,6 +61,141 @@ pub(crate) fn set_ghost(handle: isize, ghost: bool) -> WindowResult {
     WindowResult::Ok
 }
 
+pub(crate) fn prepare_handle(window: isize) -> WindowResult {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_TOP,
+        SWP_NOACTIVATE, SWP_NOSIZE, SW_HIDE, WS_EX_NOACTIVATE,
+    };
+    if window == 0 {
+        return WindowResult::Failed;
+    }
+    // SAFETY: the handle belongs to this process' main window; moving and hiding it before the
+    // first paint keeps it off-screen even when eframe shows the window after painting.
+    unsafe {
+        let hwnd = window as windows_sys::Win32::Foundation::HWND;
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE as isize);
+        SetWindowPos(
+            hwnd,
+            HWND_TOP,
+            -32000,
+            -32000,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        ShowWindow(hwnd, SW_HIDE);
+        WindowResult::Ok
+    }
+}
+pub(crate) fn hide_handle(window: isize) -> WindowResult {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, GWL_EXSTYLE, SW_HIDE, WS_EX_NOACTIVATE,
+    };
+    if window == 0 {
+        return WindowResult::Failed;
+    }
+    // SAFETY: the handle belongs to this process' main window and is only hidden, not destroyed.
+    unsafe {
+        let hwnd = window as windows_sys::Win32::Foundation::HWND;
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE as isize);
+        ShowWindow(hwnd, SW_HIDE);
+        WindowResult::Ok
+    }
+}
+pub(crate) fn hide_window(title: &str) -> WindowResult {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
+    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: valid NUL-terminated UTF-16 title; the window belongs to this process.
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
+        if hwnd.is_null() {
+            return WindowResult::Failed;
+        }
+        ShowWindow(hwnd, SW_HIDE);
+        WindowResult::Ok
+    }
+}
+pub(crate) fn prepare_background(title: &str) -> WindowResult {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+    };
+    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: valid NUL-terminated UTF-16 title; the window belongs to this process.
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
+        if hwnd.is_null() {
+            return WindowResult::Failed;
+        }
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE as isize);
+        WindowResult::Ok
+    }
+}
+
+pub(crate) fn background_show(title: &str) -> WindowResult {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+        HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE,
+    };
+    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: valid NUL-terminated UTF-16 title; the window belongs to this process.
+    unsafe {
+        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
+        if hwnd.is_null() {
+            return WindowResult::Failed;
+        }
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE as isize);
+        SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            -32000,
+            -32000,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        WindowResult::Ok
+    }
+}
+
+pub(crate) fn foreground_window() -> isize {
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    // SAFETY: returns a borrowed window handle; no ownership is taken.
+    unsafe { GetForegroundWindow() as isize }
+}
+
+pub(crate) fn restore_foreground(window: isize) -> WindowResult {
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowThreadProcessId, SetForegroundWindow,
+    };
+    if window == 0 {
+        return WindowResult::Failed;
+    }
+    // SAFETY: the handle is a top-level window of this or another process; attaching and
+    // detaching the input queue only borrows the thread, and both calls are paired.
+    unsafe {
+        let hwnd = window as windows_sys::Win32::Foundation::HWND;
+        let foreground_thread = GetWindowThreadProcessId(hwnd, std::ptr::null_mut());
+        let current_thread = GetCurrentThreadId();
+        let attached = foreground_thread != 0
+            && foreground_thread != current_thread
+            && AttachThreadInput(current_thread, foreground_thread, 1) != 0;
+        let result = SetForegroundWindow(hwnd);
+        if attached {
+            AttachThreadInput(current_thread, foreground_thread, 0);
+        }
+        if result != 0 {
+            WindowResult::Ok
+        } else {
+            WindowResult::Failed
+        }
+    }
+}
 pub(crate) fn exclude_from_capture(title: &str) -> WindowResult {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         FindWindowW, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,

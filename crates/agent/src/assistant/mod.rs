@@ -11,6 +11,9 @@ pub mod title;
 pub mod tools;
 
 pub use brain::{Brain, Call, ChatBrain, Message, Piece, Role, Step, ToolSpec};
+pub use mediaa_core::assistant::{
+    Event, Live, Metrics, State, StepRecord, StepStatus, TaskRef, WaitReason,
+};
 pub use memory::Memory;
 pub use tools::{Recording, Tools};
 
@@ -40,77 +43,6 @@ const METRICS_EVERY: Duration = Duration::from_millis(300);
 const CLOSING_CHARS: usize = 400;
 const SECTION_CHARS: usize = 2400;
 const STUB_CHARS: usize = 300;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StepStatus {
-    Found,
-    Nothing,
-    Repeated,
-    Failed,
-}
-
-impl StepStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            StepStatus::Found => "found",
-            StepStatus::Nothing => "nothing",
-            StepStatus::Repeated => "repeated",
-            StepStatus::Failed => "failed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StepRecord {
-    pub title: String,
-    pub tool: String,
-    pub args: Value,
-    pub result: String,
-    pub status: StepStatus,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WaitReason {
-    Loading {
-        model: String,
-    },
-    Memory {
-        model: String,
-    },
-    Downloading {
-        model: String,
-        done: u64,
-        total: u64,
-    },
-    Busy {
-        tasks: Vec<crate::scope::TaskRef>,
-    },
-    ProviderSlot,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Event {
-    Waiting { reason: WaitReason },
-    StepStarted { title: String, tool: String },
-    Step(StepRecord),
-    Thinking(String),
-    AnswerText(String),
-    AnswerDiscarded,
-    Say(String),
-    SteerTaken { text: String },
-    Scanning { done: usize, total: usize },
-    Metrics(Metrics),
-    Done,
-    Stopped,
-    Failed(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Metrics {
-    pub context_tokens: u32,
-    pub context: u32,
-    pub speed: Option<f64>,
-}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Turn {

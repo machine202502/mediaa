@@ -88,6 +88,24 @@ impl MicChoice {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EncoderTuning {
+    pub zerolatency: bool,
+    pub threads: Option<u32>,
+    pub lookahead: Option<u32>,
+}
+
+impl Default for EncoderTuning {
+    fn default() -> Self {
+        Self {
+            zerolatency: true,
+            threads: None,
+            lookahead: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RecordSettings {
@@ -103,6 +121,7 @@ pub struct RecordSettings {
     pub show_no_signal: bool,
     pub allow_unavailable_sources: bool,
     pub webp_mode: WebpMode,
+    pub encoder_tuning: EncoderTuning,
     #[serde(default)]
     pub saved_formats: BTreeMap<String, FormatSnapshot>,
 }
@@ -177,6 +196,7 @@ impl Default for RecordSettings {
             show_no_signal: true,
             allow_unavailable_sources: false,
             webp_mode: WebpMode::Fast,
+            encoder_tuning: EncoderTuning::default(),
             saved_formats: BTreeMap::new(),
         }
     }
@@ -502,7 +522,8 @@ pub struct HotkeySettings {
     pub stop_recording: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum HotkeyAction {
     RegionScreenshot,
     FullscreenScreenshot,
@@ -528,7 +549,7 @@ pub enum ScreenChoice {
     Display(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RecordProfile {
     App,
     Hotkey,

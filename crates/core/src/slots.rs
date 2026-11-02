@@ -1,4 +1,5 @@
 use crate::agent::{AgentSettings, GROUP_LIMIT_MAX};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -12,7 +13,7 @@ enum Key {
     Web,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct GroupLoad {
     pub name: String,
     pub busy: u32,
@@ -20,14 +21,14 @@ pub struct GroupLoad {
     pub waiting: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ToolLoad {
     pub busy: u32,
     pub limit: u32,
     pub waiting: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Status {
     pub groups: Vec<GroupLoad>,
     pub web: ToolLoad,

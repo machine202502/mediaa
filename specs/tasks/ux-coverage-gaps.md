@@ -50,6 +50,6 @@ frame, если перетащить текст через верхнюю гра
 - `cargo test --workspace` — 134 passed в app crate;
 - `cargo test -p mediaa --lib app::ui_tests` — 42 passed;
 - `cargo test -p mediaa --lib overlay::tests::` — 11 passed;
-- `scripts/windows/region-overlay-smoke.ps1` — passed;
+- `scripts/windows/test/region-overlay-smoke.ps1` — passed;
 - `cargo clippy --workspace --all-targets -- -D warnings` — успешно;
 - `cargo fmt --all -- --check` — успешно.

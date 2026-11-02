@@ -49,10 +49,14 @@ impl Log for FileLogger {
 }
 
 pub fn init(dir: &Path, level: LevelFilter) {
+    init_named(dir, "mediaa.log", level);
+}
+
+pub fn init_named(dir: &Path, file_name: &str, level: LevelFilter) {
     let _ = std::fs::create_dir_all(dir);
-    let path = dir.join("mediaa.log");
+    let path = dir.join(file_name);
     if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
-        let _ = std::fs::rename(&path, dir.join("mediaa.log.1"));
+        let _ = std::fs::rename(&path, dir.join(format!("{file_name}.1")));
     }
     let file = std::fs::OpenOptions::new()
         .create(true)

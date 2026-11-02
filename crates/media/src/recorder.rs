@@ -1,4 +1,4 @@
-﻿use crate::animation_backends::{self, AnimationEncodeRequest};
+use crate::animation_backends::{self, AnimationEncodeRequest};
 use crate::convert;
 use crate::filters;
 use crate::filters::Effort;
@@ -349,6 +349,7 @@ impl RecordingSession {
             }
         }
 
+        let encoder_tuning = req.encoder_tuning;
         let mut captures = Vec::new();
         let gate = Arc::new(StartGate::default());
         let mut errors = Vec::new();
@@ -388,6 +389,7 @@ impl RecordingSession {
                         gate2,
                         events.clone(),
                         req.show_no_signal,
+                        encoder_tuning,
                     );
                     if let Err(e) = &r {
                         log::error!("capture {i} failed: {e:#}");

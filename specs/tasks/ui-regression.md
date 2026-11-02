@@ -27,7 +27,7 @@ tests. До изменения runtime lifecycle потребовался кон
 ```powershell
 cargo test -p mediaa --lib app::ui_tests
 UPDATE_SNAPSHOTS=true cargo test -p mediaa --lib ui_regression_snapshot
-scripts/windows/region-overlay-smoke.ps1
+scripts/windows/test/region-overlay-smoke.ps1
 ```
 
 ## Покрытие

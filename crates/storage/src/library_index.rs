@@ -312,6 +312,18 @@ fn read_rows(db: &rusqlite::Connection, dir: &Path) -> rusqlite::Result<Vec<Libr
 }
 
 impl LibraryIndex {
+    pub fn from_entries(dir: &Path, entries: Vec<LibraryEntry>, version: u64) -> LibraryIndex {
+        Self {
+            dir: dir.to_path_buf(),
+            entries,
+            version,
+            writer: None,
+            cache_dirty: false,
+            next_cache_flush: Instant::now(),
+            pending_details: Vec::new(),
+        }
+    }
+
     pub fn load(dir: &Path) -> LibraryIndex {
         let db = crate::cache_db::open(&cache_dir(dir))
             .map_err(|e| log::warn!("library index: {e:#}"))

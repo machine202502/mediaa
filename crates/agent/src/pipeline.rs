@@ -1,83 +1,12 @@
 use mediaa_core::agent::AnalysisOptions;
-use mediaa_core::outline::Chapter;
-use mediaa_core::retrieval::Chunk;
-use mediaa_core::transcript::{self, Reply, Transcript};
+use mediaa_core::transcript::{self, Transcript};
 use mediaa_queue::{Child, Filter, KindGroup, NewTask, Resource, Scheduler, Task, TaskId};
 use serde_json::{json, Value};
 use std::path::Path;
 
+pub use mediaa_core::analysis::{readiness, Readiness, Stage};
+
 pub const ANALYSIS_KIND: &str = "analysis";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Stage {
-    Transcribe,
-    Diarize,
-    Index,
-    Topics,
-    Details,
-}
-
-impl Stage {
-    pub const ALL: [Stage; 5] = [
-        Stage::Transcribe,
-        Stage::Diarize,
-        Stage::Index,
-        Stage::Topics,
-        Stage::Details,
-    ];
-
-    pub fn kind(self) -> Option<&'static str> {
-        match self {
-            Stage::Transcribe => Some(crate::transcribe::KIND),
-            Stage::Diarize => Some(crate::diarize::KIND),
-            Stage::Index => Some(crate::index::KIND),
-            Stage::Topics => Some(crate::outline::TOPICS_KIND),
-            Stage::Details => Some(crate::outline::DETAILS_KIND),
-        }
-    }
-
-    fn chosen(self, options: &AnalysisOptions) -> bool {
-        match self {
-            Stage::Transcribe => true,
-            Stage::Diarize => false,
-            Stage::Index => options.index,
-            Stage::Topics => options.topics,
-            Stage::Details => options.details,
-        }
-    }
-
-    fn reset(self, ai_dir: &Path, id: &str) -> anyhow::Result<()> {
-        if !Transcript::exists(ai_dir, id) {
-            return Ok(());
-        }
-        let mut t = Transcript::open(ai_dir, id)?;
-        match self {
-            Stage::Transcribe => t.clear(),
-            Stage::Diarize => t.clear_speakers(),
-            Stage::Index => t.set_chunks(&[]),
-            Stage::Topics => {
-                t.clear_chapters()?;
-                t.remove_meta_prefix("outline-")
-            }
-            Stage::Details => {
-                for (i, mut chapter) in t.chapters()?.into_iter().enumerate() {
-                    chapter.digest.sections.clear();
-                    t.put_chapter(i, &chapter)?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Readiness {
-    pub replies: bool,
-    pub speakers: bool,
-    pub index: bool,
-    pub topics: bool,
-    pub details: bool,
-}
 
 fn stages(from: Stage, options: &AnalysisOptions) -> Vec<Stage> {
     let mut active: Vec<Stage> = Vec::new();
@@ -227,29 +156,6 @@ pub fn active(sched: &Scheduler, id: &str) -> anyhow::Result<Option<Task>> {
         .max_by_key(|t| t.id))
 }
 
-pub fn readiness(ai_dir: &Path, id: &str) -> anyhow::Result<Readiness> {
-    if !Transcript::exists(ai_dir, id) {
-        return Ok(Readiness::default());
-    }
-    let t = Transcript::open(ai_dir, id)?;
-    let dialog: Vec<Reply> = t.dialog()?;
-    let chunks: Vec<(i64, Chunk, bool)> = t.chunks()?;
-    let chapters: Vec<Chapter> = t.chapters()?;
-    Ok(Readiness {
-        replies: !dialog.is_empty(),
-        speakers: dialog.iter().any(|reply| reply.speaker.is_some()),
-        index: !chunks.is_empty() && chunks.iter().all(|(_, _, embedded)| *embedded),
-        topics: !chapters.is_empty()
-            && chapters
-                .iter()
-                .all(|chapter| !chapter.digest.title.trim().is_empty()),
-        details: !chapters.is_empty()
-            && chapters
-                .iter()
-                .all(|chapter| !chapter.digest.sections.is_empty()),
-    })
-}
-
 pub fn prioritize_detail(sched: &Scheduler, file_id: &str, topic: usize) -> anyhow::Result<usize> {
     let mut raised = 0;
     for task in sched.store().list()? {
@@ -276,8 +182,9 @@ pub fn prioritize_detail(sched: &Scheduler, file_id: &str, topic: usize) -> anyh
 mod tests {
     use super::*;
     use mediaa_core::agent::{AgentSettings, ModelChoices, ModelSource};
-    use mediaa_core::outline::Digest;
-    use mediaa_core::transcript::Word;
+    use mediaa_core::outline::{Chapter, Digest};
+    use mediaa_core::retrieval::Chunk;
+    use mediaa_core::transcript::{Reply, Word};
     use mediaa_engine::testing::FakeEngine;
     use mediaa_engine::Engine;
     use mediaa_queue::{Scheduler, Status as TaskStatus, Store};

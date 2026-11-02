@@ -2,7 +2,7 @@
 
 ## Цель
 
-`.\scripts\windows\run.ps1` открывает каталоги, а не показывает SQLite код 14.
+`.\scripts\windows\run\run.ps1` открывает каталоги, а не показывает SQLite код 14.
 
 ## Факты
 

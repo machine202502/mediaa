@@ -1,125 +1,13 @@
-use super::{Answer, Event, Memory, Metrics, StepRecord, WaitReason};
+use super::{Answer, Event, Memory};
 use crate::scope::Scope;
-use mediaa_core::chat::{Author, ChatId, Timeline, STEP_RUNNING};
+pub use mediaa_core::assistant::{Live, State};
+use mediaa_core::chat::{Author, ChatId};
 use mediaa_core::transcript::Transcript;
 use mediaa_queue::{Store, TaskId};
 use serde_json::json;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum State {
-    Running,
-    Done,
-    Stopped,
-    Failed(String),
-}
-
-#[derive(Debug, Clone)]
-pub struct Live {
-    pub timeline: Timeline,
-    pub waiting: Option<WaitReason>,
-    pub scanning: Option<(usize, usize)>,
-    pub metrics: Option<Metrics>,
-    pub steps: Vec<StepRecord>,
-    pub stored: usize,
-    pub steers_taken: usize,
-    pub state: State,
-    pub continuing: bool,
-    closed: bool,
-}
-
-impl Live {
-    pub fn close(&mut self) {
-        self.closed = true;
-    }
-
-    pub fn closed(&self) -> bool {
-        self.closed
-    }
-}
-
-impl Default for Live {
-    fn default() -> Live {
-        Live::new()
-    }
-}
-
-impl Live {
-    pub fn new() -> Live {
-        Live {
-            timeline: Timeline::default(),
-            waiting: None,
-            scanning: None,
-            metrics: None,
-            steps: Vec::new(),
-            stored: 0,
-            steers_taken: 0,
-            state: State::Running,
-            continuing: false,
-            closed: false,
-        }
-    }
-
-    pub fn apply(&mut self, event: &Event) {
-        if !matches!(self.state, State::Running) {
-            return;
-        }
-        if self.closed && !matches!(event, Event::Done | Event::Stopped | Event::Failed(_)) {
-            return;
-        }
-        if !matches!(event, Event::Waiting { .. } | Event::Metrics(_)) {
-            self.waiting = None;
-        }
-        match event {
-            Event::Waiting { reason } => self.waiting = Some(reason.clone()),
-            Event::StepStarted { title, tool } => {
-                self.scanning = None;
-                self.timeline.step(title, tool, STEP_RUNNING);
-            }
-            Event::Step(record) => {
-                self.scanning = None;
-                self.timeline.finish_step(record.status.as_str());
-                self.steps.push(record.clone());
-            }
-            Event::Thinking(text) => self.timeline.thinking(text),
-            Event::AnswerText(text) => self.timeline.answer(text),
-            Event::AnswerDiscarded => self.timeline.discard_answer(),
-            Event::Say(text) => {
-                self.timeline.section(text);
-                self.stored += 1;
-            }
-            Event::SteerTaken { text } => {
-                self.timeline.steer(text);
-                self.steers_taken += 1;
-            }
-            Event::Scanning { done, total } => self.scanning = Some((*done, *total)),
-            Event::Metrics(metrics) => self.metrics = Some(*metrics),
-            Event::Done => self.state = State::Done,
-            Event::Stopped => {
-                self.timeline.stop();
-                self.state = State::Stopped;
-            }
-            Event::Failed(error) => {
-                self.timeline.stop();
-                self.state = State::Failed(error.clone());
-            }
-        }
-    }
-
-    fn details(&self, forced: bool, stopped: bool) -> serde_json::Value {
-        let mut details =
-            json!({ "steps": self.steps, "forced": forced, "timeline": self.timeline.to_value() });
-        if let Some(metrics) = self.metrics {
-            details["metrics"] = json!(metrics);
-        }
-        if stopped {
-            details["stopped"] = json!(true);
-        }
-        details
-    }
-}
 
 #[derive(Clone)]
 pub struct Run {
@@ -150,11 +38,11 @@ impl Run {
     pub fn stop(&self, t: &Transcript, chat: ChatId) -> anyhow::Result<()> {
         self.cancel.store(true, Ordering::Relaxed);
         let mut live = self.live();
-        if live.closed {
+        if live.closed() {
             return Ok(());
         }
         live.apply(&Event::Stopped);
-        live.closed = true;
+        live.close();
         if let Err(e) = self.store.cancel(self.task) {
             log::warn!("the stopped answer was not cancelled in the queue: {e:#}");
         }
@@ -187,7 +75,7 @@ pub fn work(
     let live = run.live.clone();
     let mut sink = move |event: &Event| {
         let mut live = live.lock().expect("live answer lock");
-        if live.closed {
+        if live.closed() {
             return;
         }
         if let Event::Say(text) = event {
@@ -211,10 +99,10 @@ pub fn work(
         return Outcome::Stopped;
     }
     let mut live = run.live();
-    if live.closed {
+    if live.closed() {
         return Outcome::Stopped;
     }
-    live.closed = true;
+    live.close();
     let t = match Transcript::open(ai_dir, store) {
         Ok(t) => t,
         Err(e) => return fail(scope, &mut live, format!("{e:#}")),

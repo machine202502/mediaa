@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+tokio = { version = "1.54.1", features = ["rt"] }
 mediaa-core.workspace = true
 mediaa-media.workspace = true
 mediaa-engine.workspace = true

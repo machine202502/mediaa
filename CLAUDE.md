@@ -11,3 +11,9 @@ Before acting, read in order:
 5. [specs/progress.md](specs/progress.md) and the context document linked for the current task.
 
 All project policy lives in `specs/`. Do not duplicate it here.
+
+## Сжатие контекста
+
+Если выполняется сжатие контекста (компактификация, выжимка) и это замечено, в самом начале
+итогового контекста оставить себе инструкцию: заново прочитать [AGENTS.md](AGENTS.md) и
+[CLAUDE.md](CLAUDE.md) перед продолжением работы.

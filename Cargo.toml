@@ -11,6 +11,11 @@ members = [
     "crates/queue",
     "crates/eval",
     "crates/app",
+    "crates/backend",
+    "crates/frontend",
+    "crates/app-agent",
+    "crates/sync",
+    "crates/protocol",
     "crates/ffmpeg",
     "crates/webp",
     "crates/gif",
@@ -39,6 +44,10 @@ mediaa-gif = { path = "crates/gif" }
 mediaa-engine = { path = "crates/engine" }
 mediaa-agent = { path = "crates/agent" }
 mediaa-queue = { path = "crates/queue" }
+mediaa-backend = { path = "crates/backend" }
+mediaa-frontend = { path = "crates/frontend" }
+mediaa-sync = { path = "crates/sync" }
+mediaa-protocol = { path = "crates/protocol" }
 mediaa-eval = { path = "crates/eval" }
 anyhow = "1"
 thiserror = "2"

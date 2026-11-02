@@ -1,0 +1,17 @@
+[package]
+name = "mediaa-app-agent"
+description = "MediaA agent copy with a red icon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mediaa-agent"
+path = "src/main.rs"
+
+[dependencies]
+mediaa = { path = "../app" }
+
+[build-dependencies]
+ico = "0.4"
+winresource = "0.1"

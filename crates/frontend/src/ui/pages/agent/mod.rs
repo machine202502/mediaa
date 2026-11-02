@@ -1,0 +1,27 @@
+pub mod analysis;
+pub mod budget;
+pub mod catalogs;
+pub mod chat;
+pub mod composer;
+pub mod dialog;
+pub mod live_buffer;
+pub mod markdown;
+pub mod mentions;
+pub mod models;
+pub mod providers;
+pub mod queue;
+pub mod studio;
+pub mod tab_strip;
+pub mod task_details;
+pub mod task_label;
+pub mod timeline;
+pub mod topics;
+
+#[derive(Default)]
+pub struct AgentUi {
+    pub budget: budget::BudgetUi,
+    pub catalogs: catalogs::CatalogsUi,
+    pub providers: providers::ProvidersUi,
+    pub models: models::ModelsUi,
+    pub queue: queue::QueueUi,
+}

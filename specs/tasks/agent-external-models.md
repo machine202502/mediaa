@@ -82,7 +82,7 @@ JSON-schema ответа, usage-токены, эмбеддинги и не да�
 - `core/src/paths.rs::models_dir`.
 - Сборка: `.cargo/config.toml` (`LLAMA_STATIC_CRT`, `CMAKE_GENERATOR`, `CMAKE_TOOLCHAIN_FILE`),
   `cmake/static-crt.cmake`, `Directory.Build.targets`, проверки CMake/Vulkan в
-  `scripts/windows/env.ps1`, README (CMake, Vulkan SDK), `specs/constraints.md` (Vulkan/CMake),
+  `scripts/windows/build/env.ps1`, README (CMake, Vulkan SDK), `specs/constraints.md` (Vulkan/CMake),
   профиль `dev` с `debug = 0` из-за D8050 на сборке llama.cpp
   ([windows-build.md](windows-build.md)).
 
@@ -447,7 +447,7 @@ pub struct ModelSource { pub connection: String, pub model: String }
 - `.cargo/config.toml`: удалить `LLAMA_STATIC_CRT`, `CMAKE_GENERATOR`, `CMAKE_TOOLCHAIN_FILE`.
   Оставить `FFMPEG_DIR` и `crt-static`.
 - Удалить `cmake/static-crt.cmake`, `Directory.Build.targets`.
-- `scripts/windows/env.ps1`: удалить проверки CMake и Vulkan SDK. Оставить vcpkg, libclang и
+- `scripts/windows/build/env.ps1`: удалить проверки CMake и Vulkan SDK. Оставить vcpkg, libclang и
   TEMP в `target\tmp` — он нужен `aws-lc-sys`/`lzma-sys`, не llama. Проверить, нужен ли ещё
   libclang: `cargo tree -i bindgen`; если без llama/sherpa его никто не тянет, кроме ffmpeg-sys, —
   оставить.

@@ -215,9 +215,7 @@ impl Stage for AnswerStage {
                     }
                 }
             }
-            streams.update(id, |live| {
-                live.apply(event);
-            });
+            streams.apply_event(id, event.clone());
         };
         let stepped = if let Some(files) = task.input.get("files").and_then(Value::as_array) {
             let files: Vec<PathBuf> = files
@@ -273,7 +271,7 @@ impl Stage for AnswerStage {
             Err(e) => {
                 save_memory(&host.ai_dir, &store_key, chat, &session.memory);
                 host.streams
-                    .update(task.id, |live| live.apply(&Event::Failed(format!("{e:#}"))));
+                    .apply_event(task.id, Event::Failed(format!("{e:#}")));
                 Err(e)
             }
             Ok(Advance::More) => {
@@ -296,8 +294,8 @@ impl Stage for AnswerStage {
                 host.streams.update(task.id, |live| {
                     live.timeline.finish_answer(&answer.text);
                     live.continuing = session.noticed;
-                    live.apply(&Event::Done);
                 });
+                host.streams.apply_event(task.id, Event::Done);
                 let live = host.streams.get(task.id).unwrap_or_default();
                 let mut details = json!({ "steps": answer.steps, "forced": answer.forced, "timeline": live.timeline.to_value(), "task": task.id });
                 if let Some(metrics) = live.metrics {

@@ -248,131 +248,136 @@ Watcher overflow требует reconciliation.
 
 Крейт зависит от остальных workspace-крейтов по реальной необходимости.
 
-Слои внутри крейта ещё не разделены до конца: `logic/` и `ui/` уже существуют, но `shell/`,
-`logic/`, `services/` и `shell/` пока остаются, страницы принимают `&mut App`, а `features`
-содержат и состояние бизнеса, и состояние вида, и отрисовку. Целевое разделение на `shell`,
-`logic`, `ui` и `adapters` и порядок перестройки описаны в
-[tasks/ui-logic-separation.md](tasks/ui-logic-separation.md). Ниже описано текущее состояние.
+Слои внутри крейта: `ui` (отрисовка), `app` (composition root), `features`
+(состояние фич и use cases), `infra` (ОС и транспортные швы). Зависимости идут
+`ui → app → features → infra`; `features` не знает про `ui`/`app`, `infra` не
+знает про `ui`/`features`. Проверка — `boundaries`.
 
-### 7.1. Shell
+### 7.1. App
 
-#### 7.1.1. `shell.rs`
+#### 7.1.1. `app.rs`
 
 Создаёт приложение, связывает владельцев, навигацию, settings, tray/hotkey/window lifecycle и
 выполняет polling независимо от видимой страницы. Видимость окна, «призрачность» и тихий режим
-уведомлений хранит `logic/window_presence.rs`: один владелец вместо трёх отдельных флагов.
+уведомлений хранит `features/window_presence.rs`: один владелец вместо трёх отдельных флагов.
 
-#### 7.1.2. `shell/actions`
+#### 7.1.2. `app/actions`
 
 Обрабатывает межфункциональные действия, exit и tray state.
 
-#### 7.1.3. `shell/state`, `shell/command`
+#### 7.1.3. `app/state`, `app/command`
 
-Содержат Page, pending action и общие shell-команды. Feature business state здесь не хранится.
+Содержат Page, pending action и общие app-команды. Feature business state здесь не хранится.
 
-#### 7.1.4. `shell/desktop`, `shell/recovery`
+#### 7.1.4. `app/desktop`, `app/recovery`
 
 Владеют open/reveal/rename и startup recovery как app-level effects.
 
 ### 7.2. User features
 
-#### 7.2.1. `logic/recording`
+#### 7.2.1. `features/recording`
 
 Владеет выбранным target, `Idle/Starting/Recording/Saving`, session и finalizer.
 `Saving` не освобождает результат до завершения cleanup. Завершённая запись индексируется в
 библиотеке и копируется в буфер как файл.
 
-Планирование записи — чистая функция `logic/recording.rs::plan`: проверка доступности цели,
+Планирование записи — чистая функция `features/recording.rs::plan`: проверка доступности цели,
 профиль, источники экрана и окна, разрешение микрофона и системного звука, имя рабочего каталога
 и сборка `RecordingRequest`. Ошибки приходят типом (`Unavailable`, `NoAudioSource`, `Request`),
-а тексты уведомлений и показ окна остаются в shell.
+а тексты уведомлений и показ окна остаются в app.
 
-#### 7.2.2. `logic/capture`
+#### 7.2.2. `features/capture`
 
-Владеет capture/screenshot jobs. UI возвращает действия, а window visibility и само окно
-оверлея остаются ответственностью shell: `App.overlay` держит `Overlay`, контроллер о нём не знает. Что делать со снимком (сохранить файл, положить изображение в буфер,
-положить файл в буфер, формат и путь) решает `logic/screenshot.rs::plan`; shell выполняет решение
-и показывает уведомления.
+Владеет job-обёрткой capture/screenshot и `capture_client`: отдельным соединением
+`CLIENT_CAPTURE` к backend. Кадр снимает и итоговый файл пишет backend; frontend получает
+`CaptureSourceWire` с backend-issued путём, компонует кадр через `mediaa_render`, кладёт его
+в этот путь и отправляет `screenshot_commit`. UI возвращает действия, а window visibility и
+само окно оверлея остаются ответственностью app: `App.overlay` держит `Overlay`,
+контроллер о нём не знает. Что делать со снимком (сохранить файл, положить изображение в
+буфер, положить файл в буфер, формат и путь) решает `features/screenshot.rs::plan`; commit
+выполняет backend, app показывает уведомления.
 
-#### 7.2.3. `logic/conversion`
+#### 7.2.3. `features/conversion`
 
-Владеет input/options, probe, estimate, conversion job и last output. Estimate заменяем и
-защищён generation. Отрисовка страницы — `ui/pages/convert/controller.rs` и
-`ui/pages/convert/controls.rs`; системный выбор файлов и папки — `adapters/dialogs`.
+Владеет input/options, estimate и last output. Probe идёт через backend
+(`agent_request` kind `media_probe`), conversion — через `conversion_*` команды; Estimate
+заменяем и защищён generation. Отрисовка страницы — `ui/pages/convert/controller.rs` и
+`ui/pages/convert/controls.rs`; системный выбор файлов и папки — `infra/dialogs`.
 
-#### 7.2.4. `logic/library` и `ui/pages/library`
+#### 7.2.4. `features/library` и `ui/pages/library`
 
-Владеет индексом, watcher, scan/reconciliation, query/hits, removal, previews и viewer:
+Владеет индексом, watcher, scan/reconciliation, query/hits, removal и viewer:
   состояние выделения, индекс, hits, jobs сканирования и удаления. Отрисовка и текстурные кэши живут
   в `ui/pages/library/`: `controller.rs` (страница, тулбар, сетка, bulk-панель), `actions.rs`
   (модалки удаления, переименования и очистки), `grid.rs` (плитки и тулбар), `viewer.rs` (плеер и
-  `ViewerTexture`), `thumbs.rs` (атлас миниатюр `Thumbnails`), `hover_preview.rs` (кадры
-  `Previews`/`HoverPreview`). Декодирование и файловый кэш — в логике:
-  `logic/library/thumb_worker.rs` и `logic/library/preview_worker.rs`; они отдают кадры
-  (`mediaa_core::Frame`) и детали, а `TextureHandle` создаёт только UI. Владение состоянием осталось
-  у контроллера: UI получает его `&mut` и возвращает действия.
+  `ViewerTexture`), `thumbs.rs` (атлас миниатюр `Thumbnails`), `hover_preview` (кадры
+  `Previews`/`HoverPreview`). Trash/delete и cleanup уходят backend-командой `library_remove`;
+  миниатюры, hover- и playback-прокси готовит backend по protocol (`PreviewKindWire`), UI
+  запрашивает путь и создаёт `TextureHandle`. Rename файла пока остаётся в app.
+  Владение состоянием осталось у контроллера: UI получает его `&mut` и возвращает действия.
 
-##### `logic/library/viewer` и `player`
+##### `features/library/viewer` и `player`
 
-`logic/library/viewer.rs` держит воспроизведение: открытие файла, jobs загрузки кадра и звука,
+`features/library/viewer.rs` держит воспроизведение: открытие файла, jobs загрузки кадра и звука,
 зум, пауза, `Drop`. Отрисовка плеера (`show`, media area, top bar, controls, timeline) — в
 `ui/pages/library/viewer.rs` как `impl Viewer`: код в UI, состояние и владение — в features.
 `player` остаётся владельцем воспроизведения видео и звука.
 
-##### `logic/library/hover_preview` и `thumbs`
+##### `features/library/hover_preview` и `thumbs`
 
 Управляют hover media и thumbnail atlas.
 
-##### `logic/library/cleanup`
+##### `features/library/cleanup`
 
 Содержит одну removal operation с `Selected` и `OlderThan`; bulk age перепроверяется.
 
-#### 7.2.5. `logic/agent_host`
+#### 7.2.5. Агент: только backend
 
-Владеет подключениями, слотами и scheduler очереди. Хост запускается, когда открыт раздел
-Agent или в очереди остались незавершённые задачи; изменение лимитов параллелизма обновляет
-slots живого scheduler, а не пересоздаёт его. Каждый вызов модели идёт через `Gated`: перед
-вызовом он берёт слот группы подключения, если группа задана. Пулы очереди постоянно большие
-и не дублируют лимиты групп. Ключи подключений загружаются и сохраняются через
-`agent/secrets` (OS keychain), а не через `core`. Инференса внутри приложения нет. Тип
-`AgentServices` и решение о запуске хоста живут здесь; UI-состояние агента — в `AgentUi`.
+`AgentHost` живёт в backend-процессе (`crates/backend/src/features/agent/host.rs`) и владеет
+подключениями, слотами, scheduler, store, streams и feed. Хост тикает всегда, пока backend
+жив, независимо от того, открыт ли UI. Изменение лимитов обновляет slots живого scheduler, а
+не пересоздаёт его. Каждый вызов модели идёт через `Gated`. Ключи подключений загружаются и
+сохраняются через `agent/secrets` (OS keychain), а не через `core`.
+
+Во frontend нет `AgentServices`, `Scheduler`, `Store`, `Streams`, `Feed` или `Engine`.
+`features/agent` хранит только view-модели, конвертацию wire-типов и общий request buffer;
+`ui/pages/agent` читает `AgentSnapshotWire`, live-события и отправляет команды.
 
 #### 7.2.6. `ui/pages/agent`
 
 Рисует UI агента: каталоги, подключения, модели, очередь и лимиты параллелизма. Страницы находятся в
 `ui/pages/agent`, навигация — через `Section::Agent`, вкладки студии — в
 `ui/pages/agent/tab_strip.rs`. Каталоги рисуют собственный split-view в `catalogs::screen`;
-shell не содержит их layout. Фоновые проверки, загрузки и поиск используют общие
-`logic::jobs::Job` и `logic::latest_worker::LatestWorker`.
+app не содержит их layout. Очередь, чат, models/providers/budget и поиск работают только с
+protocol: snapshot, `AgentEventWire`, `agent_op`/`agent_task`/`agent_steer`/`agent_analyse`/
+`agent_names` и `agent_request`. Async-ответы складываются в общий `features::agent::requests`
+буфер и забираются страницами по id.
 
-Логика агента принадлежит крейтам `mediaa-agent`, `mediaa-engine` и `mediaa-queue`, а не
-приложению. Поэтому `ui/pages/agent` — клиент этих крейтов: страницы читают их состояние и вызывают
-их команды напрямую (`AgentServices` с `engine`, `sched`, `streams`, `feed`), а `AgentUi` хранит
-только состояние вида. Перенос этой логики в `logic/` или оборачивание вызовов в общий dispatch
-не планируется: приложение запускает хост, передаёт настройки и рисует. Системные эффекты этих
-страниц (диалоги, reveal, чтение лога, звук, буфер) идут через `adapters/`, а не напрямую из UI.
+Системные эффекты этих страниц (диалоги, reveal, чтение лога, звук, буфер) идут через
+`infra/`, а не напрямую из UI.
 
 ### 7.3. Pages
 
-Страницы `ui/pages/*` рисуют экраны и не знают про `shell`: они получают
+Страницы `ui/pages/*` рисуют экраны и не знают про `app`: они получают
 `ui/pages/ctx.rs::Ctx` — срез состояния приложения на кадр (`settings`, `lib`, `recording`,
-`capture`, `conversion`, `agent_host`, `agent_ui`, текстуры библиотеки, `notices`, каталоги
+`capture`, `conversion`, `agent_ui`, текстуры библиотеки, `notices`, каталоги
 мониторов, окон и микрофонов). Тип `Ctx` принадлежит `ui`, поэтому `ui` не импортирует
-`crate::shell` — это проверяет тест границ.
+`crate::app` — это проверяет тест границ.
 
 Изменения состояния страница применяет к своим срезам, а эффекты отдаёт наружу: либо
 `Vec<Intent>` (уведомление, открытие пути, reveal, переименование, конвертация, команды записи,
 hotkeys, preview-кэш), либо `AppCommand`. `App::frame_ui` собирает `Ctx`, вызывает
-`ui::pages::shell`, забирает `intents` и выполняет их через `App::handle_intents`. Навигация
+`ui::pages::frame`, забирает `intents` и выполняет их через `App::handle_intents`. Навигация
 (`page`, `page_scroll`, `last_capture_page`, `last_main_page`, `last_agent_page`) хранится в `Ctx`
 значениями и копируется обратно после кадра. Background lifecycle страницам не принадлежит.
 
-### 7.4. Services и adapters (слой `adapters`)
+### 7.4. Services и infra (слой `infra`)
 
-`adapters/clipboard_worker` выполняет native clipboard worker, timeout и recovery.
-`adapters/settings_file` объединяет частые изменения настроек и пишет последнюю версию вне UI.
+`infra/clipboard_worker` выполняет native clipboard worker, timeout и recovery.
+Настройки пишет backend (`SettingsWriter` в демоне); UI получает snapshot и отправляет
+`SetSettings`.
 
-Системные эффекты, которые нельзя держать в UI, живут в `adapters/`: `dialogs` (выбор файла,
+Системные эффекты, которые нельзя держать в UI, живут в `infra/`: `dialogs` (выбор файла,
 папки и каталога), `desktop` (reveal), `files` (создание каталога), `log_file` (чтение лога
 программы), `clipboard` (синхронное копирование текста), `audio` (выход звука), `native_window`
 (анимация открытия, исключение из захвата). UI вызывает эти функции и не содержит `rfd`,
@@ -380,29 +385,29 @@ hotkeys, preview-кэш), либо `AppCommand`. `App::frame_ui` собирае�
 
 ### 7.5. Shared app mechanisms
 
-- `logic/intent.rs` — `Intent`: единственный вход из UI в логику приложения.
-- `logic/window_presence.rs` — `WindowPresence`: скрытость окна, ghost-режим и quiet-режим.
-- `logic/recording/plan.rs`, `logic/screenshot.rs` — чистые решения записи и снимка.
-- `logic/jobs.rs` — one-shot `Job<T>` с owned handle и однократным poll.
-- `logic/latest_worker.rs` — bounded replacement worker для устаревающих запросов.
-- `logic/notices.rs` + `ui/notices.rs` + `shell/notices.rs` — уведомления. Логика: очередь,
+- `features/intent.rs` — `Intent`: единственный вход из UI в логику приложения.
+- `features/window_presence.rs` — `WindowPresence`: скрытость окна, ghost-режим и quiet-режим.
+- `features/recording/plan.rs`, `features/screenshot.rs` — чистые решения записи и снимка.
+- `features/jobs.rs` — one-shot `Job<T>` с owned handle и однократным poll.
+- `features/latest_worker.rs` — bounded replacement worker для устаревающих запросов.
+- `features/notices.rs` + `ui/notices.rs` + `app/notices.rs` — уведомления. Логика: очередь,
   уровни, срок жизни, hover pause, silent actions. Вид: `ui/notices.rs` рисует карточки и анимацию
-  появления/закрытия. `shell/notices.rs` — только `App::error/warning/info/success`, которые
+  появления/закрытия. `app/notices.rs` — только `App::error/warning/info/success`, которые
   формируют текст и пушат уведомление.
-- `adapters/tray.rs` — иконка трея. Горячие клавиши разделены: `adapters/hotkeys.rs` держит
-  `GlobalHotKeyManager`, регистрацию и событие нажатия (`Wake`), `logic/hotkeys.rs` — слоты,
+- `infra/tray.rs` — иконка трея. Горячие клавиши разделены: `infra/hotkeys.rs` держит
+  `GlobalHotKeyManager`, регистрацию и событие нажатия (`Wake`), `features/hotkeys.rs` — слоты,
   конфликты и группировку комбинаций, `ui/pages/settings/hotkeys.rs` — захват нажатия в строку
   комбинации (`combo_from_key`, `combo_from_token`).
-- `wake.rs` — `Wake`: просьба о перерисовке вместо `egui::Context`; его принимают `logic` и
-  `adapters`, а `shell` превращает в `ctx.request_repaint*`.
+- `wake.rs` — `Wake`: просьба о перерисовке вместо `egui::Context`; его принимают `features` и
+  `infra`, а `app` превращает в `ctx.request_repaint*`.
 - `test_support.rs` (корень, только в тестовой сборке) — общий мьютекс harness-тестов и локальные
   guard'ы (`LocaleGuard`, `english_locale`, `russian_locale`). Не принадлежит слоям: им пользуются
-  тесты и `ui`, и `shell`, поэтому он не должен жить в `shell`.
+  тесты и `ui`, и `app`, поэтому он не должен жить в `app`.
 - `ui/themes/`, `ui/widgets/`, `ui/caches.rs`, `icon.rs`, `i18n.rs` — presentation and
   localization. `ui/caches.rs` держит текстуры представления (логотип по теме). `icon.rs` и
-  `i18n.rs` остаются в корне крейта: их используют и `logic` (тексты уведомлений), и `adapters`
-  (иконка трея), а `logic` не может зависеть от `ui`.
-- Region editor разделён на два слоя. `logic/region_editor.rs` хранит модель и решения: `Purpose`,
+  `i18n.rs` остаются в корне крейта: их используют и `features` (тексты уведомлений), и `infra`
+  (иконка трея), а `features` не может зависеть от `ui`.
+- Region editor разделён на два слоя. `features/region_editor.rs` хранит модель и решения: `Purpose`,
   `Outcome`, `SaveDefaults`, выбор формата по расширению (`resolve_save_path`), порядок форматов,
   имя файла и запись кропа (`save_crop`: crop, аннотации, сохранение). `ui/region_editor.rs` —
   отдельный native viewport: текстура кадра, пересчёт координат, ввод, отрисовка, текст и панели;
@@ -411,9 +416,9 @@ hotkeys, preview-кэш), либо `AppCommand`. `App::frame_ui` собирае�
   editor имеет рамку, перетаскивается за её поля и фиксируется кликом снаружи. Overlay использует
   один native viewport; opaque viewport создаётся скрытым заранее и переиспользуется при открытии;
   `Tab` меняет monitor frame через один capture job без создания нового окна. Сохранение области
-  идёт через системный диалог (`adapters/dialogs`), уровень окна на время диалога меняет viewport;
+  идёт через системный диалог (`infra/dialogs`), уровень окна на время диалога меняет viewport;
   формат берётся из расширения, а overlay закрывается только после успешной записи. Отключение
-  анимации открытия и исключение из захвата — `adapters/native_window`. Перед снимком области окно
+  анимации открытия и исключение из захвата — `infra/native_window`. Перед снимком области окно
   скрывается и выдерживается `HIDE_DELAY`, затем показывается overlay.
 
 ### 7.6. Reusable widgets and themes
@@ -435,7 +440,7 @@ crates/app/src/ui/widgets/
 
 `ui/widgets/mod.rs` объявляет модули и реэкспортирует публичные функции. Страницы и остатки
 `features` обязаны использовать эти примитивы вместо локальных копий кнопок, иконок, модалок,
-сегментов и слайдеров. В `ui/pages/` и `logic/` остаётся только композиция конкретного экрана и
+сегментов и слайдеров. В `ui/pages/` и `features/` остаётся только композиция конкретного экрана и
 его бизнес-состояние; новый общий виджет добавляется отдельным файлом в `ui/widgets/`.
 
 Темы и их палитры живут в `crates/app/src/ui/themes/`:
@@ -468,7 +473,7 @@ crates/app/src/ui/themes/
 сохраняет настройки уже в `~/.mediaa.toml`. В TOML хранятся все пользовательские настройки,
 профили записи и тема; ключи провайдеров хранятся отдельно в OS keychain (`agent/secrets`).
 
-Запись выполняет `adapters/settings_file`: изменения объединяются, последняя версия
+Запись выполняет `infra/settings_file`: изменения объединяются, последняя версия
 сохраняется вне UI, файл публикуется атомарно. Каталоги данных задаёт
 `core::paths::data_dir()` через `ProjectDirs::data_local_dir()` (fallback —
 `std::env::temp_dir()/MediaA`): `logs/` — логи, `work/` — рабочие файлы незавершённых операций. Медиатека по
@@ -480,29 +485,27 @@ crates/app/src/ui/themes/
 исправляются этапами `ARCH-14.2`…`ARCH-14.6`
 ([tasks/ui-logic-separation.md](tasks/ui-logic-separation.md)).
 
-- `logic/` — логика приложения: владеет состоянием, фоновой работой и terminal result. Без
-  `egui`/`eframe` и без обращения к `ui` и `shell`. Перерисовку просит через `wake::Wake`.
-  Единственное исключение — `hotkeys.rs` в корне крейта: он смешивает регистрацию OS-горячих клавиш
-  и UI-захват комбинаций. Это остаток `ARCH-15.2`.
+- `features/` — логика приложения: владеет состоянием, фоновой работой и terminal result. Без
+  `egui`/`eframe` и без обращения к `ui` и `app`. Перерисовку просит через `wake::Wake`.
 - `ui/` — отрисовка и ввод. Получает read-only срезы, изменения запрашивает через `Intent`. Не
-  вызывает ОС, файлы, потоки и системные диалоги — для них есть `adapters/`.
-- `adapters/` — эффекты ОС. Не знает ни про `ui`, ни про `logic`; ждёт `wake::Wake`, а не
+  вызывает ОС, файлы, потоки и системные диалоги — для них есть `infra/`.
+- `infra/` — эффекты ОС. Не знает ни про `ui`, ни про `features`; ждёт `wake::Wake`, а не
   `egui::Context`.
-- `shell.rs` — композиция: единственное место с `egui::Context` и мутирующим доступом к `logic`.
+- `app.rs` — композиция: единственное место с `egui::Context` и мутирующим доступом к `features`.
 
 Правило действует и на тестовый код: гейт сканирует `#[cfg(test)]`-блоки и файлы `tests.rs` для
-`logic` и `adapters` без вырезания, поэтому тест логики не может импортировать `ui`, а тест
-адаптера — `ui` или `logic`. Для `ui` тестовый код исключён: ему нужны `egui` и harness. UI-регресс
+`features` и `infra` без вырезания, поэтому тест логики не может импортировать `ui`, а тест
+адаптера — `ui` или `features`. Для `ui` тестовый код исключён: ему нужны `egui` и harness. UI-регресс
 тесты и снапшоты живут рядом с отрисовкой в `ui/`, даже если проверяют поведение контроллера через
 экран. Тесты, которые форматируют локализованный текст, берут общий мьютекс и фиксируют язык
 (`english_locale`/`russian_locale`): иначе глобальная локаль может смениться во время теста. Тесты
 статуса конвертации замораживают `elapsed` через тестовый хук — время не должно влиять на снапшот.
-Исключение — `ui/pages/agent`: это клиент агентских крейтов (раздел 7.2.6), ему можно вызывать
-`mediaa_agent`, `mediaa_engine` и `mediaa_queue` напрямую, но не ОС и не файлы.
+Исключений для `ui/pages/agent` больше нет: UI-страницы агента работают только с protocol
+(`AgentSnapshotWire`, события и команды), а `mediaa-agent/engine/queue` в frontend не входят.
 
-Проверка границ — одна команда: `cargo test -p mediaa --lib layers_have_no_forbidden_dependencies`:
-`logic` не видит `ui`/`shell`/`egui`, `ui` не зовёт ОС и файлы, `adapters` не видит `ui`/`logic`/`egui`; `ui` не импортирует `crate::shell` (страницы работают через `Ctx`).
-Правила и список временных исключений живут в `crates/app/src/layer_check.rs`; каждое исключение
+Проверка границ — одна команда: `cargo test -p mediaa-frontend --lib modules_respect_architecture_boundaries`:
+`features` не видит `ui`/`app`/`egui`, `ui` не зовёт ОС и файлы, `infra` не видит `ui`/`features`/`egui`; `ui` не импортирует `crate::app` (страницы работают через `Ctx`).
+Правила и список временных исключений живут в `crates/frontend/src/boundaries.rs`; каждое исключение
 называет этап, который его удаляет.
 
 ### 7.9. Границы между крейтами
@@ -519,6 +522,76 @@ cargo test -p mediaa-arch
 Правила — `mediaa_arch::RULES`, подробности и порядок изменений — `specs/tasks/crate-boundaries.md`.
 `cargo` по-прежнему ловит отсутствующие зависимости и циклы; тест закрывает то, что компилятор не
 видит: «зависимость объявлена, но не имеет права быть».
+
+### 7.10. Backend: структура крейта
+
+```text
+crates/backend/src
+  daemon/            composition root и event loop
+    mod.rs           Daemon, run, tick
+    dispatch.rs      IPC/event dispatch
+    agent.rs         агентские команды
+    services.rs     library/preview/conversion/recording/recovery
+    notices.rs       NoticeRing
+    launch.rs        launcher/daemon/ui процессы
+  features/          предметные сервисы
+    agent/           host, snapshot, requests
+    library/         LibraryStore
+    preview/         service + store
+    capture/         capture file/commit
+    clipboard/       clipboard service
+    recording/       controller, host, plan
+    conversion/      controller
+    hotkeys.rs       разбор комбинаций и конфликты
+  infra/             ipc, tray, hotkeys, settings_file
+  runtime.rs         tokio runtime
+```
+
+`daemon` — единственный composition root: только он знает все feature-сервисы и
+`infra`. `features` не должны зависеть от `daemon`; `infra` не знает про
+`features`. Backend не содержит UI-слоя: у него нет `ui`/`app` frontend-крейта.
+
+Проверка backend-границ: `cargo test -p mediaa-backend --lib boundaries`.
+
+### 7.11. Роли демон и UI
+
+Приложение запускается в одной из трёх ролей: лаунчер (`mediaa.exe` без флага), демон (`--backend`)
+и UI (`--ui`); `--daemon` — старый алиас демона. Лаунчер поднимает демон, если его нет, и запускает UI; повторный запуск при
+открытом UI не создаёт второй экземпляр и второй демон. Демон владеет single-instance и слушает
+локальный канал: `infra/ipc` поверх `interprocess`, имя — из `platform::ipc` (named pipe в
+Windows, Unix-сокет с правами 0600). Сообщения — JSON-строки с версией протокола в handshake;
+несовпадение версии и закрытие канала обрабатываются как ошибка. UI подключается к демону и
+завершается, когда канал закрылся; UI не перезапускает демон и не берёт его single-instance.
+
+Сейчас демон владеет треем, глобальными хоткеями, жизненным циклом, файлом настроек
+(`SettingsWriter` в демоне; UI получает `Snapshot`/`Changed` и присылает `SetSettings`),
+recovery, записью, индексом библиотеки, capture, previews, conversion и агентом. UI владеет
+окном, страницами, transport и чтением файлов.
+Повторный запуск при уже открытом UI не создаёт второй процесс: лаунчер видит
+`metadata.ui` в `Welcome` и просит демон отправить существующему UI `show_window`
+(окно снимается с minimized/скрытия и фокусируется). Закрытие окна при `close_to_tray = true` завершает UI-процесс, демон остаётся в трее; работа
+(запись, конвертация, capture, recovery, оверлей) продолжается, а окно вместо выхода скрывается
+и UI завершается через 3 с после её окончания. При `false` UI шлёт команду `quit`, и демон выходит.
+Демон поднимает UI по требованию: лаунчер — видимым, фоновая команда трея или хоткея — скрытым
+(`--tray`). Запись: демон держит `RecordingController`, гоняет `host` и присылает
+store `recording`; UI шлёт `recording_*`-команды, рисует `Snapshot`/`Changed` и применяет
+recording-события (окно, файлы, завершение с clipboard/звуком). На время холодного старта пикера демон показывает
+своё layered-окно-маску и скрывает его по команде `picker_shown` от UI. Автозапуск в режиме трея
+запускает `--backend`. Логи раздельные по роли, проблемы старта демона приходят в UI через
+эфемерный ring уведомлений (`Notices` при подключении, `Notice` для новых). Recovery
+незавершённых записей выполняет демон при старте и по команде recovery от UI; UI получает
+store `recovery { running }` и событие `RecoveryReport`, затем показывает результат уведомлением. Демон владеет индексом библиотеки: загрузка, скан, `refresh_paths` и `flush`; watcher
+публикует store `library`, а UI перезагружает индекс только для чтения и рисует миниатюры.
+
+Capture: UI скрывает окно и просит backend снять кадр; backend отдаёт `CaptureSourceWire` с
+backend-issued путём, UI компонует финальный кадр и отправляет `screenshot_commit` (файл и
+clipboard делает backend). UI не вызывает capture/render/save backend-функции напрямую.
+
+Агент: `AgentHost` всегда живёт в backend-процессе и тикает независимо от UI. UI читает
+snapshot/live-события и отправляет команды; при подключении UI backend ничего не роняет и
+второй хост не создаёт.
+([tasks/background-first.md](tasks/background-first.md)).
+
 ## 8. `agent`, `engine`, `queue`, `eval` — агентские крейты
 
 `queue` зависит только от внешних крейтов и хранит задачи, композиты, пулы ресурсов и
@@ -569,3 +642,38 @@ core
 
 `core` — общий фундамент, а не строго чистая domain model. Новые OS API и FFmpeg зависимости в
 него не добавляются.
+
+### 7.11. Единая синхронизация
+
+Весь доменный обмен идёт через `mediaa-sync` и `mediaa-protocol`; отдельного набора
+`Message`-вариантов больше нет. Транспорт — `interprocess` named pipe, кадры с `u32`
+длиной и JSON-кодеком за трейтом `Codec`.
+
+Конверт:
+
+- `Hello { version, client }` — `ui` или `launcher`; `Welcome { version, session, event_seq,
+  metadata }` (`metadata.tray`) или `Reject`;
+- `Subscribe { stores, versions, event_seq }` → `Snapshot`/`Changed`/`Event`;
+- `Command { id, name, payload }` → `Result { id, .. }`; сервер кэширует результат по id;
+- `Event { seq, kind, payload }`, `Ping`/`Pong`, `Resync`.
+
+Состояние — `StateHub` в демоне: версия на store, коалесинг до `flush`, клиент применяет
+только более новую версию. События — `EventLog` с seq; новый клиент получает `event_seq`
+в `Welcome` и не принимает первый живой event за gap. Потеря `Changed`/события лечится
+`Resync`; переподключение присылает актуальные `Snapshot`. Демон шлёт `Ping` каждые
+5 с и после 15 с без `Pong` считает UI зависшим и отключает его.
+
+Store: `settings`, `recording`, `library`, `notices`, `recovery`. События: recording,
+recovery, tray, hotkeys. Команды: `set_settings`, recording-команды, `hotkeys_paused`,
+`tray_state`, `quit`, `picker_*`.
+
+UI буферизует кадры, пришедшие до создания `App`, и проигрывает их через тот же `Client`.
+`pending_events` в демоне вливаются в EventLog сразу после `Welcome`, поэтому трей-команда,
+пришедшая до UI, не теряется.
+
+Замеры 02.11.26 (debug, Windows 11): демон idle 18.3 MB / 0.3 % одного ядра; UI settings
+на GL — 328.5 MB / 0 %; UI settings на Vulkan — 591.4 MB / 99 % (известное поведение
+eframe, не sync). Смоук записи: `Finished` доходит, файл попадает в clipboard; `--area`
+открывает пикер. Видео-энкодер по умолчанию использует `-tune zerolatency`
+(`RecordSettings.encoder_tuning`): это резко снижает память libx264; потоки/lookahead
+можно включить параметрами.

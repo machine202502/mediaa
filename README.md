@@ -117,12 +117,17 @@ commit is pinned in `scripts/vcpkg-commit.txt`.
 **Windows** (PowerShell):
 
 ```powershell
-.\scripts\windows\run.ps1            # debug build, logs in the console
-.\scripts\windows\run.ps1 -Release   # optimized
+.\scripts\windows\run\run.ps1            # debug build, logs in the console
+.\scripts\windows\run\run.ps1 -Release   # optimized
 ```
 
 `env.ps1` (used by all Windows scripts) finds or clones vcpkg, finds `libclang.dll` via
 `vswhere`, builds FFmpeg on the first run and sets `VCPKG_ROOT`, `LIBCLANG_PATH`, `FFMPEG_DIR`.
+
+Windows scripts are grouped by purpose (`build`, `run`, `test`, `agent`); the human list is in
+[scripts/windows/README.md](scripts/windows/README.md), agent instructions in
+[scripts/windows/AGENTS.md](scripts/windows/AGENTS.md). Same for Linux and macOS:
+[Linux](scripts/linux/README.md), [macOS](scripts/macos/README.md).
 
 **Linux:**
 
@@ -131,11 +136,15 @@ export VCPKG_ROOT=~/vcpkg      # a vcpkg checkout (bootstrap-vcpkg.sh)
 scripts/linux/build.sh --run
 ```
 
+Linux scripts: [scripts/linux/README.md](scripts/linux/README.md).
+
 **macOS:**
 
 ```bash
 scripts/macos/build.sh --run   # clones vcpkg into .tools/ if VCPKG_ROOT is not set
 ```
+
+macOS scripts: [scripts/macos/README.md](scripts/macos/README.md).
 
 On macOS grant *Screen Recording* (and *Microphone*) permissions in System Settings → Privacy
 & Security on first use.
@@ -144,7 +153,7 @@ On macOS grant *Screen Recording* (and *Microphone*) permissions in System Setti
 
 | Platform | Command | Result |
 |---|---|---|
-| Windows | `.\scripts\windows\build.ps1` | `dist\windows\mediaa.exe` — a single file, FFmpeg + C runtime static (only system DLLs) |
+| Windows | `.\scripts\windows\build\build.ps1` | `dist\windows\mediaa.exe` — a single file, FFmpeg + C runtime static (only system DLLs) |
 | Linux (native) | `scripts/linux/build.sh` | `dist/linux/mediaa` — FFmpeg static; system GUI/audio libs dynamic |
 | Linux (Docker) | `scripts/linux/build-docker.sh` | the same program, built in an Ubuntu 24.04 container |
 | macOS | `scripts/macos/build.sh` | `dist/macos/MediaA.app` |
@@ -205,10 +214,10 @@ virtual X server and a screenshot is saved to `dist/linux/smoke.png`:
 ## Tests
 
 ```powershell
-.\scripts\windows\test.ps1          # or: cargo test --workspace (with the env from env.ps1)
+.\scripts\windows\test\test.ps1          # or: cargo test --workspace (with the env from env.ps1)
 cargo check --workspace --lib --bins --profile dev-check
-.\scripts\windows\test-fast.ps1
-.\scripts\windows\test-release.ps1
+.\scripts\windows\test\test-fast.ps1
+.\scripts\windows\test\test-release.ps1
 ```
 
 The `dev-check` profile is for fast edit/feedback loops: it disables dependency optimization and

@@ -20,6 +20,8 @@ impl std::fmt::Display for RecordingStartCancelled {
 
 impl std::error::Error for RecordingStartCancelled {}
 
+pub use mediaa_core::settings::EncoderTuning;
+
 pub struct RecordingRequest {
     pub(super) sources: Vec<SourceFactory>,
     pub(super) audio: Vec<Box<dyn AudioSource>>,
@@ -36,6 +38,7 @@ pub struct RecordingRequest {
     pub(super) work_dir: WorkDir,
     pub(super) title: String,
     pub(super) limits: RecordingLimits,
+    pub(super) encoder_tuning: EncoderTuning,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,8 +88,13 @@ impl RecordingRequest {
                 work_dir,
                 title,
                 limits: RecordingLimits::default(),
+                encoder_tuning: EncoderTuning::default(),
             },
         }
+    }
+
+    pub fn encoder_tuning(&self) -> EncoderTuning {
+        self.encoder_tuning
     }
 
     pub fn output(&self) -> OutputKind {
@@ -133,6 +141,11 @@ impl RecordingRequestBuilder {
 
     pub fn webp_mode(mut self, mode: WebpMode) -> Self {
         self.request.webp_mode = mode;
+        self
+    }
+
+    pub fn encoder_tuning(mut self, tuning: EncoderTuning) -> Self {
+        self.request.encoder_tuning = tuning;
         self
     }
 
@@ -193,7 +206,7 @@ pub enum AudioLayout {
     EveryFile,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StopAction {
     Save,
     Discard,
@@ -245,4 +258,29 @@ pub enum SessionEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionNotice {
     WebpFallback { trace_id: String, detail: String },
+}
+
+#[cfg(test)]
+mod encoder_tuning_tests {
+    use super::*;
+
+    #[test]
+    fn zerolatency_is_the_default() {
+        let tuning = EncoderTuning::default();
+        assert!(tuning.zerolatency);
+        assert_eq!(tuning.threads, None);
+        assert_eq!(tuning.lookahead, None);
+    }
+
+    #[test]
+    fn tuning_roundtrips_as_a_future_setting() {
+        let tuning = EncoderTuning {
+            zerolatency: false,
+            threads: Some(4),
+            lookahead: Some(10),
+        };
+        let text = serde_json::to_string(&tuning).expect("serialize");
+        let decoded: EncoderTuning = serde_json::from_str(&text).expect("deserialize");
+        assert_eq!(decoded, tuning);
+    }
 }

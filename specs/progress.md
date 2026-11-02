@@ -179,3 +179,133 @@
 | UI-25 | 01.11.26 11:18 | Уведомления включены по умолчанию и после сброса; отправка в конвертацию показывает уведомление с именами файлов | готово | [notifications-default-and-convert-queue.md](tasks/notifications-default-and-convert-queue.md) |
 | UI-26 | 01.11.26 11:30 | Исчезновение верхнего уведомления не сдвигает стек: кадр удаления сразу перерисовывается | готово | [notice-stack-position.md](tasks/notice-stack-position.md) |
 | UI-27 | 01.11.26 11:38 | Снапшоты стека уведомлений: два, после закрытия, после истечения | готово | [notice-stack-position.md](tasks/notice-stack-position.md) |
+| PERF-5 | 02.11.26 00:40 | Разобрать простой: 440 MB RSS и периодическая нагрузка CPU, отделить графику от логики | готово | [idle-memory-cpu.md](tasks/idle-memory-cpu.md) |
+| PERF-6 | 02.11.26 00:50 | Добавить аудит памяти и CPU по состояниям приложения с baseline-снимком и сравнением | готово | [performance.md](tasks/performance.md) |
+| PERF-7 | 02.11.26 01:05 | Шаг 0: проверить бэкенд wgpu замерами и функциональными сценариями | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-1 | 02.11.26 01:05 | Согласовать контракт сплита: роли, владение, IPC, жизненный цикл, прогресс | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-2 | 02.11.26 01:05 | Каркас IPC на interprocess: handshake с версией, framing, права, обрыв | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-3 | 02.11.26 01:05 | Роли запуска --daemon/--ui и лаунчер, single-instance, автозапуск | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.1 | 02.11.26 01:50 | Трей, хоткеи и жизненный цикл в демоне; UI закрывается в трей, скрытый UI выходит через 3 с | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.2 | 02.11.26 01:50 | Настройки: владение демоном, снапшот в UI, запись через SettingsWriter | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3a | 02.11.26 02:05 | Закрытие при активной работе скрывает окно; скрытый UI выходит после завершения | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3b1 | 02.11.26 04:20 | Recovery в демоне: старт, StartRecovery, снапшот в UI | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3b2a | 02.11.26 04:30 | Эффекты записи: старт через host, RecordingEffect, единый apply | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3b2b | 02.11.26 04:40 | Эффекты записи: poll событий и завершение через host | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3b2c1 | 02.11.26 04:55 | RecordUi вынесен из контроллера в UI-состояние ViewState | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3b2c2a | 02.11.26 05:10 | Снапшот записи: serde RecordingView, ViewState::apply | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3b2c2b | 02.11.26 05:25 | Протокол записи и daemon-движок: команды, снапшоты, события | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3b2c3 | 02.11.26 05:40 | UI переключён на демон: команды, снапшоты, локальный контроллер только в тестах | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3b2d | 02.11.26 05:55 | Проверка записи в демоне без UI: record-smoke.ps1, изоляция dev-библиотеки, замер | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3b2 | 02.11.26 05:40 | Запись в демоне: эффекты, протокол, снапшоты | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.3c | 02.11.26 04:25 | Снимки: захват остаётся в UI (окно, скрытие, оверлей), демон только просит | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.4a | 02.11.26 06:05 | Watcher библиотеки в демоне: LibraryChanged, UI применяет paths/rescan | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.4b | 02.11.26 06:35 | Индекс библиотеки в демоне: скан/запись, UI reload-only | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-4.4 | 02.11.26 01:50 | Индекс библиотеки и watcher в демоне, миниатюры в UI (детали пока пишет UI) | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-5 | 02.11.26 07:10 | UI: запись и библиотека на снапшотах, выход по закрытию, выход при потере демона | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-6 | 02.11.26 07:10 | Прогресс/статусы: запись снапшотами, конвертация и агент опросом при открытом окне | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-7a | 02.11.26 06:55 | Агент: демон поднимает AgentHost при закрытом UI, роняет при подключении | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-7 | 02.11.26 07:10 | Агент: handoff в демон при закрытом UI, host в UI при открытом | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-8 | 02.11.26 04:12 | Эфемерные уведомления: ring с TTL в демоне, отображение в UI | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-9a | 02.11.26 02:20 | Замер задержки пикера и ускорение холодного старта (без FFmpeg и лишней работы) | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-9b | 02.11.26 02:20 | Маска/нативный слой на время холодного старта пикера (цель < 400 мс) | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-9c | 02.11.26 02:58 | Фоновый режим тестовых окон: ничего не всплывает, фокус остаётся у пользователя | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-9d | 02.11.26 03:15 | Скрипты Windows разложены по подпапкам build/run/test/checks, README для человека и AGENTS.md для агента | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-9e | 02.11.26 03:25 | Скрипты скриншотов в checks: list-windows, capture-screen, capture-window | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-9f | 02.11.26 03:40 | Тестовый ввод: MEDIAA_DEV_INPUT + send-input.ps1 (клавиши, указатель, клик, драг) | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-9g | 02.11.26 04:00 | Правила платформы в rules.md, правила агента в scripts/windows/AGENTS.md, красная иконка копии агента | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-9h | 02.11.26 04:05 | Правила: убраны скиллы, закрытые задачи не редактируются, правило перечитывания при сжатии контекста | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-9i | 02.11.26 04:06 | AppMode: единая тестовая конфигурация, dev-чтения убраны из UI/демона | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-10 | 02.11.26 02:07 | Логи двух процессов, слот последней ошибки, версия протокола | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-11 | 02.11.26 04:35 | Тесты сплита: handshake, отказ, обрыв, падение job, UI-тесты и слой-гейт | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-12 | 02.11.26 07:10 | Документация, architecture/constraints, таблица замеров | готово | [background-first.md](tasks/background-first.md) |
+| PERF-8 | 02.11.26 01:10 | Зафиксировать политику бэкенда: GL по умолчанию с fallback и настройкой | ожидание | [deferred.md](tasks/deferred.md) |
+| AGENT-1 | 02.11.26 07:15 | Агент без UI-хоста: Live/Feed по IPC, демон владеет агентом всегда | ожидание | [deferred.md](tasks/deferred.md) |
+| THUMB-1 | 02.11.26 07:15 | Детали миниатюр через демон: SetDetails вместо записи из UI | ожидание | [deferred.md](tasks/deferred.md) |
+| FIX-2 | 02.11.26 07:35 | UI застревал в «Сохранение записи»: демон не слал финальный Idle-снапшот | готово | [background-first.md](tasks/background-first.md) |
+| AGENT-ICON-1 | 02.11.26 07:25 | mediaa-agent.exe с красной иконкой в exe: Task Manager, Explorer, build-agent.ps1 | готово | [background-first.md](tasks/background-first.md) |
+| FIX-1 | 02.11.26 07:05 | Tray-команда терялась в settings handshake: буферизация, тест, dev-хук MEDIAA_DEV_TRAY | готово | [background-first.md](tasks/background-first.md) |
+| SPLIT-13 | 02.11.26 01:31 | Закрытие приложения: Quit демону, принудительное завершение фоновых задач, тест | готово | [background-first.md](tasks/background-first.md) |
+| SYNC-1 | 02.11.26 07:45 | Крейт mediaa-sync: кадры, версия протокола, length-prefix, JSON-кодек, тесты | готово | [sync.md](tasks/sync.md) |
+| SYNC-2 | 02.11.26 07:45 | StateHub/StateView/EventLog: версии, coalescing, seq, gap | готово | [sync.md](tasks/sync.md) |
+| SYNC-3 | 02.11.26 08:05 | Server/Client state machines: subscribe/snapshot/changed/resync/command/event | готово | [sync.md](tasks/sync.md) |
+| SYNC-4a | 02.11.26 08:25 | Settings: стартовый снимок и изменения через store | готово | [sync.md](tasks/sync.md) |
+| SYNC-4b | 02.11.26 08:40 | Settings: команда SetSettings с ack, старый SettingsSync удалён | готово | [sync.md](tasks/sync.md) |
+| SYNC-5a | 02.11.26 08:55 | Recording: состояние через store, версии, финальный Idle | готово | [sync.md](tasks/sync.md) |
+| SYNC-5b | 02.11.26 09:15 | Recording: команды start/stop/pause/cancel через Command | готово | [sync.md](tasks/sync.md) |
+| SYNC-5c | 02.11.26 09:15 | Recording: события finished/window/files через EventLog | готово | [sync.md](tasks/sync.md) |
+| SYNC-6 | 02.11.26 09:30 | Library: store `library`, reload-only, coalescing загрузок | готово | [sync.md](tasks/sync.md) |
+| SYNC-7 | 02.11.26 09:50 | Notices: ring-store с id; recovery: state + report event | готово | [sync.md](tasks/sync.md) |
+| SYNC-8 | 02.11.26 10:15 | Tray/hotkeys — события, tray state/pause/quit/picker — команды | готово | [sync.md](tasks/sync.md) |
+| SYNC-9a | 02.11.26 10:35 | PickerStarting → команда; доменные Message удалены, остался handshake | готово | [sync.md](tasks/sync.md) |
+| SYNC-9b | 02.11.26 10:55 | Handshake/launcher на sync-кадры, Message/Incoming удалены | готово | [sync.md](tasks/sync.md) |
+| SYNC-10 | 02.11.26 11:15 | Документация, замеры, финальный прогон | готово | [sync.md](tasks/sync.md) |
+| ENC-1 | 02.11.26 12:10 | Память записи: EncoderTuning, zerolatency по умолчанию | готово | [encoder-memory.md](tasks/encoder-memory.md) |
+| ENC-2 | 02.11.26 12:40 | GIF: two-pass палитра, память 2.1 GB → 1.07 GB на 4K | готово | [encoder-memory.md](tasks/encoder-memory.md) |
+| RELAUNCH-1 | 02.11.26 13:05 | Повторный запуск открывает/фокусирует существующий UI | готово | [relaunch.md](tasks/relaunch.md) |
+| ENC-3 | 02.11.26 13:30 | Настройки потоков/энкодеров для всех форматов — отложено, подробный документ | ожидание | [encoder-settings.md](tasks/encoder-settings.md) |
+| SPLIT2-0 | 02.11.26 14:10 | Инвентаризация и ADR: один exe, роли, границы backend/frontend | готово | [backend-split.md](tasks/backend-split.md) |
+| SPLIT2-1 | 02.11.26 14:25 | Protocol backend: library query/edit, preview, agent events | готово | [backend-split.md](tasks/backend-split.md) |
+| SPLIT2-2 | 02.11.26 15:10 | Backend crate: Tokio runtime, library store, preview queue + cleanup | готово | [backend-split.md](tasks/backend-split.md) |
+| SPLIT2-2b | 02.11.26 15:10 | Перенос daemon/sync/tray/hotkeys в backend | ожидание | [backend-split.md](tasks/backend-split.md) |
+| SPLIT2-3a | 02.11.26 18:05 | Library snapshot; статические thumbnail UI через backend `preview_ensure` | в работе | [backend-split.md](tasks/backend-split.md) |
+| SPLIT2-8a | 02.11.26 17:55 | AgentStream: Tokio broadcast + пример использования | готово | [backend-split.md](tasks/backend-split.md) |
+| SPLIT2-P0 | 02.11.26 18:30 | Полный план и очередь SPLIT2 | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-B0 | 02.11.26 18:30 | Backend foundation: Tokio, library, preview, agent stream | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-F1 | 02.11.26 18:30 | Frontend foundation: крейт, Page, Notices, BackendClient | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-B2 | 02.11.26 18:30 | Previews backend: thumbnail/hover, очередь, TTL cleanup | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-B1 | 02.11.26 19:00 | Library DB — единственный источник; daemon на LibraryStore, без scan | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-F2 | 02.11.26 19:30 | Library frontend на LibraryView; edits в backend | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-F3 | 02.11.26 20:05 | Previews frontend: thumbnail/hover backend; production worker выключен | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-B3 | 02.11.26 20:35 | Recording backend: controller/host/plan/wire, daemon переключён | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-F4 | 02.11.26 21:05 | Recording frontend: types отдельно, controller/host test-only | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-B4 | 02.11.26 22:10 | Capture/screenshot/clipboard в backend; UI overlay держит кадр | готово (conditional) | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-F5 | 02.11.26 22:10 | Capture/picker frontend: оверлей и ввод | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-B5 | 02.11.26 23:10 | Conversion backend: controller + protocol start/cancel/state | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-F6 | 02.11.26 23:25 | Conversion frontend: старт в backend, status/progress по событиям | готово (conditional) | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-B6 | 02.11.26 22:45 | Settings/tray/hotkeys в backend daemon | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-F8 | 02.11.26 18:30 | Settings/tray/notices frontend | ожидание | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-B7 | 02.11.26 22:50 | AgentHost в backend; backend daemon его использует | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-B8 | 02.11.26 23:55 | Async agent host + live status/progress в backend | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-F7 | 03.11.26 00:40 | UI agent host view-only; backend всегда исполняет агента | готово (conditional) | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-F9 | 03.11.26 02:05 | Весь UI перенесён в mediaa-frontend; app — тонкий launcher | в работе | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-P1 | 02.11.26 22:45 | Один exe: --backend запускает mediaa_backend::daemon | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-P2 | 02.11.26 22:45 | Launcher запускает backend/UI; smoke двух процессов | готово | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-C1 | 02.11.26 18:30 | Удаление legacy и старых воркеров | ожидание | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-C2 | 02.11.26 18:30 | Полная тестовая матрица | ожидание | [backend-split-plan.md](tasks/backend-split-plan.md) |
+| SPLIT2-C3 | 02.11.26 23:00 | Первый замер backend/UI процессов (debug) | в работе | [backend-split-measurements.md](tasks/backend-split-measurements.md) |
+| FNL-1 | 03.11.26 02:20 | Старый app-код удалён; app — main+build icon | готово | [final-split.md](tasks/final-split.md) |
+| FNL-2 | 03.11.26 02:40 | Frontend runtime без backend-daemon | готово | [final-split.md](tasks/final-split.md) |
+| FNL-3 | 03.11.26 04:30 | Cache/thumb удалены; clipboard через backend protocol | готово | [final-split.md](tasks/final-split.md) |
+| FNL-4 | 03.11.26 03:00 | Library view без storage в production | готово (conditional) | [final-split.md](tasks/final-split.md) |
+| FNL-5 | 03.11.26 03:15 | Conversion production jobs отключены; только backend | готово (conditional) | [final-split.md](tasks/final-split.md) |
+| FNL-6 | 03.11.26 03:45 | AgentView; tray runtime/storage/thumb/cache убраны из frontend | готово (conditional) | [final-split.md](tasks/final-split.md) |
+| FNL-7 | 02.11.26 15:50 | P0 стабилизация split: app lib, app-agent, arch, clippy, baseline 386 UI-тестов | готово | [finalize-split-plan.md](tasks/finalize-split-plan.md) |
+| FNL-8 | 02.11.26 17:10 | P1 backend-агент: core view-типы, host всегда в backend, rich snapshot, live events, op/task/steer/request, secrets load/merge, analyse/names/stop/title | готово (conditional) | [finalize-split-plan.md](tasks/finalize-split-plan.md) |
+| FNL-9 | 02.11.26 17:10 | P2 frontend-агент: AgentView удалён, очередь/чат/models/providers/budget/catalogs/dialog на protocol; normal-дерево без backend/agent/engine/queue | готово | [finalize-split-plan.md](tasks/finalize-split-plan.md) |
+| FNL-10 | 02.11.26 17:10 | P3 capture: protocol/backend/client, overlay и fullscreen/window через CaptureClient, frontend без mediaa-backend/storage/agent/engine/queue | готово | [finalize-split-plan.md](tasks/finalize-split-plan.md) |
+| FNL-11 | 02.11.26 17:45 | P4/P5: conversion probe, library remove, Player preview, recording test-only; dev-зависимости пусты; открыт только rename файла и часть UI-тестов | готово (conditional) | [finalize-split-plan.md](tasks/finalize-split-plan.md) |
+| FNL-12 | 02.11.26 17:35 | P6: release smoke двух процессов, exe 75.3 MiB, замеры 18.4/527.9 MB, architecture/plan/progress обновлены | готово (conditional) | [finalize-split-plan.md](tasks/finalize-split-plan.md) |
+| FNL-13 | 02.11.26 17:45 | P4: library remove -> backend, Player preview -> backend, recording test-only, 5 view-тестов (334 passed) | готово (conditional) | [finalize-split-plan.md](tasks/finalize-split-plan.md) |
+| FNL-14 | 02.11.26 17:55 | Rename файла -> backend (`LIBRARY_RENAME`), UI без fs::rename; conversion module allow убран; protocol roundtrip | готово (conditional) | [finalize-split-plan.md](tasks/finalize-split-plan.md) |
+| ARC-1 | 02.11.26 20:35 | Frontend: `app/features/infra`; backend: `daemon/features/infra`, daemon разбит на dispatch/agent/services/notices/launch | готово | [crate-structure.md](tasks/crate-structure.md) |
+| TST-1 | 02.11.26 21:00 | Восстановить 54 удалённых UI-теста агента (queue/analysis/task_details/dialog/chat) на wire-фикстурах; исходники приложены в `specs/tasks/removed-agent-ui-tests/` | ожидание | [restore-agent-ui-tests.md](tasks/restore-agent-ui-tests.md) |
+| BUG-1 | 02.11.26 21:15 | Трей: подписи `backend message` заменены на локализованные; backend грузит locales и применяет язык настроек | готово | [tray-labels.md](tasks/tray-labels.md) |
+| BUG-2 | 02.11.26 22:05 | Трей: ack+visible fallback для ShowWindow, быстрый Quit; pending events после Subscribe, без keychain; все `MEDIAA_DEV_TRAY` команды и `tray-action.ps1` | готово | [tray-open-quit.md](tasks/tray-open-quit.md) |
+
+| ST-0 | 02.11.26 22:40 | Аудит всех состояний: master-план, 8 доменных задач, правила enum/event/effect и тестов без Windows | в работе | [state-machines.md](tasks/state-machines.md) |
+| ST-1 | 02.11.26 23:07 | Tray/App lifecycle: protocol reducer + backend effects + WindowLifecycle; 24 targeted tests, smoke open/quit; 343 frontend, 53 backend | готово | [state-app-lifecycle.md](tasks/state-app-lifecycle.md) |
+| ST-2 | 02.11.26 22:40 | Recording: одно состояние вместо RecState/ViewState/phase; cancel/discard не bool | ожидание | [state-recording.md](tasks/state-recording.md) |
+| ST-3 | 02.11.26 22:40 | Capture/overlay: CaptureState вместо трёх Option<Job> и флагов restore/hide | ожидание | [state-capture.md](tasks/state-capture.md) |
+| ST-4 | 02.11.26 22:40 | Conversion: ConversionState вместо job/batch_auto/probe_loading/conflict_notified | ожидание | [state-conversion.md](tasks/state-conversion.md) |
+| ST-5 | 02.11.26 22:40 | Library/player: PlayerState вместо got_frame/audio_waiting/dragging | ожидание | [state-library.md](tasks/state-library.md) |
+| ST-6 | 02.11.26 22:40 | Agent UI: reducer вместо глобального LiveBuffer и трёх Option; host state | ожидание | [state-agent.md](tasks/state-agent.md) |
+| ST-7 | 02.11.26 22:40 | Backend services/sync: writer/clipboard/preview/sync state machines | ожидание | [state-services.md](tasks/state-services.md) |
+| ST-8 | 02.11.26 22:40 | App shell: composition root вместо 45 полей и 858 строк | ожидание | [state-app-shell.md](tasks/state-app-shell.md) |
+
+| ST-9 | 02.11.26 22:45 | Protocol/Sync: типизированные ClientCommand/ServerEvent/StoreId вместо строк и Vec<u8>; sync остаётся механизмом | ожидание | [state-protocol.md](tasks/state-protocol.md) |
+
+| ST-10 | 02.11.26 22:50 | Ownership: protocol — чистые переходы, backend — авторитет/эффекты, frontend — проекция, sync — доставка | ожидание | [state-ownership.md](tasks/state-ownership.md) |
+
+| ST-11 | 02.11.26 22:55 | Test strategy: pure transition, fake effects, protocol/sync, frontend projection; OS smoke отдельно | ожидание | [state-test-strategy.md](tasks/state-test-strategy.md) |
+
+| ST-12 | 02.11.26 23:00 | Frontend-owned state: ClientPreferences/ui-state.toml, миграция viewer_volume из Settings, backend не знает | ожидание | [state-client-state.md](tasks/state-client-state.md) |
