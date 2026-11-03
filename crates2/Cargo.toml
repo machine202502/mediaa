@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/i18n",
+    "crates/protocol",
+    "crates/storage",
+    "crates/platform",
+    "crates/media",
+    "crates/frontend",
+    "crates/backend",
+    "crates/app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.95"
+
+[workspace.lints.rust]
+unused = "deny"
+dead_code = "deny"
+
+[workspace.dependencies]
+mediaa2-core = { path = "crates/core" }
+mediaa2-i18n = { path = "crates/i18n" }
+mediaa2-protocol = { path = "crates/protocol" }
+mediaa2-storage = { path = "crates/storage" }
+mediaa2-platform = { path = "crates/platform" }
+mediaa2-media = { path = "crates/media" }
+mediaa2-backend = { path = "crates/backend" }
+mediaa2-frontend = { path = "crates/frontend" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+tokio = { version = "1", features = ["io-util", "rt", "macros"] }
+rust-i18n = "4"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg", "bmp", "tiff"] }
+hound = "3.5"
+crossbeam-channel = "0.5"
+log = { version = "0.4", features = ["std"] }
+directories = "6"
+tempfile = "3"
+url = "2"
+fnv = "1"
+fast_image_resize = "6.1"

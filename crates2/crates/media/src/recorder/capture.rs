@@ -1,0 +1,308 @@
+use super::*;
+use mediaa2_core::Frame;
+
+fn scratch_output(
+    path: &Path,
+    kind: OutputKind,
+    quality: u8,
+    max_height: Option<u32>,
+    size: (u32, u32),
+    fps: u32,
+    tuning: &EncoderTuning,
+) -> (String, Output) {
+    let out = Output::new(path).format("matroska").stream_map("[v]");
+    let mut out = out;
+    if tuning.zerolatency {
+        out = out.video_opt("tune", "zerolatency");
+    }
+    if let Some(threads) = tuning.threads {
+        out = out.video_opt("threads", threads.to_string());
+    }
+    if let Some(lookahead) = tuning.lookahead.filter(|_| !tuning.zerolatency) {
+        out = out.video_opt("rc-lookahead", lookahead.to_string());
+    }
+    match kind {
+        OutputKind::Video(_) => (
+            filters::scratch_graph("yuv420p", max_height),
+            out.video_codec("libx264")
+                .video_opt("preset", {
+                    let (w, h) = filters::scaled_size(size.0, size.1, max_height);
+                    filters::live_preset(w, h, fps)
+                })
+                .video_opt("crf", filters::crf_for_quality(quality).to_string()),
+        ),
+        OutputKind::Audio(_) => unreachable!("audio recordings have no picture to encode"),
+        OutputKind::Anim(_) => {
+            let out = out
+                .video_codec("libx264rgb")
+                .video_opt("preset", "ultrafast")
+                .video_opt("qp", "0");
+            (filters::scratch_graph("bgr0", max_height), out)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, reason = "plain data handed to a thread")]
+pub(super) fn capture_loop(
+    factory: SourceFactory,
+    control: Arc<Control>,
+    fps: u32,
+    kind: OutputKind,
+    quality: u8,
+    max_height: Option<u32>,
+    scratch: PathBuf,
+    frames: Arc<AtomicU64>,
+    ready: Sender<anyhow::Result<(String, (u32, u32))>>,
+    gate: Arc<StartGate>,
+    events: Sender<SessionEvent>,
+    show_no_signal: bool,
+    tuning: EncoderTuning,
+) -> anyhow::Result<Vec<PathBuf>> {
+    let setup = (|| -> anyhow::Result<_> {
+        let source = factory()?;
+        let (w, h) = source.size();
+        let (push_source, handle) = crate::ffmpeg::push_source(w, h, "rgba", (1, fps as i32))?;
+        let (graph, output) =
+            scratch_output(&scratch, kind, quality, max_height, (w, h), fps, &tuning);
+        let scheduler = JobBuilder::new()
+            .push_input(push_source)
+            .filter_desc(&graph)
+            .output(output)
+            .build()?
+            .start()?;
+        Ok((source, handle, scheduler))
+    })();
+    let (source, mut handle, scheduler) = match setup {
+        Ok(v) => {
+            let size = v.0.size();
+            let _ = ready.send(Ok((v.0.name(), size)));
+            v
+        }
+        Err(e) => {
+            let _ = ready.send(Err(anyhow::anyhow!("{e:#}")));
+            return Err(e);
+        }
+    };
+
+    gate.wait();
+    let mut slots = SlotTracker::new(fps);
+    let size = source.size();
+    let name = source.name();
+    let placeholder = if show_no_signal {
+        no_signal(size)
+    } else {
+        Frame::filled(size.0, size.1, [0, 0, 0, 255])
+    };
+    let mut last_live: Option<Vec<u8>> = None;
+    let mut source = Some(source);
+    let mut lost = false;
+    let mut next_retry = Instant::now() + Duration::from_millis(250);
+    let mut result = Ok(());
+    loop {
+        let active = control.capture_time();
+        let previous = slots.last();
+        if let Some(slot) = slots.slot(active) {
+            let available = source.as_ref().is_none_or(|source| source.available());
+            if !available && !lost {
+                log::warn!("capture \"{name}\" lost (source is not visible)");
+                let _ = events.send(SessionEvent::SourceLost(name.clone()));
+                lost = true;
+            }
+            if source.is_none() && Instant::now() >= next_retry {
+                match factory() {
+                    Ok(restored) if restored.available() => {
+                        log::info!("capture \"{name}\" restored");
+                        let _ = events.send(SessionEvent::SourceRestored(name.clone()));
+                        source = Some(restored);
+                        lost = false;
+                    }
+                    Ok(_) => {
+                        next_retry = Instant::now() + Duration::from_millis(250);
+                    }
+                    Err(error) => {
+                        log::debug!("capture \"{name}\" reconnect failed: {error:#}");
+                        next_retry = Instant::now() + Duration::from_millis(250);
+                    }
+                }
+            }
+            if lost && source.as_ref().is_some_and(|source| source.available()) {
+                log::info!("capture \"{name}\" restored");
+                let _ = events.send(SessionEvent::SourceRestored(name.clone()));
+                lost = false;
+            }
+            if lost {
+                let gap_frame = if show_no_signal {
+                    placeholder.data.clone()
+                } else {
+                    last_live
+                        .clone()
+                        .unwrap_or_else(|| Frame::filled(size.0, size.1, [0, 0, 0, 255]).data)
+                };
+                if let Some(previous) = previous {
+                    for missing in (previous + 1)..slot {
+                        if let Err(error) =
+                            handle.push_owned(gap_frame.clone(), missing as i64, Some(1))
+                        {
+                            result = Err(anyhow::anyhow!("encoder stopped: {error}"));
+                            break;
+                        }
+                        frames.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+            let grabbed = if lost {
+                None
+            } else {
+                source.as_mut().map(|source| source.grab())
+            };
+            let frame = match grabbed {
+                Some(Ok(frame)) => {
+                    let data = if frame.width == size.0 && frame.height == size.1 {
+                        frame.data
+                    } else {
+                        frame.fit_to(size.0, size.1, [0, 0, 0, 255]).data
+                    };
+                    last_live = Some(data.clone());
+                    Some(data)
+                }
+                Some(Err(error)) => {
+                    log::warn!("capture \"{name}\" lost: {error:#}");
+                    if !lost {
+                        let _ = events.send(SessionEvent::SourceLost(name.clone()));
+                    }
+                    lost = true;
+                    source = None;
+                    next_retry = Instant::now() + Duration::from_millis(250);
+                    None
+                }
+                None => None,
+            };
+            let data = frame.unwrap_or_else(|| {
+                if show_no_signal {
+                    placeholder.data.clone()
+                } else {
+                    last_live
+                        .clone()
+                        .unwrap_or_else(|| Frame::filled(size.0, size.1, [0, 0, 0, 255]).data)
+                }
+            });
+            if let Err(error) = handle.push_owned(data, slot as i64, Some(1)) {
+                result = Err(anyhow::anyhow!("encoder stopped: {error}"));
+                break;
+            }
+            frames.fetch_add(1, Ordering::Relaxed);
+        }
+        let wait = slots.next_deadline().saturating_sub(control.capture_time());
+        if !control.wait(wait.max(Duration::from_millis(1))) {
+            break;
+        }
+    }
+    if result.is_ok() && lost {
+        if let (Some(stop), Some(last)) = (control.stopped_at(), slots.last()) {
+            let stop_slot = slots.slot_at(stop);
+            let gap = if show_no_signal {
+                placeholder.data.clone()
+            } else {
+                last_live
+                    .clone()
+                    .unwrap_or_else(|| Frame::filled(size.0, size.1, [0, 0, 0, 255]).data)
+            };
+            for slot in (last + 1)..=stop_slot {
+                if let Err(error) = handle.push_owned(gap.clone(), slot as i64, Some(1)) {
+                    result = Err(anyhow::anyhow!("encoder stopped: {error}"));
+                    break;
+                }
+                frames.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+    handle.finish();
+    scheduler.wait()?;
+    result?;
+    Ok(vec![scratch])
+}
+
+fn no_signal(size: (u32, u32)) -> Frame {
+    let mut frame = image::load_from_memory(include_bytes!("../../assets/no-signal.png"))
+        .map(|image| Frame::from_image(image.to_rgba8()))
+        .unwrap_or_else(|_| Frame::filled(size.0, size.1, [0, 0, 0, 255]));
+    for pixel in frame.data.as_chunks_mut::<4>().0 {
+        pixel[3] = 255;
+    }
+    frame.resized(size.0, size.1)
+}
+
+pub(super) enum StartFailure {
+    Cancelled,
+    Message(String),
+}
+
+impl From<StartFailure> for anyhow::Error {
+    fn from(failure: StartFailure) -> Self {
+        match failure {
+            StartFailure::Cancelled => RecordingStartCancelled.into(),
+            StartFailure::Message(message) => {
+                anyhow::anyhow!("could not start recording: {message}")
+            }
+        }
+    }
+}
+
+pub(super) enum SourceReady {
+    Ready(String, (u32, u32)),
+    Failed(String),
+    Exited,
+    TimedOut,
+    Cancelled,
+}
+
+pub(super) fn wait_for_source(
+    ready: &SourceReadyReceiver,
+    cancel: &AtomicBool,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> SourceReady {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return SourceReady::Cancelled;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return SourceReady::TimedOut;
+        }
+        match ready.recv_timeout(remaining.min(poll_interval)) {
+            Ok(Ok((name, size))) => return SourceReady::Ready(name, size),
+            Ok(Err(error)) => return SourceReady::Failed(format!("{error:#}")),
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                return SourceReady::Exited;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::no_signal;
+
+    #[test]
+    fn the_no_signal_card_is_visible() {
+        let frame = no_signal((128, 72));
+        assert_eq!((frame.width, frame.height), (128, 72));
+        assert!(
+            frame
+                .data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[0] > 100),
+            "the placeholder must not be an all-black frame"
+        );
+        let corner = frame.pixel(0, 0);
+        assert!(
+            corner[0] > 100,
+            "the card must fill the canvas, not sit on a background: {corner:?}"
+        );
+    }
+}

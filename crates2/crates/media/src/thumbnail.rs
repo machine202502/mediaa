@@ -1,0 +1,47 @@
+use crate::ffmpeg::{frames, FrameRequest};
+use mediaa2_core::formats::MediaKind;
+use mediaa2_core::Frame;
+use std::path::Path;
+
+pub fn thumbnail(path: &Path, kind: MediaKind, max_size: u32) -> anyhow::Result<Frame> {
+    let max_size = max_size.max(16);
+    if kind == MediaKind::Image {
+        let (width, height) = image::image_dimensions(path)?;
+        mediaa2_core::formats::ensure_safe_dimensions(width, height)?;
+        let img = image::open(path)?.thumbnail(max_size, max_size).to_rgba8();
+        return Ok(Frame::from_image(img));
+    }
+    let proxy = crate::preview_cache::ready_proxy(path);
+    let source = proxy.as_deref().unwrap_or(path);
+    if mediaa2_core::formats::is_webp_path(source) {
+        let mut first = None;
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        crate::preview::preview_frames(source, max_size, 1.0, 0.0, &cancel, &mut |f| {
+            first = Some(f.frame);
+            false
+        })?;
+        let f = first.ok_or_else(|| anyhow::anyhow!("no frames in {}", path.display()))?;
+        let img = image::RgbaImage::from_raw(f.width, f.height, f.data)
+            .ok_or_else(|| anyhow::anyhow!("bad frame buffer"))?;
+        return Ok(Frame::from_image(
+            image::DynamicImage::ImageRgba8(img)
+                .thumbnail(max_size, max_size)
+                .to_rgba8(),
+        ));
+    }
+    let mut reader = frames(
+        source,
+        FrameRequest {
+            width: Some(max_size & !1),
+            max_frames: Some(1),
+            ..FrameRequest::default()
+        },
+    )?;
+    let timed = reader
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no frames in {}", path.display()))??;
+    let img = image::DynamicImage::ImageRgba8(timed.frame.into_image())
+        .thumbnail(max_size, max_size)
+        .to_rgba8();
+    Ok(Frame::from_image(img))
+}

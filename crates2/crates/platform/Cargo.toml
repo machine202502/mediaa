@@ -1,0 +1,39 @@
+[package]
+name = "mediaa2-platform"
+description = "MediaA 2 Windows integrations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mediaa2-core.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+log.workspace = true
+image.workspace = true
+crossbeam-channel.workspace = true
+parking_lot = "0.12"
+hound.workspace = true
+xcap = "0.9"
+cpal = "0.18"
+clipboard-rs = "0.3"
+trash = "5"
+opener = { version = "0.9", features = ["reveal"] }
+raw-window-handle = "0.6"
+tiny-skia = "0.12"
+rfd = "0.17"
+auto-launch = "0.6"
+interprocess = { version = "2.4", features = ["tokio"] }
+tokio = { version = "1", features = ["io-util", "net", "sync", "time", "rt", "macros"] }
+tray-icon = { version = "0.26", default-features = false }
+global-hotkey = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2.0.1"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

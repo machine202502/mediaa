@@ -1,0 +1,27 @@
+[package]
+name = "mediaa2-backend"
+description = "MediaA 2 daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mediaa2-core.workspace = true
+mediaa2-protocol.workspace = true
+mediaa2-storage.workspace = true
+mediaa2-platform.workspace = true
+mediaa2-media.workspace = true
+mediaa2-i18n.workspace = true
+anyhow.workspace = true
+image.workspace = true
+chrono.workspace = true
+crossbeam-channel.workspace = true
+log.workspace = true
+rust-i18n.workspace = true
+tokio = { workspace = true, features = ["sync", "net", "time", "rt-multi-thread", "macros", "io-util"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

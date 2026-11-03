@@ -1,0 +1,24 @@
+[package]
+name = "mediaa2"
+description = "MediaA 2 launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mediaa"
+path = "src/main.rs"
+
+[[bin]]
+name = "mediaa-agent"
+path = "src/agent.rs"
+
+[dependencies]
+mediaa2-backend.workspace = true
+mediaa2-frontend.workspace = true
+mediaa2-platform.workspace = true
+anyhow.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

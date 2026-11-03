@@ -309,3 +309,10 @@
 | ST-11 | 02.11.26 22:55 | Test strategy: pure transition, fake effects, protocol/sync, frontend projection; OS smoke отдельно | ожидание | [state-test-strategy.md](tasks/state-test-strategy.md) |
 
 | ST-12 | 02.11.26 23:00 | Frontend-owned state: ClientPreferences/ui-state.toml, миграция viewer_volume из Settings, backend не знает | ожидание | [state-client-state.md](tasks/state-client-state.md) |
+
+| RW-0 | 02.11.26 23:25 | Аудит и проект переписывания MediaA в `crates2`: 9 крейтов, роли, протокол, состояние, тесты, бюджет; агент исключён | готово | [rewrite-crates2.md](tasks/rewrite-crates2.md) |
+| RW-1 | 02.11.26 23:55 | M0–M2: workspace `crates2`, core, i18n, protocol, storage, platform, media; 299 тестов | готово | [rewrite-crates2.md](tasks/rewrite-crates2.md) |
+| RW-2 | 03.11.26 00:55 | M3–M4: backend IPC/library, frontend shell, страницы Library/Settings/Capture/Record/Audio/Convert | готово (conditional) | [rewrite-crates2.md](tasks/rewrite-crates2.md) |
+| RW-3 | 03.11.26 01:07 | M5–M8: recording/conversion/screenshots, presence/tray/hotkeys, picker overlay; 382 passed / 1 ignored; реальные smoke: screenshot, MKV, MP3, MP4, cold launch | готово (conditional) | [rewrite-crates2.md](tasks/rewrite-crates2.md) |
+| RW-4 | 03.11.26 01:18 | M7: picker с выделением, 8 ручками, Pen/Line/Arrow/Rect/Marker/Text, цветом, толщиной, undo/redo и выбором региона записи | готово (conditional) | [rewrite-crates2.md](tasks/rewrite-crates2.md) |
+| RW-5 | 03.11.26 01:18 | M9 parity: видеопросмотр, hotkey capture, tray badges/язык, page-level kittest, чек-лист удаления старого | в работе | [rewrite-crates2.md](tasks/rewrite-crates2.md) |
