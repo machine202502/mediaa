@@ -1,5 +1,6 @@
 use mediaa2_core::formats::MediaKind;
 use mediaa2_core::hash::stable_hash;
+use mediaa2_core::library::Details;
 use mediaa2_protocol::{PreviewKind, PreviewReady};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -30,9 +31,14 @@ impl PreviewHandle {
         &self,
         path: PathBuf,
         kind: PreviewKind,
+        library: &crate::services::library::LibraryHandle,
+        state: &std::sync::Arc<crate::state::StateStore>,
         tx: mpsc::UnboundedSender<PreviewReady>,
     ) {
         let permits = Arc::clone(&self.permits);
+        let library = library.clone();
+        let state = std::sync::Arc::clone(state);
+        let probe_path = path.clone();
         tokio::task::spawn(async move {
             let Ok(permit) = permits.acquire_owned().await else {
                 return;
@@ -50,6 +56,28 @@ impl PreviewHandle {
                     file,
                 });
             }
+        });
+        // the tile is on the screen: probe its media details once and keep
+        // them for the library badges, the hover timeline and the player
+        tokio::task::spawn_blocking(move || {
+            let path = probe_path;
+            let kind = match MediaKind::from_path(&path) {
+                Some(kind) => kind,
+                None => return,
+            };
+            let Ok(info) = mediaa2_media::preview::details(&path, kind) else {
+                return;
+            };
+            library.set_details(
+                &path,
+                Details {
+                    width: info.width,
+                    height: info.height,
+                    duration_secs: info.duration_us.map(|us| us as f64 / 1e6),
+                    audio: info.audio_streams > 0,
+                },
+            );
+            state.update(|current| current.library_revision = library.revision());
         });
     }
 }

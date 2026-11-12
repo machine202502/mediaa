@@ -1,5 +1,6 @@
 use crate::client::{Client, ClientEvent};
 use crate::pages::{self, Actions, Ctx};
+use crate::player::Player;
 use crate::textures::Textures;
 use crate::ui::theme;
 use crate::ui_state::UiState;
@@ -8,8 +9,10 @@ use eframe::egui;
 use mediaa2_core::navigation::Page;
 use mediaa2_core::notices::NoticeLevel;
 use mediaa2_core::settings::Settings;
+use mediaa2_i18n::t;
 use mediaa2_protocol::state::{ConversionState, PickerState, RecordingState, RecoveryState, State};
 use mediaa2_protocol::{ClientCommand, LibraryCommand, UiEvent, UiRequest, UiStartup};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 pub struct App {
@@ -17,6 +20,18 @@ pub struct App {
     view: BackendView,
     ui: UiState,
     textures: Textures,
+    /// the built-in player behind the open viewer, with the audio device
+    /// opening in the background
+    player: Option<Player>,
+    audio_open: Option<(
+        std::path::PathBuf,
+        std::sync::mpsc::Receiver<Result<mediaa2_platform::audio::AudioOut, String>>,
+    )>,
+    /// viewer files whose media details were requested (once per session)
+    probed: HashSet<std::path::PathBuf>,
+    /// a duration probe running for the open player, done by the UI itself
+    /// so the timeline works even when the backend has no details yet
+    probing: Option<(std::path::PathBuf, std::sync::mpsc::Receiver<f64>)>,
     actions: Actions,
     monitors: Vec<mediaa2_core::screen::MonitorInfo>,
     windows: Vec<mediaa2_core::screen::WindowInfo>,
@@ -37,6 +52,9 @@ pub struct App {
     picker_deadline: Option<Instant>,
     picker_visible: bool,
     picker_frames: u32,
+    picker_ghosted: bool,
+    picker_was_visible: bool,
+    picker_texture_wait: u32,
 }
 
 impl App {
@@ -64,6 +82,10 @@ impl App {
             view: BackendView::new(default_state(settings)),
             ui,
             textures: Textures::default(),
+            player: None,
+            audio_open: None,
+            probed: HashSet::new(),
+            probing: None,
             actions: Actions::default(),
             monitors,
             windows,
@@ -84,6 +106,9 @@ impl App {
             picker_deadline: None,
             picker_visible: false,
             picker_frames: 0,
+            picker_ghosted: false,
+            picker_was_visible: false,
+            picker_texture_wait: 0,
         }
     }
 
@@ -116,7 +141,7 @@ impl App {
                 if self.view.picker().is_some() && self.ui.picker.is_none() {
                     if let Some(picker) = self.view.picker() {
                         let picker = picker.clone();
-                        self.open_picker(ctx, picker);
+                        self.open_picker(picker);
                     }
                 }
                 if !self.dev_done {
@@ -205,7 +230,9 @@ impl App {
                         .send(ClientCommand::Library(LibraryCommand::Query(
                             self.ui.library.query.clone(),
                         )));
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    if !self.picker_window {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    }
                     ctx.request_repaint();
                 }
                 Ok(mediaa2_protocol::CommandOk::PickerStarted { session }) => {
@@ -213,7 +240,7 @@ impl App {
                         if let Some(picker) = self.view.picker() {
                             let picker = picker.clone();
                             if picker.session == session {
-                                self.open_picker(ctx, picker);
+                                self.open_picker(picker);
                             }
                         }
                     }
@@ -237,9 +264,53 @@ impl App {
                     self.client
                         .send(ClientCommand::Library(LibraryCommand::Refresh));
                 }
+                Ok(mediaa2_protocol::CommandOk::Transcript(view)) => {
+                    self.ui.transcript = Some(view);
+                    ctx.request_repaint();
+                }
+                Ok(mediaa2_protocol::CommandOk::ChatView(view)) => {
+                    self.ui.chat_timeline = Some(view.timeline);
+                    self.ui.chat_id = Some(view.chat);
+                    self.ui.chat_model = view.model;
+                    ctx.request_repaint();
+                }
+                Ok(mediaa2_protocol::CommandOk::Chat { chat, model }) => {
+                    self.ui.chat_id = Some(chat);
+                    self.ui.chat_model = model;
+                    let store = self.ui.chat_store.clone();
+                    if let Some(store) = store {
+                        self.client.send(ClientCommand::Transcription(
+                            mediaa2_protocol::TranscriptionCommand::LoadChat { store, chat },
+                        ));
+                    }
+                    ctx.request_repaint();
+                }
+                Ok(mediaa2_protocol::CommandOk::Topics(topics)) => {
+                    self.ui.topics = Some(topics);
+                    ctx.request_repaint();
+                }
+                Ok(mediaa2_protocol::CommandOk::Models(models)) => {
+                    for (id, list) in &models {
+                        self.ui.transcription.checks.insert(
+                            id.clone(),
+                            Ok(t!("transcription.provider_ok", n = list.len()).into_owned()),
+                        );
+                    }
+                    self.ui.transcription.checking.clear();
+                    self.ui.transcription.models.extend(models);
+                    self.ui.transcription.models_checking = false;
+                    ctx.request_repaint();
+                }
+                Ok(mediaa2_protocol::CommandOk::Web(count)) => {
+                    self.ui.transcription.web_status =
+                        Some(Ok(t!("transcription.web_ok", n = count).into_owned()));
+                    ctx.request_repaint();
+                }
                 Ok(_) => {}
                 Err(error) => {
                     self.command_error = Some(error.message.clone());
+                    self.ui.transcription.models_checking = false;
+                    self.ui.transcription.checking.clear();
                     self.actions.notice(
                         NoticeLevel::Error,
                         error.message,
@@ -252,18 +323,30 @@ impl App {
             },
             ClientEvent::UiRequest(request) => match request {
                 UiRequest::ShowWindow => {
-                    let _ = mediaa2_platform::window::show_window("MediaA");
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    if self.picker_window {
+                        self.picker_was_visible = true;
+                    } else {
+                        if self.picker_ghosted {
+                            let _ = mediaa2_platform::window::unghost_window("MediaA", true);
+                            self.picker_ghosted = false;
+                            self.picker_was_visible = true;
+                        }
+                        let _ = mediaa2_platform::window::show_window("MediaA");
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
                 }
                 UiRequest::HideWindow => {
                     let _ = mediaa2_platform::window::hide_window("MediaA");
+                    if self.picker_window {
+                        self.picker_was_visible = false;
+                    }
                 }
                 UiRequest::OpenPicker { session } => {
                     if self.ui.picker.is_none() {
                         if let Some(picker) = self.view.picker() {
                             let state = picker.clone();
                             if state.session == session {
-                                self.open_picker(ctx, state);
+                                self.open_picker(state);
                             }
                         }
                     }
@@ -304,7 +387,7 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    fn open_picker(&mut self, ctx: &egui::Context, picker: PickerState) {
+    fn open_picker(&mut self, picker: PickerState) {
         if self
             .ui
             .picker
@@ -318,9 +401,157 @@ impl App {
         self.picker_deadline = None;
         self.picker_visible = false;
         self.picker_frames = 0;
-        let _ = self.textures.get_or_load(ctx, &picker.image);
+        self.picker_texture_wait = 0;
+        self.picker_ghosted = false;
+        self.picker_was_visible = false;
+        self.textures.begin_load(&picker.image);
         self.ui.open_picker(picker_ui(&picker));
-        let _ = mediaa2_platform::window::hide_window("MediaA");
+    }
+
+    fn restore_main_window(&mut self) {
+        if self.picker_ghosted {
+            let _ = mediaa2_platform::window::unghost_window("MediaA", self.picker_was_visible);
+            self.picker_ghosted = false;
+        }
+        if self.picker_was_visible {
+            let _ = mediaa2_platform::window::show_window("MediaA");
+        }
+    }
+
+    /// Keeps the viewer player in step with the open recording: creates it,
+    /// attaches the audio device once it opens, drops it on close.
+    fn sync_player(&mut self) {
+        let Some(viewer) = &self.ui.viewer else {
+            if self.player.take().is_some() {
+                self.textures.drop_player_texture();
+            }
+            self.audio_open = None;
+            return;
+        };
+        let path = viewer.path.clone();
+        let fresh = !self
+            .player
+            .as_ref()
+            .is_some_and(|player| player.path() == path);
+        if fresh {
+            let entry = self
+                .view
+                .library
+                .entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .cloned();
+            let kind = entry
+                .as_ref()
+                .map(|entry| entry.kind)
+                .or_else(|| mediaa2_core::formats::MediaKind::from_path(&path))
+                .unwrap_or(mediaa2_core::formats::MediaKind::Image);
+            let duration = entry
+                .as_ref()
+                .and_then(|entry| entry.details.as_ref())
+                .and_then(|details| details.duration_secs)
+                .unwrap_or(0.0);
+            self.textures.drop_player_texture();
+            if kind == mediaa2_core::formats::MediaKind::Image {
+                self.player = None;
+                self.audio_open = None;
+            } else {
+                let volume = self.view.settings().viewer_volume;
+                let mut player = Player::new(
+                    &path,
+                    duration,
+                    kind == mediaa2_core::formats::MediaKind::Animation,
+                    kind != mediaa2_core::formats::MediaKind::Audio,
+                );
+                player.set_volume(volume);
+                player.expect_audio();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let spawned = std::thread::Builder::new()
+                    .name("viewer-audio-open".into())
+                    .spawn(move || {
+                        let result = mediaa2_platform::audio::AudioOut::open()
+                            .map_err(|error| format!("{error:#}"));
+                        let _ = tx.send(result);
+                    });
+                self.audio_open = spawned.ok().map(|_| (path.clone(), rx));
+                self.player = Some(player);
+            }
+        }
+        // the opened file may not have been probed yet: ask once, the
+        // preview pass persists the details and pushes the new state
+        let missing_details = self
+            .view
+            .library
+            .entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .is_some_and(|entry| entry.details.is_none());
+        if missing_details && self.probed.insert(path.clone()) {
+            self.client.send(ClientCommand::Preview {
+                path: path.clone(),
+                kind: mediaa2_protocol::PreviewKind::Thumbnail,
+            });
+        }
+        // adopt the duration the backend has learned meanwhile
+        if let Some(player) = &mut self.player {
+            if let Some(duration) = self
+                .view
+                .library
+                .entries
+                .iter()
+                .find(|entry| entry.path == path)
+                .and_then(|entry| entry.details.as_ref())
+                .and_then(|details| details.duration_secs)
+            {
+                player.set_duration(duration);
+            }
+        }
+        // and probe it in the UI itself: the timeline must not depend on the
+        // backend having the details ready
+        if let Some(player) = &mut self.player {
+            if player.duration() <= 0.0
+                && self.probing.is_none()
+                && self.probed.insert(path.clone())
+            {
+                let probe_path = path.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                let spawned = std::thread::Builder::new()
+                    .name("viewer-duration-probe".into())
+                    .spawn(move || {
+                        let kind = mediaa2_core::formats::MediaKind::from_path(&probe_path)
+                            .unwrap_or(mediaa2_core::formats::MediaKind::Image);
+                        let duration = mediaa2_media::preview::details(&probe_path, kind)
+                            .ok()
+                            .and_then(|info| info.duration_secs())
+                            .unwrap_or(0.0);
+                        let _ = tx.send(duration);
+                    });
+                if spawned.is_ok() {
+                    self.probing = Some((path.clone(), rx));
+                }
+            }
+        }
+        if let (Some(player), Some((probe_path, rx))) = (&mut self.player, &self.probing) {
+            if player.path() == probe_path {
+                if let Ok(duration) = rx.try_recv() {
+                    player.set_duration(duration);
+                    self.probing = None;
+                }
+            } else {
+                self.probing = None;
+            }
+        }
+        if let (Some(player), Some((open_path, rx))) = (&mut self.player, &self.audio_open) {
+            if player.path() == open_path {
+                if let Ok(result) = rx.try_recv() {
+                    match result {
+                        Ok(audio) => player.attach_audio(audio),
+                        Err(_) => player.audio_unavailable(),
+                    }
+                    self.audio_open = None;
+                }
+            }
+        }
     }
 
     fn finish_picker(&mut self, ctx: &egui::Context) {
@@ -335,7 +566,7 @@ impl App {
             self.closing = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else {
-            let _ = mediaa2_platform::window::show_window("MediaA");
+            self.restore_main_window();
         }
     }
 
@@ -358,7 +589,7 @@ impl App {
             self.closing = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else {
-            let _ = mediaa2_platform::window::show_window("MediaA");
+            self.restore_main_window();
         }
     }
 
@@ -450,6 +681,7 @@ impl eframe::App for App {
                         ui: &mut self.ui,
                         actions: &mut self.actions,
                         textures: &mut self.textures,
+                        player: None,
                         monitors: &self.monitors,
                         windows: &self.windows,
                         microphones: &self.microphones,
@@ -462,26 +694,57 @@ impl eframe::App for App {
                     let _ = mediaa2_platform::window::disable_open_animation("MediaA Region");
                     let _ = mediaa2_platform::window::exclude_from_capture("MediaA Region");
                 }
-                if self.picker_frames >= 2 && !self.picker_visible {
+                let _ = mediaa2_platform::window::hide_taskbar_button("MediaA Region");
+                if matches!(self.startup, UiStartup::Picker { .. }) {
+                    let _ = mediaa2_platform::window::ghost_window("MediaA");
+                    self.picker_ghosted = true;
+                }
+                let texture_ready = self.textures.poll(&gui, &picker.image).is_some();
+                if self.picker_frames >= 2 && texture_ready && !self.picker_visible {
+                    if !self.picker_ghosted {
+                        let shown =
+                            mediaa2_platform::window::window_visible("MediaA").unwrap_or(false);
+                        let _ = mediaa2_platform::window::ghost_window("MediaA");
+                        self.picker_ghosted = true;
+                        self.picker_was_visible = shown || matches!(self.startup, UiStartup::Show);
+                    }
                     self.picker_visible = true;
                     gui.send_viewport_cmd_to(id, egui::ViewportCommand::Visible(true));
                     gui.send_viewport_cmd_to(id, egui::ViewportCommand::Focus);
+                    self.client.send_ui(UiEvent::PickerShown);
                     gui.request_repaint();
                 } else if !self.picker_visible {
+                    if !texture_ready {
+                        self.picker_texture_wait += 1;
+                        if self.picker_texture_wait > PICKER_TEXTURE_WAIT_FRAMES {
+                            self.client.send(ClientCommand::Picker(
+                                mediaa2_protocol::PickerCommand::Cancel {
+                                    session: picker.session,
+                                },
+                            ));
+                            self.actions.notice(
+                                mediaa2_core::notices::NoticeLevel::Error,
+                                "Screenshot",
+                                "the frozen frame is unavailable".to_string(),
+                            );
+                            self.ui.close_picker();
+                            self.finish_picker(&gui);
+                        }
+                    }
                     gui.request_repaint();
                 }
                 if self.ui.picker.is_none() {
                     self.finish_picker(&gui);
-                } else {
-                    let _ = mediaa2_platform::window::hide_window("MediaA");
                 }
             }
         } else {
+            self.sync_player();
             let mut ctx = Ctx {
                 view: &self.view,
                 ui: &mut self.ui,
                 actions: &mut self.actions,
                 textures: &mut self.textures,
+                player: self.player.as_mut(),
                 monitors: &self.monitors,
                 windows: &self.windows,
                 microphones: &self.microphones,
@@ -528,13 +791,19 @@ impl eframe::App for App {
             gui.send_viewport_cmd(egui::ViewportCommand::Close);
         }
 
-        if self.view.recording_active() || self.view.conversion_busy() {
+        if self.view.recording_active()
+            || self.view.conversion_busy()
+            || self.view.state.transcription.running
+            || self.view.state.transcription.streaming_text.is_some()
+        {
             gui.request_repaint_after(Duration::from_millis(100));
         } else {
             gui.request_repaint_after(Duration::from_millis(500));
         }
     }
 }
+
+const PICKER_TEXTURE_WAIT_FRAMES: u32 = 120;
 
 fn picker_viewport_id() -> egui::ViewportId {
     egui::ViewportId::from_hash_of("mediaa2-picker")
@@ -587,6 +856,7 @@ fn default_state(settings: Settings) -> State {
         recovery: RecoveryState { running: false },
         notices: Vec::new(),
         picker: None,
+        transcription: mediaa2_protocol::TranscriptionState::default(),
         library_revision: 0,
     }
 }
@@ -615,7 +885,6 @@ pub fn run_ui(args: &[String]) -> anyhow::Result<()> {
             return Ok(());
         }
     };
-    let visible = matches!(startup, UiStartup::Show);
     let background = std::env::var("MEDIAA2_DEV_BACKGROUND").is_ok_and(|value| value == "1");
     let window_icon = mediaa2_platform::tray_icon::icon(crate::dev_agent(), 2);
     let mut viewport = egui::ViewportBuilder::default()
@@ -624,7 +893,7 @@ pub fn run_ui(args: &[String]) -> anyhow::Result<()> {
         .with_inner_size([1120.0, 760.0])
         .with_min_inner_size([480.0, 480.0])
         .with_transparent(true)
-        .with_visible(visible)
+        .with_visible(background)
         .with_icon(std::sync::Arc::new(egui::IconData {
             rgba: window_icon.rgba,
             width: window_icon.width,
@@ -635,6 +904,7 @@ pub fn run_ui(args: &[String]) -> anyhow::Result<()> {
     }
     let options = eframe::NativeOptions {
         viewport,
+        persist_window: false,
         ..Default::default()
     };
     let result = eframe::run_native(
@@ -646,19 +916,9 @@ pub fn run_ui(args: &[String]) -> anyhow::Result<()> {
 }
 
 fn page_from_args(args: &[String]) -> Option<Page> {
-    args.iter().find_map(|arg| {
-        let value = arg.strip_prefix("--page=")?;
-        match value {
-            "screenshot" => Some(Page::Screenshot),
-            "record" => Some(Page::Record),
-            "audio" | "record_audio" => Some(Page::RecordAudio),
-            "library" => Some(Page::Library),
-            "convert" => Some(Page::Convert),
-            "settings" => Some(Page::Settings),
-            "about" => Some(Page::About),
-            _ => None,
-        }
-    })
+    args.iter()
+        .find_map(|arg| arg.strip_prefix("--page="))
+        .and_then(Page::from_arg)
 }
 
 fn scope() -> String {

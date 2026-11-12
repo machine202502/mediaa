@@ -1,6 +1,6 @@
 use crate::services::{
     ConversionHandle, LibraryHandle, PresenceHandle, PreviewHandle, RecordingHandle,
-    ScreenshotHandle, SettingsHandle,
+    ScreenshotHandle, SettingsHandle, TranscriptionHandle,
 };
 use crate::state::StateStore;
 use anyhow::Context;
@@ -157,6 +157,7 @@ pub async fn serve(
     recording: RecordingHandle,
     conversion: ConversionHandle,
     screenshots: ScreenshotHandle,
+    transcription: crate::services::TranscriptionHandle,
     previews: PreviewHandle,
     presence: PresenceHandle,
     mailbox: UiMailbox,
@@ -203,6 +204,7 @@ pub async fn serve(
         let recording = recording.clone();
         let conversion = conversion.clone();
         let screenshots = screenshots.clone();
+        let transcription = transcription.clone();
         let previews = previews.clone();
         let presence = presence.clone();
         let mailbox = mailbox.clone();
@@ -217,6 +219,7 @@ pub async fn serve(
                 recording,
                 conversion,
                 screenshots,
+                transcription,
                 previews,
                 presence,
                 mailbox,
@@ -258,6 +261,7 @@ async fn handle_connection<S>(
     recording: RecordingHandle,
     conversion: ConversionHandle,
     screenshots: ScreenshotHandle,
+    transcription: crate::services::TranscriptionHandle,
     previews: PreviewHandle,
     presence: PresenceHandle,
     mailbox: UiMailbox,
@@ -298,6 +302,7 @@ where
         return Ok(());
     }
     let is_ui = matches!(role, Role::Ui);
+    let is_launcher = matches!(role, Role::Launcher);
     let gate_lease = match role {
         Role::Ui => match gate.claim() {
             Some(lease) => Some(lease),
@@ -407,9 +412,12 @@ where
                             &conversion,
                             &screenshots,
                             &previews,
+                            &state,
                             &presence,
                             &shutdown,
                             &preview_tx,
+                            is_launcher,
+                            &transcription,
                         )
                         .await;
                         log::info!(
@@ -485,17 +493,20 @@ async fn dispatch(
     conversion: &ConversionHandle,
     screenshots: &ScreenshotHandle,
     previews: &PreviewHandle,
+    state_arc: &Arc<StateStore>,
     presence: &PresenceHandle,
     shutdown: &Shutdown,
     preview_tx: &mpsc::UnboundedSender<PreviewReady>,
+    launcher: bool,
+    transcription: &TranscriptionHandle,
 ) -> Result<CommandOk, CommandError> {
     match command {
         ClientCommand::SetSettings(value) => {
             settings.apply(value).await?;
             Ok(CommandOk::Unit)
         }
-        ClientCommand::ShowWindow => {
-            presence.open();
+        ClientCommand::ShowWindow { page } => {
+            presence.open(page);
             Ok(CommandOk::Unit)
         }
         ClientCommand::Quit => {
@@ -506,13 +517,16 @@ async fn dispatch(
         ClientCommand::Library(command) => handle_library(command, state, library).await,
         ClientCommand::Recording(command) => handle_recording(command, recording).await,
         ClientCommand::Conversion(command) => handle_conversion(command, conversion).await,
-        ClientCommand::Screenshot(command) => handle_screenshot(command, screenshots).await,
+        ClientCommand::Screenshot(command) => {
+            handle_screenshot(command, screenshots, presence, launcher).await
+        }
         ClientCommand::Picker(command) => handle_picker(command, screenshots, presence).await,
         ClientCommand::HotkeysPaused(_) => Ok(CommandOk::Unit),
         ClientCommand::Preview { path, kind } => {
-            previews.request(path, kind, preview_tx.clone());
+            previews.request(path, kind, library, state_arc, preview_tx.clone());
             Ok(CommandOk::Preview(PreviewState::Pending))
         }
+        ClientCommand::Transcription(command) => transcription.dispatch(command).await,
         ClientCommand::Probe { .. } => Err(unavailable()),
     }
 }
@@ -551,6 +565,8 @@ async fn handle_conversion(
 async fn handle_screenshot(
     command: ScreenshotCommand,
     screenshots: &ScreenshotHandle,
+    presence: &PresenceHandle,
+    launcher: bool,
 ) -> Result<CommandOk, CommandError> {
     match command {
         ScreenshotCommand::Monitor { monitor, after } => {
@@ -559,7 +575,16 @@ async fn handle_screenshot(
         ScreenshotCommand::Window { window, after } => {
             screenshots.capture_window(window, after).await
         }
-        ScreenshotCommand::StartPicker => screenshots.start_picker().await,
+        ScreenshotCommand::Fullscreen { after } => screenshots.capture_fullscreen(after).await,
+        ScreenshotCommand::StartPicker => {
+            let result = screenshots.start_picker().await;
+            if launcher {
+                if let Ok(CommandOk::PickerStarted { session }) = &result {
+                    presence.picker_requested(*session);
+                }
+            }
+            result
+        }
     }
 }
 
@@ -694,6 +719,7 @@ mod tests {
     use super::*;
     use crate::services::presence::{PresenceDeps, PresenceOptions};
     use crate::services::test_state;
+    use mediaa2_core::query::LibraryQuery;
     use mediaa2_core::settings::{Settings, ThemePreference};
     use tokio::io::AsyncRead;
 
@@ -730,6 +756,115 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_library_query_returns_probed_audio_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let wav = media.join("Recording_2026-01-02_03-04-05.wav");
+        let mut bytes = Vec::new();
+        let data_len = 8000u32 * 2;
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&8000u32.to_le_bytes());
+        bytes.extend_from_slice(&16000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.extend(std::iter::repeat_n(0u8, data_len as usize));
+        std::fs::write(&wav, bytes).unwrap();
+
+        let state = Arc::new(StateStore::new(test_state()));
+        let settings = SettingsHandle::new(Arc::clone(&state), dir.path().join("settings.toml"));
+        let library = LibraryHandle::open(media).unwrap();
+        library.refresh().unwrap();
+        let notices = crate::services::NoticeRing::new();
+        let recording = RecordingHandle::new(Arc::clone(&state), library.clone(), notices.clone());
+        let conversion =
+            ConversionHandle::new(Arc::clone(&state), library.clone(), notices.clone());
+        let screenshots =
+            ScreenshotHandle::new(Arc::clone(&state), library.clone(), notices.clone());
+        let transcription = TranscriptionHandle::new(Arc::clone(&state));
+        let transcription_clone = transcription.clone();
+        let previews = PreviewHandle::new();
+        let shutdown = Shutdown::new();
+        let (mailbox, signals) = mailbox();
+        let presence = PresenceHandle::new(PresenceDeps {
+            state: Arc::clone(&state),
+            mailbox: mailbox.clone(),
+            signals,
+            screenshots: screenshots.clone(),
+            recording: recording.clone(),
+            conversion: conversion.clone(),
+            notices,
+            shutdown: shutdown.clone(),
+            options: PresenceOptions::disabled(),
+        });
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let server_state = Arc::clone(&state);
+        let server_shutdown = shutdown.clone();
+        let task = tokio::spawn(async move {
+            handle_connection(
+                server,
+                server_state,
+                settings,
+                library,
+                recording,
+                conversion,
+                screenshots,
+                transcription_clone,
+                previews,
+                presence,
+                mailbox,
+                server_shutdown,
+                UiGate::new(),
+            )
+            .await
+        });
+
+        write_frame(
+            &mut client,
+            &ClientMessage::Hello {
+                protocol: PROTOCOL,
+                role: Role::Ui,
+                startup: None,
+            },
+        )
+        .await
+        .unwrap();
+        let _ = next_message(&mut client).await;
+
+        write_frame(
+            &mut client,
+            &ClientMessage::Command {
+                id: 3,
+                command: ClientCommand::Library(LibraryCommand::Query(LibraryQuery::default())),
+            },
+        )
+        .await
+        .unwrap();
+        let ServerMessage::Result { result, .. } = next_message(&mut client).await else {
+            panic!("expected the query result");
+        };
+        let Ok(CommandOk::LibraryPage(page)) = result else {
+            panic!("expected a library page: {result:?}");
+        };
+        assert_eq!(page.entries.len(), 1);
+        let details = page.entries[0]
+            .details
+            .as_ref()
+            .expect("the audio file carries probed details");
+        let duration = details.duration_secs.expect("the duration");
+        assert!((0.9..1.1).contains(&duration), "duration: {duration}");
+        assert!(details.audio);
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn a_ui_connection_applies_settings_and_quits() {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(StateStore::new(test_state()));
@@ -742,6 +877,8 @@ mod tests {
             ConversionHandle::new(Arc::clone(&state), library.clone(), notices.clone());
         let screenshots =
             ScreenshotHandle::new(Arc::clone(&state), library.clone(), notices.clone());
+        let transcription = TranscriptionHandle::new(Arc::clone(&state));
+        let transcription_clone = transcription.clone();
         let previews = PreviewHandle::new();
         let shutdown = Shutdown::new();
         let (mailbox, signals) = mailbox();
@@ -769,6 +906,7 @@ mod tests {
                 recording,
                 conversion,
                 screenshots,
+                transcription_clone,
                 previews,
                 presence,
                 mailbox,

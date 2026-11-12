@@ -1,5 +1,5 @@
 use mediaa2_core::formats::MediaKind;
-use mediaa2_core::library::LibraryEntry;
+use mediaa2_core::library::{Details, LibraryEntry};
 use mediaa2_core::naming;
 use mediaa2_core::query::{LibraryPage, LibraryQuery};
 use mediaa2_platform::files;
@@ -129,6 +129,19 @@ impl LibraryHandle {
         })
     }
 
+    /// Persists the probed media details of one recording (from the preview
+    /// pass) and refreshes the UI state.
+    pub fn set_details(&self, path: &Path, details: Details) {
+        let mut library = self.inner.lock().expect("library lock poisoned");
+        match library.db.upsert_details(path, &details) {
+            Ok(true) => {
+                library.revision = library.revision.saturating_add(1);
+            }
+            Ok(false) => {}
+            Err(error) => log::debug!("library details {}: {error:#}", path.display()),
+        }
+    }
+
     pub fn revision(&self) -> u64 {
         self.inner.lock().expect("library lock poisoned").revision
     }
@@ -141,6 +154,20 @@ fn entry_from_path(path: &Path) -> Option<LibraryEntry> {
     if !metadata.is_file() {
         return None;
     }
+    // audio files probe in milliseconds: the scan carries their details
+    // right away, so the player and the hover timeline work on first open
+    let details = if kind == MediaKind::Audio {
+        mediaa2_media::preview::details(path, kind)
+            .ok()
+            .map(|info| Details {
+                width: info.width,
+                height: info.height,
+                duration_secs: info.duration_secs(),
+                audio: info.audio_streams > 0,
+            })
+    } else {
+        None
+    };
     Some(LibraryEntry {
         path: path.to_path_buf(),
         name: path
@@ -152,7 +179,7 @@ fn entry_from_path(path: &Path) -> Option<LibraryEntry> {
         size: metadata.len(),
         modified: metadata.modified().unwrap_or(UNIX_EPOCH),
         taken: parsed.taken,
-        details: None,
+        details,
     })
 }
 
@@ -204,6 +231,40 @@ mod tests {
         assert_eq!(page.entries[0].kind, MediaKind::Video);
         assert_eq!(page.entries[0].size, 1);
         assert_eq!(library.revision(), 1);
+    }
+
+    #[test]
+    fn an_audio_file_is_probed_by_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let media = dir.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let wav = media.join("Recording_2026-01-02_03-04-05.wav");
+        // a pure-Rust one-second 8 kHz mono PCM wav, no fixtures needed
+        let mut bytes = Vec::new();
+        let data_len = 8000u32 * 2;
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_len).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&8000u32.to_le_bytes());
+        bytes.extend_from_slice(&16000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_len.to_le_bytes());
+        bytes.extend(std::iter::repeat_n(0u8, data_len as usize));
+        std::fs::write(&wav, bytes).unwrap();
+
+        let entry = entry_from_path(&wav).expect("the audio entry");
+        let details = entry.details.expect("probed by the scan");
+        assert!(details.audio);
+        let duration = details.duration_secs.expect("the duration");
+        assert!(
+            (0.9..1.1).contains(&duration),
+            "one second of audio: {duration}"
+        );
     }
 
     #[test]

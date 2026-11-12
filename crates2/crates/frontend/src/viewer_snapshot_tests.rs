@@ -54,6 +54,7 @@ impl ViewerSnap {
             viewer.volume = 1.0;
         }
         let mut view = BackendView::new(State {
+            transcription: mediaa2_protocol::TranscriptionState::default(),
             settings: settings.clone(),
             recording: RecordingState::Idle,
             conversion: ConversionState::Idle,
@@ -104,6 +105,7 @@ impl ViewerSnap {
             ui: &mut self.ui,
             actions: &mut self.actions,
             textures: &mut self.textures,
+            player: None,
             monitors: &self.monitors,
             windows: &self.windows,
             microphones: &self.microphones,

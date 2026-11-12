@@ -1,0 +1,1198 @@
+use crate::queue::{Child, Filter, KindGroup, NewTask, Resource, Scheduler, Task, TaskId};
+use crate::transcript_db::Transcript;
+use mediaa2_core::agent::TranscriptionOptions;
+use serde_json::{json, Value};
+use std::path::Path;
+
+pub use crate::stages::{readiness, Readiness, Stage};
+
+/// The root task of one transcription run; stored queue databases may still
+/// hold it under the old name.
+pub const PIPELINE_KIND: &str = "transcription";
+pub const PIPELINE_KIND_OLD: &str = "analysis";
+pub const ANALYSIS_KIND: &str = PIPELINE_KIND;
+
+/// Whether the task is a transcription run, whatever named it.
+pub fn is_pipeline_kind(kind: &str) -> bool {
+    kind == PIPELINE_KIND || kind == PIPELINE_KIND_OLD
+}
+
+fn stages(from: Stage, options: &TranscriptionOptions) -> Vec<Stage> {
+    let mut active: Vec<Stage> = Vec::new();
+    for stage in Stage::ALL.into_iter().filter(|stage| *stage >= from) {
+        let wanted = stage == from || stage.chosen(options);
+        let prerequisite = match stage {
+            Stage::Topics => Some(Stage::Index),
+            Stage::Details => Some(Stage::Topics),
+            _ => None,
+        };
+        let ready = prerequisite.is_none_or(|needed| needed < from || active.contains(&needed));
+        if wanted && ready && stage.kind().is_some() {
+            active.push(stage);
+        }
+    }
+    active
+}
+
+fn stage_input(stage: Stage, path: &Path, options: &TranscriptionOptions) -> Value {
+    match stage {
+        Stage::Transcribe => {
+            json!({ "path": path, "diarize": options.diarize, "speakers": options.speakers })
+        }
+        _ => json!({ "path": path }),
+    }
+}
+
+fn enqueue_analysis(
+    sched: &Scheduler,
+    ai_dir: &Path,
+    path: &Path,
+    options: &TranscriptionOptions,
+    from: Stage,
+) -> anyhow::Result<TaskId> {
+    let id = crate::transcript_db::file_id(path)?;
+    let mut stages = stages(from, options);
+    anyhow::ensure!(!stages.is_empty(), "no analysis stage to run from {from:?}");
+    if stages.contains(&Stage::Topics) {
+        stages.retain(|stage| *stage != Stage::Details);
+    }
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let minutes = mediaa2_media::info::probe(path)
+        .ok()
+        .and_then(|info| info.duration_secs())
+        .unwrap_or(0.0)
+        / 60.0;
+    let root = NewTask::new(ANALYSIS_KIND, &name, &json!({ "path": path }))
+        .composite()
+        .scope(&id)
+        .analysis(&id);
+    let mut children = Vec::with_capacity(stages.len());
+    for (i, stage) in stages.iter().enumerate() {
+        let child = match stage {
+            Stage::Topics => Child::new(
+                crate::outline::topics_task(path, options)
+                    .scope(&id)
+                    .units(minutes)
+                    .priority(10),
+            )
+            .with_children(vec![Child::new(
+                crate::outline::plan_task(path, options)
+                    .scope(&id)
+                    .priority(10),
+            )]),
+            Stage::Details => {
+                let t = Transcript::open(ai_dir, &id)?;
+                let chapters = t.chapters()?;
+                anyhow::ensure!(
+                    !chapters.is_empty(),
+                    "{} has no topics to detail",
+                    path.display()
+                );
+                let replies = t.dialog()?;
+                Child::new(crate::outline::details_task(path).scope(&id).priority(10))
+                    .with_children(crate::outline::detail_tasks(
+                        path, options, &chapters, &replies,
+                    ))
+            }
+            _ => {
+                let kind = stage
+                    .kind()
+                    .expect("only stages with a task are in the chain");
+                Child::new(
+                    stage_task(kind, &name, &stage_input(*stage, path, options), &id)
+                        .units(minutes)
+                        .priority(10),
+                )
+            }
+        };
+        children.push(if i == 0 { child } else { child.after(&[i - 1]) });
+    }
+    Ok(sched.enqueue_tree(root, children)?.0)
+}
+
+fn stage_task(kind: &str, name: &str, input: &Value, id: &str) -> NewTask {
+    let resource = match kind {
+        "transcribe" | "diarize" => Resource::Speech,
+        "index" => Resource::Embed,
+        _ => Resource::Llm,
+    };
+    NewTask::new(kind, name, input)
+        .resource(resource)
+        .scope(id)
+        .analysis(id)
+}
+
+pub fn start(
+    sched: &Scheduler,
+    ai_dir: &Path,
+    path: &Path,
+    options: TranscriptionOptions,
+) -> anyhow::Result<TaskId> {
+    enqueue_analysis(sched, ai_dir, path, &options, Stage::Transcribe)
+}
+
+pub fn restart(
+    sched: &Scheduler,
+    ai_dir: &Path,
+    path: &Path,
+    from: Stage,
+    options: TranscriptionOptions,
+) -> anyhow::Result<TaskId> {
+    let id = crate::transcript_db::file_id(path)?;
+    let chain = stages(from, &options);
+    anyhow::ensure!(!chain.is_empty(), "no analysis stage to run from {from:?}");
+    sched.cancel_analysis(&id)?;
+    for stage in chain {
+        stage.reset(ai_dir, &id)?;
+    }
+    enqueue_analysis(sched, ai_dir, path, &options, from)
+}
+
+pub fn active(sched: &Scheduler, id: &str) -> anyhow::Result<Option<Task>> {
+    let filter = Filter {
+        scope: Some(id.to_string()),
+        group: KindGroup::Analysis,
+    };
+    Ok(sched
+        .store()
+        .top_level(&filter)?
+        .into_iter()
+        .filter(|t| is_pipeline_kind(&t.kind) && !t.status.is_finished())
+        .max_by_key(|t| t.id))
+}
+
+pub fn prioritize_detail(sched: &Scheduler, file_id: &str, topic: usize) -> anyhow::Result<usize> {
+    let mut raised = 0;
+    for task in sched.store().list()? {
+        if task.kind != crate::outline::DETAIL_KIND
+            || task.status.is_finished()
+            || task.scope.as_deref() != Some(file_id)
+        {
+            continue;
+        }
+        let Ok(input) = serde_json::from_value::<crate::outline::TopicInput>(task.input.clone())
+        else {
+            continue;
+        };
+        if input.topic != topic {
+            continue;
+        }
+        sched.set_priority(task.id, crate::outline::DETAIL_PRIORITY)?;
+        raised += 1;
+    }
+    Ok(raised)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::outline_db::{Chapter, Digest};
+    use crate::queue::{Scheduler, Status as TaskStatus, Store};
+    use crate::retrieval::Chunk;
+    use mediaa2_core::agent::{AgentSettings, ModelChoices, ModelSource};
+    use mediaa2_core::transcript::{Reply, Word};
+    use mediaa2_model_eval::testing::FakeEngine;
+    use mediaa2_model_eval::Engine;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    fn wav(path: &Path, seconds: f64) {
+        let rate = 8_000u32;
+        let samples = (seconds * f64::from(rate)) as u32;
+        let data = samples * 2;
+        let mut bytes = Vec::with_capacity(44 + data as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&rate.to_le_bytes());
+        bytes.extend_from_slice(&(rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data.to_le_bytes());
+        bytes.resize(44 + data as usize, 0);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn settings(mut models: ModelChoices) -> AgentSettings {
+        let source = |name: &str| ModelSource::new("c", name);
+        if models.speech_recognition.is_none() {
+            models.speech_recognition = Some(source("asr"));
+        }
+        if models.agent.is_none() {
+            models.agent = Some(source("agent"));
+        }
+        if models.embedding.is_none() {
+            models.embedding = Some(source("embed"));
+        }
+        if models.titles.is_none() {
+            models.titles = Some(source("titles"));
+        }
+        AgentSettings {
+            models,
+            ..AgentSettings::default()
+        }
+    }
+
+    fn opened(ai: &Path, engine: Arc<dyn Engine>, settings: &AgentSettings) -> Arc<Scheduler> {
+        let sched = crate::run::open_scheduler(ai).unwrap();
+        let slots = mediaa2_model_eval::slots::Slots::new();
+        let s = settings.clone();
+        let current: Arc<dyn Fn() -> AgentSettings + Send + Sync> = Arc::new(move || s.clone());
+        crate::run::register_stages(
+            &sched,
+            ai,
+            engine,
+            slots,
+            current,
+            Arc::new(crate::run::Streams::default()),
+        );
+        sched
+    }
+
+    fn drain(sched: &Scheduler) {
+        crate::run::drain(sched, Duration::from_secs(60));
+    }
+
+    fn drain_tree(sched: &Scheduler, root: crate::queue::TaskId) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let tree = sched.store().subtree(root).unwrap();
+            let unfinished = tree.iter().any(|task| !task.status.is_finished());
+            if !unfinished && sched.live().is_empty() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{} is not finished: {:?}",
+                root,
+                tree.iter()
+                    .map(|task| (task.kind.as_str(), task.status, task.error.as_deref()))
+                    .collect::<Vec<_>>()
+            );
+            sched.tick().unwrap();
+            if !sched.live().is_empty() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+    }
+
+    const DIGEST: &str = r#"{"title":"Тема","summary":"сводка","decisions":[],"actions":[],"questions":[],"topics":[],"quotes":[]}"#;
+    const SECTIONS: &str =
+        r#"{"sections":[{"title":"Итоги","kind":"list","items":[{"text":"привет"}]}]}"#;
+
+    fn id(path: &Path) -> String {
+        crate::transcript_db::file_id(path).unwrap()
+    }
+
+    #[test]
+    fn the_whole_analysis_runs_in_order_through_the_worker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 3.0);
+        let mut settings = settings(ModelChoices::default());
+        settings.models.speech_recognition = Some({
+            let mut source = ModelSource::new("c", "dia");
+            source.diarize = true;
+            source
+        });
+        let fake = FakeEngine::new();
+        fake.chat_answers(&[DIGEST, SECTIONS]);
+        fake.script_turns(vec![mediaa2_core::transcript::Turn {
+            start: 0.0,
+            end: 3.0,
+            speaker: 0,
+        }]);
+        let engine: Arc<dyn Engine> = Arc::new(fake.clone());
+        let sched = opened(&ai, engine, &settings);
+        let task = start(
+            &sched,
+            &ai,
+            &media,
+            TranscriptionOptions {
+                diarize: true,
+                ..TranscriptionOptions::default()
+            },
+        )
+        .unwrap();
+        drain(&sched);
+        let queue = sched.store();
+
+        let analysis = queue.get(task).unwrap().unwrap();
+        assert_eq!(analysis.status, TaskStatus::Done, "{:?}", analysis.error);
+        let stages: Vec<String> = queue
+            .children(task)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect();
+        assert_eq!(
+            stages,
+            ["transcribe", "index", "topics"],
+            "the dependencies hold the order"
+        );
+        let tree = queue.subtree(task).unwrap();
+        assert!(
+            tree.iter().all(|t| t.status == TaskStatus::Done),
+            "{tree:?}"
+        );
+        let kinds: Vec<&str> = tree.iter().map(|t| t.kind.as_str()).collect();
+        for kind in [
+            "topics-plan",
+            "topic-digest",
+            "topics-merge",
+            "details",
+            "topic-detail",
+        ] {
+            assert!(kinds.contains(&kind), "{kind} is in the tree: {kinds:?}");
+        }
+        assert!(!fake.transcribes().is_empty());
+        assert!(fake.diarizes().is_empty());
+        assert!(fake.embeddings_count() > 0);
+        assert!(!fake.chats().is_empty());
+
+        let ready = readiness(&ai, &id(&media)).unwrap();
+        assert_eq!(
+            ready,
+            Readiness {
+                replies: true,
+                speakers: true,
+                index: true,
+                topics: true,
+                details: true
+            }
+        );
+    }
+
+    #[test]
+    fn disabled_stages_are_not_queued_and_dependencies_follow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 3.0);
+        let settings = settings(ModelChoices::default());
+        let engine: Arc<dyn Engine> = Arc::new(FakeEngine::new());
+        let sched = opened(&ai, engine, &settings);
+        let queue = sched.store();
+
+        let options = TranscriptionOptions {
+            diarize: false,
+            speakers: Some(2),
+            index: false,
+            topics: true,
+            details: true,
+        };
+        let task = start(&sched, &ai, &media, options).unwrap();
+        assert_eq!(queue.children(task).unwrap().len(), 1);
+        assert_eq!(queue.children(task).unwrap()[0].kind, "transcribe");
+        drain(&sched);
+        assert_eq!(queue.get(task).unwrap().unwrap().status, TaskStatus::Done);
+        let ready = readiness(&ai, &id(&media)).unwrap();
+        assert_eq!(
+            ready,
+            Readiness {
+                replies: true,
+                speakers: false,
+                index: false,
+                topics: false,
+                details: false
+            }
+        );
+    }
+
+    #[test]
+    fn diarization_failure_does_not_stop_the_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 3.0);
+        let models = ModelChoices::default();
+        let settings = settings(models);
+        let fake = FakeEngine::new();
+        fake.chat_answers(&[DIGEST, SECTIONS]);
+        let engine: Arc<dyn Engine> = Arc::new(fake);
+        let sched = opened(&ai, engine, &settings);
+        let task = start(&sched, &ai, &media, TranscriptionOptions::default()).unwrap();
+        drain(&sched);
+        let queue = sched.store();
+
+        let children = queue.children(task).unwrap();
+        assert!(
+            children.iter().all(|t| t.status == TaskStatus::Done),
+            "{children:?}"
+        );
+        assert!(children.iter().all(|t| t.kind != crate::diarize::KIND));
+        let ready = readiness(&ai, &id(&media)).unwrap();
+        assert!(ready.replies && ready.index && ready.topics);
+        assert!(!ready.speakers, "the replies stay without speakers");
+    }
+
+    #[test]
+    fn restart_from_the_index_cancels_the_analysis_and_keeps_the_words() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 3.0);
+        let mut settings = settings(ModelChoices::default());
+        settings.models.speech_recognition = Some({
+            let mut source = ModelSource::new("c", "dia");
+            source.diarize = true;
+            source
+        });
+        let fake = FakeEngine::new();
+        fake.script_turns(vec![mediaa2_core::transcript::Turn {
+            start: 0.0,
+            end: 3.0,
+            speaker: 0,
+        }]);
+        fake.chat_answers(&[DIGEST, SECTIONS, DIGEST, SECTIONS]);
+        let engine: Arc<dyn Engine> = Arc::new(fake);
+        let sched = opened(&ai, engine, &settings);
+        let queue = sched.store();
+        start(
+            &sched,
+            &ai,
+            &media,
+            TranscriptionOptions {
+                diarize: true,
+                ..TranscriptionOptions::default()
+            },
+        )
+        .unwrap();
+        drain(&sched);
+        let t = Transcript::open(&ai, &id(&media)).unwrap();
+        let replies = t.dialog().unwrap();
+        t.rename_speaker(0, "Дина").unwrap();
+        let names = t.speaker_names().unwrap();
+        drop(t);
+        let speakers = replies.iter().filter_map(|r| r.speaker).collect::<Vec<_>>();
+
+        let running = start(&sched, &ai, &media, TranscriptionOptions::default()).unwrap();
+        let restarted = restart(
+            &sched,
+            &ai,
+            &media,
+            Stage::Index,
+            TranscriptionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            queue.get(running).unwrap().unwrap().status,
+            TaskStatus::Cancelled,
+            "running analysis cancelled"
+        );
+        let kinds: Vec<String> = queue
+            .children(restarted)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            ["index", "topics"],
+            "only the index and what follows it"
+        );
+
+        drain(&sched);
+        assert_eq!(
+            queue.get(restarted).unwrap().unwrap().status,
+            TaskStatus::Done
+        );
+        let t = Transcript::open(&ai, &id(&media)).unwrap();
+        assert_eq!(
+            t.dialog()
+                .unwrap()
+                .iter()
+                .filter_map(|r| r.speaker)
+                .collect::<Vec<_>>(),
+            speakers,
+            "speakers kept"
+        );
+        assert_eq!(t.speaker_names().unwrap(), names, "names kept");
+        assert!(!t.chunks().unwrap().is_empty());
+        assert!(t.chunks().unwrap().iter().all(|(_, _, embedded)| *embedded));
+        assert!(!t.chapters().unwrap().is_empty());
+        let ready = readiness(&ai, &id(&media)).unwrap();
+        assert_eq!(
+            ready,
+            Readiness {
+                replies: true,
+                speakers: true,
+                index: true,
+                topics: true,
+                details: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_restart_from_the_details_rebuilds_them_and_keeps_a_chat_answer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 3.0);
+        let settings = settings(ModelChoices::default());
+        let fake = FakeEngine::new();
+        fake.chat_answers(&[DIGEST, SECTIONS, SECTIONS]);
+        let engine: Arc<dyn Engine> = Arc::new(fake.clone());
+        let sched = opened(&ai, engine, &settings);
+        let queue = sched.store();
+        start(&sched, &ai, &media, TranscriptionOptions::default()).unwrap();
+        drain(&sched);
+        let t = Transcript::open(&ai, &id(&media)).unwrap();
+        assert!(t
+            .chapters()
+            .unwrap()
+            .iter()
+            .all(|c| !c.digest.sections.is_empty()));
+
+        let answer = queue
+            .begin_inline("answer", "тест", &json!({}), None, Some(&id(&media)))
+            .unwrap();
+        let restarted = restart(
+            &sched,
+            &ai,
+            &media,
+            Stage::Details,
+            TranscriptionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            queue.get(answer).unwrap().unwrap().status,
+            TaskStatus::Running,
+            "the chat answer survives"
+        );
+        let kinds: Vec<String> = queue
+            .children(restarted)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect();
+        assert_eq!(kinds, ["details"], "only the details");
+        let details = queue.children(restarted).unwrap()[0].id;
+        assert!(
+            !queue.children(details).unwrap().is_empty(),
+            "one topic-detail per topic"
+        );
+        let t = Transcript::open(&ai, &id(&media)).unwrap();
+        assert!(
+            t.chapters()
+                .unwrap()
+                .iter()
+                .all(|c| c.digest.sections.is_empty()),
+            "the old details are dropped"
+        );
+
+        drain_tree(&sched, restarted);
+        assert_eq!(
+            queue.get(restarted).unwrap().unwrap().status,
+            TaskStatus::Done
+        );
+        let ready = readiness(&ai, &id(&media)).unwrap();
+        assert!(ready.details, "the details are built again");
+    }
+
+    #[test]
+    fn every_composite_ends_done_after_a_restart_from_the_topics_and_from_the_details() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 3.0);
+        let settings = settings(ModelChoices::default());
+        let fake = FakeEngine::new();
+        fake.chat_answers(&[DIGEST, SECTIONS, DIGEST, SECTIONS, SECTIONS]);
+        let engine: Arc<dyn Engine> = Arc::new(fake);
+        let mut sched = opened(&ai, engine.clone(), &settings);
+        start(&sched, &ai, &media, TranscriptionOptions::default()).unwrap();
+        drain(&sched);
+        for from in [Stage::Topics, Stage::Details] {
+            let root = restart(&sched, &ai, &media, from, TranscriptionOptions::default()).unwrap();
+            let before = sched.store().subtree(root).unwrap();
+            assert!(
+                before
+                    .iter()
+                    .filter(|t| t.kind == "details"
+                        || t.kind == "topics"
+                        || is_pipeline_kind(&t.kind))
+                    .all(|t| t.status == TaskStatus::Running),
+                "{from:?}: a stage that can run makes its composites go: {:?}",
+                before
+                    .iter()
+                    .map(|t| (&t.kind, t.status))
+                    .collect::<Vec<_>>()
+            );
+            sched.tick().unwrap();
+            drop(sched);
+            sched = opened(&ai, engine.clone(), &settings);
+            drain(&sched);
+            let tree = sched.store().subtree(root).unwrap();
+            for t in &tree {
+                assert_eq!(
+                    t.status,
+                    TaskStatus::Done,
+                    "{from:?}: {} {} ({}) {:?}; tree: {:?}",
+                    t.kind,
+                    t.title,
+                    t.id,
+                    t.error,
+                    tree.iter()
+                        .map(|t| (t.id, t.kind.as_str(), t.status, t.error.as_deref()))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_details_of_one_topic_can_go_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 3.0);
+        let settings = settings(ModelChoices::default());
+        let fake = FakeEngine::new();
+        fake.chat_answers(&[DIGEST, SECTIONS]);
+        let engine: Arc<dyn Engine> = Arc::new(fake);
+        let sched = opened(&ai, engine, &settings);
+        start(&sched, &ai, &media, TranscriptionOptions::default()).unwrap();
+        drain(&sched);
+        restart(
+            &sched,
+            &ai,
+            &media,
+            Stage::Details,
+            TranscriptionOptions::default(),
+        )
+        .unwrap();
+        let id = id(&media);
+        let queue = sched.store();
+        let target = queue
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.kind == "topic-detail" && t.status == TaskStatus::Queued)
+            .unwrap();
+        assert_eq!(target.priority, 10, "the usual priority of a topic task");
+        assert_eq!(prioritize_detail(&sched, &id, 0).unwrap(), 1);
+        assert_eq!(
+            queue.get(target.id).unwrap().unwrap().priority,
+            crate::outline::DETAIL_PRIORITY
+        );
+        assert_eq!(
+            prioritize_detail(&sched, &id, 5).unwrap(),
+            0,
+            "no such topic"
+        );
+        assert_eq!(
+            prioritize_detail(&sched, "another recording", 0).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn the_topics_reset_forgets_the_details_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 1.0);
+        let id = id(&media);
+        let t = Transcript::open(&ai, &id).unwrap();
+        t.set_meta("outline-plan", "{}").unwrap();
+        t.put_chapter(
+            0,
+            &Chapter {
+                start: 0.0,
+                end: 1.0,
+                digest: Digest {
+                    title: "Тема".into(),
+                    sections: vec![crate::outline_db::Section {
+                        title: "Итоги".into(),
+                        ..Default::default()
+                    }],
+                    ..Digest::default()
+                },
+            },
+        )
+        .unwrap();
+        t.set_meta(crate::outline::TOPICS_KEY, "[]").unwrap();
+        drop(t);
+        assert!(readiness(&ai, &id).unwrap().details);
+        Stage::Topics.reset(&ai, &id).unwrap();
+        let t = Transcript::open(&ai, &id).unwrap();
+        assert!(t.chapters().unwrap().is_empty(), "the chapters go");
+        assert!(
+            t.meta(crate::outline::TOPICS_KEY).unwrap().is_none(),
+            "the outline keys go"
+        );
+        assert!(!readiness(&ai, &id).unwrap().details);
+    }
+
+    #[test]
+    fn readiness_follows_the_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 1.0);
+        let id = id(&media);
+        assert_eq!(
+            readiness(&ai, &id).unwrap(),
+            Readiness::default(),
+            "no transcript, nothing ready"
+        );
+        let mut t = Transcript::open(&ai, &id).unwrap();
+        let word = Word {
+            text: "привет".into(),
+            start: 0.0,
+            end: 0.5,
+        };
+        t.set_replies(&[Reply {
+            start: 0.0,
+            end: 0.5,
+            speaker: None,
+            words: vec![word],
+        }])
+        .unwrap();
+        assert_eq!(
+            readiness(&ai, &id).unwrap(),
+            Readiness {
+                replies: true,
+                ..Readiness::default()
+            }
+        );
+        let chunk = Chunk {
+            start: 0.0,
+            end: 0.5,
+            speakers: vec![],
+            text: "привет".into(),
+        };
+        t.set_chunks(std::slice::from_ref(&chunk)).unwrap();
+        assert!(
+            !readiness(&ai, &id).unwrap().index,
+            "a chunk without an embedding is not a search index"
+        );
+        let (chunk_id, _, _) = t.chunks().unwrap()[0];
+        t.set_embedding(chunk_id, "e5", &[1.0, 0.0]).unwrap();
+        assert!(readiness(&ai, &id).unwrap().index);
+        t.put_chapter(
+            0,
+            &Chapter {
+                start: 0.0,
+                end: 0.5,
+                digest: Digest::default(),
+            },
+        )
+        .unwrap();
+        assert!(
+            !readiness(&ai, &id).unwrap().topics,
+            "a placeholder is not a topic"
+        );
+        t.put_chapter(
+            0,
+            &Chapter {
+                start: 0.0,
+                end: 0.5,
+                digest: Digest {
+                    title: "Тема".into(),
+                    ..Digest::default()
+                },
+            },
+        )
+        .unwrap();
+        assert!(readiness(&ai, &id).unwrap().topics);
+        assert!(
+            !readiness(&ai, &id).unwrap().details,
+            "details are not built yet"
+        );
+        let sections = vec![crate::outline_db::Section {
+            title: "Итоги".into(),
+            ..Default::default()
+        }];
+        t.put_chapter(
+            0,
+            &Chapter {
+                start: 0.0,
+                end: 0.5,
+                digest: Digest {
+                    title: "Тема".into(),
+                    sections,
+                    ..Digest::default()
+                },
+            },
+        )
+        .unwrap();
+        assert!(
+            readiness(&ai, &id).unwrap().details,
+            "a chapter with sections is broken down"
+        );
+    }
+
+    #[test]
+    fn analysis_options_are_saved_with_the_settings() {
+        let json = serde_json::to_string(&AgentSettings::default()).unwrap();
+        let back: AgentSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.transcription, TranscriptionOptions::default());
+        assert!(
+            !back.transcription.diarize
+                && back.transcription.index
+                && back.transcription.topics
+                && back.transcription.details
+        );
+        assert_eq!(back.transcription.speakers, None);
+        let old: AgentSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.transcription, TranscriptionOptions::default());
+        let models = ModelChoices::default();
+        let resolved = TranscriptionOptions::default().resolved(&models);
+        assert!(
+            !resolved.diarize && resolved.speakers.is_none(),
+            "no diarization model, no diarization"
+        );
+        let resolved = TranscriptionOptions {
+            index: false,
+            topics: true,
+            details: true,
+            ..TranscriptionOptions::default()
+        }
+        .resolved(&ModelChoices::default());
+        assert!(
+            !resolved.topics && !resolved.details,
+            "the topics need the index"
+        );
+    }
+
+    #[test]
+    fn an_active_analysis_is_the_unfinished_composite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 1.0);
+        let settings = settings(ModelChoices::default());
+        let sched = opened(&ai, Arc::new(FakeEngine::new()), &settings);
+        assert!(active(&sched, &id(&media)).unwrap().is_none());
+        let task = start(&sched, &ai, &media, TranscriptionOptions::default()).unwrap();
+        assert_eq!(
+            active(&sched, &id(&media)).unwrap().map(|t| t.id),
+            Some(task)
+        );
+    }
+
+    fn analysis_graph() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let ai = tmp.path().join(".ai");
+        let media = tmp.path().join("talk.wav");
+        wav(&media, 3.0);
+        let settings = settings(ModelChoices::default());
+        let fake = FakeEngine::new();
+        fake.chat_answers(&[DIGEST, DIGEST, DIGEST, SECTIONS, SECTIONS]);
+        let engine: Arc<dyn Engine> = Arc::new(fake);
+        let sched = opened(&ai, engine, &settings);
+        start(&sched, &ai, &media, TranscriptionOptions::default()).unwrap();
+        let mut saw_detail = false;
+        let wait_for_detail = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < wait_for_detail {
+            if sched
+                .store()
+                .list()
+                .unwrap()
+                .iter()
+                .any(|t| t.kind == "topic-detail")
+            {
+                saw_detail = true;
+                break;
+            }
+            sched.tick().unwrap();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(saw_detail, "no topic-detail was queued");
+        for task in sched.store().list().unwrap() {
+            if !task.status.is_finished() {
+                let _ = sched.pause(task.id);
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while sched
+            .store()
+            .list()
+            .unwrap()
+            .iter()
+            .any(|t| matches!(t.status, TaskStatus::Running | TaskStatus::Stopping))
+        {
+            if Instant::now() > deadline {
+                break;
+            }
+            let _ = sched.tick();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        for task in sched.store().list().unwrap() {
+            if task.status == TaskStatus::Paused {
+                let _ = sched.resume(task.id);
+            }
+        }
+        let kinds: std::collections::HashSet<String> = sched
+            .store()
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect();
+        for kind in [
+            "transcription",
+            "transcribe",
+            "index",
+            "topics",
+            "topics-plan",
+            "topic-digest",
+            "topics-merge",
+            "details",
+            "topic-detail",
+        ] {
+            assert!(kinds.contains(kind), "{kind} missing from {kinds:?}");
+        }
+        drop(sched);
+        tmp
+    }
+
+    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let dest = to.join(entry.file_name());
+            if entry.file_type().unwrap().is_dir() {
+                copy_dir(&entry.path(), &dest);
+            } else {
+                std::fs::copy(entry.path(), &dest).unwrap();
+            }
+        }
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: usize) -> usize {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (self.0 >> 33) as usize % n
+        }
+    }
+
+    fn assert_rule(q: &dyn Store, seed: u64, step: usize) {
+        use crate::queue::{composite_status, ChildState};
+        use std::collections::{HashMap, HashSet};
+        let tasks = q.list().unwrap();
+        let by_id: HashMap<_, _> = tasks.iter().map(|t| (t.id, t)).collect();
+        for task in &tasks {
+            if matches!(
+                task.status,
+                TaskStatus::Queued | TaskStatus::Waiting | TaskStatus::Running | TaskStatus::Paused
+            ) {
+                let mut stack = q.needs(task.id).unwrap();
+                let mut seen = HashSet::new();
+                while let Some(dep) = stack.pop() {
+                    if !seen.insert(dep) {
+                        continue;
+                    }
+                    let Some(other) = by_id.get(&dep) else {
+                        continue;
+                    };
+                    assert!(
+                        !matches!(other.status, TaskStatus::Failed | TaskStatus::Cancelled),
+                        "seed {seed} step {step}: {} {} {:?} waits on {} {} {:?}",
+                        task.id,
+                        task.kind,
+                        task.status,
+                        other.id,
+                        other.kind,
+                        other.status
+                    );
+                    stack.extend(q.needs(dep).unwrap());
+                }
+            }
+            let children: Vec<_> = tasks
+                .iter()
+                .filter(|child| child.parent == Some(task.id))
+                .collect();
+            if children.is_empty() || task.inline {
+                continue;
+            }
+            let world = q.world().unwrap();
+            let states: Vec<ChildState> = children
+                .iter()
+                .map(|child| crate::queue::state::child_state(&world, child))
+                .collect();
+            let expected = composite_status(&states).unwrap();
+            assert_eq!(
+                task.status, expected,
+                "seed {seed} step {step}: {} {} {:?}",
+                task.kind, task.title, states
+            );
+            if matches!(
+                task.status,
+                TaskStatus::Running | TaskStatus::Waiting | TaskStatus::Paused
+            ) {
+                assert!(
+                    task.error.is_none(),
+                    "seed {seed} step {step}: {} still shows {:?}",
+                    task.kind,
+                    task.error
+                );
+            }
+        }
+    }
+
+    struct FinishKind;
+
+    impl crate::run::Stage for FinishKind {
+        fn handles(&self, kind: &str) -> bool {
+            matches!(
+                kind,
+                "transcribe"
+                    | "diarize"
+                    | "index"
+                    | "topics-plan"
+                    | "topic-digest"
+                    | "topics-merge"
+                    | "topic-detail"
+            )
+        }
+        fn chunk(
+            &self,
+            _task: &crate::queue::Task,
+            _cancel: &Arc<std::sync::atomic::AtomicBool>,
+            _host: &crate::run::Host,
+        ) -> anyhow::Result<crate::run::Work> {
+            Ok(crate::run::Work::Done(json!({})))
+        }
+    }
+
+    fn drain_with_a_fake_handler(store: Arc<dyn Store>, seed: u64) {
+        let sched = Scheduler::new(store.clone(), crate::run::pools());
+        let host = crate::run::Host {
+            ai_dir: std::env::temp_dir(),
+            engine: Arc::new(FakeEngine::new()),
+            store: store.clone(),
+            slots: mediaa2_model_eval::slots::Slots::new(),
+            settings: Arc::new(AgentSettings::default),
+            streams: Arc::new(crate::run::Streams::default()),
+        };
+        sched.register(Box::new(crate::run::StageRunner::new(
+            host,
+            vec![Arc::new(FinishKind)],
+        )));
+        for step in 0..400 {
+            let tasks = store.list().unwrap();
+            if tasks.iter().all(|t| t.status.is_finished()) {
+                return;
+            }
+            for task in tasks.iter().filter(|t| t.status == TaskStatus::Paused) {
+                sched.resume(task.id).unwrap();
+            }
+            if sched.tick().is_err() {
+                let left: Vec<_> = store
+                    .list()
+                    .unwrap()
+                    .into_iter()
+                    .filter(|t| !t.status.is_finished())
+                    .map(|t| format!("{} {} {:?}", t.id, t.kind, t.status))
+                    .collect();
+                panic!("seed {seed} step {step} stuck with {left:?}");
+            }
+            if !sched.live().is_empty() {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        panic!("seed {seed} did not finish");
+    }
+
+    #[test]
+    fn restarting_a_failed_detail_runs_every_ancestor() {
+        let graph = analysis_graph();
+        let q = crate::run::open_store(&graph.path().join(".ai")).unwrap();
+        let mut details: Vec<_> = q
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|t| t.kind == "topic-detail")
+            .map(|t| t.id)
+            .collect();
+        details.sort_unstable();
+        let failed = details.pop().unwrap();
+        for id in &details {
+            if q.get(*id).unwrap().unwrap().status != TaskStatus::Done {
+                let _ = q.resume(*id);
+                q.complete(*id, &json!({})).unwrap();
+            }
+        }
+        if q.get(failed).unwrap().unwrap().status.is_finished() {
+            q.restart(failed).unwrap();
+        }
+        let details = q.get(failed).unwrap().unwrap().parent.unwrap();
+        assert_eq!(
+            q.get(details).unwrap().unwrap().status,
+            TaskStatus::Running,
+            "a detail can be failed only while the details are unfinished"
+        );
+        q.fail(failed, "model crashed").unwrap();
+        let mut ancestor = q.get(failed).unwrap().unwrap().parent;
+        let mut depth = 0;
+        while let Some(id) = ancestor {
+            let t = q.get(id).unwrap().unwrap();
+            assert_eq!(t.status, TaskStatus::Failed, "{} {}", t.kind, t.title);
+            assert!(t.error.is_some(), "{} has no error", t.kind);
+            ancestor = t.parent;
+            depth += 1;
+        }
+        assert!(depth >= 3, "details, topics and the analysis");
+        q.restart(failed).unwrap();
+        let restarted = q.get(failed).unwrap().unwrap();
+        assert_eq!(restarted.status, TaskStatus::Queued);
+        assert!(restarted.error.is_none());
+        ancestor = restarted.parent;
+        while let Some(id) = ancestor {
+            let t = q.get(id).unwrap().unwrap();
+            assert_eq!(t.status, TaskStatus::Running, "{} {}", t.kind, t.title);
+            assert!(t.error.is_none(), "{} kept {:?}", t.kind, t.error);
+            ancestor = t.parent;
+        }
+    }
+
+    #[test]
+    fn random_queue_ops_keep_the_analysis_graph_safe() {
+        let graph = analysis_graph();
+        let source = graph.path().join(".ai");
+        for seed in 1..=200 {
+            let dir = tempfile::tempdir().unwrap();
+            let ai = dir.path().join(".ai");
+            copy_dir(&source, &ai);
+            let q = crate::run::open_store(&ai).unwrap();
+            assert_rule(q.as_ref(), seed, 0);
+            let mut rng = Rng(seed);
+            for step in 1..=24 {
+                let tasks = q.list().unwrap();
+                if tasks.is_empty() {
+                    break;
+                }
+                let id = tasks[rng.below(tasks.len())].id;
+                match rng.below(6) {
+                    0 => q.cancel(id).unwrap(),
+                    1 => q.pause(id).unwrap(),
+                    2 => q.resume(id).unwrap(),
+                    3 => q.restart(id).unwrap(),
+                    4 => q.fail(id, "boom").unwrap(),
+                    _ => q.complete(id, &json!({})).unwrap(),
+                };
+                assert_rule(q.as_ref(), seed, step);
+            }
+            drain_with_a_fake_handler(q.clone(), seed);
+            assert!(
+                q.list().unwrap().iter().all(|t| t.status.is_finished()),
+                "seed {seed}"
+            );
+        }
+    }
+}

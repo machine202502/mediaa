@@ -1,0 +1,22 @@
+Question:
+{{ question }}
+
+Draft answer:
+{{ draft }}
+
+{% if fragments %}
+What the recording says at the cited times:
+{{ fragments }}
+
+{% endif %}
+{% if web %}
+The web pages the draft cites:
+{{ web }}
+
+{% endif %}
+Check the draft statement by statement:
+* Is it said in the cited material? A statement the material does not support, or turns around (a joke, irony, someone else's opinion, a counterexample), is removed or corrected to what the material says.
+* Does it answer the question? Something that is said but is not what was asked (for example, not a tip when tips were asked for) is removed.
+* Keep the rest as it is: the same language, the same format, the same citations [m:ss] and links for what stays. Do not add facts, citations or links.
+
+Write a JSON object with two fields: "changed" is true if you changed anything, false if not; "answer" is the full text of the checked answer, exactly as the user will read it (the draft itself when nothing changed). Put nothing else into the answer text.

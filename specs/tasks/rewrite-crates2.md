@@ -245,11 +245,17 @@ mediaa.exe --ui --area      окно выбора области (отдельн
 
 Лаунчер:
 
-1. Подключиться к backend; если нет — запустить `--backend`, ждать ≤ 5 с.
-2. `--area` / `--fullscreen` → отправить `Picker(Start)` и выйти (пикер поднимет backend).
-3. `--page=...` → запустить `--ui --show --page=...`.
-4. Иначе, если UI подключён — `ShowWindow`; если нет — запустить `--ui --show`.
-5. Выйти. Лаунчер не держит состояние и не является вторым владельцем.
+1. Подключиться к backend (handshake `Role::Launcher`); если нет — запустить `--backend`
+   и опрашивать подключение до 5 с (шаг 100 мс). Не удалось — диалог с ошибкой.
+2. `--tray` → убедиться, что backend жив, и выйти.
+3. `--area` → команда `Screenshot(StartPicker)`; backend-диспетчер для launcher-соединения
+   уведомляет presence, и тот спавнит пикер-процесс с маской.
+4. `--fullscreen` → команда `Screenshot(Fullscreen { after })`; backend берёт монитор под
+   курсором (`ScreenshotHandle::capture_fullscreen`).
+5. Иначе → команда `ShowWindow { page }` по `--page=...`; presence сам решает: поднять
+   `--ui --show --page=...` или показать существующий UI. Повторный запуск не создаёт
+   второй UI-процесс.
+6. Выйти. Лаунчер не держит состояние и не является вторым владельцем.
 
 ### 3.3. Крейты
 
@@ -472,7 +478,7 @@ pub struct State {
 
 ```rust
 pub enum ClientCommand {
-    ShowWindow,
+    ShowWindow { page: Option<Page> },
     Quit,
     SetSettings(Settings),
     HotkeysPaused(bool),
@@ -516,6 +522,7 @@ pub enum UiEvent {
     WindowShown,
     WindowHidden,
     Closing,
+    PickerShown,
 }
 
 pub struct PreviewReady { pub path: PathBuf, pub kind: PreviewKind, pub file: PathBuf }
@@ -715,8 +722,11 @@ enum Presence {
 | Open | HideRequested | Open(visible=false) | Send(HideWindow) |
 | Open | ShowRequested | Open(visible=true) | Send(ShowWindow) |
 | Open | PickerRequested | Picker | Send(HideWindow), Spawn(Picker) или Send(OpenPicker) |
-| Picker | PickerDone | Open(previous) | Send(ShowWindow), если был видим |
-| Picker | UiGone | NoUi | CancelPicker |
+| NoUi | PickerRequested | Picker | Spawn(Picker), Mask(true) |
+| NoUi | UiConnected(Picker) | Picker | — (пикер-процесс не спавнит `--ui --show`) |
+| Picker | PickerShown | Picker | Mask(false) |
+| Picker | PickerDone | Open(previous) | Mask(false), Send(ShowWindow), если был видим |
+| Picker | UiGone | NoUi | Mask(false), CancelPicker |
 | Open/NoUi | Quit | Quitting | Send(Quit), FinishQuit |
 
 UI создаёт окно скрытым и сообщает `Ready` после инициализации; backend показывает его только
@@ -841,9 +851,18 @@ UI не вызывает `std::fs` для медиа, не открывает Б
 
 1. Backend получает `Picker(Start)` (из UI, трея, хоткея или `--area`).
 2. Backend снимает монитор в PNG в work dir, создаёт `PickerSession { id, monitor, image, scale }`.
-3. Если UI нет — запускает `--ui --picker <id>`. Если есть — `UiRequest::OpenPicker`.
+3. Если UI нет — запускает `--ui --picker <id>` и показывает полноэкранную полупрозрачную
+   маску (`platform::mask::ScreenMask` в своём потоке), чтобы холодный старт процесса не
+   оставлял открытый десктоп; маска скрывается по `UiEvent::PickerShown`, при отмене
+   сессии или по таймауту 5 с. Если есть — `UiRequest::OpenPicker`.
 4. UI показывает overlay: кадр, selection, инструменты, аннотации, `Tab` — следующий монитор
-   (`Picker(Monitor)` возвращает PNG).
+   (`Picker(Monitor)` возвращает PNG). Главное окно на время overlay не прячется через
+   `SW_HIDE`, а переводится в ghost-режим (`window::ghost_window` — alpha 0, без DWM-переходов
+   и моргания таскбара); после overlay восстанавливается тем же вызовом. Overlay становится
+   видимым только когда текстура кадра реально загружена; недоступный кадр отменяет сессию
+   с уведомлением. Кнопку задачи у окна пикера снимает `hide_taskbar_button` (egui не
+   удерживает `taskbar(false)` для immediate-viewport), в пикер-процессе ghost корня
+   перестраховывается каждый кадр, потому что eframe сам показывает окно после первого кадра.
 5. `Picker(Commit { selection, shapes, format, action })` → backend режет, рисует аннотации,
    сохраняет, кладёт в библиотеку и буфер, возвращает `ShotResult`.
 6. `Picker(Cancel)` или закрытие процесса → backend освобождает сессию.
@@ -1130,7 +1149,7 @@ M2 начинается со spike: если `WDA_EXCLUDEFROMCAPTURE` не ра�
 | Риск | Почему | Что делаем |
 |---|---|---|
 | Паритет UI | 20k строк страниц, 76 снапшотов | переносим экраны по одному, сверяем скриншотами; агентские экраны не переносим |
-| Задержка picker без резидентного UI | холодный старт egui | маска backend + кадр уже снят; spike в M2; при необходимости — отдельный лёгкий picker-процесс |
+| Задержка picker без резидентного UI | холодный старт egui | решено: маска backend + кадр уже снят (`Mask(true/false)` в presence, поток `ScreenMask`) |
 | Исключение окна из захвата | зависит от Windows/WGC | проверяем в M2; fallback hide + 250 мс |
 | FFmpeg в frontend | viewer требует декод | только read-only; запись/конвертация в backend |
 | Библиотека и внешние файлы | БД хранит результаты приложения; чужие файлы не появляются сами | старт удаляет только мёртвые строки; `Refresh` сканирует папку явно; старый UI-путь не регрессирует |

@@ -31,6 +31,7 @@ pub fn show(ctx: &mut Ctx<'_>, ui: &mut egui::Ui) {
     header(ui, &mut draft, &mut advanced, &mut changed, &mut notice);
     top(ui, &mut draft, advanced, &mut changed, &mut notice);
     hotkeys(ui, &mut draft, &mut changed);
+    transcription_section(ui, &mut draft, &mut changed);
     profiles(
         ui,
         &mut draft,
@@ -1414,5 +1415,74 @@ fn preset_label(preset: RecordPreset) -> String {
         RecordPreset::Quality => t!("record.preset_quality").to_string(),
         RecordPreset::Medium => t!("record.preset_medium").to_string(),
         RecordPreset::Fast => t!("record.preset_fast").to_string(),
+    }
+}
+
+fn transcription_section(ui: &mut egui::Ui, draft: &mut Settings, changed: &mut bool) {
+    theme::section(ui, icon::WAVEFORM, &t!("settings.transcription"));
+
+    let speech_idx = draft
+        .agent
+        .connections
+        .iter()
+        .position(|c| c.kind == mediaa2_core::agent::ConnectionKind::SpeechRecognition);
+
+    match speech_idx {
+        Some(index) => {
+            let conn = &mut draft.agent.connections[index];
+            ui.horizontal(|ui| {
+                ui.label(t!("transcription.speech_url"));
+                if ui
+                    .add(egui::TextEdit::singleline(&mut conn.base_url).desired_width(300.0))
+                    .changed()
+                {
+                    *changed = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label(t!("transcription.speech_key"));
+                if ui
+                    .add(
+                        egui::TextEdit::singleline(&mut conn.api_key)
+                            .password(true)
+                            .desired_width(300.0),
+                    )
+                    .changed()
+                {
+                    *changed = true;
+                }
+            });
+            if ui
+                .small_button(t!("transcription.remove_connection"))
+                .clicked()
+            {
+                draft.agent.connections.remove(index);
+                *changed = true;
+            }
+        }
+        None => {
+            ui.label(t!("transcription.no_speech_connection"));
+            if ui.button(t!("transcription.add_speech")).clicked() {
+                draft
+                    .agent
+                    .connections
+                    .push(mediaa2_core::agent::Connection {
+                        id: format!(
+                            "speech-{}",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis()
+                        ),
+                        name: "Speech server".into(),
+                        kind: mediaa2_core::agent::ConnectionKind::SpeechRecognition,
+                        base_url: "http://localhost:8293".into(),
+                        api_key: String::new(),
+                        proxy: String::new(),
+                        group: String::new(),
+                    });
+                *changed = true;
+            }
+        }
     }
 }

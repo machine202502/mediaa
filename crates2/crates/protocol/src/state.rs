@@ -14,6 +14,7 @@ pub struct State {
     pub recovery: RecoveryState,
     pub notices: Vec<Notice>,
     pub picker: Option<PickerState>,
+    pub transcription: crate::transcription::TranscriptionState,
     pub library_revision: u64,
 }
 

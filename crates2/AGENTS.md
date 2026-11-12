@@ -6,12 +6,14 @@
 
 ## Границы
 
-1. Девять крейтов: `core`, `i18n`, `protocol`, `storage`, `platform`, `media`, `backend`,
-   `frontend`, `app`. Новый крейт — только с удалением другого или явным решением.
+1. Одиннадцать крейтов: `core`, `i18n`, `protocol`, `storage`, `platform`, `media`,
+   `model-eval`, `agent-transcription`, `backend`, `frontend`, `app`. Новый крейт — только с
+   удалением другого или явным решением.
 2. Зависимости: `core` — фундамент; `protocol` — только `core` + serde; `storage` — только
-   `core` + SQLite; `platform` — `core`; `media` — `core`, `platform`; `backend` — всё, кроме
-   `frontend`; `frontend` — `core`, `i18n`, `protocol`, `platform`, `media` только для чтения;
-   `app` — `backend` и `frontend`.
+   `core` + SQLite; `platform` — `core`; `media` — `core`, `platform`; `model-eval` — `core`;
+   `agent-transcription` — `core`, `model-eval`, `media` (только декод аудио); `backend` — всё,
+   кроме `frontend`; `frontend` — `core`, `i18n`, `protocol`, `platform`, `media` только для
+   чтения; `app` — `backend` и `frontend`.
 3. `frontend` не импортирует `storage`, `backend`, не открывает SQLite, не пишет медиа и не
    запускает запись/конвертацию.
 
@@ -27,7 +29,8 @@
 
 8. Один типизированный контракт: `State`, `Command`, `Result`, `UiRequest`, `Preview`.
    Никаких строковых имён команд и `Vec<u8>` с JSON внутри JSON.
-9. Все SQL-строки — только в `storage`. Все переводы и locale-файлы — только в `i18n`.
+9. SQL библиотеки — только в `storage`; SQL транскриптов (per-media DB) — только в
+   `agent-transcription`. Все переводы и locale-файлы — только в `i18n`.
 10. Доменные типы сериализуются напрямую; `*Wire`-дублей нет.
 11. Библиотека передаётся страницами по запросу; полный список в `State` не кладётся.
 

@@ -172,6 +172,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_animation_probes_duration_and_seeks() {
+        // the viewer timeline for animations needs a probed duration and
+        // decoding from an arbitrary moment
+        let dir = tempfile::tempdir().unwrap();
+        let gif = dir.path().join("clip.gif");
+        let asset = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join("window-a.mp4");
+        crate::gif::encode(
+            &asset,
+            &gif,
+            None,
+            &mediaa2_core::settings::AnimSettings::default(),
+            None,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        let info = details(&gif, MediaKind::Animation).unwrap();
+        assert!(info.width > 0, "the probe reports the size");
+        let duration = info.duration_us.expect("gif duration") as f64 / 1e6;
+        assert!(duration > 0.2, "gif duration: {duration}");
+
+        let mut reached = false;
+        preview_frames(
+            &gif,
+            320,
+            1.0 / 10.0,
+            duration * 0.5,
+            &AtomicBool::new(false),
+            &mut |frame| {
+                if frame.at >= duration * 0.4 {
+                    reached = true;
+                }
+                !reached
+            },
+        )
+        .unwrap();
+        assert!(reached, "frames decode from the middle of the animation");
+    }
+
+    #[test]
     fn atempo_covers_slow_and_fast_speeds() {
         assert_eq!(atempo_chain(1.0), "atempo=1.0000");
         assert_eq!(atempo_chain(0.25), "atempo=0.5,atempo=0.5000");

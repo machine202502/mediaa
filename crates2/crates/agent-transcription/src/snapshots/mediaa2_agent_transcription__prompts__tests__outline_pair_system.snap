@@ -1,0 +1,5 @@
+---
+source: crates/agent/src/prompts.rs
+expression: "render(\"outline/pair_system.j2\", ())"
+---
+You divide a recorded conversation into chapters. You get the digests of two neighbouring chapters and decide whether they should be one chapter. Judge only by what the digests say; never invent.

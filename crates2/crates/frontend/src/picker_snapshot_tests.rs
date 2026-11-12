@@ -46,6 +46,7 @@ impl Snap {
             conversion: ConversionState::Idle,
             recovery: RecoveryState { running: false },
             notices: Vec::new(),
+            transcription: mediaa2_protocol::TranscriptionState::default(),
             picker: Some(PickerState {
                 session: 7,
                 monitor: monitors[0].clone(),
@@ -78,16 +79,21 @@ impl Snap {
     }
 
     fn frame(&mut self, ui: &mut egui::Ui) {
+        let image = self.view.picker().map(|picker| picker.image.clone());
         let mut ctx = pages::Ctx {
             view: &self.view,
             ui: &mut self.ui,
             actions: &mut self.actions,
             textures: &mut self.textures,
+            player: None,
             monitors: &self.monitors,
             windows: &self.windows,
             microphones: &self.microphones,
             command_error: None,
         };
+        if let Some(image) = image {
+            ctx.textures.get_or_load(ui.ctx(), &image);
+        }
         pages::picker::show(&mut ctx, ui);
     }
 }

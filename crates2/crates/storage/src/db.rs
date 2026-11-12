@@ -46,10 +46,11 @@ ON CONFLICT(path) DO UPDATE SET
     modified = excluded.modified,
     taken = excluded.taken,
     title = excluded.title,
-    width = excluded.width,
-    height = excluded.height,
-    duration = excluded.duration,
-    audio = excluded.audio;
+    -- a filesystem scan knows nothing about the media: keep the probed values
+    width = COALESCE(excluded.width, entries.width),
+    height = COALESCE(excluded.height, entries.height),
+    duration = COALESCE(excluded.duration, entries.duration),
+    audio = COALESCE(excluded.audio, entries.audio);
 ";
 
 const DELETE_ENTRY: &str = "DELETE FROM entries WHERE path = ?1;";
@@ -201,6 +202,23 @@ impl Db {
             .into_iter()
             .map(PathBuf::from)
             .collect())
+    }
+
+    /// Stores the probed media details of one entry; reports whether the
+    /// row exists at all.
+    pub fn upsert_details(&mut self, path: &Path, details: &Details) -> anyhow::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE entries SET width = ?2, height = ?3, duration = ?4, audio = ?5
+             WHERE path = ?1",
+            params![
+                path_to_text(path),
+                details.width,
+                details.height,
+                details.duration_secs,
+                details.audio
+            ],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn remove_missing(&mut self) -> anyhow::Result<Vec<PathBuf>> {
@@ -445,6 +463,76 @@ mod tests {
         let (entries, total) = db.query(&query).unwrap();
         assert_eq!(total, 3);
         entries.into_iter().map(|entry| entry.name).collect()
+    }
+
+    #[test]
+    fn a_scan_without_details_keeps_the_probed_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let mut db = Db::open(&dir.join("library.db")).unwrap();
+        let media = dir.join("clip.mp4");
+
+        // the first upsert carries probed details
+        let mut entry = entry(dir, "clip.mp4", "Clip", MediaKind::Video, 10, 1_000);
+        entry.details = Some(Details {
+            width: 1920,
+            height: 1080,
+            duration_secs: Some(12.5),
+            audio: true,
+        });
+        db.upsert(&[entry.clone()]).unwrap();
+
+        // a fresh scan knows nothing about the media and must not wipe them
+        let mut rescanned = entry.clone();
+        rescanned.details = None;
+        db.upsert(&[rescanned]).unwrap();
+        let (entries, _) = db
+            .query(&LibraryQuery {
+                kind: Some(MediaKind::Video),
+                ..LibraryQuery::default()
+            })
+            .unwrap();
+        let stored = entries.iter().find(|e| e.path == media).expect("the entry");
+        assert_eq!(
+            stored.details.as_ref().and_then(|d| d.duration_secs),
+            Some(12.5),
+            "probed details survive the scan"
+        );
+
+        // the preview pass updates them through upsert_details
+        assert!(db
+            .upsert_details(
+                &media,
+                &Details {
+                    width: 1280,
+                    height: 720,
+                    duration_secs: Some(13.0),
+                    audio: false
+                }
+            )
+            .unwrap());
+        let (entries, _) = db
+            .query(&LibraryQuery {
+                kind: Some(MediaKind::Video),
+                ..LibraryQuery::default()
+            })
+            .unwrap();
+        let stored = &entries[0];
+        let details = stored.details.as_ref().unwrap();
+        assert_eq!(
+            (
+                details.width,
+                details.height,
+                details.duration_secs,
+                details.audio
+            ),
+            (1280, 720, Some(13.0), false)
+        );
+        assert!(
+            !db.upsert_details(&dir.join("gone.mp4"), &details.clone())
+                .unwrap(),
+            "an unknown path reports that there is nothing to update"
+        );
     }
 
     #[test]

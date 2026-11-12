@@ -1,0 +1,15 @@
+---
+source: crates/agent/src/prompts.rs
+expression: window
+---
+Part 2 of 3 of one topic of the recording (0:00 – 10:00).
+The topic: Отчёт — Сроки.
+Write everything in Russian.
+
+Transcript of this part, one line per sentence, "[time] @label: text" (each speaker is a label: @s1, @s2…; write the label wherever you mean that speaker):
+[0:10] Анна: Сроки.
+
+List the concrete points said in this part: each advice, step, argument, fact, example, number, decision, objection and conclusion — one point each. A point is one short sentence in your own words that keeps the specifics (names, numbers, what exactly to do). Skip greetings, jokes and repeats.
+
+Write a JSON object:
+points — the points in the order they are said; each with time — the time of the line it comes from, as written in the transcript (m:ss), and text — the point.

@@ -3,6 +3,8 @@ target/
 vcpkg_installed/
 vcpkg_installed_*/
 dist/
+.zcode/plans/
+__pycache__/
 
 # Local eval data that must not be published (third-party recordings)
 evals/local/

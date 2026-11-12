@@ -1,4 +1,5 @@
 use super::Ctx;
+use crate::player::Player;
 use crate::ui::theme;
 use crate::ui::widgets::track_slider::track_slider;
 use crate::ui_state::ViewerUi;
@@ -21,6 +22,7 @@ const SPEEDS: [f64; 6] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
 const NOTE_COLOR: Color32 = Color32::from_rgb(163, 174, 193);
 const PLAYBACK_NOTE: &str = "Playback in the system player";
 
+#[allow(clippy::needless_option_as_deref)]
 pub fn show(ctx: &mut Ctx<'_>, ui: &mut egui::Ui) {
     let Some(mut viewer) = ctx.ui.viewer.take() else {
         return;
@@ -61,7 +63,17 @@ fn show_viewer(ctx: &mut Ctx<'_>, ui: &mut egui::Ui, viewer: &mut ViewerUi) -> b
         .and_then(|entry| entry.details)
         .and_then(|details| details.duration_secs)
         .unwrap_or(0.0);
-    let texture = media_texture(ctx, ui, viewer, kind);
+    let mut player = ctx.player.take();
+    if let Some(player) = player.as_deref_mut() {
+        if let Some(frame) = player.update() {
+            ctx.textures.set_player_frame(ui.ctx(), &frame);
+        }
+    }
+    let playing = player
+        .as_ref()
+        .and_then(|_| ctx.textures.player_texture())
+        .map(|texture| (texture.id(), texture.size_vec2()));
+    let texture = media_texture(ctx, ui, viewer, kind, playing);
     let screen = ui.ctx().content_rect();
     let pan_id = egui::Id::new(("mediaa2-viewer-pan", viewer.path.clone()));
     let speed_id = egui::Id::new(("mediaa2-viewer-speed-open", viewer.path.clone()));
@@ -99,8 +111,15 @@ fn show_viewer(ctx: &mut Ctx<'_>, ui: &mut egui::Ui, viewer: &mut ViewerUi) -> b
                 egui::pos2(screen.max.x - 24.0, bottom.min.y - 8.0),
             );
 
-            let (media_rect, media_open) =
-                media(ui, texture, kind, area, &mut viewer.zoom, &mut pan);
+            let (media_rect, media_open) = media(
+                ui,
+                texture,
+                kind,
+                area,
+                &mut viewer.zoom,
+                &mut pan,
+                player.as_deref_mut(),
+            );
             open_file |= media_open;
             if top_bar(ui, top, &name) {
                 close = true;
@@ -113,6 +132,7 @@ fn show_viewer(ctx: &mut Ctx<'_>, ui: &mut egui::Ui, viewer: &mut ViewerUi) -> b
                 duration,
                 &mut speed_open,
                 &mut pan,
+                player,
             );
 
             if backdrop.clicked()
@@ -139,9 +159,13 @@ fn media_texture(
     ui: &egui::Ui,
     viewer: &ViewerUi,
     kind: MediaKind,
+    playing: Option<(egui::TextureId, egui::Vec2)>,
 ) -> Option<(egui::TextureId, egui::Vec2)> {
     if kind == MediaKind::Audio {
         return None;
+    }
+    if let Some(playing) = playing {
+        return Some(playing);
     }
     let path = if kind == MediaKind::Image {
         viewer.path.clone()
@@ -183,6 +207,7 @@ fn media(
     area: Rect,
     zoom: &mut f64,
     pan: &mut egui::Vec2,
+    player: Option<&mut Player>,
 ) -> (Option<Rect>, bool) {
     let p = theme::palette(ui);
     if kind == MediaKind::Audio {
@@ -203,6 +228,13 @@ fn media(
             .interact(rect, ui.id().with("audio-art"), Sense::click())
             .clicked();
         note(ui, area.center() + egui::vec2(0.0, 150.0));
+        // with a player a click toggles the playback instead of leaving
+        if let Some(player) = player {
+            if clicked {
+                player.toggle_pause();
+            }
+            return (Some(rect), false);
+        }
         return (Some(rect), clicked);
     }
     let Some((texture_id, texture_size)) = texture else {
@@ -220,9 +252,11 @@ fn media(
             NOTE_COLOR,
         );
         let text = if kind == MediaKind::Image {
-            "Image preview unavailable"
+            "Image preview unavailable".to_string()
+        } else if player.is_some() {
+            t!("viewer.decoding").into_owned()
         } else {
-            PLAYBACK_NOTE
+            PLAYBACK_NOTE.to_string()
         };
         ui.painter().text(
             center + egui::vec2(0.0, 28.0),
@@ -243,6 +277,13 @@ fn media(
         ui.id().with("media"),
         Sense::click_and_drag(),
     );
+    if kind != MediaKind::Image && response.clicked() {
+        if let Some(player) = player {
+            player.toggle_pause();
+        } else {
+            return (Some(rect.intersect(area)), true);
+        }
+    }
     ui.painter().with_clip_rect(area).image(
         texture_id,
         rect,
@@ -270,8 +311,6 @@ fn media(
             *zoom = if *zoom == 1.0 { 2.0 } else { 1.0 };
             *pan = egui::Vec2::ZERO;
         }
-    } else {
-        note(ui, egui::pos2(area.center().x, area.bottom() - 26.0));
     }
     (Some(rect.intersect(area)), false)
 }
@@ -317,6 +356,7 @@ fn top_bar(ui: &mut egui::Ui, rect: Rect, name: &str) -> bool {
     close
 }
 
+#[allow(clippy::too_many_arguments)]
 fn controls(
     ui: &mut egui::Ui,
     rect: Rect,
@@ -325,6 +365,7 @@ fn controls(
     duration: f64,
     speed_open: &mut bool,
     pan: &mut egui::Vec2,
+    player: Option<&mut Player>,
 ) -> bool {
     let p = theme::palette(ui);
     let width = rect.width().min(980.0) - 32.0;
@@ -344,7 +385,7 @@ fn controls(
                 if kind == MediaKind::Image {
                     open |= image_controls(ui, viewer, pan);
                 } else {
-                    open |= media_controls(ui, viewer, duration, speed_open);
+                    open |= media_controls(ui, viewer, duration, speed_open, player);
                 }
             });
         },
@@ -385,22 +426,54 @@ fn image_controls(ui: &mut egui::Ui, viewer: &mut ViewerUi, pan: &mut egui::Vec2
     open
 }
 
+#[allow(clippy::too_many_arguments, clippy::needless_option_as_deref)]
 fn media_controls(
     ui: &mut egui::Ui,
     viewer: &mut ViewerUi,
     duration: f64,
     speed_open: &mut bool,
+    mut player: Option<&mut Player>,
 ) -> bool {
     let mut open = false;
-    if theme::icon_button(ui, icon::PLAY, &t!("viewer.open_file")).clicked() {
-        open = true;
-    }
-    let shown = if duration > 0.0 && viewer.position >= duration - 0.05 {
-        duration
+    let position;
+    let shown_duration;
+    let volume;
+    let speed;
+    let has_sound;
+    if let Some(player) = player.as_deref_mut() {
+        let ic = if player.is_paused() {
+            icon::PLAY
+        } else {
+            icon::PAUSE
+        };
+        if theme::icon_button(ui, ic, &t!("viewer.play")).clicked() {
+            player.toggle_pause();
+        }
+        position = player.position();
+        shown_duration = duration.max(player.duration());
+        volume = player.volume();
+        speed = player.speed();
+        has_sound = player.has_sound();
     } else {
-        viewer.position.floor()
+        if theme::icon_button(ui, icon::PLAY, &t!("viewer.open_file")).clicked() {
+            open = true;
+        }
+        position = viewer.position;
+        shown_duration = duration;
+        volume = viewer.volume;
+        speed = viewer.speed;
+        has_sound = false;
+    }
+    let shown = if shown_duration > 0.0 && position >= shown_duration - 0.05 {
+        shown_duration
+    } else {
+        position.floor()
     };
-    let time = format!("{} / {}", human_duration(shown), human_duration(duration));
+    let time = format!(
+        "{} / {}",
+        human_duration(shown),
+        human_duration(shown_duration)
+    );
     let p = theme::palette(ui);
     ui.label(
         RichText::new(time)
@@ -411,39 +484,58 @@ fn media_controls(
         if open_button(ui) {
             open = true;
         }
-        ui.add_space(8.0);
-        let (_, volume) = track_slider(ui, 96.0, viewer.volume, "viewer-volume");
-        if let Some(volume) = volume {
-            viewer.volume = volume;
-        }
-        let ic = if viewer.volume == 0.0 {
-            icon::SPEAKER_SLASH
-        } else {
-            icon::SPEAKER_HIGH
-        };
-        if theme::icon_button(ui, ic, &t!("viewer.mute")).clicked() {
-            viewer.volume = if viewer.volume == 0.0 { 1.0 } else { 0.0 };
+        if has_sound {
+            ui.add_space(8.0);
+            let (_, volume_change) = track_slider(ui, 96.0, volume, "viewer-volume");
+            let volume = volume_change.unwrap_or(volume);
+            if let (Some(player), Some(change)) = (player.as_deref_mut(), volume_change) {
+                player.set_volume(change);
+            }
+            let ic = if volume == 0.0 {
+                icon::SPEAKER_SLASH
+            } else {
+                icon::SPEAKER_HIGH
+            };
+            if theme::icon_button(ui, ic, &t!("viewer.mute")).clicked() {
+                let muted = if volume == 0.0 { 1.0 } else { 0.0 };
+                if let Some(player) = player.as_deref_mut() {
+                    player.set_volume(muted);
+                }
+            }
         }
         ui.add_space(4.0);
         let speed_width = speed_button_width(ui);
         let menu_width = speed_text_width(ui) + 20.0;
-        let button = speed_button(ui, &format!("{}×", viewer.speed), speed_width);
+        let button = speed_button(ui, &format!("{speed}×"), speed_width);
         if button.clicked() {
             *speed_open = !*speed_open;
         }
         if *speed_open {
-            speed_menu(ui, &button, viewer, menu_width, speed_open);
+            speed_menu(
+                ui,
+                &button,
+                viewer,
+                player.as_deref_mut(),
+                menu_width,
+                speed_open,
+            );
         }
         button.on_hover_text(t!("viewer.speed"));
-        let frac = if duration > 0.0 {
-            (viewer.position / duration) as f32
+        let frac = if shown_duration > 0.0 {
+            (position / shown_duration) as f32
         } else {
             0.0
         };
         let width = ui.available_width();
-        ui.add_enabled_ui(false, |ui| {
-            let _ = track_slider(ui, width, frac, "viewer-timeline");
-        });
+        let (response, seek) = track_slider(ui, width, frac, "viewer-timeline");
+        if let (Some(player), true) = (player.as_deref_mut(), shown_duration > 0.0) {
+            if let Some(frac) = seek {
+                player.scrub(f64::from(frac) * shown_duration);
+            }
+            if response.drag_stopped() {
+                player.end_scrub();
+            }
+        }
     });
     open
 }
@@ -509,6 +601,7 @@ fn speed_menu(
     ui: &mut egui::Ui,
     button: &egui::Response,
     viewer: &mut ViewerUi,
+    player: Option<&mut Player>,
     menu_width: f32,
     speed_open: &mut bool,
 ) {
@@ -561,6 +654,9 @@ fn speed_menu(
         });
     if let Some(speed) = chosen {
         viewer.speed = speed;
+        if let Some(player) = player {
+            player.set_speed(speed);
+        }
         *speed_open = false;
     }
     if let Some(pointer) = ui.ctx().pointer_interact_pos() {

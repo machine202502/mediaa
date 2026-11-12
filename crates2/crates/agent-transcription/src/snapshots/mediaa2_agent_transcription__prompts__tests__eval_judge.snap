@@ -1,0 +1,16 @@
+---
+source: crates/agent/src/prompts.rs
+expression: user
+---
+Question:
+Как зовут?
+
+Reference answer:
+Иван Тестов.
+
+Facts that must be covered:
+- Иван
+- три юриста
+
+Assistant's answer:
+Его зовут Иван [12:00].

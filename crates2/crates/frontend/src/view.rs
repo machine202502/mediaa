@@ -143,6 +143,7 @@ mod tests {
         State {
             settings: Settings::default(),
             recording: RecordingState::Idle,
+            transcription: mediaa2_protocol::TranscriptionState::default(),
             conversion: ConversionState::Idle,
             recovery: RecoveryState { running: false },
             notices: Vec::new(),

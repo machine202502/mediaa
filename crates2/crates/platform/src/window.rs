@@ -54,6 +54,18 @@ pub fn show_window(title: &str) -> WindowResult {
     crate::windows::window::show_window(title)
 }
 
+pub fn ghost_window(title: &str) -> WindowResult {
+    crate::windows::window::ghost_window(title)
+}
+
+pub fn unghost_window(title: &str, was_visible: bool) -> WindowResult {
+    crate::windows::window::unghost_window(title, was_visible)
+}
+
+pub fn window_visible(title: &str) -> Option<bool> {
+    crate::windows::window::window_visible(title)
+}
+
 pub fn prepare_background(title: &str) -> WindowResult {
     crate::windows::window::prepare_background(title)
 }
@@ -80,6 +92,10 @@ pub fn make_black_transparent(title: &str) -> WindowResult {
 
 pub fn disable_open_animation(title: &str) -> WindowResult {
     crate::windows::window::disable_open_animation(title)
+}
+
+pub fn hide_taskbar_button(title: &str) -> WindowResult {
+    crate::windows::window::hide_taskbar_button(title)
 }
 
 #[derive(Default)]

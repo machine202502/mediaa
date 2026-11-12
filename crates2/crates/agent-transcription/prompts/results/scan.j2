@@ -1,0 +1,13 @@
+{% if failed %}
+Scanned {{ done }} of {{ parts }} parts for «{{ instruction }}»: {{ count }} findings. NOT checked: {% for f in failed %}{{ ", " if not loop.first else "" }}[{{ f.start }}–{{ f.end }}] ({{ f.why }}){% endfor %}.
+{% else %}
+Scanned the whole recording ({{ parts }} parts) for «{{ instruction }}»: {{ count }} findings.
+{% endif %}
+{% if facts %}
+Findings — the material for your answer: list the ones that answer the question, with their times.
+{% for f in facts %}
+[{{ f.time }}] {{ f.text }}
+{% endfor %}
+{% else %}
+Nothing in the recording matches.
+{% endif %}

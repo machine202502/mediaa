@@ -88,7 +88,7 @@ pub fn show(ctx: &mut Ctx<'_>, ui: &mut egui::Ui) {
     let Some(view) = ctx.view.picker().cloned() else {
         return;
     };
-    let texture = ctx.textures.get_or_load(ui.ctx(), &view.image).cloned();
+    let texture = ctx.textures.poll(ui.ctx(), &view.image).cloned();
     let available = ui.available_size();
     let image_size = texture
         .as_ref()

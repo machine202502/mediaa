@@ -41,6 +41,7 @@ pub enum UiEvent {
     WindowShown,
     WindowHidden,
     Closing,
+    PickerShown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +163,7 @@ mod tests {
                 detail: "The output folder is not writable".into(),
                 action: Some(NoticeAction::Reveal("C:/media".into())),
             }],
+            transcription: crate::transcription::TranscriptionState::default(),
             picker: Some(PickerState {
                 session: 4,
                 monitor: monitor(),
@@ -253,6 +255,20 @@ mod tests {
             }),
         };
         assert_eq!(roundtrip(&message), message);
+    }
+
+    #[test]
+    fn ui_events_survive_json() {
+        for event in [
+            UiEvent::Ready,
+            UiEvent::WindowShown,
+            UiEvent::WindowHidden,
+            UiEvent::Closing,
+            UiEvent::PickerShown,
+        ] {
+            let message = ClientMessage::Ui(event);
+            assert_eq!(roundtrip(&message), message);
+        }
     }
 
     #[test]

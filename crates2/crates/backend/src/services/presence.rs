@@ -2,22 +2,23 @@ use crate::domain::presence::{Presence, PresenceEffect, PresenceEvent};
 use crate::ipc::{Shutdown, UiMailbox, UiSignal};
 use crate::services::{ConversionHandle, NoticeRing, RecordingHandle, ScreenshotHandle};
 use crate::state::StateStore;
+use mediaa2_core::navigation::Page;
 use mediaa2_core::notices::NoticeLevel;
 use mediaa2_core::recording::{RecordTarget, StopAction, StopSource};
-use mediaa2_core::screen::MonitorInfo;
 use mediaa2_core::settings::{
     AfterCapture, HotkeyAction, HotkeySettings, RecordProfile, Settings, TrayClickAction,
 };
 use mediaa2_i18n::t;
 use mediaa2_platform::hotkeys::Hotkeys;
+use mediaa2_platform::screen;
 use mediaa2_platform::startup::{self, AutoStart};
 use mediaa2_platform::tray::{Tray, TrayCommand, TrayLabels, TrayState};
 use mediaa2_platform::tray_icon::icon;
-use mediaa2_platform::{cursor, screen};
 use mediaa2_protocol::state::RecordingState;
 use mediaa2_protocol::{CommandOk, UiEvent, UiStartup};
 use std::ffi::OsString;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
@@ -31,6 +32,7 @@ pub type Launch = Arc<dyn Fn(&[OsString]) -> io::Result<()> + Send + Sync>;
 pub struct PresenceOptions {
     pub tray: bool,
     pub hotkeys: bool,
+    pub mask: bool,
     pub launch: Launch,
 }
 
@@ -39,6 +41,7 @@ impl Default for PresenceOptions {
         Self {
             tray: true,
             hotkeys: true,
+            mask: true,
             launch: Arc::new(|args| {
                 mediaa2_platform::process::spawn_detached(args).map(|_child| ())
             }),
@@ -51,6 +54,7 @@ impl PresenceOptions {
         Self {
             tray: false,
             hotkeys: false,
+            mask: false,
             launch: Arc::new(|_args| Ok(())),
         }
     }
@@ -93,6 +97,7 @@ impl PresenceHandle {
             presence: Presence::new(),
             tray: None,
             hotkeys: None,
+            mask: None,
             mailbox,
             screenshots,
             recording,
@@ -111,12 +116,16 @@ impl PresenceHandle {
         Self { tx }
     }
 
-    pub fn open(&self) {
-        self.send(PresenceCommand::Open);
+    pub fn open(&self, page: Option<Page>) {
+        self.send(PresenceCommand::Open(page));
     }
 
     pub fn quit(&self) {
         self.send(PresenceCommand::Quit);
+    }
+
+    pub fn picker_requested(&self, session: u64) {
+        self.send(PresenceCommand::PickerRequested(session));
     }
 
     pub fn ui_event(&self, event: UiEvent) {
@@ -143,18 +152,26 @@ impl PresenceHandle {
 }
 
 enum PresenceCommand {
-    Open,
+    Open(Option<Page>),
     Quit,
     Ui(UiEvent),
     Connected(UiStartup),
     Disconnected,
     PickerDone,
+    PickerRequested(u64),
 }
 
 enum PlatformEvent {
     Tray(TrayCommand),
     Hotkey(u32),
 }
+
+struct MaskHandle {
+    hide: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
+}
+
+const MASK_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TrayView {
@@ -240,10 +257,15 @@ fn tray_labels() -> TrayLabels {
     }
 }
 
-fn ui_args(startup: &UiStartup) -> Vec<OsString> {
+fn ui_args(startup: &UiStartup, page: Option<Page>) -> Vec<OsString> {
     let mut args = vec![OsString::from("--ui")];
     match startup {
-        UiStartup::Show => args.push(OsString::from("--show")),
+        UiStartup::Show => {
+            args.push(OsString::from("--show"));
+            if let Some(page) = page {
+                args.push(OsString::from(format!("--page={}", page.to_arg())));
+            }
+        }
         UiStartup::Tray => args.push(OsString::from("--tray")),
         UiStartup::Picker { session } => {
             args.push(OsString::from("--picker"));
@@ -253,22 +275,12 @@ fn ui_args(startup: &UiStartup) -> Vec<OsString> {
     args
 }
 
-fn monitor_under_cursor() -> Option<MonitorInfo> {
-    let monitors = screen::monitors().ok()?;
-    if monitors.is_empty() {
-        return None;
-    }
-    cursor::position()
-        .and_then(|(x, y)| screen::monitor_at(x, y))
-        .and_then(|id| monitors.iter().find(|monitor| monitor.id == id).cloned())
-        .or_else(|| monitors.into_iter().next())
-}
-
 struct Actor {
     state: Arc<StateStore>,
     presence: Presence,
     tray: Option<Tray>,
     hotkeys: Option<Hotkeys>,
+    mask: Option<MaskHandle>,
     mailbox: UiMailbox,
     screenshots: ScreenshotHandle,
     recording: RecordingHandle,
@@ -323,6 +335,7 @@ impl Actor {
                 _ = ticker.tick() => self.on_tick().await,
             }
         }
+        self.hide_mask();
         self.tray = None;
         self.hotkeys = None;
     }
@@ -423,12 +436,15 @@ impl Actor {
 
     async fn handle(&mut self, command: PresenceCommand) {
         match command {
-            PresenceCommand::Open => self.apply(PresenceEvent::OpenRequested).await,
+            PresenceCommand::Open(page) => self.apply(PresenceEvent::OpenRequested { page }).await,
             PresenceCommand::Quit => self.apply(PresenceEvent::Quit { immediate: false }).await,
             PresenceCommand::Ui(event) => self.on_ui_event(event).await,
             PresenceCommand::Connected(startup) => self.on_connected(startup).await,
             PresenceCommand::Disconnected => self.apply(PresenceEvent::UiGone).await,
             PresenceCommand::PickerDone => self.apply(PresenceEvent::PickerDone).await,
+            PresenceCommand::PickerRequested(session) => {
+                self.apply(PresenceEvent::PickerRequested { session }).await
+            }
         }
     }
 
@@ -457,15 +473,18 @@ impl Actor {
             UiEvent::Ready => PresenceEvent::UiReady,
             UiEvent::WindowShown => PresenceEvent::WindowShown,
             UiEvent::WindowHidden | UiEvent::Closing => PresenceEvent::WindowHidden,
+            UiEvent::PickerShown => PresenceEvent::PickerShown,
         };
         self.apply(event).await;
     }
 
     async fn on_connected(&mut self, startup: UiStartup) {
         let startup = self.resolve_startup(startup);
-        if matches!(self.presence, Presence::NoUi) {
+        if matches!(self.presence, Presence::NoUi) && !matches!(startup, UiStartup::Picker { .. }) {
             let now = self.now_ms();
-            let _ = self.presence.apply(PresenceEvent::OpenRequested, now);
+            let _ = self
+                .presence
+                .apply(PresenceEvent::OpenRequested { page: None }, now);
         }
         self.apply(PresenceEvent::UiConnected { startup }).await;
     }
@@ -484,9 +503,12 @@ impl Actor {
 
     async fn on_tray(&mut self, command: TrayCommand) {
         match command {
-            TrayCommand::ShowWindow => self.apply(PresenceEvent::OpenRequested).await,
+            TrayCommand::ShowWindow => {
+                self.apply(PresenceEvent::OpenRequested { page: None })
+                    .await
+            }
             TrayCommand::RegionScreenshot => self.start_picker().await,
-            TrayCommand::FullscreenScreenshot => self.fullscreen().await,
+            TrayCommand::FullscreenScreenshot => self.fullscreen(AfterCapture::CopyAndSave).await,
             TrayCommand::StartRecording => self.start_video().await,
             TrayCommand::StartAudio => self.start_audio().await,
             TrayCommand::PauseResume => self.toggle_pause().await,
@@ -505,7 +527,9 @@ impl Actor {
         for action in actions {
             match action {
                 HotkeyAction::RegionScreenshot => self.start_picker().await,
-                HotkeyAction::FullscreenScreenshot => self.fullscreen().await,
+                HotkeyAction::FullscreenScreenshot => {
+                    self.fullscreen(AfterCapture::CopyAndSave).await
+                }
                 HotkeyAction::StartVideo => self.start_video().await,
                 HotkeyAction::StartAudio => self.start_audio().await,
                 HotkeyAction::StopRecording => self.stop(StopSource::Hotkey).await,
@@ -515,7 +539,10 @@ impl Actor {
 
     async fn primary_click(&mut self) {
         match self.state.snapshot().settings.tray_left_click {
-            TrayClickAction::OpenWindow => self.apply(PresenceEvent::OpenRequested).await,
+            TrayClickAction::OpenWindow => {
+                self.apply(PresenceEvent::OpenRequested { page: None })
+                    .await
+            }
             TrayClickAction::ScreenArea => self.start_picker().await,
         }
     }
@@ -530,24 +557,8 @@ impl Actor {
         }
     }
 
-    async fn fullscreen(&mut self) {
-        let monitor = tokio::task::spawn_blocking(monitor_under_cursor).await;
-        let monitor = match monitor {
-            Ok(Some(monitor)) => monitor,
-            Ok(None) => {
-                self.notice("Screenshot", "No monitors are available");
-                return;
-            }
-            Err(error) => {
-                self.notice("Screenshot", format!("monitor task failed: {error}"));
-                return;
-            }
-        };
-        if let Err(error) = self
-            .screenshots
-            .capture_monitor(monitor, AfterCapture::CopyAndSave)
-            .await
-        {
+    async fn fullscreen(&mut self, after: AfterCapture) {
+        if let Err(error) = self.screenshots.capture_fullscreen(after).await {
             self.notice("Screenshot", error.message);
         }
     }
@@ -610,16 +621,67 @@ impl Actor {
 
     async fn run_effect(&mut self, effect: PresenceEffect) {
         match effect {
-            PresenceEffect::Spawn(startup) => self.spawn_ui(startup).await,
+            PresenceEffect::Spawn(startup, page) => self.spawn_ui(startup, page).await,
             PresenceEffect::Send(request) => self.mailbox.send(request),
+            PresenceEffect::Mask(show) => {
+                if show {
+                    self.show_mask();
+                } else {
+                    self.hide_mask();
+                }
+            }
             PresenceEffect::CancelPicker => self.cancel_picker().await,
             PresenceEffect::FinishQuit => self.finish_quit().await,
             PresenceEffect::Notice(message) => self.notice("Window", message),
         }
     }
 
-    async fn spawn_ui(&mut self, startup: UiStartup) {
-        let args = ui_args(&startup);
+    fn show_mask(&mut self) {
+        if !self.options.mask {
+            return;
+        }
+        if self
+            .mask
+            .as_ref()
+            .is_some_and(|mask| mask.alive.load(Ordering::Acquire))
+        {
+            return;
+        }
+        let hide = Arc::new(AtomicBool::new(false));
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread_hide = Arc::clone(&hide);
+        let thread_alive = Arc::clone(&alive);
+        let spawned = std::thread::Builder::new()
+            .name("mediaa2-picker-mask".into())
+            .spawn(move || {
+                let Some(mask) = mediaa2_platform::mask::ScreenMask::create() else {
+                    log::warn!("presence: the screen mask is unavailable");
+                    thread_alive.store(false, Ordering::Release);
+                    return;
+                };
+                mask.show();
+                let started = Instant::now();
+                while !thread_hide.load(Ordering::Acquire) && started.elapsed() < MASK_TIMEOUT {
+                    mask.pump();
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                mask.hide();
+                thread_alive.store(false, Ordering::Release);
+            });
+        match spawned {
+            Ok(_) => self.mask = Some(MaskHandle { hide, alive }),
+            Err(error) => log::warn!("presence: the mask thread failed: {error}"),
+        }
+    }
+
+    fn hide_mask(&mut self) {
+        if let Some(mask) = &self.mask {
+            mask.hide.store(true, Ordering::Release);
+        }
+    }
+
+    async fn spawn_ui(&mut self, startup: UiStartup, page: Option<Page>) {
+        let args = ui_args(&startup, page);
         if let Err(error) = (self.options.launch)(&args) {
             log::warn!("presence: cannot start the ui: {error}");
             match startup {
@@ -806,13 +868,14 @@ mod tests {
         let options = PresenceOptions {
             tray: false,
             hotkeys: false,
+            mask: false,
             launch: Arc::new(move |args| {
                 let _ = args_tx.send(args.to_vec());
                 Ok(())
             }),
         };
         let (handle, _mailbox, _state, _shutdown, _dir) = fixture(options);
-        handle.open();
+        handle.open(None);
         let args = tokio::time::timeout(Duration::from_secs(2), args_rx.recv())
             .await
             .unwrap()
@@ -829,7 +892,7 @@ mod tests {
     async fn ready_after_connection_sends_show_window() {
         let (handle, mailbox, _state, _shutdown, _dir) = fixture(PresenceOptions::disabled());
         let mut requests = mailbox.subscribe();
-        handle.open();
+        handle.open(None);
         mailbox.connected(UiStartup::Show);
         mailbox.event(UiEvent::Ready);
         let request = tokio::time::timeout(Duration::from_secs(2), requests.recv())
@@ -837,6 +900,44 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(request, UiRequest::ShowWindow);
+    }
+
+    #[tokio::test]
+    async fn picker_connect_from_no_ui_sends_open_picker_only() {
+        let (_handle, mailbox, state, _shutdown, _dir) = fixture(PresenceOptions::disabled());
+        state.update(|current| {
+            current.picker = Some(mediaa2_protocol::state::PickerState {
+                session: 9,
+                monitor: mediaa2_core::screen::MonitorInfo {
+                    id: mediaa2_core::screen::MonitorId::new(1),
+                    device: r"\\.\DISPLAY1".into(),
+                    index: 0,
+                    name: "Test".into(),
+                    x: 0,
+                    y: 0,
+                    width: 800,
+                    height: 600,
+                    scale: 1.0,
+                    primary: true,
+                },
+                image: "frame.rgba".into(),
+                scale: 1.0,
+            })
+        });
+        let mut requests = mailbox.subscribe();
+        mailbox.connected(UiStartup::Picker { session: 9 });
+        mailbox.event(UiEvent::Ready);
+        let request = tokio::time::timeout(Duration::from_secs(2), requests.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(request, UiRequest::OpenPicker { session: 9 });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), requests.recv())
+                .await
+                .is_err(),
+            "no ShowWindow must follow a picker connection"
+        );
     }
 
     #[tokio::test]
@@ -854,6 +955,7 @@ mod tests {
         let options = PresenceOptions {
             tray: false,
             hotkeys: false,
+            mask: false,
             launch: Arc::new(move |args| {
                 let _ = args_tx.send(args.to_vec());
                 Ok(())
@@ -871,7 +973,7 @@ mod tests {
     #[test]
     fn spawned_picker_arguments_carry_the_session() {
         assert_eq!(
-            ui_args(&UiStartup::Picker { session: 7 }),
+            ui_args(&UiStartup::Picker { session: 7 }, None),
             vec![
                 OsString::from("--ui"),
                 OsString::from("--picker"),
@@ -879,8 +981,16 @@ mod tests {
             ]
         );
         assert_eq!(
-            ui_args(&UiStartup::Tray),
+            ui_args(&UiStartup::Tray, None),
             vec![OsString::from("--ui"), OsString::from("--tray")]
+        );
+        assert_eq!(
+            ui_args(&UiStartup::Show, Some(Page::Library)),
+            vec![
+                OsString::from("--ui"),
+                OsString::from("--show"),
+                OsString::from("--page=library"),
+            ]
         );
     }
 

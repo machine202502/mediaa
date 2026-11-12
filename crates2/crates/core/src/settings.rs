@@ -572,6 +572,7 @@ pub struct Settings {
     pub stop_recording_on_left_click: bool,
     pub highlight_recording_region: bool,
     pub recording_region_outline_width: u32,
+    pub agent: crate::agent::AgentSettings,
 }
 
 impl Default for Settings {
@@ -620,6 +621,7 @@ impl Default for Settings {
             stop_recording_on_left_click: true,
             highlight_recording_region: true,
             recording_region_outline_width: 4,
+            agent: crate::agent::AgentSettings::default(),
         };
         settings.apply_simple_mode();
         settings

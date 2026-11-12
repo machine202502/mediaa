@@ -1,0 +1,9 @@
+---
+source: crates/agent/src/prompts.rs
+expression: phrase
+---
+The question: Когда отчёт?
+The tool: search — Finds places.
+Its arguments: {"query":"отчёт"}
+
+Write in Russian what the assistant is doing now: a phrase in the first person that names the subject of the arguments (a topic, a search phrase, a time span) in plain words. Phrase:

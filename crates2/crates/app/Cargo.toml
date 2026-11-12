@@ -17,8 +17,11 @@ path = "src/agent.rs"
 mediaa2-backend.workspace = true
 mediaa2-frontend.workspace = true
 mediaa2-platform.workspace = true
+mediaa2-core.workspace = true
+mediaa2-protocol.workspace = true
 anyhow.workspace = true
 log.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

@@ -2,7 +2,10 @@ rust_i18n::i18n!("../i18n/locales", fallback = "en");
 
 pub mod app;
 pub mod client;
+pub mod markdown;
+pub mod mentions;
 pub mod pages;
+pub mod player;
 pub mod textures;
 pub mod ui;
 pub mod ui_state;

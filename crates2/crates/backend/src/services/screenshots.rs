@@ -109,6 +109,17 @@ impl ScreenshotHandle {
         Ok(CommandOk::Shot(shot))
     }
 
+    pub async fn capture_fullscreen(&self, after: AfterCapture) -> Result<CommandOk, CommandError> {
+        let monitor = tokio::task::spawn_blocking(monitor_under_cursor)
+            .await
+            .map_err(internal)?
+            .ok_or_else(|| CommandError {
+                code: ErrorCode::Unavailable,
+                message: "no monitors are available".into(),
+            })?;
+        self.capture_monitor(monitor, after).await
+    }
+
     pub async fn start_picker(&self) -> Result<CommandOk, CommandError> {
         if self.state.snapshot().picker.is_some() {
             return Err(busy("picker is already open"));
@@ -301,6 +312,17 @@ fn capture_picker(session: u64, work: &Path) -> Result<CapturedPicker, CommandEr
         monitor,
         path,
     })
+}
+
+fn monitor_under_cursor() -> Option<MonitorInfo> {
+    let monitors = screen::monitors().ok()?;
+    if monitors.is_empty() {
+        return None;
+    }
+    cursor::position()
+        .and_then(|(x, y)| screen::monitor_at(x, y))
+        .and_then(|id| monitors.iter().find(|monitor| monitor.id == id).cloned())
+        .or_else(|| monitors.into_iter().next())
 }
 
 fn monitor_for_picker(monitors: &[MonitorInfo]) -> Result<MonitorInfo, CommandError> {

@@ -5,7 +5,7 @@ use mediaa2_core::geometry::Rect;
 use mediaa2_core::navigation::Page;
 use mediaa2_core::query::LibraryQuery;
 use mediaa2_core::settings::{AudioRecordSettings, Settings};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -21,6 +21,50 @@ pub struct UiState {
     pub library: LibraryPageState,
     pub picker: Option<PickerUi>,
     pub viewer: Option<ViewerUi>,
+    pub transcript: Option<mediaa2_protocol::TranscriptView>,
+    pub chat_timeline: Option<mediaa2_core::chat::Timeline>,
+    pub topics: Option<Vec<mediaa2_protocol::TopicChapter>>,
+    pub topics_path: Option<String>,
+    pub selected_task: Option<i64>,
+    pub renaming_speaker: Option<u32>,
+    pub rename_value: String,
+    pub chat_store: Option<String>,
+    pub chat_id: Option<i64>,
+    /// the model pinned to the open chat (from the last Chat/ChatView reply)
+    pub chat_model: Option<mediaa2_protocol::ChatModelInfo>,
+    /// a question waiting for the user to pick the chat's model
+    pub chat_confirm: Option<String>,
+    pub transcription_tab: TranscriptionTab,
+    pub transcription: TranscriptionUi,
+}
+
+/// Transient editing/check state of the transcription settings tabs
+/// (providers, models, budget). Not mirrored from the backend.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TranscriptionUi {
+    pub add_kind: mediaa2_core::agent::ConnectionKind,
+    /// provider id -> last check result ("ok"/error)
+    pub checks: BTreeMap<String, Result<String, String>>,
+    /// provider ids with a check in flight
+    pub checking: BTreeSet<String>,
+    /// connection id -> known model ids (from ModelsCheck)
+    pub models: BTreeMap<String, Vec<String>>,
+    pub models_checking: bool,
+    /// (connection id, model) waiting for the download confirmation
+    pub pull_confirm: Option<(String, String)>,
+    pub web_status: Option<Result<String, String>>,
+    pub pool_name: String,
+    pub pool_limit: u32,
+    pub pool_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TranscriptionTab {
+    #[default]
+    Assistant,
+    Providers,
+    Models,
+    Budget,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -126,6 +170,19 @@ impl Default for UiState {
             library: LibraryPageState::default(),
             picker: None,
             viewer: None,
+            transcript: None,
+            chat_timeline: None,
+            topics: None,
+            topics_path: None,
+            selected_task: None,
+            renaming_speaker: None,
+            rename_value: String::new(),
+            chat_store: None,
+            chat_id: None,
+            chat_model: None,
+            chat_confirm: None,
+            transcription_tab: TranscriptionTab::Assistant,
+            transcription: TranscriptionUi::default(),
         }
     }
 }
@@ -138,7 +195,7 @@ impl UiState {
                 self.last_capture_page = page;
                 self.last_main_page = page;
             }
-            Page::Library | Page::Convert => self.last_main_page = page,
+            Page::Library | Page::Transcription | Page::Convert => self.last_main_page = page,
             Page::Settings | Page::About => {}
         }
     }

@@ -10,20 +10,24 @@ mediaa.exe              launcher
 mediaa.exe --backend    трей-демон
 mediaa.exe --ui         окно по требованию
 mediaa.exe --ui --picker <session>
+mediaa.exe --area       выбор области через backend (picker-процесс)
+mediaa.exe --fullscreen снимок экрана через backend
 ```
 
 ## Крейты
 
 | Крейт | Ответственность |
 |---|---|
-| `mediaa2-core` | настройки, форматы, геометрия, библиотечные записи, пути, имена |
+| `mediaa2-core` | настройки, форматы, геометрия, библиотечные записи, пути, имена, agent-типы, speakers, chat/transcript/pulse/assistant-типы |
 | `mediaa2-i18n` | языки и locale-файлы |
-| `mediaa2-protocol` | сообщения, состояние, кадрирование IPC |
+| `mediaa2-protocol` | сообщения, состояние, кадрирование IPC, типизированный протокол транскрибации (PROTOCOL=3) |
 | `mediaa2-storage` | только SQL и схема библиотеки |
-| `mediaa2-platform` | Windows: WGC, окна, audio, clipboard, tray, hotkeys, single instance, autostart |
+| `mediaa2-platform` | Windows: WGC, окна (ghost-режим), audio, clipboard, tray, hotkeys, single instance, autostart |
 | `mediaa2-media` | recorder, convert, GIF/WebP/FFmpeg, preview, аннотации, screenshot |
-| `mediaa2-backend` | Tokio-демон, сервисы, домены, IPC |
-| `mediaa2-frontend` | egui-приложение, страницы, состояние, клиент |
+| `mediaa2-model-eval` | провайдеры моделей: Engine trait, OpenAI-совместимый/GenAI/Ollama, стриминг, embeddings/rerank, gate/slots, keychain-секреты |
+| `mediaa2-agent-transcription` | фича «Транскрибация»: очередь задач с чекпоинтами, стадии (транскрибация/диаризация/голоса/имена/индекс/поиск/темы), ассистент с чатами и веб-поиском, per-media SQLite |
+| `mediaa2-backend` | Tokio-демон, сервисы, домены, IPC, сервис Transcription (AgentHost + tick 250 мс) |
+| `mediaa2-frontend` | egui-приложение, страницы (включая «Транскрибацию»: очередь, транскрипт, темы, чат с markdown, провайдеры/модели/бюджет), состояние, клиент |
 | `mediaa2` | лаунчер и роли |
 
 ## Сборка и проверки
@@ -70,13 +74,19 @@ PNG лежат в `crates2/crates/frontend/tests/snapshots`, контактны�
 
 ## Текущее состояние
 
-- полный workspace: 382 passed, 1 ignored (реальный захват рабочего стола);
+- полный workspace: **777 passed** (live- и capture-тесты — ignored, запускаются отдельно);
 - реальные smoke-прогоны: снимок экрана, 3-секундная запись видео в MKV,
-  3-секундная запись аудио в MP3, конвертация MKV → MP4, холодный запуск лаунчера;
-- страницы Library/Settings/Capture/Record/Audio/Convert работают на реальном `State`;
+  3-секундная запись аудио в MP3, конвертация MKV → MP4, холодный запуск лаунчера,
+  транскрибация 11.5 мин русского аудио через speech-сервер (GigaAM v3 + pyannote + CAM++, 1065 слов);
+- страницы Library/Settings/Capture/Record/Audio/Convert/Transcription работают на реальном `State`;
 - трей, хоткеи, single instance, autostart, диалоги, recording/conversion/screenshots
   подключены к backend;
+- «Транскрибация»: очередь с прогрессом/отменой, транскрипт со спикерами и
+  переименованием, темы, чат с markdown/упоминаниями/стримингом, провайдеры
+  (OpenRouter/DeepSeek/HF/Ollama/OpenAI/speech), модели по ролям, бюджеты пулов,
+  веб-поиск, Ollama pull/serve — команды через `TranscriptionCommand` (PROTOCOL=3);
 - превью: изображения показываются напрямую, для видео/анимаций backend строит
   статические PNG-превью; picker умеет выделение, 8 ручек, Pen/Line/Arrow/Rect/Marker/Text,
   цвет, толщину, undo/redo и выбор региона записи;
-- не закончено: видеопросмотр, hotkey capture, badge-иконки меню трея, page-level kittest.
+- не закончено: hotkey capture, badge-иконки меню трея,
+  поиск по индексу в UI (волна 3), перезапуск отдельной стадии задачи.

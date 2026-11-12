@@ -1,3 +1,4 @@
+use mediaa2_core::navigation::Page;
 use mediaa2_protocol::message::{UiRequest, UiStartup};
 
 const START_TIMEOUT_MS: u64 = 5_000;
@@ -9,6 +10,7 @@ pub enum Presence {
     NoUi,
     Starting {
         mode: UiStartup,
+        page: Option<Page>,
         attempts: u8,
         since_ms: u64,
     },
@@ -26,7 +28,7 @@ pub enum Presence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresenceEvent {
-    OpenRequested,
+    OpenRequested { page: Option<Page> },
     UiConnected { startup: UiStartup },
     UiReady,
     WindowShown,
@@ -34,6 +36,7 @@ pub enum PresenceEvent {
     HideRequested,
     ShowRequested,
     PickerRequested { session: u64 },
+    PickerShown,
     PickerDone,
     PickerFailed,
     UiGone,
@@ -43,8 +46,9 @@ pub enum PresenceEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PresenceEffect {
-    Spawn(UiStartup),
+    Spawn(UiStartup, Option<Page>),
     Send(UiRequest),
+    Mask(bool),
     CancelPicker,
     FinishQuit,
     Notice(String),
@@ -57,7 +61,7 @@ impl Presence {
 
     pub fn apply(&mut self, event: PresenceEvent, now_ms: u64) -> Vec<PresenceEffect> {
         match event {
-            PresenceEvent::OpenRequested => self.open_requested(now_ms),
+            PresenceEvent::OpenRequested { page } => self.open_requested(page, now_ms),
             PresenceEvent::UiConnected { startup } => self.connected(startup),
             PresenceEvent::UiReady => self.ready(),
             PresenceEvent::WindowShown => self.window_shown(),
@@ -65,6 +69,7 @@ impl Presence {
             PresenceEvent::HideRequested => self.hide_requested(),
             PresenceEvent::ShowRequested => self.show_requested(),
             PresenceEvent::PickerRequested { session } => self.picker_requested(session),
+            PresenceEvent::PickerShown => self.picker_shown(),
             PresenceEvent::PickerDone => self.picker_done(),
             PresenceEvent::PickerFailed => self.picker_failed(),
             PresenceEvent::UiGone => self.ui_gone(now_ms),
@@ -73,15 +78,16 @@ impl Presence {
         }
     }
 
-    fn open_requested(&mut self, now_ms: u64) -> Vec<PresenceEffect> {
+    fn open_requested(&mut self, page: Option<Page>, now_ms: u64) -> Vec<PresenceEffect> {
         match std::mem::take(self) {
             Presence::NoUi => {
                 *self = Presence::Starting {
                     mode: UiStartup::Show,
+                    page,
                     attempts: 0,
                     since_ms: now_ms,
                 };
-                vec![PresenceEffect::Spawn(UiStartup::Show)]
+                vec![PresenceEffect::Spawn(UiStartup::Show, page)]
             }
             Presence::Open { .. } => {
                 *self = Presence::Open {
@@ -115,6 +121,17 @@ impl Presence {
                         ready: false,
                     },
                 };
+            }
+            Presence::NoUi => {
+                if let UiStartup::Picker { session } = startup {
+                    *self = Presence::Picker {
+                        session,
+                        previous_visible: false,
+                        ready: false,
+                    };
+                } else {
+                    *self = Presence::NoUi;
+                }
             }
             other => *self = other,
         }
@@ -230,7 +247,10 @@ impl Presence {
                     previous_visible: false,
                     ready: false,
                 };
-                vec![PresenceEffect::Spawn(UiStartup::Picker { session })]
+                vec![
+                    PresenceEffect::Spawn(UiStartup::Picker { session }, None),
+                    PresenceEffect::Mask(true),
+                ]
             }
             Presence::Open { visible, .. } => {
                 *self = Presence::Picker {
@@ -244,6 +264,33 @@ impl Presence {
                 }
                 effects.push(PresenceEffect::Send(UiRequest::OpenPicker { session }));
                 effects
+            }
+            other if matches!(other, Presence::Starting { .. }) => {
+                *self = other;
+                vec![PresenceEffect::Notice(
+                    "Screen area is not ready yet".into(),
+                )]
+            }
+            other => {
+                *self = other;
+                Vec::new()
+            }
+        }
+    }
+
+    fn picker_shown(&mut self) -> Vec<PresenceEffect> {
+        match std::mem::take(self) {
+            Presence::Picker {
+                session,
+                previous_visible,
+                ready,
+            } => {
+                *self = Presence::Picker {
+                    session,
+                    previous_visible,
+                    ready,
+                };
+                vec![PresenceEffect::Mask(false)]
             }
             other => {
                 *self = other;
@@ -261,11 +308,11 @@ impl Presence {
                     visible: previous_visible,
                     show_on_ready: false,
                 };
+                let mut effects = vec![PresenceEffect::Mask(false)];
                 if previous_visible {
-                    vec![PresenceEffect::Send(UiRequest::ShowWindow)]
-                } else {
-                    Vec::new()
+                    effects.push(PresenceEffect::Send(UiRequest::ShowWindow));
                 }
+                effects
             }
             other => {
                 *self = other;
@@ -283,7 +330,7 @@ impl Presence {
                     visible: previous_visible,
                     show_on_ready: false,
                 };
-                let mut effects = vec![PresenceEffect::CancelPicker];
+                let mut effects = vec![PresenceEffect::Mask(false), PresenceEffect::CancelPicker];
                 if previous_visible {
                     effects.push(PresenceEffect::Send(UiRequest::ShowWindow));
                 }
@@ -299,10 +346,15 @@ impl Presence {
 
     fn ui_gone(&mut self, now_ms: u64) -> Vec<PresenceEffect> {
         match std::mem::take(self) {
-            Presence::Starting { mode, attempts, .. } => self.retry_start(mode, attempts, now_ms),
+            Presence::Starting {
+                mode,
+                page,
+                attempts,
+                ..
+            } => self.retry_start(mode, page, attempts, now_ms),
             Presence::Picker { .. } => {
                 *self = Presence::NoUi;
-                vec![PresenceEffect::CancelPicker]
+                vec![PresenceEffect::Mask(false), PresenceEffect::CancelPicker]
             }
             Presence::Open { .. } => {
                 *self = Presence::NoUi;
@@ -331,6 +383,7 @@ impl Presence {
                 *self = Presence::Quitting;
                 let mut effects = Vec::new();
                 if picker {
+                    effects.push(PresenceEffect::Mask(false));
                     effects.push(PresenceEffect::CancelPicker);
                 }
                 if immediate || !has_ui {
@@ -347,10 +400,11 @@ impl Presence {
         match std::mem::take(self) {
             Presence::Starting {
                 mode,
+                page,
                 attempts,
                 since_ms,
             } if now_ms.saturating_sub(since_ms) >= START_TIMEOUT_MS => {
-                self.retry_start(mode, attempts, now_ms)
+                self.retry_start(mode, page, attempts, now_ms)
             }
             other => {
                 *self = other;
@@ -359,15 +413,21 @@ impl Presence {
         }
     }
 
-    fn retry_start(&mut self, mode: UiStartup, attempts: u8, now_ms: u64) -> Vec<PresenceEffect> {
+    fn retry_start(
+        &mut self,
+        mode: UiStartup,
+        page: Option<Page>,
+        attempts: u8,
+        now_ms: u64,
+    ) -> Vec<PresenceEffect> {
         if attempts < MAX_START_ATTEMPTS {
-            let next = mode;
             *self = Presence::Starting {
                 mode,
+                page,
                 attempts: attempts + 1,
                 since_ms: now_ms,
             };
-            vec![PresenceEffect::Spawn(next)]
+            vec![PresenceEffect::Spawn(mode, page)]
         } else {
             *self = Presence::NoUi;
             vec![PresenceEffect::Notice("UI did not start".into())]
@@ -380,7 +440,7 @@ mod tests {
     use super::*;
 
     fn opened(presence: &mut Presence, now_ms: u64) -> Vec<PresenceEffect> {
-        presence.apply(PresenceEvent::OpenRequested, now_ms)
+        presence.apply(PresenceEvent::OpenRequested { page: None }, now_ms)
     }
 
     fn connected(presence: &mut Presence, startup: UiStartup) -> Vec<PresenceEffect> {
@@ -400,19 +460,45 @@ mod tests {
             presence,
             Presence::Starting {
                 mode: UiStartup::Show,
+                page: None,
                 attempts: 0,
                 since_ms: 100,
             }
         );
-        assert_eq!(effects, vec![PresenceEffect::Spawn(UiStartup::Show)]);
+        assert_eq!(effects, vec![PresenceEffect::Spawn(UiStartup::Show, None)]);
         assert!(opened(&mut presence, 150).is_empty());
         assert_eq!(
             presence,
             Presence::Starting {
                 mode: UiStartup::Show,
+                page: None,
                 attempts: 0,
                 since_ms: 100,
             }
+        );
+    }
+
+    #[test]
+    fn open_request_carries_the_page_into_the_spawn() {
+        let mut presence = Presence::new();
+        let effects = presence.apply(
+            PresenceEvent::OpenRequested {
+                page: Some(Page::Library),
+            },
+            100,
+        );
+        assert_eq!(
+            presence,
+            Presence::Starting {
+                mode: UiStartup::Show,
+                page: Some(Page::Library),
+                attempts: 0,
+                since_ms: 100,
+            }
+        );
+        assert_eq!(
+            effects,
+            vec![PresenceEffect::Spawn(UiStartup::Show, Some(Page::Library))]
         );
     }
 
@@ -483,6 +569,30 @@ mod tests {
     }
 
     #[test]
+    fn picker_ui_connecting_from_no_ui_tracks_the_session() {
+        let mut presence = Presence::new();
+        assert!(connected(&mut presence, UiStartup::Picker { session: 9 }).is_empty());
+        assert_eq!(
+            presence,
+            Presence::Picker {
+                session: 9,
+                previous_visible: false,
+                ready: false,
+            }
+        );
+        assert_eq!(
+            presence.apply(PresenceEvent::UiReady, 0),
+            vec![PresenceEffect::Send(UiRequest::OpenPicker { session: 9 })]
+        );
+        let effects = presence.apply(PresenceEvent::UiGone, 100);
+        assert_eq!(presence, Presence::NoUi);
+        assert_eq!(
+            effects,
+            vec![PresenceEffect::Mask(false), PresenceEffect::CancelPicker]
+        );
+    }
+
+    #[test]
     fn ready_shows_when_requested_and_is_idempotent() {
         let mut presence = Presence::new();
         opened(&mut presence, 100);
@@ -514,24 +624,26 @@ mod tests {
         opened(&mut presence, 100);
         assert_eq!(
             presence.apply(PresenceEvent::UiGone, 200),
-            vec![PresenceEffect::Spawn(UiStartup::Show)]
+            vec![PresenceEffect::Spawn(UiStartup::Show, None)]
         );
         assert_eq!(
             presence,
             Presence::Starting {
                 mode: UiStartup::Show,
+                page: None,
                 attempts: 1,
                 since_ms: 200,
             }
         );
         assert_eq!(
             presence.apply(PresenceEvent::UiGone, 300),
-            vec![PresenceEffect::Spawn(UiStartup::Show)]
+            vec![PresenceEffect::Spawn(UiStartup::Show, None)]
         );
         assert_eq!(
             presence,
             Presence::Starting {
                 mode: UiStartup::Show,
+                page: None,
                 attempts: 2,
                 since_ms: 300,
             }
@@ -561,12 +673,13 @@ mod tests {
                 },
                 0,
             ),
-            vec![PresenceEffect::Spawn(UiStartup::Show)]
+            vec![PresenceEffect::Spawn(UiStartup::Show, None)]
         );
         assert_eq!(
             presence,
             Presence::Starting {
                 mode: UiStartup::Show,
+                page: None,
                 attempts: 1,
                 since_ms: 100 + START_TIMEOUT_MS,
             }
@@ -581,7 +694,7 @@ mod tests {
         assert_eq!(presence, Presence::NoUi);
         assert_eq!(
             opened(&mut presence, 300),
-            vec![PresenceEffect::Spawn(UiStartup::Show)]
+            vec![PresenceEffect::Spawn(UiStartup::Show, None)]
         );
     }
 
@@ -698,19 +811,26 @@ mod tests {
         );
         assert_eq!(
             effects,
-            vec![PresenceEffect::Spawn(UiStartup::Picker { session: 6 })]
+            vec![
+                PresenceEffect::Spawn(UiStartup::Picker { session: 6 }, None),
+                PresenceEffect::Mask(true),
+            ]
         );
     }
 
     #[test]
-    fn picker_request_is_ignored_while_starting() {
+    fn picker_request_while_starting_notices_the_user() {
         let mut presence = Presence::new();
         opened(&mut presence, 100);
         let before = presence.clone();
-        assert!(presence
-            .apply(PresenceEvent::PickerRequested { session: 6 }, 200)
-            .is_empty());
+        let effects = presence.apply(PresenceEvent::PickerRequested { session: 6 }, 200);
         assert_eq!(presence, before);
+        assert_eq!(
+            effects,
+            vec![PresenceEffect::Notice(
+                "Screen area is not ready yet".into()
+            )]
+        );
     }
 
     #[test]
@@ -733,6 +853,22 @@ mod tests {
     }
 
     #[test]
+    fn picker_shown_hides_the_mask_while_picking() {
+        let mut presence = Presence::new();
+        presence.apply(PresenceEvent::PickerRequested { session: 6 }, 200);
+        assert_eq!(
+            presence.apply(PresenceEvent::PickerShown, 250),
+            vec![PresenceEffect::Mask(false)]
+        );
+        assert_eq!(
+            presence.apply(PresenceEvent::PickerShown, 300),
+            vec![PresenceEffect::Mask(false)]
+        );
+        presence.apply(PresenceEvent::PickerDone, 300);
+        assert!(presence.apply(PresenceEvent::PickerShown, 300).is_empty());
+    }
+
+    #[test]
     fn picker_done_restores_a_visible_window() {
         let mut presence = Presence::new();
         open_ui(&mut presence);
@@ -746,7 +882,13 @@ mod tests {
                 show_on_ready: false,
             }
         );
-        assert_eq!(effects, vec![PresenceEffect::Send(UiRequest::ShowWindow)]);
+        assert_eq!(
+            effects,
+            vec![
+                PresenceEffect::Mask(false),
+                PresenceEffect::Send(UiRequest::ShowWindow),
+            ]
+        );
     }
 
     #[test]
@@ -755,7 +897,10 @@ mod tests {
         opened(&mut presence, 100);
         connected(&mut presence, UiStartup::Tray);
         presence.apply(PresenceEvent::PickerRequested { session: 5 }, 200);
-        assert!(presence.apply(PresenceEvent::PickerDone, 300).is_empty());
+        assert_eq!(
+            presence.apply(PresenceEvent::PickerDone, 300),
+            vec![PresenceEffect::Mask(false)]
+        );
         assert_eq!(
             presence,
             Presence::Open {
@@ -779,9 +924,10 @@ mod tests {
                 show_on_ready: false,
             }
         );
-        assert_eq!(effects[0], PresenceEffect::CancelPicker);
-        assert_eq!(effects[1], PresenceEffect::Send(UiRequest::ShowWindow));
-        assert!(matches!(&effects[2], PresenceEffect::Notice(_)));
+        assert_eq!(effects[0], PresenceEffect::Mask(false));
+        assert_eq!(effects[1], PresenceEffect::CancelPicker);
+        assert_eq!(effects[2], PresenceEffect::Send(UiRequest::ShowWindow));
+        assert!(matches!(&effects[3], PresenceEffect::Notice(_)));
     }
 
     #[test]
@@ -790,7 +936,10 @@ mod tests {
         presence.apply(PresenceEvent::PickerRequested { session: 6 }, 200);
         let effects = presence.apply(PresenceEvent::UiGone, 300);
         assert_eq!(presence, Presence::NoUi);
-        assert_eq!(effects, vec![PresenceEffect::CancelPicker]);
+        assert_eq!(
+            effects,
+            vec![PresenceEffect::Mask(false), PresenceEffect::CancelPicker]
+        );
     }
 
     #[test]
@@ -831,6 +980,7 @@ mod tests {
         assert_eq!(
             effects,
             vec![
+                PresenceEffect::Mask(false),
                 PresenceEffect::CancelPicker,
                 PresenceEffect::Send(UiRequest::Quit),
             ]
@@ -857,6 +1007,7 @@ mod tests {
             PresenceEvent::UiReady,
             PresenceEvent::WindowShown,
             PresenceEvent::WindowHidden,
+            PresenceEvent::PickerShown,
             PresenceEvent::PickerDone,
             PresenceEvent::PickerFailed,
             PresenceEvent::UiGone,

@@ -72,6 +72,18 @@ impl ScreenMask {
                 return None;
             }
             SetLayeredWindowAttributes(hwnd, 0, MASK_ALPHA, LWA_ALPHA);
+            use windows_sys::Win32::Graphics::Dwm::{
+                DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
+            };
+            let disable: i32 = 1;
+            // The attribute disables the DWM open/close fade for the mask; a failure only
+            // leaves the default fade in place.
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_TRANSITIONS_FORCEDISABLED as u32,
+                (&disable as *const i32).cast(),
+                std::mem::size_of::<i32>() as u32,
+            );
             Some(Self { hwnd })
         }
     }

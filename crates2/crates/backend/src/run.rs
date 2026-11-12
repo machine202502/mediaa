@@ -2,7 +2,7 @@ use crate::ipc::{self, Shutdown, UiMailbox};
 use crate::services::presence::{PresenceDeps, PresenceHandle, PresenceOptions};
 use crate::services::{
     ConversionHandle, LibraryHandle, NoticeRing, PreviewHandle, RecordingHandle, ScreenshotHandle,
-    SettingsHandle,
+    SettingsHandle, TranscriptionHandle,
 };
 use crate::state::StateStore;
 use mediaa2_core::paths;
@@ -39,6 +39,7 @@ async fn async_run() -> anyhow::Result<()> {
         recovery: RecoveryState { running: false },
         notices: Vec::new(),
         picker: None,
+        transcription: mediaa2_protocol::TranscriptionState::default(),
         library_revision: 0,
     }));
     let library = LibraryHandle::open(settings.media_dir.clone())?;
@@ -53,6 +54,7 @@ async fn async_run() -> anyhow::Result<()> {
     }
     let conversion = ConversionHandle::new(Arc::clone(&state), library.clone(), notices.clone());
     let screenshots = ScreenshotHandle::new(Arc::clone(&state), library.clone(), notices.clone());
+    let transcription = TranscriptionHandle::new(Arc::clone(&state));
     let previews = PreviewHandle::new();
     let settings = SettingsHandle::new(Arc::clone(&state), paths::settings_file());
     let shutdown = Shutdown::new();
@@ -75,6 +77,7 @@ async fn async_run() -> anyhow::Result<()> {
         recording,
         conversion,
         screenshots,
+        transcription,
         previews,
         presence,
         mailbox,

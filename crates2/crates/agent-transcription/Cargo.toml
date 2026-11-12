@@ -1,0 +1,46 @@
+[package]
+name = "mediaa2-agent-transcription"
+description = "Transcription agent: queue, pipeline, diarization, chats, catalogs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mediaa2-core.workspace = true
+mediaa2-model-eval.workspace = true
+mediaa2-media.workspace = true
+anyhow.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json = "1"
+crossbeam-channel.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true
+ureq.workspace = true
+tokio = { version = "1.54.1", features = ["rt"] }
+url.workspace = true
+evalexpr = "13"
+scraper = "0.27"
+dom_smoothie = "0.18"
+regex = "1"
+minijinja = "2"
+minijinja-embed = "2"
+deunicode = "1"
+
+
+blake3 = "1"
+rust-stemmers = "1"
+hound.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest = "1"
+mediaa2-model-eval = { workspace = true, features = ["testing"] }
+insta = "1"
+env_logger = "0.11"
+
+[lints]
+workspace = true
+
+[build-dependencies]
+minijinja-embed = "2"

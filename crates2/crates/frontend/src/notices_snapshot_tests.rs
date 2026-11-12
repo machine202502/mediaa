@@ -42,6 +42,7 @@ impl Snap {
         let mut ui = UiState::default();
         ui.settings.begin(settings.clone());
         let view = BackendView::new(State {
+            transcription: mediaa2_protocol::TranscriptionState::default(),
             settings,
             recording: RecordingState::Idle,
             conversion: ConversionState::Idle,
@@ -86,6 +87,7 @@ impl Snap {
                 ui: &mut self.ui,
                 actions: &mut self.actions,
                 textures: &mut self.textures,
+                player: None,
                 monitors: &self.monitors,
                 windows: &self.windows,
                 microphones: &self.microphones,

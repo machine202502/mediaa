@@ -1,0 +1,9 @@
+{% if hits %}
+{% for hit in hits %}
+- {{ hit.title }} — {{ hit.url }}
+  {{ hit.snippet }}
+{% endfor %}
+Cite pages as [title](address).
+{% else %}
+Nothing found on the web.
+{% endif %}

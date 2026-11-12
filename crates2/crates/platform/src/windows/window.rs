@@ -1,6 +1,52 @@
 use crate::window::WindowResult;
 use raw_window_handle::RawWindowHandle;
 
+struct TitleSearch {
+    target: Vec<u16>,
+    found: isize,
+}
+
+fn find_own_window(title: &str) -> Option<isize> {
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId,
+    };
+    let mut search = TitleSearch {
+        target: title.encode_utf16().collect(),
+        found: 0,
+    };
+    unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: lparam points to the caller-owned TitleSearch that lives for the whole
+        // EnumWindows call; the callback stores the first own window with the target title.
+        let search = unsafe { &mut *(lparam as *mut TitleSearch) };
+        let mut pid: u32 = 0;
+        let thread = unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        if pid != unsafe { GetCurrentProcessId() } || thread != unsafe { GetCurrentThreadId() } {
+            return 1;
+        }
+        let mut buffer = [0_u16; 256];
+        let len = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), 256) } as usize;
+        if buffer[..len.min(buffer.len())] == search.target[..] {
+            search.found = hwnd as isize;
+            return 0;
+        }
+        1
+    }
+    // SAFETY: the callback and the context are valid for the duration of the call. Only
+    // windows of the calling thread are inspected, so GetWindowTextW never sends a
+    // cross-thread WM_GETTEXT that could block on a non-pumping helper window.
+    unsafe {
+        EnumWindows(Some(enum_proc), &mut search as *mut TitleSearch as LPARAM);
+    }
+    if search.found == 0 {
+        None
+    } else {
+        Some(search.found)
+    }
+}
+
 pub(crate) fn from_raw(raw: RawWindowHandle) -> Option<isize> {
     match raw {
         RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
@@ -105,64 +151,58 @@ pub(crate) fn hide_handle(window: isize) -> WindowResult {
     }
 }
 pub(crate) fn hide_window(title: &str) -> WindowResult {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
-    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: valid NUL-terminated UTF-16 title; the window belongs to this process.
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    let Some(window) = find_own_window(title) else {
+        return WindowResult::Failed;
+    };
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: the handle belongs to this process and is only hidden, not destroyed.
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
-            return WindowResult::Failed;
-        }
         ShowWindow(hwnd, SW_HIDE);
-        WindowResult::Ok
     }
+    WindowResult::Ok
 }
 
 pub(crate) fn show_window(title: &str) -> WindowResult {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetForegroundWindow, ShowWindow, SW_SHOW,
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_SHOW};
+    let Some(window) = find_own_window(title) else {
+        return WindowResult::Failed;
     };
-    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: valid NUL-terminated UTF-16 title; the window belongs to this process.
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: ShowWindow/SetForegroundWindow on this process' own top-level window.
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
-            return WindowResult::Failed;
-        }
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
-        WindowResult::Ok
     }
+    WindowResult::Ok
 }
 pub(crate) fn prepare_background(title: &str) -> WindowResult {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE,
     };
-    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: valid NUL-terminated UTF-16 title; the window belongs to this process.
+    let Some(window) = find_own_window(title) else {
+        return WindowResult::Failed;
+    };
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: plain style call on this process' own top-level window.
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
-            return WindowResult::Failed;
-        }
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE as isize);
-        WindowResult::Ok
     }
+    WindowResult::Ok
 }
 
 pub(crate) fn background_show(title: &str) -> WindowResult {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
-        HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE,
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_BOTTOM,
+        SWP_NOACTIVATE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE,
     };
-    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: valid NUL-terminated UTF-16 title; the window belongs to this process.
+    let Some(window) = find_own_window(title) else {
+        return WindowResult::Failed;
+    };
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: style, position and visibility calls on this process' own window.
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
-            return WindowResult::Failed;
-        }
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE as isize);
         SetWindowPos(
@@ -175,8 +215,8 @@ pub(crate) fn background_show(title: &str) -> WindowResult {
             SWP_NOSIZE | SWP_NOACTIVATE,
         );
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        WindowResult::Ok
     }
+    WindowResult::Ok
 }
 
 pub(crate) fn foreground_window() -> isize {
@@ -215,15 +255,14 @@ pub(crate) fn restore_foreground(window: isize) -> WindowResult {
 }
 pub(crate) fn exclude_from_capture(title: &str) -> WindowResult {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
     };
-    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: valid NUL-terminated UTF-16 title.
+    let Some(window) = find_own_window(title) else {
+        return WindowResult::Failed;
+    };
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: display affinity call on this process' own window.
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
-            return WindowResult::Failed;
-        }
         if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) != 0 {
             WindowResult::Ok
         } else {
@@ -234,17 +273,16 @@ pub(crate) fn exclude_from_capture(title: &str) -> WindowResult {
 
 pub(crate) fn make_black_transparent(title: &str) -> WindowResult {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW,
-        SetWindowPos, GWL_EXSTYLE, LWA_COLORKEY, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
+        GWL_EXSTYLE, LWA_COLORKEY, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
     };
-    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: valid NUL-terminated UTF-16 title and Win32 window-style calls on our own viewport.
+    let Some(window) = find_own_window(title) else {
+        return WindowResult::Failed;
+    };
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: style and layered-attribute calls on this process' own viewport.
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
-            return WindowResult::Failed;
-        }
         let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         let extra = (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW) as isize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | extra);
@@ -266,18 +304,96 @@ pub(crate) fn make_black_transparent(title: &str) -> WindowResult {
     }
 }
 
+static GHOST_STYLE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(-1);
+
+pub(crate) fn ghost_window(title: &str) -> WindowResult {
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
+        WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+    };
+    let Some(window) = find_own_window(title) else {
+        return WindowResult::Failed;
+    };
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: style and layered-attribute calls on this process' own viewport.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if GHOST_STYLE.load(Ordering::Relaxed) == -1 {
+            GHOST_STYLE.store(style, Ordering::Relaxed);
+        }
+        let extra = (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW) as isize;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | extra);
+        SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
+    }
+    WindowResult::Ok
+}
+
+pub(crate) fn unghost_window(title: &str, was_visible: bool) -> WindowResult {
+    use std::sync::atomic::Ordering;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SetLayeredWindowAttributes, SetWindowLongPtrW, ShowWindow, GWL_EXSTYLE, LWA_ALPHA, SW_HIDE,
+        SW_SHOWNOACTIVATE,
+    };
+    let Some(window) = find_own_window(title) else {
+        return WindowResult::Failed;
+    };
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: style, attribute and visibility calls on this process' own viewport.
+    unsafe {
+        let saved = GHOST_STYLE.swap(-1, Ordering::Relaxed);
+        if saved != -1 {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, saved);
+        }
+        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+        ShowWindow(
+            hwnd,
+            if was_visible {
+                SW_SHOWNOACTIVATE
+            } else {
+                SW_HIDE
+            },
+        );
+    }
+    WindowResult::Ok
+}
+
+pub(crate) fn window_visible(title: &str) -> Option<bool> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    let window = find_own_window(title)?;
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: visibility read on this process' own window.
+    unsafe { Some(IsWindowVisible(hwnd) != 0) }
+}
+
+pub(crate) fn hide_taskbar_button(title: &str) -> WindowResult {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    };
+    let Some(window) = find_own_window(title) else {
+        return WindowResult::Failed;
+    };
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: style call on this process' own window; egui re-applies the builder without
+    // the taskbar flag, so the button is stripped natively after the window exists.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let fixed = (style & !WS_EX_APPWINDOW as isize) | WS_EX_TOOLWINDOW as isize;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, fixed);
+    }
+    WindowResult::Ok
+}
+
 pub(crate) fn disable_open_animation(title: &str) -> WindowResult {
     use windows_sys::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_TRANSITIONS_FORCEDISABLED,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
-    let wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: valid NUL-terminated UTF-16 title; the attribute value is a 4-byte BOOL.
+    let Some(window) = find_own_window(title) else {
+        return WindowResult::Failed;
+    };
+    let hwnd = window as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: the attribute value is a 4-byte BOOL on this process' own window.
     unsafe {
-        let hwnd = FindWindowW(std::ptr::null(), wide.as_ptr());
-        if hwnd.is_null() {
-            return WindowResult::Failed;
-        }
         let disable: i32 = 1;
         if DwmSetWindowAttribute(
             hwnd,

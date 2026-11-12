@@ -1,0 +1,17 @@
+This model has no native tool calls. To use a tool, answer with ONE JSON object and nothing else.
+
+Tools:
+{% for tool in tools -%}
+- {{ tool.name }}: {{ tool.description }}
+  Arguments JSON: {{ tool.params }}
+{% endfor %}
+
+Call one or more tools (up to {{ max_calls }}):
+{"calls": [{"action": "tool name", "args": {…}}]}
+{% if thinking -%}
+Give your reasoning in "thought" only if it helps; the JSON object is still required.
+{%- else -%}
+Start the object with "thought": a short reasoning, then the action.
+{%- endif %}
+Instead of a tool call, the final answer to the user:
+{"action": "answer", "answer": "the answer text"}

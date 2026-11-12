@@ -25,6 +25,7 @@ const PAGE_LIMIT: u32 = 200;
 const INFO_HEIGHT: f32 = 70.0;
 const MEDIA_ASPECT: f32 = 0.62;
 const STRIP_PAD: i8 = 8;
+const SCRUB_ZONE: f32 = 26.0;
 const TOOLBAR_ONE_LINE: f32 = 1380.0;
 
 #[derive(Clone, Default)]
@@ -764,16 +765,27 @@ fn card(
                 painter.rect_filled(rect, top, p.card_hover);
 
                 let preview = ctx.previews.get(&entry.path).cloned();
+                let duration = entry
+                    .details
+                    .and_then(|details| details.duration_secs)
+                    .unwrap_or(0.0);
+                let mut timeline: Option<f32> = None;
+                let mut playing_at: Option<f64> = None;
                 let hover_texture = if hovered
                     && matches!(entry.kind, MediaKind::Video | MediaKind::Animation)
                 {
                     if let Some(PreviewState::Ready(file)) = ctx.hover_previews.get(&entry.path) {
-                        ctx.textures.hover_frame(
+                        let texture = ctx.textures.hover_frame(
                             ui.ctx(),
                             &entry.path,
                             file,
                             entry.details.and_then(|details| details.duration_secs),
-                        )
+                        );
+                        if let Some((position, length)) = ctx.textures.hover_timeline(&entry.path) {
+                            timeline = Some((position / length) as f32);
+                            playing_at = Some(position);
+                        }
+                        texture
                     } else {
                         ctx.hover_requests.push(entry.path.clone());
                         None
@@ -781,6 +793,40 @@ fn card(
                 } else {
                     None
                 };
+                if entry.kind == MediaKind::Audio {
+                    if hovered && duration > 0.0 {
+                        if let Some(position) = ctx.textures.hover_audio_tick(&entry.path, duration)
+                        {
+                            timeline = Some((position / duration) as f32);
+                            playing_at = Some(position);
+                        }
+                    } else {
+                        ctx.textures.hover_audio_stop(&entry.path);
+                    }
+                }
+                // pressing inside the bottom zone of the tile scrubs it for
+                // as long as the button stays down
+                let scrub_zone = Rect::from_min_max(
+                    egui::pos2(rect.left(), rect.bottom() - SCRUB_ZONE),
+                    rect.max,
+                );
+                let scrub_press = response.is_pointer_button_down_on()
+                    && ui
+                        .input(|input| input.pointer.press_origin())
+                        .is_some_and(|origin| scrub_zone.contains(origin));
+                if scrub_press {
+                    if let Some(pointer) = response.interact_pointer_pos() {
+                        let frac = ((pointer.x - rect.left() - 8.0) / (rect.width() - 16.0))
+                            .clamp(0.0, 1.0);
+                        if entry.kind == MediaKind::Audio && duration > 0.0 {
+                            ctx.textures
+                                .hover_audio_seek(&entry.path, f64::from(frac) * duration);
+                        } else if let Some((_, length)) = ctx.textures.hover_timeline(&entry.path) {
+                            ctx.textures
+                                .hover_seek(&entry.path, f64::from(frac) * length);
+                        }
+                    }
+                }
                 let texture = match hover_texture {
                     Some(texture) => Some((texture.id(), texture.size_vec2())),
                     None => match preview {
@@ -829,7 +875,7 @@ fn card(
                     egui::Align2::RIGHT_TOP,
                     &human_size(entry.size),
                 );
-                let bottom = rect.bottom() - pad;
+                let bottom = rect.bottom() - pad - if timeline.is_some() { 14.0 } else { 0.0 };
                 if let Some(details) = entry.details.filter(|details| details.width > 0) {
                     badge(
                         &painter,
@@ -840,7 +886,10 @@ fn card(
                 }
                 if entry.kind != MediaKind::Image {
                     let mut text = icon::PLAY.to_string();
-                    if let Some(seconds) = entry.details.and_then(|details| details.duration_secs) {
+                    if let Some(seconds) = playing_at
+                        .map(f64::floor)
+                        .or_else(|| entry.details.and_then(|details| details.duration_secs))
+                    {
                         text = format!("{text} {}", human_duration(seconds));
                     }
                     if entry.details.is_some_and(|details| details.audio) {
@@ -854,7 +903,33 @@ fn card(
                     );
                 }
 
-                if response.clicked() && !response.double_clicked() {
+                if let Some(frac) = timeline {
+                    let y = rect.bottom() - 9.0;
+                    let (l, r) = (rect.left() + 8.0, rect.right() - 8.0);
+                    let track = Rect::from_min_max(egui::pos2(l, y - 2.0), egui::pos2(r, y + 2.0));
+                    painter.rect_filled(
+                        track,
+                        CornerRadius::same(2),
+                        Color32::from_white_alpha(90),
+                    );
+                    let x = l + (r - l) * frac.clamp(0.0, 1.0);
+                    painter.rect_filled(
+                        Rect::from_min_max(track.min, egui::pos2(x, track.max.y)),
+                        CornerRadius::same(2),
+                        p.accent,
+                    );
+                    painter.circle_filled(egui::pos2(x, y), 6.0, Color32::WHITE);
+                    painter.circle_stroke(egui::pos2(x, y), 6.0, Stroke::new(1.5, p.accent));
+                }
+
+                let timeline_click = timeline.is_some()
+                    && ui.input(|input| {
+                        input
+                            .pointer
+                            .interact_pos()
+                            .is_some_and(|pos| pos.y >= rect.bottom() - SCRUB_ZONE)
+                    });
+                if response.clicked() && !response.double_clicked() && !timeline_click {
                     let (ctrl, shift) =
                         ui.input(|input| (input.modifiers.command, input.modifiers.shift));
                     select_click(

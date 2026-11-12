@@ -1,0 +1,4 @@
+The folder has {{ items | length }} recordings:
+{% for item in items %}
+#{{ loop.index }} «{{ item.title }}», {{ item.length }}{{ " — not transcribed yet" if not item.transcribed else (". About: " ~ item.chapters | join("; ") if item.chapters else "") }}
+{% endfor %}

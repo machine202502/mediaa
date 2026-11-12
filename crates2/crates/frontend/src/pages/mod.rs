@@ -24,6 +24,8 @@ pub mod notices;
 pub mod picker;
 pub mod record;
 pub mod settings;
+pub mod transcription;
+pub mod transcription_settings;
 pub mod viewer;
 
 pub struct Ctx<'a> {
@@ -31,6 +33,8 @@ pub struct Ctx<'a> {
     pub ui: &'a mut UiState,
     pub actions: &'a mut Actions,
     pub textures: &'a mut Textures,
+    /// the built-in player of the open recording, if one is open
+    pub player: Option<&'a mut crate::player::Player>,
     pub monitors: &'a [MonitorInfo],
     pub windows: &'a [WindowInfo],
     pub microphones: &'a [String],
@@ -100,6 +104,7 @@ impl Actions {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Section {
+    Transcription,
     Library,
     Capture,
     Convert,
@@ -114,6 +119,7 @@ pub fn section_for(page: Page) -> Option<Section> {
     match page {
         Page::Library => Some(Section::Library),
         Page::Screenshot | Page::Record | Page::RecordAudio => Some(Section::Capture),
+        Page::Transcription => Some(Section::Transcription),
         Page::Convert => Some(Section::Convert),
         Page::Settings | Page::About => None,
     }
@@ -138,13 +144,14 @@ fn sub_pages(section: Section) -> Vec<(Page, &'static str, String)> {
                 t!("nav.record_audio").to_string(),
             ),
         ],
-        Section::Library | Section::Convert => Vec::new(),
+        Section::Library | Section::Convert | Section::Transcription => Vec::new(),
     }
 }
 
 fn section_page(ctx: &Ctx<'_>, section: Option<Section>) -> Page {
     match section {
         Some(Section::Library) => Page::Library,
+        Some(Section::Transcription) => Page::Transcription,
         Some(Section::Convert) => Page::Convert,
         Some(Section::Capture) | None => ctx.ui.last_capture_page,
     }
@@ -680,6 +687,7 @@ fn page(ctx: &mut Ctx<'_>, ui: &mut egui::Ui) {
                     Page::Screenshot => capture::show(ctx, ui),
                     Page::Record => record::show(ctx, ui),
                     Page::RecordAudio => audio::show(ctx, ui),
+                    Page::Transcription => transcription::show(ctx, ui),
                     Page::Convert => convert::show(ctx, ui),
                     Page::Settings => settings::show(ctx, ui),
                     Page::About => about::show(ctx, ui),

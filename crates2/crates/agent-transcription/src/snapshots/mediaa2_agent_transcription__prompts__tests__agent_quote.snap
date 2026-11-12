@@ -1,0 +1,5 @@
+---
+source: crates/agent/src/prompts.rs
+expression: quote
+---
+(quoting @s1 1:40–2:29: "Отчёт в пятницу")

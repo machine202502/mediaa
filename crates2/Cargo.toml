@@ -7,6 +7,8 @@ members = [
     "crates/storage",
     "crates/platform",
     "crates/media",
+    "crates/model-eval",
+    "crates/agent-transcription",
     "crates/frontend",
     "crates/backend",
     "crates/app",
@@ -29,6 +31,8 @@ mediaa2-protocol = { path = "crates/protocol" }
 mediaa2-storage = { path = "crates/storage" }
 mediaa2-platform = { path = "crates/platform" }
 mediaa2-media = { path = "crates/media" }
+mediaa2-model-eval = { path = "crates/model-eval" }
+mediaa2-agent-transcription = { path = "crates/agent-transcription" }
 mediaa2-backend = { path = "crates/backend" }
 mediaa2-frontend = { path = "crates/frontend" }
 anyhow = "1"
@@ -42,6 +46,10 @@ rust-i18n = "4"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 image = { version = "0.25", default-features = false, features = ["png", "webp", "jpeg", "bmp", "tiff"] }
 hound = "3.5"
+ureq = { version = "3", default-features = false, features = ["json", "socks-proxy", "rustls"] }
+genai = "0.7"
+keyring = "4"
+futures = "0.3"
 crossbeam-channel = "0.5"
 log = { version = "0.4", features = ["std"] }
 directories = "6"
